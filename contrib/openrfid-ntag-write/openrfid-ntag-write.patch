@@ -1,0 +1,254 @@
+diff --git a/src/main.py b/src/main.py
+index 1124c7f..36ee4d4 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -27,6 +27,7 @@ from tag.snapmaker import SnapmakerTagProcessor
+ from tag.spoolease import SpooleaseTagProcessor
+ from tag.tigertag import TigerTagProcessor
+ from controllers.moonraker_on_property_change import MoonrakerOnPropertyChangeController
++from controllers.file_write_watch import FileWriteWatchController
+ 
+ def consume_config(config: dict) -> Runtime:
+     for key, value in config.items():
+@@ -75,6 +76,8 @@ def create_configurable_entity(key: str, config: dict) -> ConfigurableEntity:
+             return MoonrakerRemoteMethodController(config)
+         case "moonraker_on_property_change":
+             return MoonrakerOnPropertyChangeController(config)
++        case "file_write_watch":
++            return FileWriteWatchController(config)
+         case _:
+             raise ValueError(f"Unknown configurable entity type: {key_split[0]}")
+ 
+diff --git a/src/reader/fm175xx/rfid.py b/src/reader/fm175xx/rfid.py
+index 1a8b968..c0919bb 100644
+--- a/src/reader/fm175xx/rfid.py
++++ b/src/reader/fm175xx/rfid.py
+@@ -82,6 +82,15 @@ class Fm175xx(MifareClassicReader, MifareUltralightReader):
+ 
+         return bytes(data.out_data)
+ 
++    def write_mifare_ultralight(self, scan_result: ScanResult, start_page: int, data: bytes) -> bool:
++        result = self.__reader_a_ultralight_write_all_data(start_page, list(data))
++
++        if result.err_code != Constants.FM175XX_OK:
++            self.logger.error("Mifare Ultralight write error: %d", result.err_code)
++            return False
++
++        return True
++
+     # read register
+     def __register_read(self, addr:int) -> int:
+         addr = (addr << 1) | 0x80
+@@ -687,6 +696,95 @@ class Fm175xx(MifareClassicReader, MifareUltralightReader):
+ 
+         return ret
+ 
++    # Reader-A: NTAG/Ultralight, write a page (4 bytes)
++    def __reader_a_ultralight_page_write(self, page:int, buff:list) -> int:
++        outbuf = [0] * 6
++        inbuf = [0] * 1
++        cmd = Fm175xxCmdMetaData()
++
++        # Unlike the MIFARE Classic write (0xA0), which sends the command and
++        # the data as two separate transceives, WRITE (0xA2) carries the page
++        # and its 4 bytes in ONE frame. Both answer the same way: a 4-bit ACK
++        # of 0x0A, with no CRC of its own.
++        cmd.send_crc_en = Constants.FM175XX_SET
++        cmd.recv_crc_en = Constants.FM175XX_RESET
++        cmd.send_buff = outbuf
++        cmd.recv_buff = inbuf
++        cmd.send_buff[0] = 0xA2
++        cmd.send_buff[1] = page
++        cmd.send_buff[2:6] = buff[0:4]
++        cmd.bytes_to_send = 6
++        cmd.bits_to_send = 0
++        cmd.bits_to_recv = 0
++        cmd.bytes_to_recv = 1
++        cmd.timeout = 10
++        cmd.cmd = Constants.FM175XX_CMD_TRANSCEIVE
++        result = self.__command_exe(cmd)
++
++        if (result.err_code != Constants.FM175XX_OK):
++            return result.err_code
++
++        if ((cmd.bits_recved != 4) or (cmd.recv_buff[0] & 0x0F != 0x0A)):
++            return Constants.FM175XX_CARD_WRITE_ERR
++
++        return Constants.FM175XX_OK
++
++    # Reader-A: NTAG215, write pages and read them back
++    def __reader_a_ultralight_write_all_data(self, start_page:int, data:list, retry_times = 3) -> Fm175xxReturnVal:
++        ret = Fm175xxReturnVal()
++        per_page = Constants.FM175XX_NTAG215_BYTES_PER_PAGE
++
++        if ((len(data) == 0) or (len(data) % per_page != 0)):
++            ret.err_code = Constants.FM175XX_PARAM_ERR
++            return ret
++
++        pages = len(data) // per_page
++        end_page = start_page + pages - 1
++
++        # Pages below USER_START are the UID, the one-way static lock bits and
++        # the capability container; pages above USER_END are the dynamic lock
++        # bits, the configuration and the password. Those are fuses, not
++        # storage, so a caller's page arithmetic is checked here rather than
++        # trusted: the failure mode is a permanently dead tag.
++        if ((start_page < Constants.FM175XX_NTAG215_USER_START_PAGE) or
++                (end_page > Constants.FM175XX_NTAG215_USER_END_PAGE)):
++            ret.err_code = Constants.FM175XX_PARAM_ERR
++            return ret
++
++        for page_no in range(pages):
++            err_code = Constants.FM175XX_CARD_WRITE_ERR
++            page_data = data[page_no * per_page : (page_no + 1) * per_page]
++            for _ in range(retry_times):
++                err_code = self.__reader_a_ultralight_page_write(start_page + page_no, page_data)
++                if (err_code == Constants.FM175XX_OK):
++                    break
++            if (err_code != Constants.FM175XX_OK):
++                ret.err_code = err_code
++                return ret
++
++        # Read back and compare. A tag that ACKs and stores nothing is a real
++        # failure mode (a sticker leaving the field mid-write), and it is
++        # indistinguishable from success without this.
++        for page_no in range(0, pages, 4):
++            result = Fm175xxReturnVal()
++            for _ in range(retry_times):
++                result = self.__reader_a_ultralight_page_read(start_page + page_no)
++                if (result.err_code == Constants.FM175XX_OK):
++                    break
++            if (result.err_code != Constants.FM175XX_OK):
++                ret.err_code = Constants.FM175XX_CARD_READ_ERR
++                return ret
++
++            area = page_no * per_page
++            to_check = min(16, len(data) - area)
++            if (result.out_data[0 : to_check] != data[area : area + to_check]):
++                ret.err_code = Constants.FM175XX_CARD_WRITE_ERR
++                return ret
++
++        ret.err_code = Constants.FM175XX_OK
++        ret.out_data = data
++        return ret
++
+     # TODO: Maybe don't call it ultralight but the actual ISO specification
+     # Reader-A: NTAG215, read all data
+     def __reader_a_ultralight_read_all_data(self, retry_times = 3) -> Fm175xxReturnVal:
+diff --git a/src/reader/gpio_enabled_rfid_reader.py b/src/reader/gpio_enabled_rfid_reader.py
+index 105b5a2..edc75bc 100644
+--- a/src/reader/gpio_enabled_rfid_reader.py
++++ b/src/reader/gpio_enabled_rfid_reader.py
+@@ -54,4 +54,10 @@ class GpioEnabledRfidReader(MifareClassicReader, MifareUltralightReader):
+         if isinstance(self.rfid_reader, MifareUltralightReader):
+             return self.rfid_reader.read_mifare_ultralight(scan_result)
+         
+-        return None
+\ No newline at end of file
++        return None
++
++    def write_mifare_ultralight(self, scan_result : ScanResult, start_page : int, data : bytes) -> bool:
++        if isinstance(self.rfid_reader, MifareUltralightReader):
++            return self.rfid_reader.write_mifare_ultralight(scan_result, start_page, data)
++
++        return False
+\ No newline at end of file
+diff --git a/src/reader/mifare_ultralight_reader.py b/src/reader/mifare_ultralight_reader.py
+index 436c582..8aea4d4 100644
+--- a/src/reader/mifare_ultralight_reader.py
++++ b/src/reader/mifare_ultralight_reader.py
+@@ -9,4 +9,12 @@ class MifareUltralightReader(RfidReader):
+     @abstractmethod
+     def read_mifare_ultralight(self, scan_result : ScanResult) -> bytes|None:
+         """Reads data from a Mifare Ultralight tag."""
+-        raise NotImplementedError("Subclasses must implement this method")
+\ No newline at end of file
++        raise NotImplementedError("Subclasses must implement this method")
++
++    def write_mifare_ultralight(self, scan_result : ScanResult, start_page : int, data : bytes) -> bool:
++        """Writes data to a Mifare Ultralight tag, starting at start_page.
++
++        Not abstract on purpose: a reader that cannot write inherits this and
++        reports so, rather than every existing implementation becoming
++        uninstantiable. data must be a whole number of 4-byte pages."""
++        return False
+\ No newline at end of file
+diff --git a/src/runtime.py b/src/runtime.py
+index 48f1fc8..598559d 100644
+--- a/src/runtime.py
++++ b/src/runtime.py
+@@ -14,6 +14,7 @@ from filament import GenericFilament
+ from typing import cast
+ import time
+ import logging
++import threading
+ 
+ class Runtime:
+     def __init__(self):
+@@ -42,6 +43,12 @@ class Runtime:
+ 
+         self.read_retries_left = [0] * len(self.rfid_readers)
+ 
++        # Serialises reader access between the scan loop and a write request.
++        # Both run on their own threads (the loop on the main thread, a write
++        # arriving on a controller thread), and the FM175xx is one shared SPI
++        # bus, so concurrent access would corrupt both.
++        self.reader_lock = threading.Lock()
++
+     def _notify_exporters(self, scan: ScanResult|None, filament: GenericFilament|None, reader: RfidReader, event: ExporterEvent):
+         for exporter in self.exporters:
+             if exporter.has_event(event):
+@@ -55,6 +62,43 @@ class Runtime:
+         self.read_retries_left[slot] = self.config.read_retries
+         logging.info(f"Received request to read tag on slot {slot} with {self.config.read_retries} retries")
+ 
++    def write_ntag(self, slot: int, start_page: int, data: bytes) -> dict:
++        """Program an NTAG/Ultralight tag on a slot's reader, holding the same
++        lock the scan loop uses so the two never touch the bus at once.
++
++        Returns a plain dict so a controller can serialise it straight to a
++        result file. A write is only attempted after a scan confirms a tag is
++        present and is an Ultralight-family tag; the reader stack then writes
++        and reads back before reporting success."""
++        if slot < 0 or slot >= len(self.rfid_readers):
++            return {"ok": False, "error": f"invalid slot {slot}"}
++
++        reader = self.rfid_readers[slot]
++        if not isinstance(reader, MifareUltralightReader):
++            return {"ok": False, "error": f"reader on slot {slot} cannot write NTAG"}
++
++        with self.reader_lock:
++            reader.start_session()
++            try:
++                scan_result = reader.scan()
++                if scan_result is None:
++                    return {"ok": False, "error": "no tag in the reader's field"}
++
++                uid = scan_result.uid.hex()
++                if scan_result.tag_type != TagType.MifareUltralight:
++                    return {"ok": False, "uid": uid,
++                            "error": "not an NTAG/Ultralight tag (a Classic tag "
++                                     "cannot be programmed this way)"}
++
++                ok = reader.write_mifare_ultralight(scan_result, start_page, data)
++            finally:
++                reader.end_session()
++
++        if ok:
++            return {"ok": True, "uid": uid, "pages": len(data) // 4}
++        return {"ok": False, "uid": uid,
++                "error": "the reader reported the write failed (see openrfid log)"}
++
+     def loop(self):
+         while True:
+             for i, reader in enumerate(self.rfid_readers):
+@@ -63,7 +107,8 @@ class Runtime:
+ 
+                 logging.debug(f"Processing reader {reader.name}, retries left: {self.read_retries_left[i]}")
+                 try:
+-                    scan_result, filament, retry = self.process_reader_single(reader)
++                    with self.reader_lock:
++                        scan_result, filament, retry = self.process_reader_single(reader)
+                 except Exception as e:
+                     logging.exception(f"Error processing reader {reader.name}: {e}")
+                     scan_result, filament, retry = None, None, False # Assume exceptions are not transient

@@ -1244,3 +1244,77 @@ class TestModuleImportGuards:
         assert str(exc_info.value).startswith(
             "Error trying to import AFC_lane, please rerun install-afc.sh"
         )
+
+
+class TestPauseResumeExtrudeMode:
+    """AFC_PAUSE switches to absolute mode before the user's PAUSE saves its
+    state, so the user's RESUME brings absolute mode back. AFC_RESUME must put
+    the print's own modes back even when restore_pos does not run (a tool
+    change during the pause already used the saved position)."""
+
+    def _make(self, absolute_coord=True, absolute_extrude=False):
+        from types import SimpleNamespace
+        err, afc = _make_afc_error()
+        afc.gcode_move = SimpleNamespace(absolute_coord=absolute_coord,
+                                         allow_absolute_extrude=absolute_extrude,
+                                         last_position=[0.0, 0.0, 10.0, 0.0])
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.z_hop = 0.0
+        afc.move_z_pos = MagicMock()
+        afc.restore_pos = MagicMock()
+
+        def check_absolute_mode(func_name=""):
+            afc.gcode_move.absolute_coord = True
+            afc.gcode_move.allow_absolute_extrude = True
+        afc.function.check_absolute_mode.side_effect = check_absolute_mode
+
+        def run_script(script):
+            # The user's RESUME restores PAUSE_STATE, saved in absolute mode
+            if script.startswith(err.AFC_RENAME_RESUME_NAME):
+                afc.gcode_move.absolute_coord = True
+                afc.gcode_move.allow_absolute_extrude = True
+        afc.gcode.run_script_from_command.side_effect = run_script
+        return err, afc
+
+    def _pause_then_resume(self, err, afc):
+        from tests.conftest import MockGCodeCommand
+        afc.function.is_paused.return_value = False
+        err.cmd_AFC_PAUSE(MockGCodeCommand())
+        afc.function.is_paused.return_value = True
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+
+    def test_relative_extrude_restored_after_resume(self):
+        err, afc = self._make(absolute_coord=True, absolute_extrude=False)
+        self._pause_then_resume(err, afc)
+        assert afc.gcode_move.allow_absolute_extrude is False
+        assert afc.gcode_move.absolute_coord is True
+        assert err.pause_modes is None
+        assert ("debug", "AFC_RESUME: restored absolute_coord True, absolute_extrude False") \
+            in err.logger.messages
+
+    def test_relative_coords_restored_after_resume(self):
+        err, afc = self._make(absolute_coord=False, absolute_extrude=False)
+        self._pause_then_resume(err, afc)
+        assert afc.gcode_move.absolute_coord is False
+        assert afc.gcode_move.allow_absolute_extrude is False
+
+    def test_absolute_print_stays_absolute(self):
+        err, afc = self._make(absolute_coord=True, absolute_extrude=True)
+        self._pause_then_resume(err, afc)
+        assert afc.gcode_move.absolute_coord is True
+        assert afc.gcode_move.allow_absolute_extrude is True
+
+    def test_pause_records_modes_before_forcing_absolute(self):
+        from tests.conftest import MockGCodeCommand
+        err, afc = self._make(absolute_coord=True, absolute_extrude=False)
+        afc.function.is_paused.return_value = False
+        err.cmd_AFC_PAUSE(MockGCodeCommand())
+        assert err.pause_modes == (True, False)
+        assert afc.gcode_move.allow_absolute_extrude is True
+
+    def test_resume_without_pause_snapshot_leaves_modes(self):
+        from tests.conftest import MockGCodeCommand
+        err, afc = self._make(absolute_coord=True, absolute_extrude=False)
+        afc.function.is_paused.return_value = True
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert afc.gcode_move.allow_absolute_extrude is True

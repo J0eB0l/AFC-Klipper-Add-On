@@ -858,7 +858,8 @@ class AFC_moonraker:
                 "key": key
             }
             req = Request( self.database_url, urlencode(payload).encode(), method="DELETE")
-            with urlopen(req):
+            # Timed like the other calls, or a silent moonraker hangs the writer thread.
+            with urlopen(req, timeout=self.REQUEST_TIMEOUT):
                 pass
             self._log_async(self.logger.debug, f"Removing {key} from {namespace}")
         except HTTPError as e:

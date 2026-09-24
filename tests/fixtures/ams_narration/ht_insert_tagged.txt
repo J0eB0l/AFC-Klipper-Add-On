@@ -1,0 +1,31 @@
+# model:     ht
+# outcome:   read
+# source:    an AMS HT tagged insert from AFC_BambuAMS.log, plus the capacity
+#            lines from a second insert on the same unit.
+# verbatim:  abbreviated -- the four log lines carry wall-clock stamps
+#            rather than offsets, and the capacity lines come from a second
+#            insert on the same unit.
+#
+# The HT's dialect is STEP + digit + COMMA where the boxed units use STEP +
+# COLON. That single difference made _RFID_READ_OK_RE unable to match anything
+# an HT ever said, and the unit was diagnosed as broken for four firmware
+# rounds while it was answering correctly the whole time.
+#
+# Note the HT commits to its own flash and SAYS SO -- "save to flash ,card info
+# valid" -- which is a stronger statement than a read landing. The boxed models
+# say "[RF] trayN: info write to flash" for the same event; both spellings now
+# count as a read.
+#
+# "tray capacity no en" is terminal on this model: the HT reaches the tray
+# capacity step, declines to run it, and its cycle is over there. It never
+# reaches the calibration a boxed unit ends on.
+#
+# offset | expect | line
+- | .             | [AMS_RFID] STEP3,auth card successful
+- | read          | [RF] tray0: info write to flash
+- | read          | [AMS_RFID] STEP3,save to flash ,card info valid
+- | read          | [AMS_RFID] STEP3,read success ,goto Cali
+- | .             | [AMS_RFID] STEP,odom reset tray 0
+- | read          | [AMS_RFID] STEP3,feed with rfid success
+- | end           | [AMS_RFID] STEP3:tray capacity no en
+- | end           | [AMS_RFID] STEP4,Calibration rst:0

@@ -38,6 +38,11 @@ except:
     err_str = ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc())
     raise error(err_str)
 
+try: from extras.AFC_functions import get_gcode_absolute_extrude, set_gcode_absolute_extrude
+except:
+    err_str = ERROR_STR.format(import_lib="AFC_functions", trace=traceback.format_exc())
+    raise error(err_str)
+
 class afcError:
     def __init__(self, config: ConfigWrapper) -> None:
         """
@@ -50,6 +55,8 @@ class afcError:
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.errorLog: dict[str, Any] = {}
         self.pause= False
+        # Coordinate and extrude modes from before AFC_PAUSE forced absolute mode
+        self.pause_modes: Optional[tuple[bool, bool]] = None
 
     def handle_connect(self) -> None:
         """
@@ -310,6 +317,18 @@ class afcError:
                 self.afc.restore_pos(False)
             self.pause = False
 
+        # restore_pos may not run (a tool change during the pause already used the saved
+        # position), and the user's RESUME brings back the absolute modes AFC_PAUSE set
+        if self.pause_modes is not None:
+            absolute_coord, absolute_extrude = self.pause_modes
+            self.afc.gcode_move.absolute_coord = absolute_coord
+            set_gcode_absolute_extrude(self.afc.gcode_move, absolute_extrude)
+            self.pause_modes = None
+            self.logger.debug(
+                f"AFC_RESUME: restored absolute_coord {absolute_coord}, "
+                f"absolute_extrude {absolute_extrude}"
+            )
+
         self.logger.debug(
             f"RESUME-Error State: {self.afc.error_state}, "
             f"Is Paused {self.afc.function.is_paused()}, "
@@ -340,6 +359,10 @@ class afcError:
             self.logger.debug("AFC_PAUSE: Pausing")
             # Save position
             self.afc.save_pos()
+            # The user's PAUSE saves its state after the switch to absolute mode below, so
+            # keep the print's own modes for AFC_RESUME to put back
+            self.pause_modes = (self.afc.gcode_move.absolute_coord,
+                                get_gcode_absolute_extrude(self.afc.gcode_move))
             # Need to pause as soon as possible to stop more gcode from executing, this needs to be done before movement in Z
             self.pause_resume.send_pause_command()
             # Verify that printer is in absolute mode

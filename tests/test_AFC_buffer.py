@@ -36,6 +36,216 @@ from extras.AFC_buffer import (
     FPS_ENDSTOP_POLL_TIME,
 )
 from tests.test_AFC_lane import _make_afc_lane
+from typing import Any, Callable, List, Optional, Tuple
+
+from extras.AFC_BambuAMS_buffer import AFCBambuBuffer
+from extras.AFC_buffer import load_config_prefix
+from tests.conftest import MockAFC, MockConfig, MockPrinter
+
+
+class FpsRecordingMcu:
+    """The MCU behind the FPS ADC, turning reactor time into print time."""
+
+    def __init__(self) -> None:
+        self.queries: List[float] = []
+
+    def estimated_print_time(self, eventtime: float) -> float:
+        """
+        Record the query and answer with a fixed 32 s offset.
+
+        :param eventtime: reactor time asked about
+        :return float: the print time for it
+        """
+        self.queries.append(eventtime)
+        return eventtime + 32.0
+
+
+class FpsRecordingAdc:
+    """An MCU ADC pin recording how the buffer sets it up; subclasses carry each API."""
+
+    def __init__(self) -> None:
+        self.calls: List[Tuple[Any, ...]] = []
+        self.callback: Optional[Callable[..., None]] = None
+        self.mcu = FpsRecordingMcu()
+
+    def get_mcu(self) -> FpsRecordingMcu:
+        """
+        :return FpsRecordingMcu: the MCU that owns the pin
+        """
+        return self.mcu
+
+
+class FpsMainlineAdc(FpsRecordingAdc):
+    """Current mainline Klipper: setup_adc_sample(report_time, ...) and a callback-only hook."""
+
+    def setup_adc_sample(self, report_time: float, sample_time: float = 0.0,
+                         sample_count: int = 1, batch_num: int = 1, minval: float = 0.0,
+                         maxval: float = 1.0, range_check_count: int = 0) -> None:
+        """
+        Record the sampling setup.
+
+        :param report_time: seconds between reports
+        :param sample_time: seconds per sample
+        :param sample_count: samples per report
+        :param batch_num: reports per batch
+        :param minval: range check minimum
+        :param maxval: range check maximum
+        :param range_check_count: out-of-range reports tolerated
+        """
+        self.calls.append(("setup_adc_sample", report_time, sample_time, sample_count))
+
+    def setup_adc_callback(self, callback: Callable[..., None]) -> None:
+        """
+        Record the callback.
+
+        :param callback: called with each report
+        """
+        self.calls.append(("setup_adc_callback",))
+        self.callback = callback
+
+
+class FpsRecordingPins:
+    """Klipper's `pins` object, handing out one ADC and recording each request."""
+
+    def __init__(self, adc: FpsRecordingAdc) -> None:
+        self.adc = adc
+        self.requests: List[Tuple[str, str]] = []
+
+    def setup_pin(self, pin_type: str, pin: str) -> FpsRecordingAdc:
+        """
+        :param pin_type: the kind of pin asked for
+        :param pin: the pin name from the config
+        :return FpsRecordingAdc: the ADC
+        """
+        self.requests.append((pin_type, pin))
+        return self.adc
+
+
+class FpsRecordingTimer:
+    """A timer handle as the reactor handed it out."""
+
+    def __init__(self, callback: Callable[[float], float], waketime: Optional[float]) -> None:
+        self.callback = callback
+        self.waketime = waketime
+
+
+class FpsRecordingCompletion:
+    """A reactor completion recording every value it is completed with."""
+
+    def __init__(self) -> None:
+        self.results: List[Any] = []
+
+    def complete(self, result: Any) -> None:
+        """
+        :param result: the completion value
+        """
+        self.results.append(result)
+
+
+class FpsRecordingReactor:
+    """The reactor a buffer and its software endstops share, recording what they ask of it."""
+
+    NOW = 0.0
+    NEVER = 9_999_999_999.0
+
+    def __init__(self, now: float = 10.0) -> None:
+        self.now = now
+        self.timers: List[FpsRecordingTimer] = []
+        self.unregistered: List[FpsRecordingTimer] = []
+        self.updates: List[Tuple[FpsRecordingTimer, float]] = []
+        self.completions: List[FpsRecordingCompletion] = []
+
+    def monotonic(self) -> float:
+        """
+        :return float: the current reactor time
+        """
+        return self.now
+
+    def register_timer(self, callback: Callable[[float], float],
+                       waketime: Optional[float] = None) -> FpsRecordingTimer:
+        """
+        :param callback: the timer callback
+        :param waketime: when it first runs
+        :return FpsRecordingTimer: its handle
+        """
+        timer = FpsRecordingTimer(callback, waketime)
+        self.timers.append(timer)
+        return timer
+
+    def unregister_timer(self, timer: FpsRecordingTimer) -> None:
+        """
+        :param timer: the handle to drop
+        """
+        self.unregistered.append(timer)
+
+    def update_timer(self, timer: FpsRecordingTimer, waketime: float) -> None:
+        """
+        :param timer: the handle to reschedule
+        :param waketime: its new wake time
+        """
+        self.updates.append((timer, waketime))
+
+    def completion(self) -> FpsRecordingCompletion:
+        """
+        :return FpsRecordingCompletion: a fresh completion
+        """
+        completion = FpsRecordingCompletion()
+        self.completions.append(completion)
+        return completion
+
+    def clear_records(self) -> None:
+        """Forget what construction asked for, so a test sees only its own calls."""
+        self.timers.clear()
+        self.unregistered.clear()
+        self.updates.clear()
+        self.completions.clear()
+
+
+def fps_recording_config(values: Optional[dict] = None,
+                         adc: Optional[FpsRecordingAdc] = None,
+                         name: str = "FPS_test"
+                         ) -> Tuple[MockConfig, FpsRecordingAdc, FpsRecordingReactor]:
+    """
+    Build an FPS buffer's config section on a printer carrying the recording fakes.
+
+    :param values: config options laid over `type: FPS_PSF` and `adc_pin: PB1`
+    :param adc: the ADC the pins hand out; a mainline Klipper one by default
+    :param name: the buffer's name, after `AFC_buffer`
+    :return: the config, the ADC, and the reactor the buffer will share with its endstops
+    """
+    afc = MockAFC()
+    reactor = FpsRecordingReactor()
+    afc.reactor = reactor
+    printer = MockPrinter(afc=afc)
+    adc = adc if adc is not None else FpsMainlineAdc()
+    printer.objects["pins"] = FpsRecordingPins(adc)
+    merged = {"type": "FPS_PSF", "adc_pin": "PB1"}
+    merged.update(values or {})
+    config = MockConfig(name=f"AFC_buffer {name}", printer=printer, values=merged)
+    return config, adc, reactor
+
+
+def fps_recording_buffer(values: Optional[dict] = None,
+                         adc: Optional[FpsRecordingAdc] = None,
+                         name: str = "FPS_test",
+                         buffer_cls: type = AFCFPSBuffer
+                         ) -> Tuple[AFCFPSBuffer, FpsRecordingAdc, FpsRecordingReactor]:
+    """
+    Build an FPS buffer through its real __init__ on the recording fakes.
+
+    The reactor's records start empty once the buffer is built.
+
+    :param values: config options laid over `type: FPS_PSF` and `adc_pin: PB1`
+    :param adc: the ADC the pins hand out; a mainline Klipper one by default
+    :param name: the buffer's name, after `AFC_buffer`
+    :param buffer_cls: AFCFPSBuffer or a subclass of it
+    :return: the buffer, its ADC and its reactor
+    """
+    config, adc, reactor = fps_recording_config(values, adc, name)
+    buf = buffer_cls(config)
+    reactor.clear_records()
+    return buf, adc, reactor
+
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1975,6 +2185,43 @@ class TestFPSEndstopWrapperHomeStart:
         assert endstop._trigger_time == 5.0
         assert endstop._completion is not None
 
+    def test_endstop_already_triggered_completes_immediately(self):
+        buf, adc, reactor = fps_recording_buffer()
+        buf.smoothed_fps = 0.75  # past homing_high_point (0.7)
+        endstop = buf.fps_endstop
+
+        # Called the way klippy's homing calls it: no `triggered`, so it homes toward triggered.
+        completion = endstop.home_start(0.0, 0.0, 0, 0.0)
+
+        assert reactor.completions == [completion]
+        assert endstop._completion is completion
+        assert completion.results == [True]
+        assert reactor.timers == []  # no polling needed
+        assert endstop._poll_timer is None
+        # Reactor time 10.0 is print time 42.0 on this MCU.
+        assert adc.mcu.queries == [10.0]
+        assert endstop._trigger_time == 42.0
+        assert endstop.home_wait(99.0) == 42.0
+        assert reactor.unregistered == []
+        assert buf.logger.messages == []
+
+    def test_each_home_start_gets_a_fresh_completion(self):
+        # A completion already completed by the last homing move must not be reused.
+        buf, _adc, reactor = fps_recording_buffer()
+        buf.smoothed_fps = 0.75
+        endstop = buf.fps_endstop
+        first = endstop.home_start(0.0, 0.0, 0, 0.0)
+        reactor.now = 20.0
+
+        second = endstop.home_start(0.0, 0.0, 0, 0.0)
+
+        assert second is not first
+        assert reactor.completions == [first, second]
+        assert (first.results, second.results) == ([True], [True])
+        assert endstop._completion is second
+        assert endstop._trigger_time == 52.0
+        assert buf.logger.messages == []
+
 
 class TestFPSEndstopWrapperPollFps:
     def test_triggered_completes_and_returns_never(self):
@@ -1998,6 +2245,30 @@ class TestFPSEndstopWrapperPollFps:
 
         assert result == 100.0 + FPS_ENDSTOP_POLL_TIME
         assert endstop._completion.result is None
+
+    def test_endstop_polls_until_triggered(self):
+        buf, adc, reactor = fps_recording_buffer()
+        buf.smoothed_fps = 0.5  # centred: the filament is not at the gears yet
+        endstop = buf.fps_endstop
+
+        completion = endstop.home_start(0.0, 0.0, 0, 0.0)
+        poll = endstop._poll_timer
+        assert reactor.timers == [poll]
+        assert (poll.callback, poll.waketime) == (endstop._poll_fps, 0.0)
+        assert endstop._completion is completion
+        assert completion.results == []
+
+        # Drive the poll callback as the reactor would.
+        assert endstop._poll_fps(1.0) == 1.01
+        assert completion.results == []
+        assert adc.mcu.queries == []
+        buf.smoothed_fps = 0.75  # the filament reaches the gears
+        assert endstop._poll_fps(2.0) == 9_999_999_999.0
+        assert completion.results == [True]
+        # The trigger time is the poll's own eventtime (2.0) in print time.
+        assert adc.mcu.queries == [2.0]
+        assert endstop._trigger_time == 34.0
+        assert buf.logger.messages == []
 
 
 class TestFPSEndstopWrapperHomeWait:
@@ -2024,6 +2295,22 @@ class TestFPSEndstopWrapperHomeWait:
         fps_buffer.reactor.unregister_timer.assert_not_called()
         assert result == 3.0
 
+    def test_endstop_home_wait_unregisters_poll_timer(self):
+        buf, adc, reactor = fps_recording_buffer()
+        buf.smoothed_fps = 0.5
+        endstop = buf.fps_endstop
+        endstop.home_start(0.0, 0.0, 0, 0.0)
+        poll = endstop._poll_timer
+        assert reactor.timers == [poll]
+
+        result = endstop.home_wait(99.0)
+
+        assert reactor.unregistered == [poll]
+        assert endstop._poll_timer is None
+        assert result == 0.0  # never triggered
+        assert adc.mcu.queries == []
+        assert buf.logger.messages == []
+
 
 class TestFPSEndstopWrapperQueryEndstop:
     def test_triggered_returns_one(self):
@@ -2033,6 +2320,21 @@ class TestFPSEndstopWrapperQueryEndstop:
     def test_not_triggered_returns_zero(self):
         endstop, fps_buffer, triggered = _make_endstop(trigger_value=False)
         assert endstop.query_endstop(0) == 0
+
+    def test_endstop_query(self):
+        # Every query reads the live reading. The advance endstop trips at
+        # homing_high_point (0.7), the trailing one at low_point (0.1).
+        buf, adc, reactor = fps_recording_buffer()
+        answers = []
+        for reading in (0.75, 0.5, 0.05):
+            buf.smoothed_fps = reading
+            answers.append((buf.fps_endstop.query_endstop(0.0),
+                            buf.fps_trailing_endstop.query_endstop(0.0)))
+
+        assert answers == [(1, 0), (0, 0), (0, 1)]
+        assert adc.mcu.queries == []
+        assert reactor.timers == []
+        assert buf.logger.messages == []
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -2069,6 +2371,32 @@ class TestCheckDeadband:
         assert "neutral_low" in msg
         assert "neutral_high" in msg
         assert "\n" in msg
+
+    def test_deadband_too_wide_low_side(self):
+        # A 0.3 band round a requested set point of 0.2 reaches down to 0.05, under
+        # low_point (0.1). Round the configured set point (0.5) it would have fitted.
+        buf, _adc, _reactor = fps_recording_buffer()
+
+        msg = buf._check_deadband(0.2, 0.3)
+
+        assert msg == ("AFC_FPS FPS_test: deadband (0.3) too wide - neutral_low (0.050) "
+                       "must be above low_point (0.1)")
+        assert (buf.set_point, buf.deadband) == (0.5, 0.3)  # only checked, never applied
+        assert buf.logger.messages == []
+
+    def test_deadband_too_wide_both_sides(self):
+        # A narrow buffer (0.3 to 0.6) asked for a 0.5 band round 0.5: 0.25 to 0.75.
+        buf, _adc, _reactor = fps_recording_buffer(
+            {"low_point": 0.3, "high_point": 0.6, "set_point": 0.45, "deadband": 0.2})
+
+        msg = buf._check_deadband(0.5, 0.5)
+
+        assert msg == ("AFC_FPS FPS_test: deadband (0.5) too wide - neutral_low (0.250) "
+                       "must be above low_point (0.3)\n"
+                       "AFC_FPS FPS_test: deadband (0.5) too wide - neutral_high (0.750) "
+                       "must be below high_point (0.6)")
+        assert (buf.set_point, buf.deadband) == (0.45, 0.2)
+        assert buf.logger.messages == []
 
 
 class TestGetFpsValue:
@@ -2296,6 +2624,173 @@ class TestAdcCallback:
         assert buf.last_state == "Advancing"
         assert buf.advance_state == False
         assert buf.trailing_state == True
+
+    class _Lane:
+        """A lane the buffer may steer: with an AFC stepper (BoxTurtle) or without (ACE)."""
+
+        def __init__(self, stepped: bool, name: str = "lane1") -> None:
+            self.name = name
+            self.extruder_stepper: Optional[object] = object() if stepped else None
+            self.rotation_factors: List[float] = []
+
+        def update_rotation_distance(self, multiplier: float) -> None:
+            """
+            :param multiplier: the rotation distance factor applied
+            """
+            self.rotation_factors.append(multiplier)
+
+    @staticmethod
+    def _states(buf: AFCFPSBuffer) -> Tuple[str, bool, bool]:
+        """
+        :param buf: the buffer
+        :return: its last_state, advance_state and trailing_state
+        """
+        return buf.last_state, buf.advance_state, buf.trailing_state
+
+    def test_adc_callback_reversed_inverts_reading(self):
+        buf, _adc, _reactor = fps_recording_buffer({"reversed": True, "smoothing": 0.0})
+
+        buf._adc_callback(1.0, 0.2)
+
+        assert buf.fps_value == pytest.approx(0.8)
+        assert buf.smoothed_fps == pytest.approx(0.8)
+        # 0.8 is compressed; the raw 0.2 would have read as stretched.
+        assert self._states(buf) == ("Trailing", True, False)
+        assert buf.logger.messages == []
+
+    def test_adc_callback_ema_smoothing(self):
+        # Not 0.5: at an even split, swapped weights would give the same answer.
+        buf, _adc, _reactor = fps_recording_buffer({"smoothing": 0.25})
+        buf.smoothed_fps = 0.5
+
+        buf._adc_callback(1.0, 0.9)
+
+        assert buf.fps_value == pytest.approx(0.9)
+        # A quarter of the old 0.5 (0.125) plus three quarters of the new 0.9 (0.675).
+        assert buf.smoothed_fps == pytest.approx(0.8)
+        assert self._states(buf) == ("Trailing", True, False)
+        assert buf.logger.messages == []
+
+    def test_adc_callback_batch_list_uses_last_sample(self):
+        buf, _adc, _reactor = fps_recording_buffer({"smoothing": 0.0})
+
+        buf._adc_callback([(1.0, 0.2), (2.0, 0.6)])
+
+        assert buf.fps_value == pytest.approx(0.6)
+        assert buf.smoothed_fps == pytest.approx(0.6)
+        assert self._states(buf) == ("Neutral", False, False)  # 0.2 would read as stretched
+        assert buf.logger.messages == []
+
+    def test_adc_callback_states(self):
+        # last_state is the correction direction: a low reading (spring stretched) asks for
+        # more feed, Advancing; a high one (compressed, ramming the gears) for less,
+        # Trailing. The booleans follow the turtleneck switches instead: advance_state is
+        # the pressed (compressed) position, which get_toolhead_pre_sensor_state() reports.
+        buf, _adc, _reactor = fps_recording_buffer({"smoothing": 0.0})
+
+        buf._adc_callback(1.0, 0.05)
+        assert self._states(buf) == ("Advancing", False, True)
+
+        buf._adc_callback(2.0, 0.5)
+        assert self._states(buf) == ("Neutral", False, False)
+
+        buf._adc_callback(3.0, 0.95)
+        assert self._states(buf) == ("Trailing", True, False)
+        assert buf._advance_latched is False  # no latch outside a load
+        assert buf.logger.messages == []
+
+    def test_virtual_advance_sensor_mirrors_advance_state(self):
+        # The GUI advance sensor shows the pressed (compressed) position, not "pressure
+        # above low_point"; the trailing sensor shows the stretched one.
+        buf, _adc, _reactor = fps_recording_buffer({"smoothing": 0.0})
+        adv = buf.fila_adv.runout_helper
+        trail = buf.fila_trail.runout_helper
+        seen = []
+
+        for eventtime, reading in ((1.0, 0.5), (2.0, 0.05), (3.0, 0.95)):
+            buf._adc_callback(eventtime, reading)
+            seen.append((adv.filament_present, trail.filament_present))
+
+        assert seen == [(False, False), (False, True), (True, False)]
+        assert buf.logger.messages == []
+
+    def test_stepper_lane_disabled_buffer_refreshes_advance_state(self):
+        # Regression: on a stepper lane with the buffer disabled (bowden calibration, load)
+        # the reading must still refresh the state. Frozen, it never shows the filament
+        # arriving and the ramming home-to-buffer calibration loops forever.
+        buf, _adc, reactor = fps_recording_buffer(
+            {"smoothing": 0.0, "set_point": 0.5, "deadband": 0.1})
+        lane = self._Lane(stepped=True)
+        buf.current_lane = lane  # wired, but the buffer is not enabled
+
+        buf._adc_callback(1.0, 0.1)
+        assert self._states(buf) == ("Advancing", False, True)
+
+        buf._adc_callback(2.0, 0.9)
+        assert self._states(buf) == ("Trailing", True, False)
+        assert buf._correction_running is False
+        assert reactor.updates == []  # a disabled buffer starts no correction loop
+        assert lane.rotation_factors == []
+        assert buf.logger.messages == []
+
+    def test_stepper_lane_active_correction_owns_state(self):
+        # While the correction loop drives the lane, the reading must not overwrite the
+        # state: the loop owns it.
+        buf, _adc, reactor = fps_recording_buffer(
+            {"smoothing": 0.0, "set_point": 0.5, "deadband": 0.1})
+        lane = self._Lane(stepped=True)
+        buf.current_lane = lane
+        buf.enable = True
+        buf._correction_running = True
+
+        buf._adc_callback(1.0, 0.1)  # stretched: the fallback would say Advancing
+
+        assert buf.fps_value == pytest.approx(0.1)
+        assert buf.smoothed_fps == pytest.approx(0.1)
+        assert self._states(buf) == ("Unknown", False, False)
+        assert buf._correction_running is True
+        assert reactor.updates == []  # already running, so not restarted
+        assert buf.fila_trail.runout_helper.filament_present is False
+        assert lane.rotation_factors == []
+        assert buf.logger.messages == []
+
+    def test_enabled_buffer_on_a_lane_without_a_stepper_still_classifies(self):
+        # ACE/OpenAMS: enabled, but with no stepper the correction loop has nothing to
+        # steer, so the reading keeps the state current itself.
+        buf, _adc, reactor = fps_recording_buffer(
+            {"smoothing": 0.0, "set_point": 0.5, "deadband": 0.1})
+        lane = self._Lane(stepped=False)
+        buf.current_lane = lane
+        buf.enable = True
+        # Left over from a stepper lane: running and enabled alone do not hand over the state.
+        buf._correction_running = True
+
+        buf._adc_callback(1.0, 0.1)
+
+        assert self._states(buf) == ("Advancing", False, True)
+        assert buf._correction_running is True
+        assert reactor.updates == []
+        assert lane.rotation_factors == []
+        assert buf.logger.messages == []
+
+    def test_disabled_buffer_with_a_stale_running_flag_still_classifies(self):
+        # disable_buffer() with no lane returns before clearing _correction_running, so a
+        # disabled buffer can carry the flag; a stepper and the flag alone must not stop
+        # the reading from refreshing the state.
+        buf, _adc, reactor = fps_recording_buffer(
+            {"smoothing": 0.0, "set_point": 0.5, "deadband": 0.1})
+        lane = self._Lane(stepped=True)
+        buf.current_lane = lane
+        buf._correction_running = True
+
+        buf._adc_callback(1.0, 0.9)
+
+        assert buf.enable is False
+        assert self._states(buf) == ("Trailing", True, False)
+        assert buf._correction_running is True
+        assert reactor.updates == []
+        assert lane.rotation_factors == []
+        assert buf.logger.messages == []
 
 
 class TestUpdateVirtualSensors:
@@ -3144,6 +3639,99 @@ class TestAFCFPSBufferInit:
         kinds = [c[0] for c in adc.calls]
         assert "setup_adc_callback_old" in kinds
 
+    class _KalicoAdc(FpsRecordingAdc):
+        """Kalico and older Klipper: setup_minmax, and setup_adc_callback(report_time, cb)."""
+
+        def setup_minmax(self, sample_time: float, sample_count: int, minval: float = 0.0,
+                         maxval: float = 1.0, range_check_count: int = 0) -> None:
+            """
+            Record the sampling setup.
+
+            :param sample_time: seconds per sample
+            :param sample_count: samples per report
+            :param minval: range check minimum
+            :param maxval: range check maximum
+            :param range_check_count: out-of-range reports tolerated
+            """
+            self.calls.append(("setup_minmax", sample_time, sample_count))
+
+        def setup_adc_callback(self, report_time: float,
+                               callback: Callable[..., None]) -> None:
+            """
+            Record the callback.
+
+            :param report_time: seconds between reports
+            :param callback: called with each report
+            """
+            self.calls.append(("setup_adc_callback", report_time))
+            self.callback = callback
+
+    class _MidKlipperAdc(FpsRecordingAdc):
+        """Mid-vintage Klipper: setup_adc_sample without report_time; the callback takes it."""
+
+        def setup_adc_sample(self, sample_time: float, sample_count: int) -> None:
+            """
+            Record the sampling setup.
+
+            :param sample_time: seconds per sample
+            :param sample_count: samples per report
+            """
+            self.calls.append(("setup_adc_sample", sample_time, sample_count))
+
+        def setup_adc_callback(self, report_time: float,
+                               callback: Callable[..., None]) -> None:
+            """
+            Record the callback.
+
+            :param report_time: seconds between reports
+            :param callback: called with each report
+            """
+            self.calls.append(("setup_adc_callback", report_time))
+            self.callback = callback
+
+    def test_adc_dispatch_kalico_uses_setup_minmax(self):
+        adc = self._KalicoAdc()
+
+        buf, _adc, _reactor = fps_recording_buffer(adc=adc)
+
+        # Defaults: sample_time 0.005, sample_count 5, report_time 0.1. The mainline
+        # setup_adc_sample does not exist on this ADC, so it is never tried.
+        assert adc.calls == [("setup_minmax", 0.005, 5), ("setup_adc_callback", 0.1)]
+        assert adc.callback == buf._adc_callback
+        assert buf.logger.messages == [("info", "Kalico setup ADC")]
+
+    def test_adc_dispatch_new_klipper_report_time_first(self):
+        # report_time must be the first setup_adc_sample argument on newer mainline
+        # Klipper; the mis-ordered call was silently mis-sampling.
+        adc = FpsMainlineAdc()
+
+        buf, _adc, _reactor = fps_recording_buffer(adc=adc)
+
+        assert adc.calls == [("setup_adc_sample", 0.1, 0.005, 5), ("setup_adc_callback",)]
+        assert adc.callback == buf._adc_callback
+        assert buf.logger.messages == []
+
+    def test_adc_dispatch_mid_klipper_without_report_time(self):
+        adc = self._MidKlipperAdc()
+
+        buf, _adc, _reactor = fps_recording_buffer(adc=adc)
+
+        assert adc.calls == [("setup_adc_sample", 0.005, 5), ("setup_adc_callback", 0.1)]
+        assert adc.callback == buf._adc_callback
+        assert buf.logger.messages == []
+
+    def test_adc_config_overrides_flow_through(self):
+        adc = FpsMainlineAdc()
+
+        buf, _adc, _reactor = fps_recording_buffer(
+            {"sample_time": 0.002, "sample_count": 4, "report_time": 0.010}, adc=adc)
+
+        assert adc.calls == [("setup_adc_sample", 0.01, 0.002, 4), ("setup_adc_callback",)]
+        assert (buf.sample_time, buf.sample_count, buf.report_time) == (0.002, 4, 0.01)
+        assert buf.ppins.requests == [("adc", "PB1")]
+        assert buf.adc is adc
+        assert buf.logger.messages == []
+
 
 class TestEnableClearAdvanceLatch:
     def test_enable_advance_latch_sets_flags(self):
@@ -3316,6 +3904,108 @@ class TestFPSEnableBuffer:
         buf.enable_buffer(lane)
         msg = buf.logger.debug.call_args_list[-1][0][0]
         assert "correction=off/adc-only" in msg
+
+    LOAD3: List[Tuple[float, float]] = [
+        (0.02, 0.002), (0.02, 0.044), (0.02, 0.111), (0.02, 0.151),
+        (0.02, 0.208), (0.02, 0.283), (0.02, 0.357), (0.02, 0.432),
+        (0.02, 0.509), (0.02, 0.578), (0.02, 0.658), (0.02, 0.719),
+        (0.02, 0.811), (0.02, 0.883), (0.02, 0.961), (0.02, 1.037),
+        (0.02, 1.112), (0.02, 1.186), (0.02, 1.249), (0.02, 1.329),
+        (0.02, 1.411), (0.02, 1.487), (0.02, 1.561), (0.03, 1.641),
+        # friction plateau: the tube is filling and the buffer is loading up
+        (0.35, 1.717), (0.35, 1.787), (0.35, 1.861), (0.35, 1.936),
+        (0.35, 2.011), (0.36, 2.089), (0.37, 2.161), (0.38, 2.237),
+        (0.39, 2.309),
+        # at the gears
+        (0.96, 2.364), (0.96, 2.428), (0.96, 2.483), (0.96, 2.533),
+        (0.95, 2.538), (0.94, 2.542), (0.94, 2.543), (0.94, 2.545),
+        (0.95, 2.545),
+    ]
+
+    class _BambuLane:
+        """A lane as the Bambu buffer reads it: a name and the buffer it names."""
+
+        def __init__(self, name: str, buffer_name: str) -> None:
+            self.name = name
+            self.buffer_name = buffer_name
+
+    class _BambuUnit:
+        """An AFC_BambuAMS unit as the buffer reads it: a name, lanes and an odometer."""
+
+        def __init__(self, name: str, lane: TestFPSEnableBuffer._BambuLane) -> None:
+            self.name = name
+            self.lanes = {lane.name: lane}
+            self.odom_m: Optional[float] = None
+
+        def _odom_now_mm(self) -> Optional[float]:
+            """
+            :return: the odometer in mm, or None before the first frame
+            """
+            return None if self.odom_m is None else self.odom_m * 1000.0
+
+    def _bambu_buffer(self) -> Tuple[AFCBambuBuffer, TestFPSEnableBuffer._BambuUnit,
+                                      FpsRecordingReactor]:
+        """
+        Build a real Bambu buffer, with one unit on its printer and AFC's PREP done.
+
+        :return: the buffer, its unit and its reactor
+        """
+        buf, _adc, reactor = fps_recording_buffer(
+            {"type": "bambu", "adc_pin": "bambu_buffer:fps"}, name="Bambu_AMS_Buffer",
+            buffer_cls=AFCBambuBuffer)
+        buf.afc.prep_done = True
+        unit = self._BambuUnit("Bambu_AMS_1", self._BambuLane("lane12", "Bambu_AMS_Buffer"))
+        buf.printer.objects["AFC_BambuAMS Bambu_AMS_1"] = unit
+        return buf, unit, reactor
+
+    @staticmethod
+    def _gate(buf: AFCBambuBuffer) -> dict:
+        """
+        :param buf: the Bambu buffer
+        :return: every piece of its odometer gate's state
+        """
+        units = None if buf._odom_units is None else list(buf._odom_units)
+        return {"units": units, "prev": dict(buf._odom_prev),
+                "first": buf._first_sample_t, "prep": buf._prep_seen_t,
+                "last_move": buf._last_move_t, "now": buf._now_t,
+                "tension": buf._tension_since, "compressed": buf._compressed_since,
+                "record": buf._record_checked, "moved": buf._odom_moved,
+                "latched": buf._gate_latched, "warned": buf._odom_warned}
+
+    def test_the_end_of_a_load_does_not_destroy_the_latch(self):
+        # Live fault, printer 1, 2026-09-22. enable_buffer() runs at the END of a load,
+        # right after arrival, so resetting the gate there wiped the latch a second after
+        # it was set: lane15 sat loaded and compressed at 0.94 with the sensor reporting
+        # not loaded, the dangerous way round for the unload AFC then watches it for.
+        buf, unit, reactor = self._bambu_buffer()
+        eventtime = 0.0
+        for reading, odom_m in self.LOAD3:
+            unit.odom_m = odom_m
+            eventtime += 0.25
+            buf._adc_callback(eventtime, reading)
+        assert buf._gate_latched is True
+        assert buf.advance_state is True
+        gate = self._gate(buf)
+        buf.logger.messages.clear()
+        # An FPS load latch left set, which enable_buffer must clear
+        buf._latch_enabled = True
+        buf._advance_latched = True
+        lane = self._BambuLane("lane15", "Bambu_AMS_Buffer")
+
+        buf.enable_buffer(lane)
+
+        assert buf._gate_latched is True
+        assert buf.advance_state is True
+        assert self._gate(buf) == gate
+        assert buf.current_lane is lane
+        assert buf.enable is True
+        assert (buf._latch_enabled, buf._advance_latched) == (False, False)
+        assert buf.smoothed_fps == 0.95  # restarted from the last raw reading
+        assert buf._correction_running is False  # no stepper to steer
+        assert reactor.updates == []
+        assert buf.logger.messages == [
+            ("debug", "Bambu_AMS_Buffer FPS buffer enabled for lane15 "
+                      "(correction=off/adc-only)")]
 
 
 class TestFPSDisableBuffer:
@@ -3977,6 +4667,33 @@ class TestLoadConfigPrefix:
         config = MockConfig(name="AFC_buffer TN", printer=printer, values={"type": "bogus"})
         with pytest.raises(Exception, match="not valid"):
             load_config_prefix(config)
+
+    def test_load_config_prefix_builds_a_bambu_buffer(self):
+        config, _adc, _reactor = fps_recording_config(
+            {"type": "bambu", "adc_pin": "bambu_buffer:fps"}, name="Bambu_AMS_Buffer")
+        afc = config.get_printer().lookup_object("AFC")
+
+        buf = load_config_prefix(config)
+
+        assert type(buf) is AFCBambuBuffer
+        # Still an FPS buffer, so the gauge, QUERY_BUFFER and ramming all keep working;
+        # only the load answer is narrowed.
+        assert isinstance(buf, AFCFPSBuffer)
+        assert afc.buffers == {"Bambu_AMS_Buffer": buf}
+        assert afc.logger.messages == []
+
+    def test_unknown_type_names_bambu_in_the_error(self):
+        config, _adc, _reactor = fps_recording_config({"type": "nonsense"},
+                                                      name="Bambu_AMS_Buffer")
+        afc = config.get_printer().lookup_object("AFC")
+
+        with pytest.raises(configparser.Error) as exc:
+            load_config_prefix(config)
+
+        assert str(exc.value) == ("nonsense not valid, only switched(turtleneck style), "
+                                  "FPS_PSF or bambu are valid options")
+        assert afc.buffers == {}
+        assert afc.logger.messages == []
 
 
 # ═════════════════════════════════════════════════════════════════════════

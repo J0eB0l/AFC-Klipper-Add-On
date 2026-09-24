@@ -641,6 +641,22 @@ class MockPrinter:
             self._objects[name] = val
         return val
 
+    def lookup_objects(self, module=None):
+        """
+        Real Klipper's (name, object) enumeration, which code that has to
+        FIND its collaborators rather than name them relies on.
+
+        Only the explicitly registered objects: the MagicMocks lookup_object
+        fabricates on demand are not real registrations and would show up
+        here as objects nobody added.
+        """
+        items = list(self._objects.items())
+        if module is None:
+            return items
+        prefix = module + " "
+        return [(n, o) for n, o in items
+                if n == module or n.startswith(prefix)]
+
     _NO_DEFAULT = object()
 
     def load_object(self, config, name, default=_NO_DEFAULT):
@@ -706,6 +722,15 @@ class MockConfig:
             error_str = f"Option '{option}' in section '{self.section}' must be specified"
             raise KlipperError(error_str)
         return default
+
+    def get_prefix_options(self, prefix):
+        opts = [k for k in self._values if k.startswith(prefix)]
+        try:
+            opts += [o for o in self.fileconfig.options(self.section)
+                     if o.startswith(prefix) and o not in opts]
+        except Exception:
+            pass
+        return opts
 
     def get(self, option, default=_MOCK_CONFIG_SENTINEL):
         try:

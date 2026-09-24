@@ -1,0 +1,19 @@
+# model:     ams2
+# outcome:   notag
+# source:    an AMS 2 preload scan (tray 0 tagged / tray 1 untagged) under
+#            default settings, on a reel with no chip in it.
+# verbatim:  abbreviated -- see ams2_insert_tagged.txt.
+#
+# The bay reader genuinely saw nothing. This is the cycle that has to reach
+# "end" without ever reaching "read", so the lane gets AFC defaults rather than
+# the previous spool's profile.
+#
+# offset | expect | line
+- | .        | [AMS_RFID]STEP:set 1 tray_preload
+- | .        | rfid pull back all
+- | .        | reader 0 enable
+- | .        | [AMS_RFID]STEP2:pull tension
+- | .        | [AMS_RFID]STEP5:no card in RF
+- | .        | [AMS_RFID]STEP:rfid pull 1
+- | .        | [AMS_RFID]STEP:tray pull over 789 mm, but no card detected
+- | end      | [AMS_RFID]STEP7:finish,cali tray

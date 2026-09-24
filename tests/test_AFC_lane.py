@@ -449,6 +449,59 @@ class TestMoveAdvancedStepperlessDelegation:
 
         lane.move.assert_called_once_with(25.0, 50, 100, False)
 
+    def _make_real_lane_with_drive(self, unit_obj: Any) -> AFCLane:
+        """
+        A real lane whose stepper path is observable: distinct short and long
+        move settings, quiet mode off and a drive stepper that records moves.
+
+        :param unit_obj: the lane's unit
+        :return AFCLane: the lane
+        """
+        lane = _make_real_lane_for_unit_hooks(unit_obj, values={
+            "short_moves_speed": 50.0, "short_moves_accel": 400.0,
+            "long_moves_speed": 150.0, "long_moves_accel": 300.0})
+        lane.afc._get_quiet_mode = MagicMock(return_value=False)
+        lane.drive_stepper = MagicMock(spec=["move"])
+        return lane
+
+    def test_move_advanced_delegates_negative_distance(self):
+        unit = MagicMock(spec=["stepperless_drive", "lane_move", "select_lane"])
+        unit.stepperless_drive = True
+        lane = self._make_real_lane_with_drive(unit)
+
+        lane.move_advanced(-50.0, SpeedMode.LONG, assist_active=AssistActive.YES)
+
+        # lane_move takes no assist argument, so AssistActive.YES is not passed on.
+        assert unit.lane_move.call_args_list == [call(lane, -50.0, SpeedMode.LONG)]
+        unit.select_lane.assert_not_called()
+        lane.drive_stepper.move.assert_not_called()
+        assert lane.logger.messages == []
+
+    def test_move_advanced_native_stepper_path_untouched(self):
+        unit = MagicMock(spec=["stepperless_drive", "lane_move", "select_lane"])
+        unit.stepperless_drive = False
+        lane = self._make_real_lane_with_drive(unit)
+
+        lane.move_advanced(30.0, SpeedMode.SHORT)
+
+        unit.lane_move.assert_not_called()
+        assert unit.select_lane.call_args_list == [call(lane)]
+        # SHORT moves at the short speed and accel; AssistActive.NO means no assist.
+        assert lane.drive_stepper.move.call_args_list == [call(30.0, 50.0, 400.0, False)]
+        assert lane.logger.messages == []
+
+    def test_move_advanced_stepperless_without_lane_move_falls_through(self):
+        # Stepperless alone does not delegate: the unit must also provide lane_move.
+        unit = MagicMock(spec=["stepperless_drive", "select_lane"])
+        unit.stepperless_drive = True
+        lane = self._make_real_lane_with_drive(unit)
+
+        lane.move_advanced(30.0, SpeedMode.SHORT)
+
+        assert unit.select_lane.call_args_list == [call(lane)]
+        assert lane.drive_stepper.move.call_args_list == [call(30.0, 50.0, 400.0, False)]
+        assert lane.logger.messages == []
+
 
 # ── _prep_capture_td1: unit hook interception ────────────────────────────────
 # New branch: a unit's prep_capture_td1 hook can intercept TD-1 capture on
@@ -502,6 +555,147 @@ class TestPrepCaptureTd1UnitHook:
         lane.unit_obj.prep_capture_td1.assert_not_called()
         lane.get_td1_data.assert_not_called()
 
+    BLOCKED_MSG = ("Cannot get TD-1 data for lane1, either toolhead is loaded or hub shows "
+                   "filament in path")
+
+    def _make_real_td1_lane(self, unit_obj: Any, enabled: bool = True,
+                            hub_state: Optional[bool] = None,
+                            current_lane: Optional[Any] = None) -> AFCLane:
+        """
+        A real lane with a TD-1 device and capture_td1_when_loaded set from enabled.
+
+        :param unit_obj: the lane's unit
+        :param enabled: the capture_td1_when_loaded option
+        :param hub_state: the hub sensor state; None leaves the lane without a hub
+        :param current_lane: the lane AFC reports loaded in the toolhead, or None
+        :return AFCLane: the lane
+        """
+        lane = _make_real_lane_for_unit_hooks(unit_obj, values={
+            "capture_td1_when_loaded": enabled, "td1_device_id": "td1_1"})
+        if hub_state is not None:
+            lane.hub_obj = MagicMock(spec=["state"])
+            lane.hub_obj.state = hub_state
+        lane.afc.function.get_current_lane_obj.return_value = current_lane
+        return lane
+
+    def test_prep_capture_td1_disabled_does_nothing(self):
+        unit = MagicMock(spec=["prep_capture_td1", "capture_td1_data"])
+        unit.prep_capture_td1.return_value = None
+        lane = self._make_real_td1_lane(unit, enabled=False, hub_state=True)
+
+        lane._prep_capture_td1()
+
+        unit.prep_capture_td1.assert_not_called()
+        unit.capture_td1_data.assert_not_called()
+        # If enabled, the declining hook and the full hub would log a blocked capture.
+        assert lane.logger.messages == []
+        assert lane.afc.error.mock_calls == []
+
+    def test_prep_capture_td1_unit_hook_intercepts(self):
+        unit = MagicMock(spec=["prep_capture_td1", "capture_td1_data"])
+        unit.prep_capture_td1.return_value = (True, "TD-1 capture handled by prep_post_load")
+        # The hub shows filament, as after an ACE hub feed; the unit hook still decides.
+        lane = self._make_real_td1_lane(unit, hub_state=True)
+
+        lane._prep_capture_td1()
+
+        assert unit.prep_capture_td1.call_args_list == [call(lane)]
+        unit.capture_td1_data.assert_not_called()
+        assert lane.afc.error.mock_calls == []
+        assert lane.logger.messages == []
+
+    def test_prep_capture_td1_hook_none_falls_through(self):
+        unit = MagicMock(spec=["prep_capture_td1", "capture_td1_data"])
+        unit.prep_capture_td1.return_value = None
+        unit.capture_td1_data.return_value = (True, "TD-1 data captured")
+        lane = self._make_real_td1_lane(unit, hub_state=False)
+
+        lane._prep_capture_td1()
+
+        assert unit.prep_capture_td1.call_args_list == [call(lane)]
+        # get_td1_data ran, and it hands the capture to the unit.
+        assert unit.capture_td1_data.call_args_list == [call(lane)]
+        assert lane.afc.error.mock_calls == []
+        assert lane.logger.messages == []
+
+    def test_prep_capture_td1_blocked_when_hub_shows_filament(self):
+        lane = self._make_real_td1_lane(MagicMock(spec=[]), hub_state=True)
+
+        lane._prep_capture_td1()
+
+        assert lane.logger.messages == [("info", self.BLOCKED_MSG)]
+        # A capture attempt would report the unset td1_bowden_length here.
+        assert lane.afc.error.mock_calls == []
+
+    def test_prep_capture_td1_blocked_when_toolhead_loaded(self):
+        loaded = MagicMock(spec=["name"])
+        loaded.name = "lane2"
+        lane = self._make_real_td1_lane(MagicMock(spec=[]), hub_state=False, current_lane=loaded)
+
+        lane._prep_capture_td1()
+
+        assert lane.logger.messages == [("info", self.BLOCKED_MSG)]
+        assert lane.afc.error.mock_calls == []
+
+    def _make_toolchanger_td1_lane(self, own_lane: Optional[str],
+                                   printing: bool) -> tuple:
+        """
+        A TD-1 lane on a printer whose active tool holds lane2, a different tool.
+
+        :param own_lane: the lane loaded in this lane's own toolhead, or None
+        :param printing: what is_printing reports
+        :return tuple: the lane and its unit, which takes the capture
+        """
+        unit = MagicMock(spec=["capture_td1_data"])
+        unit.capture_td1_data.return_value = (True, "TD-1 data captured")
+        other = MagicMock(spec=["name"])
+        other.name = "lane2"
+        lane = self._make_real_td1_lane(unit, hub_state=False, current_lane=other)
+        lane.extruder_obj = MagicMock(spec=["lane_loaded"])
+        lane.extruder_obj.lane_loaded = own_lane
+        lane.afc.function.is_printing.return_value = printing
+        return lane, unit
+
+    def test_prep_capture_td1_runs_when_another_tool_is_loaded(self):
+        lane, unit = self._make_toolchanger_td1_lane(own_lane=None, printing=False)
+
+        lane._prep_capture_td1()
+
+        assert unit.capture_td1_data.call_args_list == [call(lane)]
+        assert lane.logger.messages == []
+        assert lane.afc.error.mock_calls == []
+
+    def test_prep_capture_td1_blocked_when_its_own_tool_is_loaded(self):
+        lane, unit = self._make_toolchanger_td1_lane(own_lane="lane3", printing=False)
+
+        lane._prep_capture_td1()
+
+        unit.capture_td1_data.assert_not_called()
+        assert lane.logger.messages == [("info", self.BLOCKED_MSG)]
+        assert lane.afc.error.mock_calls == []
+
+    def test_prep_capture_td1_blocked_mid_print_on_another_tool(self):
+        lane, unit = self._make_toolchanger_td1_lane(own_lane=None, printing=True)
+
+        lane._prep_capture_td1()
+
+        unit.capture_td1_data.assert_not_called()
+        assert lane.logger.messages == [("info", self.BLOCKED_MSG)]
+        assert lane.afc.error.mock_calls == []
+
+    def test_prep_capture_td1_blocked_without_an_extruder_object(self):
+        unit = MagicMock(spec=["capture_td1_data"])
+        other = MagicMock(spec=["name"])
+        other.name = "lane2"
+        lane = self._make_real_td1_lane(unit, hub_state=False, current_lane=other)
+        lane.afc.function.is_printing.return_value = False
+
+        lane._prep_capture_td1()
+
+        unit.capture_td1_data.assert_not_called()
+        assert lane.logger.messages == [("info", self.BLOCKED_MSG)]
+        assert lane.afc.error.mock_calls == []
+
 
 # ── get_td1_data: unit hook interception ─────────────────────────────────────
 
@@ -548,6 +742,43 @@ class TestGetTd1DataUnitHook:
 
         assert status is False
         assert "not loaded" in msg.lower()
+
+    NO_DEVICE_MSG = ("Cannot grab TD-1 data for lane1, td1_device_id is a required field in "
+                     "AFC_hub or per AFC_lane")
+
+    def test_get_td1_data_unit_failure_propagates(self):
+        unit = MagicMock(spec=["capture_td1_data"])
+        unit.capture_td1_data.return_value = (False, "ACE not connected")
+        lane = _make_real_lane_for_unit_hooks(unit, values={"td1_device_id": "td1_1"})
+
+        result = lane.get_td1_data()
+
+        assert result == (False, "ACE not connected")
+        assert unit.capture_td1_data.call_args_list == [call(lane)]
+        # The stepper path would report the unset td1_bowden_length here.
+        assert lane.afc.error.mock_calls == []
+        assert lane.logger.messages == []
+
+    def test_get_td1_data_hook_none_falls_through_to_stepper_path(self):
+        unit = MagicMock(spec=["capture_td1_data"])
+        unit.capture_td1_data.return_value = None
+        lane = _make_real_lane_for_unit_hooks(unit, values={"td1_device_id": None})
+
+        result = lane.get_td1_data()
+
+        assert result == (False, self.NO_DEVICE_MSG)
+        assert unit.capture_td1_data.call_args_list == [call(lane)]
+        assert lane.afc.error.mock_calls == [call.AFC_error(self.NO_DEVICE_MSG, pause=False)]
+        assert lane.logger.messages == []
+
+    def test_get_td1_data_no_hook_falls_through(self):
+        lane = _make_real_lane_for_unit_hooks(MagicMock(spec=[]), values={"td1_device_id": None})
+
+        result = lane.get_td1_data()
+
+        assert result == (False, self.NO_DEVICE_MSG)
+        assert lane.afc.error.mock_calls == [call.AFC_error(self.NO_DEVICE_MSG, pause=False)]
+        assert lane.logger.messages == []
 
 
 # ── get_td1_data_load / _apply_td1_data_load ──────────────────────────────────
@@ -3067,6 +3298,29 @@ class TestPerformInfiniteRunout:
 # (MockConfig/MockPrinter/MockAFC). Using "AFC_stepper" as the config section
 # name makes AFCLane.__init__ take its early-return path (no stepper/hub/buffer/
 # extruder pins configured), which keeps construction lightweight while still
+from typing import Any, Dict, Optional
+
+
+def _make_real_lane_for_unit_hooks(unit_obj: Any,
+                                   values: Optional[Dict[str, Any]] = None) -> AFCLane:
+    """
+    Construct a real AFCLane named lane1 via its actual __init__ and attach
+    unit_obj as its unit.
+
+    :param unit_obj: the lane's unit, a MagicMock specced to the hooks it provides
+    :param values: further [AFC_stepper lane1] options
+    :return AFCLane: the lane; its logger is the AFC core's MockLogger
+    """
+    afc = MockAFC()
+    printer = MockPrinter(afc=afc)
+    all_values: Dict[str, Any] = {"unit": "Turtle_1:1"}
+    if values:
+        all_values.update(values)
+    config = MockConfig(name="AFC_stepper lane1", printer=printer, values=all_values)
+    lane = AFCLane(config)
+    lane.unit_obj = unit_obj
+    return lane
+
 # running every line of real constructor logic AFCU1Lane depends on.
 
 from tests.conftest import MockReactor, MockConfig, MockPrinter
@@ -4230,3 +4484,12 @@ class TestPrepCallback:
 
         lane_b.handle_prep_runout(20.0, False)
         lane_b.set_unloaded.assert_called_once()
+
+
+class TestGetStatusBeforeConnect:
+    def test_a_lane_not_yet_connected_reports_nothing(self):
+        lane = _make_real_lane_for_unit_hooks(MagicMock())
+        lane.map = "T0"
+
+        assert lane.connect_done is False
+        assert lane.get_status() == {}

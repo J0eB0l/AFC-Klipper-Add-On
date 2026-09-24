@@ -251,8 +251,9 @@ class AfcToolchanger(afcUnit):
         if self.afc.afc_stats.average_tool_swap_time:
             self.afc.afc_stats.average_tool_swap_time.average_time(self.afc.afcDeltaTime.delta_time)
         lane.extruder_obj.status = self.afc.current_state = State.IDLE
-        # Update the base position and homing position after the tool swap.
-        self.afc.base_position   = list(self.afc.gcode_move.base_position)
+        # Update the base position and homing position after the tool swap. E keeps its saved
+        # base: restore_pos adds the E the swap moved, so taking it here counted it twice.
+        self.afc.base_position[:3] = self.afc.gcode_move.base_position[:3]
         self.afc.homing_position = list(self.afc.gcode_move.homing_position)
         # Update the last_gcode_position to reflect the new base position after the tool swap.
         for i in range(0, 3):

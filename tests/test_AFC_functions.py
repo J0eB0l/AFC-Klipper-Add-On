@@ -2064,3 +2064,94 @@ class TestCmdAfcTestLanesParkAndVerify:
         func = _make_func()
         self._run_test_lane(func, park=True, park_cmd=None)
         func.afc.gcode.run_script_from_command.assert_not_called()
+
+
+# ── check_absolute_mode ──────────────────────────────────────────────────────
+
+class _FakeGcodeMove:
+    """gcode_move stand-in with the coordinate state check_absolute_mode reads."""
+
+    def __init__(self, absolute_coord=True, absolute_extrude=True,
+                 base_e=0.0, last_e=0.0):
+        self.absolute_coord = absolute_coord
+        self.absolute_extrude = absolute_extrude
+        self.base_position = [0.0, 0.0, 0.0, base_e]
+        self.last_position = [10.0, 20.0, 0.5, last_e]
+        self.homing_position = [0.0, 0.0, 0.0, 0.0]
+        self.speed = 100.0
+        self.speed_factor = 1 / 60.
+        self.extrude_factor = 1.0
+
+    def get_status(self, eventtime=None):
+        return {"absolute_extrude": self.absolute_extrude}
+
+
+def _func_with_gcode_move(gm):
+    func = _make_func()
+    func.afc.gcode_move = gm
+    func.afc.toolhead = MagicMock()
+    func.afc.toolhead.get_position.return_value = list(gm.last_position)
+    return func
+
+
+class TestCheckAbsoluteMode:
+    def test_relative_extrude_flips_and_rezeroes_e_origin(self):
+        # Relative extrude leaves base E far behind last E; without a re-zero the
+        # next relative E value reads as a long absolute move.
+        gm = _FakeGcodeMove(absolute_extrude=False,
+                            base_e=156801.453808, last_e=157319.250561)
+        func = _func_with_gcode_move(gm)
+
+        func.check_absolute_mode("TOOL_UNLOAD")
+
+        assert gm.absolute_extrude is True
+        assert gm.absolute_coord is True
+        assert gm.base_position == [0.0, 0.0, 0.0, 157319.250561]
+        assert gm.last_position == [10.0, 20.0, 0.5, 157319.250561]
+        assert func.logger.messages == [
+            ("debug", "TOOL_UNLOAD: check absolute mode, POS:"
+                      "Position: [10.0, 20.0, 0.5, 157319.250561]"
+                      " base_position: [0.0, 0.0, 0.0, 156801.453808]"
+                      " last_position: [10.0, 20.0, 0.5, 157319.250561]"
+                      " speed: 100.0 speed_factor: 0.016667 extrude_factor: 1.0"
+                      " absolute_coord: True absolute_extrude: False\n"),
+            ("debug", "Printer extruder not in absolute mode, setting to absolute mode"),
+        ]
+
+    def test_absolute_extrude_leaves_e_origin_alone(self):
+        gm = _FakeGcodeMove(absolute_extrude=True, base_e=100.0, last_e=250.0)
+        func = _func_with_gcode_move(gm)
+
+        func.check_absolute_mode("TOOL_UNLOAD")
+
+        assert gm.absolute_extrude is True
+        assert gm.base_position == [0.0, 0.0, 0.0, 100.0]
+        assert gm.last_position == [10.0, 20.0, 0.5, 250.0]
+        assert func.logger.messages == [
+            ("debug", "TOOL_UNLOAD: check absolute mode, POS:"
+                      "Position: [10.0, 20.0, 0.5, 250.0]"
+                      " base_position: [0.0, 0.0, 0.0, 100.0]"
+                      " last_position: [10.0, 20.0, 0.5, 250.0]"
+                      " speed: 100.0 speed_factor: 0.016667 extrude_factor: 1.0"
+                      " absolute_coord: True absolute_extrude: True\n"),
+        ]
+
+    def test_relative_coords_flip_without_touching_e_origin(self):
+        gm = _FakeGcodeMove(absolute_coord=False, absolute_extrude=True,
+                            base_e=5.0, last_e=8.0)
+        func = _func_with_gcode_move(gm)
+
+        func.check_absolute_mode("TOOL_LOAD")
+
+        assert gm.absolute_coord is True
+        assert gm.absolute_extrude is True
+        assert gm.base_position == [0.0, 0.0, 0.0, 5.0]
+        assert func.logger.messages == [
+            ("debug", "TOOL_LOAD: check absolute mode, POS:"
+                      "Position: [10.0, 20.0, 0.5, 8.0]"
+                      " base_position: [0.0, 0.0, 0.0, 5.0]"
+                      " last_position: [10.0, 20.0, 0.5, 8.0]"
+                      " speed: 100.0 speed_factor: 0.016667 extrude_factor: 1.0"
+                      " absolute_coord: False absolute_extrude: True\n"),
+            ("debug", "Printer coords not in absolute mode, setting to absolute mode"),
+        ]

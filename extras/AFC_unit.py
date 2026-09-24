@@ -41,7 +41,7 @@ CALI_WARN = "The following lanes ({lanes}) have already been calibrated, if you 
 CALI_WARN += "with calibration then the filament for selected lanes will be ejected. "
 CALI_WARN += "Once filament is reinserted, then lanes will be calibrated.\n"
 
-SENSORLESS_UNITS = ["OpenAMS"]
+SENSORLESS_UNITS = ["OpenAMS", "ACE", "ACE2"]
 
 class afcUnit:
     HOMING_DELTA = 300  # Delta for which to warn if homing move delta is not within this amount from
@@ -76,6 +76,7 @@ class afcUnit:
         self.hub                         = config.get("hub", None)                                           # Hub name(AFC_hub) that belongs to this unit, can be overridden in AFC_stepper section
         self.extruder                    = config.get("extruder", None)                                      # Extruder name(AFC_extruder) that belongs to this unit, can be overridden in AFC_stepper section
         self.buffer_name                 = config.get('buffer', None)                                        # Buffer name(AFC_buffer) that belongs to this unit, can be overridden in AFC_stepper section
+        self.environment_sensor          = config.get('environment_sensor', None)                            # Name of a temperature/humidity sensor section beside this unit, when it is not named after the unit
 
         self.remember_spool              = config.getboolean('remember_spool', False)                        # Turns on/off ability to remember last ejected spool values for all lanes in this unit, can be overridden in AFC_stepper section
         # LED SETTINGS

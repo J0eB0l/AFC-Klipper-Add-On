@@ -229,6 +229,9 @@ class afcPrep:
                 error_string = 'Error: {} Unit not found in  config section.'.format(unit)
                 self.afc.error.AFC_error(error_string, False)
                 return
+            # An unclaimed Bambu pool unit has no lanes yet, so it has nothing to prep.
+            if getattr(cur_unit, "pool", False):
+                continue
             self.logger.info('{} {} Prepping lanes'.format(cur_unit.type, unit))
             lanes_for_first_hub = []
             hub_name = ""

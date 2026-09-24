@@ -1,0 +1,21 @@
+# model:     ams2
+# outcome:   read
+# source:    an AMS 2 preload scan (tray 0 tagged / tray 1 untagged) under
+#            default settings (300 ms poll, 5-byte frames).
+# verbatim:  abbreviated -- the source records the chain with arrows and carries
+#            the [AMS_*] tag on some elements only. The wording is the unit's.
+#            REPLACE THIS FILE with a pasted host log when one is captured.
+#
+# The AMS 2 narrates the whole card sequence rather than the HT's single line,
+# so there are four candidate moments to call a read and they are not together
+# in time: auth, the flash write, read_done, and the feed completing.
+#
+# offset | expect | line
+- | .             | [AMS_RFID]STEP2:pull tray 0 from switch
+- | .             | pull tension nearly of 0
+- | .             | [AMS_RFID]STEP3:start,read all card
+- | .             | [AMS_RFID]STEP:card auth success!
+- | read          | [RF] tray0: info write to flash
+- | .             | read_done=1
+- | read          | [AMS_RFID]STEP:feed with rfid success
+- | end           | [AMS_RFID]STEP7:finish,cali tray

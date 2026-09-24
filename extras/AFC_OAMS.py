@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 _FLOAT_STRUCT = struct.Struct("f")
 _U32_STRUCT = struct.Struct("I")
 
+#: Retract between unload attempts when neither config nor the loaded lane's
+#: tool_stn_unload gives a distance.
+_UNLOAD_STALL_RETRACT_FALLBACK_MM = 40.0
+
 class OAMSStatus(IntEnum):
     """
     Enumeration of firmware action/status codes reported by the OAMS MCU.
@@ -191,6 +195,15 @@ class AFC_OAMS:
         self.action_status: Optional[int] = None
         self.action_status_code: Optional[int] = None
         self.action_status_value: Optional[int] = None
+        # Set while a load cancel's CANCEL acknowledgement is still due, so it
+        # is not read as the result of a later operation.
+        self._pending_cancel_ack: bool = False
+
+        # Last firmware-reported motor state and when it arrived. The firmware
+        # only reports on a refused command or a state change, never on a timer.
+        self.motion_status: Optional[int] = None
+        self.motion_status_code: Optional[int] = None
+        self.motion_status_time: float = 0.0
 
         # MCU communication
         self._register_mcu_response(self._oams_action_status, "oams_action_status")
@@ -217,6 +230,23 @@ class AFC_OAMS:
         self.load_stall_grace = config.getfloat("load_stall_grace", 3.0, minval=0.0)
         self.load_stall_dwell = config.getfloat("load_stall_dwell", 5.0, minval=0.0)
 
+        # Unload gives up once the encoder has not moved for unload_stall_dwell
+        # seconds (0 disables). unload_timeout is only a backstop for dead
+        # telemetry.
+        self.unload_stall_dwell = config.getfloat(
+            "unload_stall_dwell", 5.0, minval=0.0)
+        self.unload_timeout = config.getfloat(
+            "unload_timeout", 180.0, above=0.0)
+
+        # Extruder retract between unload attempts. 0 uses the loaded lane's
+        # tool_stn_unload.
+        self.unload_stall_retract_mm = config.getfloat(
+            "unload_stall_retract_mm", 0.0, minval=0.0)
+        self.unload_stall_retract_tries = config.getint(
+            "unload_stall_retract_tries", 2, minval=0, maxval=10)
+        self.unload_stall_retract_speed = config.getfloat(
+            "unload_stall_retract_speed", 1200.0, above=0.0)
+
         # Retry state tracking
         self._load_retry_state: Dict[int, RetryState] = {}
         self._unload_retry_count     = 0
@@ -226,6 +256,8 @@ class AFC_OAMS:
         self._unload_retry_failures  = 0
         self._last_load_failure_time   = None
         self._last_unload_failure_time = None
+        # Bays whose error state this plugin set, so only those get cleared.
+        self._flagged_bays: set[int] = set()
         self.hardware_service = None
 
         # MCU command handles, resolved and set dynamically in handle_connect()
@@ -427,6 +459,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.action_status = None
         self.action_status_code = None
         self.action_status_value = None
+        self._pending_cancel_ack = False
         self.logger.info(f"OAMS[{self.oams_idx}]: Cleared software error states on ready")
 
     def get_spool_status(self, bay_index: int) -> int:
@@ -457,11 +490,115 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.action_status = None
         self.action_status_code = None
         self.action_status_value = None
+        self._pending_cancel_ack = False
+        # All four LEDs are off now, so we hold no flags either.
+        self._bay_flags().clear()
 
         try:
             self.current_spool = self.determine_current_spool()
         except Exception as e:
             self.logger.error(f"Failed to determine current spool during clear_errors on {getattr(self, 'name', 'unknown')}: {e}")
+
+    def stop_unit_motion(self, spool_idx: Optional[int] = None) -> bool:
+        """
+        Stop a unit that is still driving filament by setting the bay's error
+        state, the only command measured to stop a running unload. The stop
+        latches and the LED is left lit to mark the jammed bay.
+
+        :param spool_idx: bay to stop; defaults to the loaded spool
+        :return bool: True if the stop was sent
+        """
+        bay = spool_idx if spool_idx is not None else self.current_spool
+        if bay is None or not 0 <= bay <= 3:
+            return False
+        try:
+            # The 0->1 edge is what stops the motor, so clear first to make the
+            # stop work on a bay that is already flagged.
+            self.set_led_error(bay, 0)
+            self.set_led_error(bay, 1)
+        except Exception as e:
+            self.logger.warning(
+                f"OAMS[{self.oams_idx}]: could not stop bay {bay}: {e}")
+            return False
+        self._flag_bay(bay)
+        self.logger.info(
+            f"OAMS[{self.oams_idx}]: stopped bay {bay} via its error state "
+            f"(the LED stays lit -- clearing it does not restart the motor)")
+        return True
+
+    def _bay_flags(self) -> set[int]:
+        """
+        Return the set of bays this plugin flagged, creating it if missing.
+
+        :return set: bay indexes whose error state this plugin set
+        """
+        flags = getattr(self, '_flagged_bays', None)
+        if flags is None:
+            flags = self._flagged_bays = set()
+        return flags
+
+    def _flag_bay(self, spool_idx: Optional[int]) -> None:
+        """
+        Record that this plugin set a bay's error state.
+
+        :param spool_idx: bay that was flagged; None or out of range is ignored
+        """
+        if spool_idx is None or not 0 <= spool_idx <= 3:
+            return
+        self._bay_flags().add(spool_idx)
+
+    def _clear_bay_error(self, spool_idx: Optional[int]) -> None:
+        """
+        Clear one bay's error state, but only if this plugin set it. Errors
+        raised by the firmware or other bays are left alone.
+
+        :param spool_idx: bay whose error state to drop; None does nothing
+        """
+        if spool_idx is None or not 0 <= spool_idx <= 3:
+            return
+        flags = self._bay_flags()
+        if spool_idx not in flags:
+            return
+        try:
+            self.set_led_error(spool_idx, 0)
+        except Exception as e:
+            self.logger.debug(
+                f"OAMS[{self.oams_idx}]: could not clear bay {spool_idx} "
+                f"error state: {e}")
+            return
+        flags.discard(spool_idx)
+
+    cmd_OAMS_SET_LED_ERROR_help = "Set or clear a bay's error LED"
+    def cmd_OAMS_SET_LED_ERROR(self, gcmd: GCodeCommand) -> None:
+        """
+        Set or clear the error state on one bay.
+
+        Setting it also stops a unit that is still driving that bay (see
+        stop_unit_motion); clearing it does not restart the motor.
+
+        Usage
+        -------
+        `OAMS_SET_LED_ERROR OAMS=<index> SPOOL=<0-3> VALUE=<0 or 1>`
+
+        Example
+        -------
+        ```
+        OAMS_SET_LED_ERROR OAMS=1 SPOOL=1 VALUE=1
+        ```
+        """
+        spool_idx = gcmd.get_int("SPOOL", None)
+        if spool_idx is None or not 0 <= spool_idx <= 3:
+            raise gcmd.error("SPOOL index (0-3) is required")
+        value = gcmd.get_int("VALUE", 1, minval=0, maxval=1)
+        self.set_led_error(spool_idx, value)
+        # Track manual sets like our own, so a later successful unload clears
+        # them.
+        if value:
+            self._flag_bay(spool_idx)
+        else:
+            self._bay_flags().discard(spool_idx)
+        gcmd.respond_info(
+            f"OAMS[{self.oams_idx}]: error LED on bay {spool_idx} -> {value}")
 
     def set_led_error(self, idx: int, value: int) -> None:
         """
@@ -530,6 +667,8 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
                 self.cmd_OAMS_RESET_RETRY_COUNTS,
                 self.cmd_OAMS_RESET_RETRY_COUNTS_help,
             ),
+            ("OAMS_SET_LED_ERROR", self.cmd_OAMS_SET_LED_ERROR,
+             self.cmd_OAMS_SET_LED_ERROR_help),
         ]
 
         for cmd_name, handler, help_text in commands:
@@ -658,7 +797,9 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
                 )
                 self.reactor.pause(self.reactor.monotonic() + delay)
 
-                self.abort_current_action(wait=True)
+                # force: the failed attempt already cleared action_status, but
+                # a busy unit may still be moving and needs the cancel.
+                self.abort_current_action(wait=True, force=True)
                 self.reactor.pause(self.reactor.monotonic() + 1.0)
 
             retry.count = retry_count + 1
@@ -667,6 +808,9 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             code, message = self.load_spool(spool_idx)
 
             if code == OAMSOpCode.SUCCESS or code == OAMSOpCode.CANCEL:
+                # A successful load means the jam was cleared, so drop any
+                # error state a failed unload left on this bay.
+                self._clear_bay_error(spool_idx)
                 self._last_successful_load[spool_idx] = self.reactor.monotonic()
                 retry.was_retry = retry_count > 0
                 self._reset_load_retry_count(spool_idx)
@@ -746,12 +890,64 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         retry = self._load_retry_state.get(spool_idx)
         return retry.was_retry if retry is not None else False
 
+    def _stall_retract_mm(self) -> float:
+        """
+        Return how far to pull the extruder back between unload attempts:
+        the configured distance, else the loaded lane's ``tool_stn_unload``,
+        else the fallback.
+
+        :return float: retract distance in mm, 0 to skip retracting entirely
+        """
+        if self.unload_stall_retract_mm > 0:
+            return self.unload_stall_retract_mm      # explicit config wins
+        try:
+            lane_name = (self._resolve_lane_name(self.current_spool)
+                         if self.current_spool is not None else None)
+            lane = (self.afc.lanes or {}).get(lane_name) if lane_name else None
+            dist = getattr(getattr(lane, "extruder_obj", None),
+                           "tool_stn_unload", 0) or 0
+            if dist > 0:
+                return float(dist)
+        except Exception:
+            pass
+        return _UNLOAD_STALL_RETRACT_FALLBACK_MM
+
+    def _work_the_extruder_free(self) -> None:
+        """
+        Retract the extruder by ``_stall_retract_mm`` between unload attempts,
+        up to ``unload_stall_retract_tries`` times, to help a stuck unload come
+        free. A refused move ends the retract without failing the unload.
+        """
+        dist = self._stall_retract_mm()
+        if dist <= 0:
+            return
+        tries = self.unload_stall_retract_tries
+        speed = self.unload_stall_retract_speed
+        for attempt in range(1, tries + 1):
+            try:
+                self.gcode.run_script_from_command("M83")
+                self.gcode.run_script_from_command("G92 E0")
+                self.gcode.run_script_from_command(
+                    f"G1 E-{dist:.2f} F{speed:.0f}")
+                self.gcode.run_script_from_command("M400")
+            except Exception as e:
+                # A cold or unloaded extruder refuses the move; retry without it.
+                self.logger.warning(
+                    f"OAMS[{self.oams_idx}]: could not retract the extruder "
+                    f"({dist:.0f}mm, try {attempt}/{tries}): {e}")
+                return
+            self.logger.info(
+                f"OAMS[{self.oams_idx}]: pulled the extruder back {dist:.0f}mm "
+                f"({attempt}/{tries}) to help the unload come free")
+
     def unload_spool_with_retry(self, max_retries: Optional[int] = None) -> Tuple[bool, str]:
         """
         Unload the current spool, retrying on failure up to the limit.
         Between attempts it waits the retry delay, aborts the current action,
-        and retracts the extruder a short distance before retrying. Updates
-        unload retry/failure bookkeeping and emits progress logs.
+        stops the unit via the bay error state, and retracts the extruder
+        (``_work_the_extruder_free``) before retrying. On giving up it stops
+        the unit again. Updates unload retry/failure bookkeeping and emits
+        progress logs.
 
         :param max_retries: override for the unload retry limit; ``None`` uses
             the configured ``unload_retry_max``.
@@ -763,6 +959,10 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         retry_limit     = max_retries if (max_retries is not None
                                           and max_retries > 0) else self.unload_retry_max
 
+        # Captured now: a successful unload_spool() clears current_spool.
+        stall_bay = self.current_spool
+        # Start from a clean bay, not the error state a previous give-up left.
+        self._clear_bay_error(stall_bay)
         while self._unload_retry_count < retry_limit: # pragma: no branch  While loop is always true, suppress coverage warning about always being True
             if self._unload_retry_count > 0:
                 delay = self._calculate_retry_delay(self._unload_retry_count)
@@ -771,18 +971,18 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
                 )
                 self.reactor.pause(self.reactor.monotonic() + delay)
 
-                self.abort_current_action(wait=True)
-                self.reactor.pause(self.reactor.monotonic() + 1.0)
+                # force: the failed attempt already cleared action_status.
+                self.abort_current_action(wait=True, force=True)
 
-                try:
-                    self.gcode.run_script_from_command("M83")
-                    self.gcode.run_script_from_command("G92 E0")
-                    self.gcode.run_script_from_command("G1 E-5.00 F1200")
-                    self.gcode.run_script_from_command("M400")
-                except Exception as e:
-                    self.logger.warning(
-                        f"OAMS[{self.oams_idx}]: Failed to retract extruder before unload retry: {e}"
-                    )
+                # The cancel does not stop a running unload, so stop the unit
+                # via the bay error state or the next attempt is refused busy.
+                if self.stop_unit_motion(stall_bay):
+                    self.reactor.pause(self.reactor.monotonic() + 1.0)
+
+                self._work_the_extruder_free()
+
+                self._clear_bay_error(stall_bay)
+                self.reactor.pause(self.reactor.monotonic() + 1.0)
 
             self._unload_retry_count += 1
             attempt_number = self._unload_retry_count
@@ -792,6 +992,8 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
 
             if success:
                 self._reset_unload_retry_count()
+                # Success clears the error state an earlier failure latched.
+                self._clear_bay_error(stall_bay)
                 lane_name  = self._resolve_lane_name(self.current_spool) if self.current_spool is not None else None
                 lane_label = f"lane {lane_name}" if lane_name else "filament"
                 self.logger.info(
@@ -808,6 +1010,15 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             else:
                 break
 
+        # Giving up must also stop the unit, or it keeps driving filament
+        # while the print pauses. The cancel alone does not stop an unload.
+        try:
+            self.abort_current_action(wait=False, force=True)
+        except Exception as e:
+            self.logger.warning(
+                f"OAMS[{self.oams_idx}]: Failed to abort after giving up on "
+                f"the unload: {e}")
+        self.stop_unit_motion(stall_bay)
         self._reset_unload_retry_count()
         self._unload_retry_failures    += 1
         self._last_unload_failure_time  = self.reactor.monotonic()
@@ -825,6 +1036,9 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             the command is unavailable on the current firmware.
         """
         if self.oams_load_spool_cancel_cmd is not None:
+            # Its CANCEL ack must not finish a later unload (see
+            # _oams_action_status).
+            self._pending_cancel_ack = True
             self.oams_load_spool_cancel_cmd.send()
             return "OAMS load spool operation cancelled"
         return "OAMS load spool cancel command not available on this firmware"
@@ -1128,7 +1342,8 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
     def unload_spool(self) -> Tuple[bool, str]:
         """
         Send a single unload command and block until firmware reports back.
-        Times out after 40 s if the MCU stops responding. Treats both success
+        Gives up when the encoder stalls for ``unload_stall_dwell`` seconds
+        after moving, or after ``unload_timeout``. Treats both success
         and ``NO_SPOOL_IN_BAY`` as unloaded and clears ``current_spool``.
 
         :return tuple: ``(success, message)`` where ``success`` is ``True`` when
@@ -1136,14 +1351,44 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         """
         self.action_status = OAMSStatus.UNLOADING
         self.oams_unload_spool_cmd.send()
-        timeout = self.reactor.monotonic() + 40.0
+        start          = self.reactor.monotonic()
+        stall_enabled  = self.unload_stall_dwell > 0.0
+        last_clicks    = self.encoder_clicks
+        last_move_time = start
+        seen_movement  = False
 
         while self.action_status is not None:
-            if self.reactor.monotonic() > timeout:
-                self.logger.error(f"OAMS[{self.oams_idx}]: Unload operation timed out after 40 seconds")
+            now = self.reactor.monotonic()
+
+            if self.encoder_clicks != last_clicks:
+                last_clicks    = self.encoder_clicks
+                last_move_time = now
+                seen_movement  = True
+
+            if (stall_enabled
+                and seen_movement
+                and now - last_move_time > self.unload_stall_dwell):
+                self.logger.error(
+                    f"OAMS[{self.oams_idx}]: Unload stalled -- encoder stopped "
+                    f"advancing for {self.unload_stall_dwell:.0f}s after "
+                    f"{now - start:.0f}s of unloading")
                 self.action_status      = None
                 self.action_status_code = OAMSOpCode.ERROR_UNSPECIFIED
-                return False, "OAMS unload operation timed out (MCU unresponsive)"
+                return False, ("OAMS unload stalled (no encoder movement; "
+                               "filament may be jammed)")
+
+            if now - start > self.unload_timeout:
+                # Not "unresponsive" unless it really never moved -- say which.
+                how = ("never reported any encoder movement"
+                       if not seen_movement else
+                       "was still reporting movement")
+                self.logger.error(
+                    f"OAMS[{self.oams_idx}]: Unload gave up after "
+                    f"{self.unload_timeout:.0f}s; the unit {how}")
+                self.action_status      = None
+                self.action_status_code = OAMSOpCode.ERROR_UNSPECIFIED
+                return False, (f"OAMS unload did not complete within "
+                               f"{self.unload_timeout:.0f}s ({how})")
             self.reactor.pause(self.reactor.monotonic() + 0.2)
 
         if self.action_status_code == OAMSOpCode.SUCCESS:
@@ -1207,7 +1452,9 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         """
         code = gcmd.get_int("CODE", OAMSOpCode.ERROR_KLIPPER_CALL)
         wait = gcmd.get_int("WAIT", 1)
-        self.abort_current_action(code=code, wait=bool(wait))
+        # force: an operator abort must reach the firmware even when no
+        # action is tracked host-side.
+        self.abort_current_action(code=code, wait=bool(wait), force=True)
 
     def set_oams_follower(self, enable: int, direction: int) -> None:
         """
@@ -1219,18 +1466,24 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.oams_follower_cmd.send([enable, direction])
 
     def abort_current_action(
-        self, code: OAMSOpCode = OAMSOpCode.ERROR_KLIPPER_CALL, wait: bool = True
+        self, code: OAMSOpCode = OAMSOpCode.ERROR_KLIPPER_CALL, wait: bool = True,
+        force: bool = False
     ) -> None:
         """
         Clear the in-flight action, optionally waiting for firmware to settle.
-        Returns immediately if no action is in progress. When ``wait`` is set it
-        polls (with backoff) for up to 5 s before force-clearing the status.
+        Returns immediately if no action is in progress, unless ``force`` is
+        set. When ``wait`` is set it polls (with backoff) for up to 5 s before
+        force-clearing the status.
 
         :param code: result code to record for the aborted action.
         :param wait: whether to wait for the current action to drain first.
+        :param force: send the firmware cancel even when no action is tracked
+            host-side, as a unit that refused a command busy may still be moving.
         """
-        if self.action_status is None:
+        if self.action_status is None and not force:
             return
+        # With nothing tracked, keep the caller's recorded code (e.g. ERROR_BUSY).
+        had_action = self.action_status is not None
 
         # Tell the firmware to actually stop the in-flight action. Clearing only
         # the host-side action_status leaves the MCU wedged in its load routine,
@@ -1242,6 +1495,10 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             self.logger.warning(
                 f"OAMS[{self.oams_idx}]: Failed to send firmware cancel during abort: {e}"
             )
+        if not had_action:
+            # No operation is waiting, so any ack is dropped as a late reply;
+            # a lingering flag would swallow a later real CANCEL.
+            self._pending_cancel_ack = False
 
         if wait:
             self.logger.debug(
@@ -1256,14 +1513,16 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
                 self.reactor.pause(self.reactor.monotonic() + pause_delay)
                 pause_delay = min(pause_delay + 0.25, 1.5)
 
-            self.action_status_code  = code
-            self.action_status_value = None
-            self.action_status       = None
+            if had_action:
+                self.action_status_code  = code
+                self.action_status_value = None
+                self.action_status       = None
             self.logger.info(f"OAMS[{self.oams_idx}]: Abort complete")
         else:
-            self.action_status_code  = code
-            self.action_status_value = None
-            self.action_status       = None
+            if had_action:
+                self.action_status_code  = code
+                self.action_status_value = None
+                self.action_status       = None
             self.logger.debug(f"OAMS[{self.oams_idx}]: Abort without waiting - status cleared")
 
     cmd_OAMS_FOLLOWER_help = "Enable or disable follower and set its direction"
@@ -1373,7 +1632,9 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         MCU ``oams_action_status`` callback: update in-flight action state.
         Clears ``action_status`` and records the result code for load, unload,
         error and calibration actions (capturing the calibration value), and
-        logs follower/coasting/stopped and unhandled updates.
+        logs follower/coasting/stopped and unhandled updates. Load/unload
+        replies that no in-flight operation is waiting on are ignored, and
+        follower/coasting/stopped updates are recorded in ``motion_status``.
 
         :param params: parsed MCU message fields with ``action``/``code`` and,
             for calibration, ``value``.
@@ -1383,6 +1644,29 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         code   = params["code"]
 
         if action in (OAMSStatus.LOADING, OAMSStatus.UNLOADING, OAMSStatus.ERROR):
+            if self._pending_cancel_ack and code == OAMSOpCode.CANCEL:
+                self._pending_cancel_ack = False
+                # A load in flight is waiting on this ack, so let it finish.
+                # Otherwise the load was already given up on (e.g. the stall
+                # path's auto-unload has started) and the ack must not end it.
+                if self.action_status != OAMSStatus.LOADING:
+                    self.logger.debug(
+                        f"OAMS[{self.oams_idx}]: swallowed the cancel ack for the "
+                        f"load that was just cancelled")
+                    return
+            if self.action_status is None:
+                # A reply to an operation already given up on.
+                self.logger.debug(
+                    f"OAMS[{self.oams_idx}]: late action_status (action="
+                    f"{action}, code={code}) with nothing in flight -- ignored")
+                return
+            if (action in (OAMSStatus.LOADING, OAMSStatus.UNLOADING)
+                and action != self.action_status):
+                # A reply about the other operation cannot finish this one.
+                self.logger.debug(
+                    f"OAMS[{self.oams_idx}]: action_status for {action} while "
+                    f"waiting on {self.action_status} -- ignored")
+                return
             self.action_status = None
             self.action_status_code = code
         elif action == OAMSStatus.CALIBRATING:
@@ -1398,6 +1682,14 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             OAMSStatus.COASTING,
             OAMSStatus.STOPPED,
         ):
+            # Record the motor state and when it arrived, for the RFID scan's
+            # readiness probe.
+            self.motion_status = action
+            self.motion_status_code = code
+            try:
+                self.motion_status_time = self.reactor.monotonic()
+            except Exception:
+                pass
             self.logger.debug(
                 f"OAMS status update (non-action): "
                 f"{_oams_enum_name(OAMSStatus, action, 'action')} "
