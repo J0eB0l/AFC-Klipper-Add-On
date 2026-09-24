@@ -1,0 +1,20 @@
+# model:     ams2
+# outcome:   foreign
+# source:    the _RFID_FOREIGN_TAG_RE docstring in extras/AFC_BambuAMS_bridge.py,
+#            quoting a unit refusing a non-Bambu chip.
+# verbatim:  abbreviated -- the three lines are the unit's, the surrounding
+#            cycle is not recorded.
+#
+# A Mifare chip whose keys are not Bambu's answers anticollision, so the UID is
+# readable, and then fails authentication. Worth telling apart from an empty
+# bay: "the bay reader saw no chip" is simply wrong for a Snapmaker or Elegoo
+# spool -- it saw one and could not open it.
+#
+# The auth refusal is the ONLY line that carries the verdict. "info_valid 0 or
+# bbl:N" reads like one and is not: it also fires on a genuinely empty bay, and
+# mid-retry on HT reads that then succeed.
+#
+# offset | expect | line
+- | .                | [AMS_RFID]STEP:stop goto auth
+- | foreign          | [AMS_RFID]STEP:auth fail:-4
+- | .                | [AMS_RFID]STEP7:info_valid 0 or bbl:-1

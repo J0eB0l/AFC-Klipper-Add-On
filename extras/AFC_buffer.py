@@ -1589,5 +1589,13 @@ def load_config_prefix(config):
     if buffer_type == "FPS_PSF":
         return AFCFPSBuffer(config)
 
-    msg = f"{buffer_type} not valid, only switched(turtleneck style) or FPS_PSF are valid options"
+    if buffer_type == "bambu":
+        # Bambu AMS buffer (AFC_BambuAMS_buffer.py): an FPS buffer that also
+        # gates on the AMS odometer. Imported here because it subclasses
+        # AFCFPSBuffer from this module.
+        from extras.AFC_BambuAMS_buffer import AFCBambuBuffer
+        return AFCBambuBuffer(config)
+
+    msg = (f"{buffer_type} not valid, only switched(turtleneck style), FPS_PSF "
+           f"or bambu are valid options")
     raise error(msg)

@@ -71,7 +71,8 @@ class TemperatureOAMS:
         self.simulate_aht3x = config.getboolean(
             'simulate_supported_sensor_mainsail', True)
         if self.simulate_aht3x:
-            self.printer.add_object("aht3x " + self.name, self)
+            # Registered as "aht10" so Mainsail and Fluidd both show humidity.
+            self.printer.add_object("aht10 " + self.name, self)
         else:
             self.printer.add_object("temperature_oams " + self.name, self)
         self.printer.register_event_handler("klippy:connect",
@@ -304,9 +305,12 @@ class TemperatureOAMS:
 
 def load_config(config: ConfigWrapper) -> None:
     """
-    Register ``temperature_oams`` as a heaters sensor factory.
+    Register ``temperature_oams`` and its ``aht3x`` alias (for Fluidd) as
+    heaters sensor factories. The alias is registered here because
+    AFC_OpenAMS loads too late for a ``sensor_type: aht3x`` section.
 
     :param config: ConfigWrapper used to look up the heaters object.
     """
     pheater = config.get_printer().lookup_object("heaters")
     pheater.add_sensor_factory("temperature_oams", TemperatureOAMS)
+    pheater.add_sensor_factory("aht3x", TemperatureOAMS)

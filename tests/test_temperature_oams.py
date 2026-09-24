@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sys
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 import pytest
 
 # temperature_oams.py does `from . import bus`, which resolves to
@@ -136,11 +136,13 @@ class TestInit:
             sensor = TemperatureOAMS(config)
         assert sensor.sample_timer is not None
 
-    def test_simulate_aht3x_default_true_registers_aht3x_object(self):
+    def test_simulate_aht3x_default_true_registers_aht10_object(self):
         config, printer = self._config()
         with patch("extras.temperature_oams.bus.MCU_I2C_from_config", MagicMock()):
             sensor = TemperatureOAMS(config)
-        printer.add_object.assert_called_once_with("aht3x oams1", sensor)
+        # Registered as an aht10-typed object so both Mainsail and Fluidd render
+        # humidity on the temperature card (Fluidd maps sensor_type aht3x->aht10).
+        printer.add_object.assert_called_once_with("aht10 oams1", sensor)
 
     def test_simulate_aht3x_false_registers_temperature_oams_object(self):
         config, printer = self._config(values={"simulate_supported_sensor_mainsail": False})
@@ -615,6 +617,9 @@ class TestLoadConfig:
 
         load_config(config)
 
-        heaters.add_sensor_factory.assert_called_once_with(
-            "temperature_oams", TemperatureOAMS
-        )
+        # Registers the temperature_oams factory plus the Fluidd aht3x alias
+        # (both map to TemperatureOAMS); see load_config docstring for ordering.
+        heaters.add_sensor_factory.assert_has_calls([
+            call("temperature_oams", TemperatureOAMS),
+            call("aht3x", TemperatureOAMS),
+        ])

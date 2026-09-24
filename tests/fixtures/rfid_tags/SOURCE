@@ -1,0 +1,3 @@
+Tag dumps recorded by OpenRFID (https://github.com/suchmememanyskill/OpenRFID,
+commit a13bc9e, test/tags/), GPL-3.0. Renamed; contents unchanged.
+Used by tests/test_AFC_rfid_formats.py.

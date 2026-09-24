@@ -721,6 +721,9 @@ class afcFunction:
         if not get_gcode_absolute_extrude(self.afc.gcode_move):
             self.logger.debug("Printer extruder not in absolute mode, setting to absolute mode")
             set_gcode_absolute_extrude(self.afc.gcode_move, True)
+            # Re-zero E as G92 E0 would, or a relative print's E is read as a long move.
+            gcode_move = self.afc.gcode_move
+            gcode_move.base_position[3] = gcode_move.last_position[3]
 
     def get_extruder_pos(self, eventtime=None, past_extruder_position=None, extruder=None):
         """

@@ -516,6 +516,92 @@ class TestAFCExtruderHandleReady:
 
         assert f"buffer is not valid config for pin_tool_start when using {extruder_name} as a standalone extruder" in str(exc.value)
 
+    def test_handle_ready_no_lanes_tool_start_buffer_waits_for_pooled_lane(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        ext.tool_start = "buffer"
+        ext.tc_lane = MagicMock()
+        ext.lanes.update({"extruder": ext.tc_lane})
+        lane = MagicMock()
+        lane.name = "lane7"
+        lane.extruder_obj = ext
+        ext.printer._objects["AFC_lane lane7"] = lane
+
+        ext.handle_ready()
+
+        assert ext.no_lanes is True
+        assert ext.logger.messages == [
+            ("info", "extruder no lanes"),
+            ("info", "extruder: no lane has registered yet, so pin_tool_start buffer "
+                     "cannot be judged now. Lanes are on their way from a pool; the "
+                     "verdict waits for them."),
+        ]
+
+    def test_handle_ready_no_lanes_pooled_lane_without_buffer_logs_no_wait(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        ext.tc_lane = MagicMock()
+        ext.lanes.update({"extruder": ext.tc_lane})
+        lane = MagicMock()
+        lane.name = "lane7"
+        lane.extruder_obj = ext
+        ext.printer._objects["AFC_lane lane7"] = lane
+
+        ext.handle_ready()
+
+        assert ext.no_lanes is True
+        assert ext.logger.messages == [("info", "extruder no lanes")]
+
+# ── _lanes_pending ────────────────────────────────────────────────────────────
+
+class TestAFCExtruderLanesPending:
+    def _register(self, ext, name, extruder_obj=None, afc_extruder_name=None):
+        lane = MagicMock()
+        lane.name = name
+        lane.extruder_obj = extruder_obj
+        lane.afc_extruder_name = afc_extruder_name
+        ext.printer._objects[f"AFC_lane {name}"] = lane
+        return lane
+
+    def test_no_lanes_registered_returns_false(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+
+        assert ext._lanes_pending() is False
+
+    def test_lane_bound_to_this_extruder_returns_true(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        self._register(ext, "lane7", extruder_obj=ext)
+
+        assert ext._lanes_pending() is True
+
+    def test_lane_naming_this_extruder_before_connect_returns_true(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        self._register(ext, "lane7", afc_extruder_name="extruder")
+
+        assert ext._lanes_pending() is True
+
+    def test_lane_for_another_extruder_returns_false(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        self._register(ext, "lane7", extruder_obj=MagicMock(), afc_extruder_name="extruder1")
+
+        assert ext._lanes_pending() is False
+
+    def test_lane_without_a_name_is_skipped(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        self._register(ext, "lane7", extruder_obj=ext).name = None
+
+        assert ext._lanes_pending() is False
+
+    def test_lane_named_after_the_extruder_is_skipped(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        self._register(ext, "extruder", extruder_obj=ext)
+
+        assert ext._lanes_pending() is False
+
+    def test_lane_already_registered_is_skipped(self):
+        ext = _make_afc_extruder_as_standalone("extruder")
+        ext.lanes["lane7"] = self._register(ext, "lane7", extruder_obj=ext)
+
+        assert ext._lanes_pending() is False
+
 # ── handle_connect ─────────────────────────────────────────────────────────────
 
 class TestAFCExtruderHandleConnect:

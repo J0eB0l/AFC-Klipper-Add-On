@@ -61,6 +61,9 @@ class AFC_vivid(afcBoxTurtle):
     drive_stepper_obj: AFCExtruderStepper
     selector_stepper_obj: AFCExtruderStepper
 
+    # Most feed segments a stage-and-load may take; a normal load needs 1 or 2.
+    STAGE_MAX_SEGMENTS = 8
+
     def __init__(self, config: ConfigWrapper) -> None:
         """
         Initialize a ViViD style AFC unit.
@@ -242,21 +245,8 @@ class AFC_vivid(afcBoxTurtle):
         """
         self.lane_loading(lane)
         self.select_lane(lane, sel_prep=True)
-        num_tries = 0
-        distance: float
-        if not lane.calibrated_lane:
-            distance = self.CALIBRATION_DISTANCE
-            move_speed = SpeedMode.SHORT
-        else:
-            distance = lane.dist_hub
-            move_speed = SpeedMode.LONG
-        homed = False
-        while (num_tries < 2
-               and lane.prep_state
-               and not lane.raw_load_state):
-            homed, distance, _ = lane.move_to(distance, move_speed, assist_active=AssistActive.NO,
-                                              endstop=lane.load_endstop_name, use_homing=True)
-            num_tries += 1
+        # An RFID module (AFC_Vivid_rfid) may read the tag while this feed runs.
+        homed, distance = self._stage_and_load(lane)
         if homed:
             lane.loaded_to_hub = True
             if not lane.calibrated_lane:
@@ -277,6 +267,51 @@ class AFC_vivid(afcBoxTurtle):
         self.selector_stepper_obj.do_enable(False)
         self.drive_stepper_obj.do_enable(False)
         self.afc.function.select_loaded_lane()
+
+    def _stage_and_load(self, lane: AFCLane) -> tuple[bool, float]:
+        """
+        Feed the lane to the load sensor with the normal homing move, sending
+        stage-read events around it so an RFID module can read the tag meanwhile.
+
+        :param lane: AFCLane being staged
+        :return tuple: (homed, distance fed from origin to the load sensor)
+        """
+        if not lane.calibrated_lane:
+            budget = self.CALIBRATION_DISTANCE
+            move_speed = SpeedMode.SHORT
+        else:
+            budget = lane.dist_hub
+            move_speed = SpeedMode.LONG
+
+        # 'end' is sent in a finally so a reader always stops polling.
+        try:
+            self.printer.send_event("afc_vivid:stage_read_begin", lane)
+        except Exception as e:
+            self.logger.error(f"ViViD stage read begin error: {e}")
+
+        # An RFID detect stops the move early with the load sensor still open, so
+        # feed again until the real sensor trips. A real miss is retried once.
+        total = 0.0
+        misses = 0
+        segments = 0
+        try:
+            while (lane.prep_state
+                   and not lane.raw_load_state
+                   and misses < 2
+                   and segments < self.STAGE_MAX_SEGMENTS):
+                homed, moved, _ = lane.move_to(
+                    budget, move_speed, assist_active=AssistActive.NO,
+                    endstop=lane.load_endstop_name, use_homing=True)
+                total += moved
+                segments += 1
+                if not homed:
+                    misses += 1
+        finally:
+            try:
+                self.printer.send_event("afc_vivid:stage_read_end", lane)
+            except Exception as e:
+                self.logger.error(f"ViViD stage read end error: {e}")
+        return bool(lane.raw_load_state), total
 
     def prep_post_load(self, lane: AFCLane) -> None:
         """

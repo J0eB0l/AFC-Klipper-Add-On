@@ -307,7 +307,10 @@ class afc:
         self.debug                  = config.getboolean('debug', False)             # Setting to True turns on more debugging to show on console
         self.log_frame_data         = config.getboolean('log_frame_data', True)
         self.testing                = config.getboolean('testing', False)           # Set to true for testing only so that failure states can be tested without stats being reset
-        self.enable_multiple_mapping = config.getboolean("enable_multiple_mapping",False)
+        # Accept "afc_enable_multiple_mapping" too: an unread [AFC] option halts Klipper.
+        self.enable_multiple_mapping = (
+            config.getboolean("enable_multiple_mapping", False)
+            or config.getboolean("afc_enable_multiple_mapping", False))
         self.manual_home_has_probe_pos_param: bool = False
 
         # Klippy debuginput start_args can only be passed in when doing tests, this way AFC
@@ -766,8 +769,10 @@ class afc:
             and (self.disable_print_temp_check or not self.print_tool_temperatures)):
             return
 
+        # The guard above only covers a hot extruder, so the flag is checked here too.
         if (self.function.is_printing()
-            and self.print_tool_temperatures):
+            and self.print_tool_temperatures
+            and not self.disable_print_temp_check):
             using_min_value = False
             target_temp = None
             try:
@@ -784,9 +789,18 @@ class afc:
                     f"Could not resolve print_tool_temperatures index for lane {cur_lane.name}: {e}"
                 )
                 # Returning instead of trying to lookup from default material
-                return
+                if self.heater.can_extrude:
+                    return
 
-            if target_temp is None:
+            if target_temp is None and not self.heater.can_extrude:
+                # Too cold to extrude: use the lane's material temperature so the
+                # toolchange does not abort half unloaded.
+                self.logger.info(
+                    f"No print_tool_temperatures entry for lane {cur_lane.name} and the "
+                    f"extruder is too cold to extrude, heating to its material temperature "
+                    f"so the toolchange can finish")
+                target_temp, using_min_value = self._get_default_material_temps(cur_lane)
+            elif target_temp is None:
                 self.logger.info(f"No print_tool_temperatures entry for lane {cur_lane.name}")
                 # Returning instead of trying to lookup from default material,
                 # don't want to modify extruder temperature to temperatures that could be wrong

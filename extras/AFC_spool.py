@@ -128,7 +128,9 @@ class AFCSpool:
                     or getattr(self.afc, "default_material_type", None)
                     or "NONE"
                 )
-                tmp_config['filament_sub_type'][extruder_num] = "NONE"
+                tmp_config['filament_sub_type'][extruder_num] = (
+                    getattr(lane, "sub_type", "") or "NONE"
+                )
 
                 tmp_config['filament_color'][extruder_num] = int("FFFFFFFF", 16)
                 tmp_config['filament_color_rgba'][extruder_num] = "FFFFFFFF"
