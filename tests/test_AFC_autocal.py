@@ -443,10 +443,11 @@ def add_autocal_stepper(cal: AFC_autocal, name: str = "extruder", smooth_time: f
     return stepper
 
 
-def add_autocal_pa_handler(cal: AFC_autocal, extruder: str) -> AutocalPaHandler:
+def add_autocal_pa_handler(cal: AFC_autocal, extruder: Optional[str]) -> AutocalPaHandler:
     """
     :param cal: the module; the handler is registered on its printer's gcode
-    :param extruder: the extruder the SET_PRESSURE_ADVANCE handler serves
+    :param extruder: the extruder the SET_PRESSURE_ADVANCE handler serves, None
+      for Klipper's default handler (no EXTRUDER=)
     :return AutocalPaHandler: the handler
     """
     handler = AutocalPaHandler()
@@ -1179,10 +1180,19 @@ class TestAFCautocalWrapPaHandlers:
         assert first.calls == [gcmd]
         assert cal.logger.messages == []
 
+    def test_wraps_the_default_handler(self):
+        cal = make_autocal()
+        default = add_autocal_pa_handler(cal, None)
+        cal._wrap_pa_handlers()
+        handlers = cal.printer.gcode.mux_commands["SET_PRESSURE_ADVANCE"][1]
+        assert handlers[None] is not default
+        assert cal._wrapped_extruders == {None}
+        assert cal.logger.messages == []
+
 
 class TestAFCautocalMakePaWrapper:
     @staticmethod
-    def _call(cal: AFC_autocal, name: str = "extruder"
+    def _call(cal: AFC_autocal, name: Optional[str] = "extruder"
               ) -> Tuple[AutocalPaHandler, AutocalGcmd]:
         """Build the wrapper for ``name``, send it one gcmd; return the original and gcmd."""
         original = AutocalPaHandler()
@@ -1213,6 +1223,34 @@ class TestAFCautocalMakePaWrapper:
         cal = make_autocal(ready=True)
         cal._managed_extruders.add("extruder")
         original, gcmd = self._call(cal)
+        assert original.calls == [gcmd]
+        assert gcmd.responses == []
+        assert cal.logger.messages == []
+
+    def test_default_handler_blocks_for_managed_active_extruder(self):
+        cal = make_autocal(ready=True, toolhead="extruder1")
+        cal.afc.function.printing = True
+        cal._managed_extruders.add("extruder1")
+        original, gcmd = self._call(cal, None)
+        assert original.calls == []
+        assert gcmd.responses == ["AFC flow K active, slicer pressure advance ignored"]
+        assert cal.logger.messages == [
+            ("info", "AFC autocal: slicer PA change ignored for extruder1 (flow K managed)")]
+
+    def test_default_handler_passes_when_active_not_managed(self):
+        cal = make_autocal(ready=True, toolhead="extruder")
+        cal.afc.function.printing = True
+        cal._managed_extruders.add("extruder1")
+        original, gcmd = self._call(cal, None)
+        assert original.calls == [gcmd]
+        assert gcmd.responses == []
+        assert cal.logger.messages == []
+
+    def test_default_handler_passes_without_toolhead(self):
+        cal = make_autocal(ready=True, toolhead=None)
+        cal.afc.function.printing = True
+        cal._managed_extruders.add("extruder")
+        original, gcmd = self._call(cal, None)
         assert original.calls == [gcmd]
         assert gcmd.responses == []
         assert cal.logger.messages == []
@@ -2245,6 +2283,26 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
             ("warning", "AFC_autocal: deferred calibrate error: q")]
+
+
+class TestAFCautocalActiveExtruderName:
+    def test_names_the_active_extruder(self):
+        cal = make_autocal(toolhead="extruder3")
+        assert cal._active_extruder_name() == "extruder3"
+        assert cal.logger.messages == []
+
+    def test_no_active_extruder(self):
+        cal = make_autocal()
+        cal.printer.objects["toolhead"] = AutocalToolhead(None)
+        assert cal._active_extruder_name() is None
+        assert cal.logger.messages == []
+
+    def test_lookup_failure_is_none(self):
+        cal = make_autocal(toolhead=None)
+        assert cal._active_extruder_name() is None
+        cal.printer.objects["toolhead"] = AutocalToolhead(error=RuntimeError("no toolhead"))
+        assert cal._active_extruder_name() is None
+        assert cal.logger.messages == []
 
 
 class TestAFCautocalLaneOnActiveToolhead:

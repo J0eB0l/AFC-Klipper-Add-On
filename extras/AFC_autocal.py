@@ -467,6 +467,9 @@ class AFC_autocal:
         Once a lane's K is applied, a slicer PA change mid-print would silently
         undo it; the wrapper swallows such changes for managed extruders while
         printing and passes everything else through. Idempotent per extruder.
+        Klipper's default handler (key None, a SET_PRESSURE_ADVANCE without
+        EXTRUDER=, which is what slicers send) is wrapped too and judged by the
+        active extruder.
         """
         mux = getattr(self.gcode, 'mux_commands', {}).get("SET_PRESSURE_ADVANCE")
         if mux is None:
@@ -483,7 +486,8 @@ class AFC_autocal:
         Build a SET_PRESSURE_ADVANCE wrapper that blocks slicer PA while printing.
 
         :param original: The original mux handler for this extruder
-        :param name: The extruder name this handler serves
+        :param name: The extruder name this handler serves, None for the
+            default handler that acts on the active extruder
         :return Callable: the wrapping handler
         """
         def wrapper(gcmd: GCodeCommand) -> None:
@@ -492,11 +496,12 @@ class AFC_autocal:
 
             :param gcmd: the gcode command
             """
-            if (name in self._managed_extruders
+            target = name if name is not None else self._active_extruder_name()
+            if (target in self._managed_extruders
                 and self.afc is not None
                 and self._is_printing()):
                 self.logger.info(
-                    f"AFC autocal: slicer PA change ignored for {name} "
+                    f"AFC autocal: slicer PA change ignored for {target} "
                     f"(flow K managed)")
                 gcmd.respond_info(
                     "AFC flow K active, slicer pressure advance ignored")
@@ -964,6 +969,18 @@ class AFC_autocal:
         except Exception as e:
             self._cal_pending.discard(name)
             self.logger.warning(f"AFC_autocal: deferred calibrate error: {e}")
+
+    def _active_extruder_name(self) -> Optional[str]:
+        """
+        Klipper name of the toolhead's active extruder.
+
+        :return Optional[str]: the name, or None when it can't be read
+        """
+        try:
+            active = self.printer.lookup_object('toolhead').get_extruder()
+            return active.get_name() if active is not None else None
+        except Exception:
+            return None
 
     def _lane_on_active_toolhead(self, lane: Any) -> bool:
         """
