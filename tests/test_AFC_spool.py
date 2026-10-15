@@ -2018,6 +2018,36 @@ class TestAutoSwitchFlagReset:
         spool.set_spoolID(lane, "123")
         assert lane.auto_switch_triggered is False
 
+class TestLaneInSnapmakerTool:
+    def _lane(self, held=True, tool_loaded=False, standalone=False, prep_state=False):
+        lane = _make_lane("e1", extruder_index=1)
+        lane.extruder_obj.lane_loaded = lane.name if held else "e2"
+        lane.tool_loaded = tool_loaded
+        lane.extruder_obj.is_standalone.return_value = standalone
+        lane.prep_state = prep_state
+        return lane
+
+    def test_lane_not_held_by_extruder(self):
+        lane = self._lane(held=False, tool_loaded=True, standalone=True, prep_state=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is False
+
+    def test_tool_loaded_lane(self):
+        lane = self._lane(tool_loaded=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is True
+
+    def test_standalone_lane_with_filament(self):
+        lane = self._lane(standalone=True, prep_state=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is True
+
+    def test_standalone_lane_without_filament(self):
+        lane = self._lane(standalone=True, prep_state=False)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is False
+
+    def test_unit_lane_with_filament_not_tool_loaded(self):
+        lane = self._lane(standalone=False, prep_state=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is False
+
+
 class TestSetSnapmakerFilamentParams:
     def create_print_task_config(self):
         config = {
@@ -2057,6 +2087,51 @@ class TestSetSnapmakerFilamentParams:
         lane = _make_lane("lane1")
         lane.tool_loaded = False
         lane.extruder_obj.lane_loaded = lane.name
+        lane.extruder_obj.is_standalone.return_value = False
+        spool.printer = MagicMock()
+        spool.set_snapmaker_filament_params(lane)
+        spool.printer.update_snapmaker_config_file.assert_not_called()
+
+    def test_snapmaker_standalone_lane_held_by_extruder(self):
+        """A U1 toolhead lane still held by its extruder writes its spool
+        even though tool_loaded was cleared (lane reset or spool swap)."""
+        from tests.conftest import _make_print_task_config
+        import sys
+        sys.modules.setdefault("extras.print_task_config", _make_print_task_config())
+        from extras.print_task_config import DEFAULT_PRINT_TASK_CONFIG, config_path
+        spool = _make_spool()
+        spool.afc.snapmaker_printer = True
+        spool.print_task_config_obj = MagicMock()
+        spool.print_task_config_obj.print_task_config = DEFAULT_PRINT_TASK_CONFIG
+        spool.print_task_config_obj.config_path = config_path
+        lane = _make_lane("e1", extruder_index=1)
+        lane.color = "#995F11"
+        lane.material = "PLA"
+        lane.spool_vendor = "Bambu"
+        lane.tool_loaded = False
+        lane.prep_state = True
+        lane.extruder_obj.lane_loaded = lane.name
+        lane.extruder_obj.is_standalone.return_value = True
+        spool.printer = MagicMock()
+        spool.set_snapmaker_filament_params(lane)
+        spool.printer.update_snapmaker_config_file.assert_called_once()
+        print_task_config = spool.print_task_config_obj.print_task_config
+        assert print_task_config["filament_vendor"][1] == "Bambu"
+        assert print_task_config["filament_color_rgba"][1] == "995F11FF"
+
+    def test_snapmaker_standalone_lane_empty(self):
+        """A U1 toolhead lane with no filament present writes nothing."""
+        from tests.conftest import _make_print_task_config
+        import sys
+        sys.modules.setdefault("extras.print_task_config", _make_print_task_config())
+        spool = _make_spool()
+        spool.afc.snapmaker_printer = True
+        spool.print_task_config_obj = MagicMock()
+        lane = _make_lane("e1", extruder_index=1)
+        lane.tool_loaded = False
+        lane.prep_state = False
+        lane.extruder_obj.lane_loaded = lane.name
+        lane.extruder_obj.is_standalone.return_value = True
         spool.printer = MagicMock()
         spool.set_snapmaker_filament_params(lane)
         spool.printer.update_snapmaker_config_file.assert_not_called()

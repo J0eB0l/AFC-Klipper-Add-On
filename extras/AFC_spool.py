@@ -97,6 +97,24 @@ class AFCSpool:
         self.gcode.register_mux_command('SET_MAP',              "LANE", lane_obj.name, self.cmd_SET_MAP,                desc=self.cmd_SET_MAP_help)
         self.gcode.register_mux_command('AFC_SET_SPOOL_TEMP',   "LANE", lane_obj.name, self.cmd_AFC_SET_SPOOL_TEMP,     desc=self.cmd_AFC_SET_SPOOL_TEMP_help)
 
+    @staticmethod
+    def lane_in_snapmaker_tool(lane: AFCLane) -> bool:
+        """
+        True when the lane's filament is in its toolhead, so the toolhead's entry in the snapmaker
+        print_task_config should show this lane's spool.
+
+        A U1 toolhead with its own feeder (standalone extruder) is that lane: tool_loaded only comes
+        back with a tool load, so after the lane is reset or its filament is swapped the extruder
+        still holds the lane while tool_loaded reads False. Its filament being present is enough there.
+
+        :param lane: AFC lane to check.
+        """
+        if lane.name != lane.extruder_obj.lane_loaded:
+            return False
+        if lane.tool_loaded:
+            return True
+        return bool(lane.extruder_obj.is_standalone() and lane.prep_state)
+
     def set_snapmaker_filament_params(self, lane: AFCLane) -> None:
         """
         This method is only for snapmaker printers, this method updates filament color, material,
@@ -112,8 +130,7 @@ class AFCSpool:
         """
         if (self.afc.snapmaker_printer
             and self.print_task_config_obj is not None
-            and lane.tool_loaded
-            and lane.name == lane.extruder_obj.lane_loaded):
+            and self.lane_in_snapmaker_tool(lane)):
             try:
                 # Below could also be done with the following macro for multi color spools
                 # SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER=3 COLORS=123456,654321 COLOR_NUMS=2 MULTI_MODE=1
