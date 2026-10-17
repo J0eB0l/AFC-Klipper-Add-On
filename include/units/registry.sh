@@ -58,6 +58,7 @@ UNIT_TYPE_ORDER=(
   "Claymore"
   "QuattroBox"
   "OpenAMS"
+  "BridgeBox"
   "ViViD"
   "EMU"
 )
@@ -72,6 +73,7 @@ declare -A UNIT_KEY=(
   ["Claymore"]="Claymore"
   ["QuattroBox"]="QuattroBox"
   ["OpenAMS"]="OpenAMS"
+  ["BridgeBox"]="BridgeBox"
   ["ViViD"]="ViViD"
   ["EMU"]="EMU"
 )
@@ -85,6 +87,7 @@ declare -A UNIT_ADDITIONAL_DEFAULT_NAME=(
   ["Claymore"]="Claymore_1"
   ["QuattroBox"]="QuattroBox_1"
   ["OpenAMS"]="AMS_1"
+  ["BridgeBox"]="chain2"
   ["ViViD"]="Vivid_1"
   ["EMU"]="EMU_1"
 )
@@ -547,6 +550,38 @@ unit_additional_menu_row_OpenAMS() {
     boxturtle_name="AMS_1"
   fi
   printf "1. OpenAMS Name: %s \n" "$boxturtle_name"
+}
+
+# ─── BridgeBox ───────────────────────────────────────────────────────────────
+# NOTE: no unit_buffer_target_BridgeBox adapter. Each chain builds its own
+# [AFC_buffer], so a PSF-style buffer selection is skipped with a warning.
+
+unit_copy_files_BridgeBox() {
+  safe_copy "${afc_path}/templates/AFC_Hardware-AFC.cfg" "${afc_config_dir}/AFC_Hardware.cfg"
+  safe_copy "${afc_path}/templates/AFC_BridgeBox.cfg" "${afc_config_dir}/AFC_BridgeBox.cfg"
+}
+
+unit_install_additional_BridgeBox() {
+  # A second bridge is a second chain. Its units name themselves after the
+  # chain, so the first chain's unit names are commented out.
+  safe_copy "${afc_path}/templates/AFC_BridgeBox.cfg" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  sed -i "s/^\[AFC_BridgeBox chain1\]/[AFC_BridgeBox ${boxturtle_name}]/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  sed -i "s/^\(ams_names\|ht_names\):/#\1:/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+}
+
+unit_message_BridgeBox() {
+  message+="""
+- Set serial_port and extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
+
+- See docs/bambu_hotswap.md for the bay pool, lane layout and AFC_BRIDGEBOX_* commands.
+  """
+}
+
+unit_additional_menu_row_BridgeBox() {
+  if [ "$turtle_renamed" != "True" ]; then
+    boxturtle_name="chain2"
+  fi
+  printf "1. BridgeBox Chain Name: %s \n" "$boxturtle_name"
 }
 
 # ─── ViViD ───────────────────────────────────────────────────────────────────

@@ -1,0 +1,4 @@
+=== OUTPUT ===
+1. BridgeBox Chain Name: Foo_1 
+=== VARS ===
+boxturtle_name=Foo_1
