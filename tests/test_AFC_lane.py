@@ -198,6 +198,7 @@ def _make_afc_lane(fullname="AFC_stepper lane1"):
     lane.logger = MockLogger()
     lane.fullname = fullname
     lane.name = parts[-1]
+    lane.printer = MagicMock()
     lane.afc = MagicMock()
     lane.unit = "Turtle_1"
     lane.unit_obj = MagicMock()
@@ -3143,6 +3144,12 @@ class TestSetToolLoaded:
         obj.afc.spool.set_active_spool.assert_called_once()
         obj.afc.spool.set_active_spool.assert_called_with(spool_id)
         assert obj.afc.current_loading is None
+
+    def test_sends_tool_loaded_event(self):
+        obj = _make_afc_lane()
+
+        obj.set_tool_loaded()
+        obj.printer.send_event.assert_called_once_with("afc:tool_loaded", obj)
 
 class TestPerformInfiniteRunout:
     def test_no_current_lane_found(self):

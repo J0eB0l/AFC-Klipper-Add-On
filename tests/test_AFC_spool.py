@@ -1830,6 +1830,39 @@ class TestSetSpoolID:
         spool.set_spoolID(lane, 42, on_done=on_done)
         on_done.assert_called_once_with()
 
+    def test_sync_path_sends_spool_assigned_after_on_done(self):
+        spool = _make_spool()
+        lane = _make_lane()
+        lane.remember_spool = False
+        order = []
+        spool.printer.register_event_handler(
+            "afc:spool_assigned", lambda ln: order.append(("afc:spool_assigned", ln)))
+        spool.set_spoolID(lane, "", on_done=lambda: order.append(("on_done",)))
+        assert order == [("on_done",), ("afc:spool_assigned", lane)]
+
+    def test_async_path_sends_spool_assigned_after_on_done(self):
+        spool = self._make_spool_with_spoolman()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        _stub_get_spool(spool, _make_spool_result())
+        order = []
+        spool.printer.register_event_handler(
+            "afc:spool_assigned",
+            lambda ln: order.append(("afc:spool_assigned", ln, ln.spool_id)))
+        spool.set_spoolID(lane, 42, on_done=lambda: order.append(("on_done",)))
+        assert order == [("on_done",), ("afc:spool_assigned", lane, 42)]
+
+    def test_lookup_in_flight_sends_no_spool_assigned_yet(self):
+        spool = self._make_spool_with_spoolman()
+        lane = _make_lane()
+        lane.remember_spool = False
+        spool.afc.moonraker.get_spool = MagicMock()  # never invokes its callback
+        events = []
+        spool.printer.register_event_handler("afc:spool_assigned", events.append)
+        spool.set_spoolID(lane, 42)
+        assert events == []
+
     def test_empty_spool_id_with_spoolman_not_remember_spool_clears_values(self):
         """spoolman not None + SpoolID='' + not remember_spool → clear_values."""
         spool = self._make_spool_with_spoolman()

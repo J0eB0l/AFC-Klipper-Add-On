@@ -45,7 +45,6 @@
 # stays dormant until apply_stored_k is set, the same knob used on the U1.
 
 from __future__ import annotations
-import inspect
 import threading
 import chelper
 from typing import Any, Callable, Dict, Optional, Set, Tuple, TYPE_CHECKING
@@ -55,8 +54,6 @@ from extras.AFC_RFID import SpoolmanClient
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
-    from extras.AFC_lane import AFCLane
-    from extras.AFC_spool import AFCSpool
 
 
 class AFC_autocal:
@@ -126,158 +123,18 @@ class AFC_autocal:
 
     def _handle_ready(self) -> None:
         """
-        Runs once Klipper is ready. Grabs the AFC object and, when a toggle is on,
-        patches the lane/spool paths so ordinary loads and spool assignments
-        actually reach this module.
+        Runs once Klipper is ready. Grabs the AFC object.
         """
         self._ready_time = self.reactor.monotonic()
         self.afc = self.printer.lookup_object('AFC', None)
         if self.afc is None:
             self.logger.warning("AFC_autocal: AFC not loaded; disabled")
             return
-        if self.apply_stored_k or self.auto_calibrate:
-            self._patch_set_tool_loaded_emit()
-        if self._can_calibrate():
-            self._patch_set_spoolid_emit()
         # Consumer mode only: guard the calibrated PA against slicer overrides
         # and pre-load stored K for opted-in lanes (the U1 does both itself).
         if self._flow_calibrator() is None:
             self._wrap_pa_handlers()
             self._load_all_spoolman_k()
-
-    def _patch_set_tool_loaded_emit(self) -> None:
-        """
-        Make every normal toolchange emit ``afc:tool_loaded``.
-
-        Upstream ``AFCLane.set_tool_loaded()`` doesn't fire the event; only the
-        ACE/OpenAMS/U1 units emit it, so a plain lane load never triggers autocal.
-        Patch the lane base class here so upstream files stay untouched. The patch
-        is idempotent (guarded by a class flag).
-
-        The wrapper forwards ``*args``/``**kwargs`` verbatim so an upstream
-        signature change cannot make it raise TypeError.
-        """
-        try:
-            from extras.AFC_lane import AFCLane
-        except Exception as e:
-            self.logger.warning(
-                f"AFC_autocal: cannot patch set_tool_loaded: {e}")
-            return
-        if getattr(AFCLane, '_afc_autocal_emit_patched', False):
-            return
-        _orig = AFCLane.set_tool_loaded
-
-        def set_tool_loaded(self: AFCLane, *args: Any,
-                            _orig: Callable = _orig, **kwargs: Any) -> None:
-            """
-            Wrapped AFCLane.set_tool_loaded: run the original, then announce the load.
-
-            :param _orig: the original method
-            :param args: forwarded to the original
-            :param kwargs: forwarded to the original
-            """
-            _orig(self, *args, **kwargs)
-            # Emit on every load, not just normal_toolchange: the direct
-            # "load to extruder" path (AFC_extruder.temp_check_cb) and the
-            # OpenAMS load paths call set_tool_loaded() with the default
-            # (normal_toolchange=False), and those loads need autocal too.
-            try:
-                self.printer.send_event("afc:tool_loaded", self)
-            except Exception:
-                pass
-
-        AFCLane.set_tool_loaded = set_tool_loaded
-        AFCLane._afc_autocal_emit_patched = True
-        self.logger.info(
-            "AFC_autocal: set_tool_loaded now emits afc:tool_loaded on load")
-
-    def _patch_set_spoolid_emit(self) -> None:
-        """
-        Make spool assignment emit ``afc:spool_assigned``.
-
-        A spool staged into a lane is assigned via ``AFCSpool.set_spoolID`` but
-        isn't loaded to the toolhead, so it never fires ``afc:tool_loaded`` and
-        autocal has nothing to hook. Patch set_spoolID here (idempotent) to emit
-        the lane on every call; _handle_spool_assigned then auto-loads an
-        uncalibrated staged lane so the normal tool_loaded path calibrates it.
-        Heavy gating in the handler keeps startup reconcile / clears from firing.
-
-        The wrapper forwards arguments rather than restating upstream's signature,
-        which previously raised TypeError on ``on_done=``. It binds against the real
-        signature and chains the event onto ``on_done``, because set_spoolID returns
-        before the async Spoolman fetch sets ``cur_lane.spool_id``. Upstream's
-        ``finally`` runs on_done on every exit path, so the event cannot be lost; a
-        caller's own on_done runs first and still propagates its exceptions.
-        """
-        try:
-            from extras.AFC_spool import AFCSpool
-        except Exception as e:
-            self.logger.warning(
-                f"AFC_autocal: cannot patch set_spoolID: {e}")
-            return
-        if getattr(AFCSpool, '_afc_autocal_spoolid_patched', False):
-            return
-        _orig = AFCSpool.set_spoolID
-        try:
-            _sig: Optional[inspect.Signature] = inspect.signature(_orig)
-        except (TypeError, ValueError):
-            _sig = None
-        # Whether upstream has on_done to chain onto; without it, emit on return.
-        _chainable = _sig is not None and 'on_done' in _sig.parameters
-
-        def set_spoolID(self: AFCSpool, *args: Any, _orig: Callable = _orig,
-                        _sig: Optional[inspect.Signature] = _sig,
-                        **kwargs: Any) -> None:
-            """
-            Wrapped AFCSpool.set_spoolID: run the original, then announce the assignment.
-
-            :param _orig: the original method
-            :param _sig: the original's signature, for resolving the lane argument
-            :param args: forwarded to the original
-            :param kwargs: forwarded to the original
-            """
-            def emit(cur_lane: Any) -> None:
-                """
-                Announce the assignment; never let a handler break the call.
-
-                :param cur_lane: the lane the spool was assigned to
-                """
-                try:
-                    self.printer.send_event("afc:spool_assigned", cur_lane)
-                except Exception:
-                    pass
-
-            if not _chainable:
-                _orig(self, *args, **kwargs)
-                emit(args[0] if args else kwargs.get('cur_lane'))
-                return
-            try:
-                bound = _sig.bind(self, *args, **kwargs)
-            except TypeError:
-                # Not a call upstream accepts either. Let IT raise the error, so
-                # the traceback names the real signature and not this wrapper.
-                _orig(self, *args, **kwargs)
-                return
-            cur_lane = bound.arguments.get('cur_lane')
-            caller_done = bound.arguments.get('on_done')
-
-            def chained() -> None:
-                """
-                Caller's completion first, then ours, which runs regardless.
-                """
-                try:
-                    if caller_done is not None:
-                        caller_done()
-                finally:
-                    emit(cur_lane)
-
-            bound.arguments['on_done'] = chained
-            _orig(*bound.args, **bound.kwargs)
-
-        AFCSpool.set_spoolID = set_spoolID
-        AFCSpool._afc_autocal_spoolid_patched = True
-        self.logger.info(
-            "AFC_autocal: set_spoolID now emits afc:spool_assigned")
 
     def _spoolman(self) -> Optional[SpoolmanClient]:
         """

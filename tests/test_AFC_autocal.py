@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import configparser
-import inspect
-import sys
 import threading
 import types
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -14,25 +12,9 @@ import pytest
 from extras.AFC import State
 from extras.AFC_autocal import AFC_autocal, load_config
 import extras.AFC_autocal as autocal_mod
-from extras.AFC_lane import AFCLane
-from extras.AFC_spool import AFCSpool
-from tests.bambu_helpers import make_afc_lane, make_afc_spool, make_printer
 
 
 _AUTOCAL_REQUIRED = object()
-
-
-AUTOCAL_TOOL_PATCH_LOG = ("info", "AFC_autocal: set_tool_loaded now emits afc:tool_loaded on load")
-
-
-AUTOCAL_SPOOL_PATCH_LOG = ("info", "AFC_autocal: set_spoolID now emits afc:spool_assigned")
-
-
-# Taken at collection, before any test can have left a class patch installed.
-AUTOCAL_GENUINE_SET_TOOL_LOADED = AFCLane.set_tool_loaded
-
-
-AUTOCAL_GENUINE_SET_SPOOLID = AFCSpool.set_spoolID
 
 
 class AutocalLogger:
@@ -473,15 +455,6 @@ def autocal_threads(monkeypatch: pytest.MonkeyPatch) -> AutocalThreads:
     return threads
 
 
-@pytest.fixture
-def autocal_class_patches(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AFCLane and AFCSpool start with upstream's methods and get them back after the test."""
-    monkeypatch.setattr(AFCLane, "set_tool_loaded", AUTOCAL_GENUINE_SET_TOOL_LOADED)
-    monkeypatch.setattr(AFCLane, "_afc_autocal_emit_patched", False, raising=False)
-    monkeypatch.setattr(AFCSpool, "set_spoolID", AUTOCAL_GENUINE_SET_SPOOLID)
-    monkeypatch.setattr(AFCSpool, "_afc_autocal_spoolid_patched", False, raising=False)
-
-
 class TestAFCautocalInit:
     def test_toggles_default_off(self):
         cal = make_autocal()
@@ -552,7 +525,7 @@ class TestAFCautocalInit:
 
 
 class TestAFCautocalHandleReady:
-    def test_afc_missing_disables(self, autocal_class_patches):
+    def test_afc_missing_disables(self):
         cal = make_autocal({"apply_stored_k": True})
         add_autocal_pa_handler(cal, "extruder")
         del cal.printer.objects["AFC"]
@@ -560,7 +533,6 @@ class TestAFCautocalHandleReady:
         assert cal.afc is None
         assert cal._ready_time == 1000.0
         assert cal._wrapped_extruders == set()
-        assert AFCLane._afc_autocal_emit_patched is False
         assert cal.logger.messages == [("warning", "AFC_autocal: AFC not loaded; disabled")]
 
     def test_ready_takes_afc_and_leaves_the_logger_alone(self):
@@ -572,34 +544,7 @@ class TestAFCautocalHandleReady:
         assert cal._ready_time == 1000.0
         assert cal.logger.messages == []
 
-    @pytest.mark.parametrize("values, calibrator, spool_patched", [
-        ({"apply_stored_k": True, "auto_calibrate": True}, True, True),
-        ({"apply_stored_k": True}, True, False),
-        ({"auto_calibrate": True}, True, True),
-        ({"auto_calibrate": True}, False, False),
-    ])
-    def test_patches_gated_on_toggles(self, autocal_class_patches, values, calibrator,
-                                      spool_patched):
-        cal = make_autocal(values, calibrator=calibrator)
-        cal._handle_ready()
-        assert AFCLane._afc_autocal_emit_patched is True
-        assert AFCSpool._afc_autocal_spoolid_patched is spool_patched
-        expected = [AUTOCAL_TOOL_PATCH_LOG]
-        if spool_patched:
-            expected.append(AUTOCAL_SPOOL_PATCH_LOG)
-        assert cal.logger.messages == expected
-
-    def test_no_patches_when_both_toggles_off(self, autocal_class_patches):
-        cal = make_autocal(calibrator=True)
-        cal._handle_ready()
-        assert AFCLane.set_tool_loaded is AUTOCAL_GENUINE_SET_TOOL_LOADED
-        assert AFCSpool.set_spoolID is AUTOCAL_GENUINE_SET_SPOOLID
-        assert AFCLane._afc_autocal_emit_patched is False
-        assert AFCSpool._afc_autocal_spoolid_patched is False
-        assert cal.logger.messages == []
-
-    def test_wraps_and_preloads_in_consumer_mode(self, autocal_class_patches,
-                                                 autocal_spoolman):
+    def test_wraps_and_preloads_in_consumer_mode(self, autocal_spoolman):
         cal = make_autocal({"apply_stored_k": True}, spoolman=True)
         handler = add_autocal_pa_handler(cal, "extruder")
         add_autocal_lane(cal, "lane1", 5)
@@ -609,9 +554,9 @@ class TestAFCautocalHandleReady:
         assert handlers["extruder"] is not handler
         assert cal._wrapped_extruders == {"extruder"}
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
-        assert cal.logger.messages == [AUTOCAL_TOOL_PATCH_LOG]
+        assert cal.logger.messages == []
 
-    def test_u1_mode_skips_wrap_and_preload(self, autocal_class_patches, autocal_spoolman):
+    def test_u1_mode_skips_wrap_and_preload(self, autocal_spoolman):
         cal = make_autocal({"apply_stored_k": True}, calibrator=True, spoolman=True)
         handler = add_autocal_pa_handler(cal, "extruder")
         add_autocal_lane(cal, "lane1", 5)
@@ -622,269 +567,7 @@ class TestAFCautocalHandleReady:
         assert cal._wrapped_extruders == set()
         assert cal._lane_flow_k == {}
         assert autocal_spoolman.reads == []
-        assert cal.logger.messages == [AUTOCAL_TOOL_PATCH_LOG]
-
-
-class TestAFCautocalPatchSetToolLoadedEmit:
-    @staticmethod
-    def _install_original(monkeypatch: pytest.MonkeyPatch,
-                          order: List[Tuple[Any, ...]]) -> None:
-        """Stand a recording set_tool_loaded in for upstream's, before the patch wraps it."""
-        def set_tool_loaded(lane: AFCLane, normal_toolchange: bool = False) -> None:
-            order.append(("set_tool_loaded", lane, normal_toolchange))
-
-        monkeypatch.setattr(AFCLane, "set_tool_loaded", set_tool_loaded)
-
-    @staticmethod
-    def _real_lane(monkeypatch: pytest.MonkeyPatch,
-                   handler: Callable[[AFCLane], None]) -> AFCLane:
-        """A real AFCLane whose printer runs ``handler`` on afc:tool_loaded."""
-        printer = make_printer(monkeypatch=monkeypatch)
-        lane = make_afc_lane("lane1", "Turtle_1", 0, printer=printer)
-        printer.register_event_handler("afc:tool_loaded", handler)
-        return lane
-
-    def test_patches_and_emits(self, monkeypatch, autocal_class_patches):
-        order: List[Tuple[Any, ...]] = []
-        self._install_original(monkeypatch, order)
-        cal = make_autocal()
-        cal._patch_set_tool_loaded_emit()
-        assert AFCLane._afc_autocal_emit_patched is True
-        assert cal.logger.messages == [AUTOCAL_TOOL_PATCH_LOG]
-        lane = self._real_lane(monkeypatch, lambda ln: order.append(("afc:tool_loaded", ln)))
-        lane.set_tool_loaded(normal_toolchange=True)
-        lane.set_tool_loaded()
-        assert order == [("set_tool_loaded", lane, True), ("afc:tool_loaded", lane),
-                         ("set_tool_loaded", lane, False), ("afc:tool_loaded", lane)]
-
-    def test_idempotent(self, monkeypatch, autocal_class_patches):
-        def sentinel(lane: AFCLane, normal_toolchange: bool = False) -> None:
-            return None
-
-        monkeypatch.setattr(AFCLane, "set_tool_loaded", sentinel)
-        monkeypatch.setattr(AFCLane, "_afc_autocal_emit_patched", True)
-        cal = make_autocal()
-        cal._patch_set_tool_loaded_emit()
-        assert AFCLane.set_tool_loaded is sentinel
         assert cal.logger.messages == []
-
-    def test_tool_loaded_import_failure_warns(self, monkeypatch, autocal_class_patches):
-        monkeypatch.setitem(sys.modules, "extras.AFC_lane", None)
-        cal = make_autocal()
-        cal._patch_set_tool_loaded_emit()
-        assert AFCLane._afc_autocal_emit_patched is False
-        assert cal.logger.messages == [
-            ("warning", "AFC_autocal: cannot patch set_tool_loaded: "
-                        "import of extras.AFC_lane halted; None in sys.modules")]
-
-    def test_tool_loaded_emit_swallows(self, monkeypatch, autocal_class_patches):
-        order: List[Tuple[Any, ...]] = []
-        self._install_original(monkeypatch, order)
-        cal = make_autocal()
-        cal._patch_set_tool_loaded_emit()
-
-        def failing_handler(lane: AFCLane) -> None:
-            order.append(("afc:tool_loaded", lane))
-            raise RuntimeError("boom")
-
-        lane = self._real_lane(monkeypatch, failing_handler)
-        lane.set_tool_loaded()
-        assert order == [("set_tool_loaded", lane, False), ("afc:tool_loaded", lane)]
-        assert cal.logger.messages == [AUTOCAL_TOOL_PATCH_LOG]
-
-
-class TestAFCautocalPatchSetSpoolidEmit:
-    """
-    The wrapper must survive upstream's signature, not restate it: a wrapper that
-    restated an older one raised TypeError on ``on_done=``. Where the genuine
-    upstream set_spoolID can run (no Spoolman, so it completes in the call) the
-    tests use it; a stand-in upstream keeps the genuine parameters.
-    """
-
-    @staticmethod
-    def _real_spool(monkeypatch: pytest.MonkeyPatch, events: List[Tuple[Any, ...]],
-                    fail: bool = False) -> Tuple[AFCSpool, AFCLane]:
-        """
-        A real AFCSpool and AFCLane on a Bambu printer with no Spoolman.
-
-        :param monkeypatch: isolates the Bambu printer's module state
-        :param events: gets (event, lane, lane.spool_id) on each afc:spool_assigned
-        :param fail: the event handler raises after recording
-        :return Tuple[AFCSpool, AFCLane]: the spool object and the lane
-        """
-        printer = make_printer(monkeypatch=monkeypatch)
-        lane = make_afc_lane("lane1", "Turtle_1", 0, printer=printer)
-        spool = make_afc_spool(printer)
-
-        def handler(cur_lane: AFCLane) -> None:
-            events.append(("afc:spool_assigned", cur_lane, cur_lane.spool_id))
-            if fail:
-                raise RuntimeError("boom")
-
-        printer.register_event_handler("afc:spool_assigned", handler)
-        return spool, lane
-
-    @staticmethod
-    def _parameters(func: Callable[..., Any]) -> List[Tuple[str, Any]]:
-        """:return List[Tuple[str, Any]]: each parameter's name and default"""
-        return [(p.name, p.default) for p in inspect.signature(func).parameters.values()]
-
-    def test_accepts_every_upstream_parameter(self, monkeypatch, autocal_class_patches):
-        genuine = inspect.signature(AFCSpool.set_spoolID)
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        assert AFCSpool._afc_autocal_spoolid_patched is True
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-        call = {"cur_lane": lane, "SpoolID": 7, "save_vars": False,
-                "on_done": lambda: events.append(("on_done",))}
-        # Fails when upstream grows a parameter this call does not pass.
-        assert list(genuine.parameters) == ["self", *call]
-        spool.set_spoolID(**call)
-        assert events == [("on_done",), ("afc:spool_assigned", lane, None)]
-
-    def test_emits_through_on_done_not_on_return(self, monkeypatch, autocal_class_patches):
-        pending: List[Callable[[], None]] = []
-        calls: List[Tuple[Any, ...]] = []
-
-        def set_spoolID(spool: AFCSpool, cur_lane: AFCLane, SpoolID: Any,
-                        save_vars: bool = True,
-                        on_done: Optional[Callable[[], None]] = None) -> None:
-            """Upstream's shape: the Spoolman fetch completes after the call returns."""
-            calls.append((SpoolID, save_vars))
-
-            def fetched() -> None:
-                cur_lane.spool_id = SpoolID
-                if on_done is not None:
-                    on_done()
-
-            pending.append(fetched)
-
-        assert self._parameters(set_spoolID)[1:] == self._parameters(AFCSpool.set_spoolID)[1:]
-        monkeypatch.setattr(AFCSpool, "set_spoolID", set_spoolID)
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-        spool.set_spoolID(lane, 7, save_vars=False)
-        assert calls == [(7, False)]
-        assert events == []
-        pending[0]()
-        assert events == [("afc:spool_assigned", lane, 7)]
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-
-    def test_callers_on_done_still_runs_and_runs_first(self, monkeypatch,
-                                                         autocal_class_patches):
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-        spool.set_spoolID(lane, 7, save_vars=False, on_done=lambda: events.append(("caller",)))
-        assert events == [("caller",), ("afc:spool_assigned", lane, None)]
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-
-    def test_event_survives_a_raising_caller_callback(self, monkeypatch,
-                                                       autocal_class_patches):
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-
-        def boom() -> None:
-            raise RuntimeError("caller callback failed")
-
-        # The caller's exception still propagates, after the event went out.
-        with pytest.raises(RuntimeError, match="^caller callback failed$"):
-            spool.set_spoolID(lane, 7, save_vars=False, on_done=boom)
-        assert events == [("afc:spool_assigned", lane, None)]
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-
-    def test_falls_back_to_emit_on_return_without_on_done(self, monkeypatch,
-                                                          autocal_class_patches):
-        calls: List[Tuple[Any, ...]] = []
-
-        def set_spoolID(spool: AFCSpool, cur_lane: AFCLane, SpoolID: Any,
-                        save_vars: bool = True) -> None:
-            calls.append((cur_lane, SpoolID, save_vars))
-
-        monkeypatch.setattr(AFCSpool, "set_spoolID", set_spoolID)
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-        spool.set_spoolID(lane, 7, save_vars=False)
-        spool.set_spoolID(cur_lane=lane, SpoolID=8)
-        assert calls == [(lane, 7, False), (lane, 8, True)]
-        assert events == [("afc:spool_assigned", lane, None),
-                          ("afc:spool_assigned", lane, None)]
-
-    def test_unreadable_upstream_signature_emits_on_return(self, monkeypatch,
-                                                            autocal_class_patches):
-        calls: List[Tuple[Any, ...]] = []
-
-        class OpaqueSetSpoolID:
-            """An upstream whose signature inspect cannot read."""
-
-            __signature__ = "unreadable"
-
-            def __call__(self, spool: AFCSpool, cur_lane: AFCLane, SpoolID: Any) -> None:
-                calls.append((cur_lane, SpoolID))
-
-        monkeypatch.setattr(AFCSpool, "set_spoolID", OpaqueSetSpoolID())
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-        spool.set_spoolID(lane, 7)
-        assert calls == [(lane, 7)]
-        assert events == [("afc:spool_assigned", lane, None)]
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-
-    def test_bad_call_is_reported_by_upstream_not_the_wrapper(self, monkeypatch,
-                                                              autocal_class_patches):
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events)
-        with pytest.raises(TypeError) as exc:
-            spool.set_spoolID(lane, 7, nonsense=1)
-        assert str(exc.value) == (
-            "AFCSpool.set_spoolID() got an unexpected keyword argument 'nonsense'")
-        assert events == []
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
-
-    def test_idempotent(self, monkeypatch, autocal_class_patches):
-        def sentinel(spool: AFCSpool, cur_lane: AFCLane, SpoolID: Any,
-                     save_vars: bool = True,
-                     on_done: Optional[Callable[[], None]] = None) -> None:
-            return None
-
-        monkeypatch.setattr(AFCSpool, "set_spoolID", sentinel)
-        monkeypatch.setattr(AFCSpool, "_afc_autocal_spoolid_patched", True)
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        assert AFCSpool.set_spoolID is sentinel
-        assert cal.logger.messages == []
-
-    def test_spoolid_import_failure_warns(self, monkeypatch, autocal_class_patches):
-        monkeypatch.setitem(sys.modules, "extras.AFC_spool", None)
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        assert AFCSpool._afc_autocal_spoolid_patched is False
-        assert cal.logger.messages == [
-            ("warning", "AFC_autocal: cannot patch set_spoolID: "
-                        "import of extras.AFC_spool halted; None in sys.modules")]
-
-    def test_spoolid_emit_swallows(self, monkeypatch, autocal_class_patches):
-        cal = make_autocal()
-        cal._patch_set_spoolid_emit()
-        events: List[Tuple[Any, ...]] = []
-        spool, lane = self._real_spool(monkeypatch, events, fail=True)
-        spool.set_spoolID(lane, 5, save_vars=False)
-        assert events == [("afc:spool_assigned", lane, None)]
-        assert cal.logger.messages == [AUTOCAL_SPOOL_PATCH_LOG]
 
 
 class TestAFCautocalSpoolman:

@@ -749,6 +749,7 @@ class AFCSpool:
         if save_vars: self.afc.save_vars()
         if on_done is not None:
             on_done()
+        self.printer.send_event("afc:spool_assigned", cur_lane)
 
     def _apply_spool_data(self, cur_lane: AFCLane, SpoolID: Union[int, str],
                           result: Optional[dict], save_vars: bool,
@@ -830,6 +831,7 @@ class AFCSpool:
             # callers resumed right after set_spoolID() returned either way.
             if on_done is not None:
                 on_done()
+            self.printer.send_event("afc:spool_assigned", cur_lane)
 
     cmd_SET_RUNOUT_help = "Set runout lane"
     def cmd_SET_RUNOUT(self, gcmd: GCodeCommand) -> None:

@@ -1684,6 +1684,7 @@ class AFCLane:
         self.afc.spool.set_snapmaker_filament_params(self)
 
         self.unit_obj.lane_tool_loaded(self)
+        self.printer.send_event("afc:tool_loaded", self)
 
     def set_tool_unloaded(self, normal_toolchange: bool=False):
         """
