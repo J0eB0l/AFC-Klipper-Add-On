@@ -174,7 +174,7 @@ class TestBambuSpoolmanClient:
         afc = self._Afc(spoolman, moonraker)
         assert rfid_mod._bambu_spoolman_client(afc) is None
         assert rfid_mod._bambu_spoolman_client(None) is None
-        assert not hasattr(afc, "_afc_spoolman_client_cache")
+        assert vars(afc) == {"spoolman": spoolman, "moonraker": moonraker}
 
     class _Moonraker:
         """Moonraker as far as SpoolmanClient reads it."""
@@ -187,14 +187,17 @@ class TestBambuSpoolmanClient:
         client = rfid_mod._bambu_spoolman_client(afc)
         assert isinstance(client, afc_rfid_mod.SpoolmanClient)
         assert client.host == "http://localhost:7125"
-        assert afc._afc_spoolman_client_cache is client
         assert rfid_mod._bambu_spoolman_client(afc) is client
+        assert vars(afc) == {"spoolman": BRFID_SPOOLMAN_URL,
+                             "moonraker": moonraker}
 
     def test_a_client_that_cannot_be_built_is_no_client(self):
-        # A Moonraker object with no host: both the cache and a fresh build fail.
-        afc = self._Afc(BRFID_SPOOLMAN_URL, object())
+        # A Moonraker object with no host: the client cannot be built.
+        moonraker = object()
+        afc = self._Afc(BRFID_SPOOLMAN_URL, moonraker)
         assert rfid_mod._bambu_spoolman_client(afc) is None
-        assert not hasattr(afc, "_afc_spoolman_client_cache")
+        assert vars(afc) == {"spoolman": BRFID_SPOOLMAN_URL,
+                             "moonraker": moonraker}
 
 
 class TestBambuSpoolmanInit:

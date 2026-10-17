@@ -845,28 +845,29 @@ def match_spool_for_tag(client: SpoolmanClient, uid: Any,
     return (by_uid[0] if by_uid else None), False, None
 
 
+#: The SpoolmanClient every reader shares (see _cached_spoolman_client).
+_spoolman_client: Optional[SpoolmanClient] = None
+
+
 def _cached_spoolman_client(afc: Any) -> Optional["SpoolmanClient"]:
     """
-    Return the one SpoolmanClient per AFC instance, not per call.
+    Return the one SpoolmanClient for AFC's moonraker, not one per call.
 
     Keeps the client's field-schema memos, so each bind does not re-fetch the
-    Spoolman field schema. Cached on the afc object so all units share it.
+    Spoolman field schema. Held here so all units share it; a RESTART builds
+    a new moonraker object, which gets a client of its own.
 
     :param afc: AFC main object (needs .moonraker)
-    :return Optional[SpoolmanClient]: the cached client, or None when there is
+    :return Optional[SpoolmanClient]: the shared client, or None when there is
         no afc or it has no moonraker to talk through
     """
-    client = getattr(afc, "_afc_spoolman_client_cache", None)
-    if client is None:
-        moonraker = getattr(afc, "moonraker", None)
-        if moonraker is None:
-            return None
-        client = SpoolmanClient(moonraker)
-        try:
-            afc._afc_spoolman_client_cache = client
-        except Exception:
-            pass
-    return client
+    global _spoolman_client
+    moonraker = getattr(afc, "moonraker", None)
+    if moonraker is None:
+        return None
+    if _spoolman_client is None or _spoolman_client._mr is not moonraker:
+        _spoolman_client = SpoolmanClient(moonraker)
+    return _spoolman_client
 
 
 def find_spool_by_uid(client: SpoolmanClient, uid: Any) -> Optional[dict]:
@@ -1945,26 +1946,17 @@ def _set_spoolid_takes_on_done(afc: Any) -> bool:
     """
     Whether this AFC's set_spoolID has the on_done completion callback.
 
-    Checks the real signature, since older AFC lacks it, and memoises the
-    answer on the afc object.
+    Checks the real signature, since older AFC lacks it.
 
     :param afc: AFC main object
     :return bool: True when on_done can be passed
     """
-    cached = getattr(afc, "_afc_setspoolid_on_done", None)
-    if cached is not None:
-        return cached
-    ok = False
     try:
         import inspect
-        ok = "on_done" in inspect.signature(afc.spool.set_spoolID).parameters
+        return "on_done" in inspect.signature(afc.spool.set_spoolID).parameters
     except Exception:
-        ok = False
-    try:
-        afc._afc_setspoolid_on_done = ok
-    except Exception:
-        pass
-    return ok
+        return False
+
 
 def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any,
                           prefix: str, allow_create: bool = False,

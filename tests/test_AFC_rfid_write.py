@@ -10,6 +10,7 @@ import pytest
 
 from extras.AFC_rfid_readers import decode_afc_block, decode_anycubic
 from extras.AFC_rfid_write import RfidWriteTarget, StageError
+import extras.AFC_RFID as AFC_RFID
 import extras.AFC_rfid_write as rfid_write_mod
 from tests.conftest import CommandError, MockGcode, MockGCodeCommand, MockLogger, MockPrinter
 
@@ -94,6 +95,8 @@ class RfidwSpoolman:
         self.attempts: List[Tuple[int, Optional[str]]] = []
         self.bound: List[Tuple[int, Optional[str]]] = []
         self.calls: List[Tuple[Any, ...]] = []
+        #: The moonraker it talks through.
+        self._mr = object()
 
     def get_spool(self, spool_id: int) -> Any:
         """
@@ -146,16 +149,20 @@ class RfidwSpoolman:
 
 
 class RfidwAFC:
-    """The owning unit's AFC: its lanes, and the Spoolman client cached on it."""
+    """The owning unit's AFC: its lanes, and the moonraker of the shared Spoolman client."""
 
     def __init__(self, client: Optional[RfidwSpoolman] = None, lanes: Any = None,
                  saved: Optional[List[str]] = None) -> None:
         """
-        :param client: the client the real _cached_spoolman_client finds cached
+        :param client: the client the real _cached_spoolman_client shares for this AFC's
+            moonraker; no moonraker when None
         :param lanes: the AFC's lanes mapping
         :param saved: when given, save_vars appends "saved" to it
         """
-        self._afc_spoolman_client_cache = client
+        self.moonraker = None
+        if client is not None:
+            self.moonraker = client._mr
+            AFC_RFID._spoolman_client = client
         self.lanes = lanes
         if saved is not None:
             self.save_vars = lambda: saved.append("saved")

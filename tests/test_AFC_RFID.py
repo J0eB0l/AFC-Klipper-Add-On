@@ -12,6 +12,7 @@ from urllib.request import Request
 import pytest
 
 from extras.AFC_ACE2_rfid import AFC_ACE2_RFID
+import extras.AFC_RFID as AFC_RFID
 from extras.AFC_RFID import (
     _cached_spoolman_client,
     _decode_extra,
@@ -1053,7 +1054,7 @@ class TestMatchSpoolForTag:
 
 class TestCachedSpoolmanClient:
     class _AFC:
-        """The AFC core object: its moonraker, and where the client is cached."""
+        """The AFC core object, with only its moonraker."""
 
         def __init__(self, moonraker: Any) -> None:
             """
@@ -1067,16 +1068,23 @@ class TestCachedSpoolmanClient:
     def test_an_afc_without_moonraker_gives_no_client(self):
         afc = self._AFC(None)
         assert _cached_spoolman_client(afc) is None
-        assert not hasattr(afc, "_afc_spoolman_client_cache")
+        assert vars(afc) == {"moonraker": None}
 
-    def test_one_client_is_built_and_cached_per_afc(self):
+    def test_one_client_is_built_and_shared_per_moonraker(self):
         moonraker = RfidSpoolmanMoonraker()
         afc = self._AFC(moonraker)
         client = _cached_spoolman_client(afc)
         assert isinstance(client, SpoolmanClient)
         assert client._mr is moonraker
-        assert afc._afc_spoolman_client_cache is client
-        assert _cached_spoolman_client(afc) is client
+        assert _cached_spoolman_client(self._AFC(moonraker)) is client
+        assert vars(afc) == {"moonraker": moonraker}
+
+    def test_a_restart_gets_a_client_for_its_new_moonraker(self):
+        old = _cached_spoolman_client(self._AFC(RfidSpoolmanMoonraker()))
+        moonraker = RfidSpoolmanMoonraker()
+        client = _cached_spoolman_client(self._AFC(moonraker))
+        assert client is not old
+        assert client._mr is moonraker
 
 
 class TestFindSpoolByUid:
@@ -2159,9 +2167,8 @@ class TestSyncRfidToSpoolman:
         assert afc.spool.assigned == [("lane1", 300)]
         assert lane.spool_id == 300
         assert lane.sends == 1
-        # One client per AFC, and the set_spoolID signature check, both memoised.
-        assert afc._afc_spoolman_client_cache._mr is afc.moonraker
-        assert afc._afc_setspoolid_on_done is False
+        # One client for AFC's moonraker, shared.
+        assert _cached_spoolman_client(afc)._mr is afc.moonraker
         assert logger.messages == [
             ("info", "TEST: matched spool #300 by tag UID AABBCCDD"),
             ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 800g left) assigned to lane1")]
@@ -2707,7 +2714,7 @@ class TestSyncRfidToSpoolman:
                       '"settings_bed_temp": 60}'),
             ("info", "TEST: spool #300 ('N', #00ff00, 100g left) assigned to lane1")]
         # The shared client is back on AFC's logger once the worker is done.
-        assert afc._afc_spoolman_client_cache._spoolman_proxy("PATCH", "/v1/x") is None
+        assert _cached_spoolman_client(afc)._spoolman_proxy("PATCH", "/v1/x") is None
         assert logger.messages[-1] == (
             "error", "Spoolman PATCH /v1/x failed; request body: (none)")
         assert lane.spool_id == 300
@@ -2822,8 +2829,8 @@ class TestSyncRfidToSpoolman:
     @staticmethod
     def _hooked_client(*names: str) -> Tuple[Dict[str, Hook], Callable[[Any], None]]:
         """
-        Seed the AFC's cached client with a real SpoolmanClient whose named
-        methods are wrapped in Hooks, so a test can see whether the sync called them.
+        Seed the shared client with a real SpoolmanClient for the AFC's moonraker,
+        its named methods wrapped in Hooks, so a test can see whether the sync called them.
 
         :param names: SpoolmanClient methods to wrap
         :return tuple: (hooks by name, the _run prepare callback)
@@ -2838,7 +2845,7 @@ class TestSyncRfidToSpoolman:
             for name in names:
                 hooks[name] = Hook(getattr(client, name))
                 setattr(client, name, hooks[name])
-            afc._afc_spoolman_client_cache = client
+            AFC_RFID._spoolman_client = client
 
         return hooks, prepare
 
@@ -3153,7 +3160,7 @@ class TestAFCUnitRFIDConsoleReadOut:
                      "  Remaining: 513g\n"
                      "  Spoolman ID: 7")]
         assert moonraker.calls == [("GET", "/v1/spool/7", None, True)]
-        assert reader.afc._afc_spoolman_client_cache._mr is moonraker
+        assert _cached_spoolman_client(reader.afc)._mr is moonraker
         assert slot == {"material": "PLA"}
         assert reader.logger.messages == []
 
