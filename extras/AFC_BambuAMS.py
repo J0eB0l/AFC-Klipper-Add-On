@@ -59,7 +59,7 @@ import re
 import struct
 import time
 import zlib
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # Transport lives in AFC_BambuAMS_bridge so it can be tested without a printer.
 # The bridge flashes one contiguous image, so UF2 blocks are unwrapped and a
@@ -1542,6 +1542,9 @@ class afcBambuAMS(afcUnit):
         # retract.
         self._unload_in_progress = False
         self._load_in_progress = False
+        # Lanes whose spool ran out (handle_runout): their next unload cannot
+        # reel the tail back, so it skips the AMS retract.
+        self._runout_empty: Set[str] = set()
         # The AMS's words for the fault that ended the current load, kept
         # because _ams_declared_fault consumes the sequence. Cleared at the
         # start of each load.
@@ -7846,7 +7849,7 @@ class afcBambuAMS(afcUnit):
             and getattr(target, "extruder_obj", None) is not None
             and target.extruder_obj
             is not getattr(lane, "extruder_obj", None)):
-            lane._bambu_runout_empty = True
+            self._runout_empty.add(lane.name)
             self.logger.info(
                 f"AFC bambu {self.name}: {lane.name} ran out, switching to "
                 f"its runout lane {target_name} on another extruder (the AMS "
@@ -7861,7 +7864,7 @@ class afcBambuAMS(afcUnit):
                    f"and the leftover filament is in the way.")
         lane.status = AFCLaneState.NONE
         # Its unload skips the AMS retract and keeps the follower pushing.
-        lane._bambu_runout_empty = True
+        self._runout_empty.add(lane.name)
         try:
             self.lane_not_ready(lane)
         except Exception:
@@ -8977,10 +8980,6 @@ class afcBambuAMS(afcUnit):
                 setattr(lane, attr, val)
             except Exception:
                 pass
-        try:
-            lane.bambu_sku = ""
-        except Exception:
-            pass
         # The tare came from the departed spool too (see _restore_config_tare).
         restore = getattr(self, "_restore_config_tare", None)
         if restore is not None:
@@ -9651,8 +9650,8 @@ class afcBambuAMS(afcUnit):
 
     def _surface_slot_info(self, lane: Any, info: dict) -> None:
         """
-        Apply the AMS tag's profile to a lane: material, variant, color, Bambu
-        type code and print temps.
+        Apply the AMS tag's profile to a lane: material, variant, color and
+        print temps.
 
         The tag overwrites these (a derived bed temp only fills a blank); the
         lane's weight is seeded only when unset or nominal. The tag's UID (the
@@ -9692,8 +9691,6 @@ class afcBambuAMS(afcUnit):
             if _lookup is not None:
                 _lookup(lane, info)
                 self._apply_remain_weight(lane, info)
-            if info.get("sku") and getattr(lane, "bambu_sku", None) in (None, ""):
-                lane.bambu_sku = info["sku"]
             return
 
         # No "already bound?" gate: the tag is the bay, so it is applied like
@@ -9798,10 +9795,6 @@ class afcBambuAMS(afcUnit):
         # Hand over a measurement owed to the spool a bind attaches, and finish
         # one owed to the material now named; nothing else touches the weight.
         self._apply_remain_weight(lane, info)
-
-        # Bambu profile code (e.g. GFA00), a nice sub_type hint for Spoolman.
-        if info.get("sku") and getattr(lane, "bambu_sku", None) in (None, ""):
-            lane.bambu_sku = info["sku"]
 
     def _record_fresh(self, rec: dict) -> bool:
         """
@@ -13090,9 +13083,9 @@ class afcBambuAMS(afcUnit):
 
         # A lane that ran out (its tail is past the feeder), or whose bay reads
         # empty behind it after a restart: the AMS cannot reel it back.
-        runout_empty = (bool(getattr(cur_lane, "_bambu_runout_empty", False))
+        runout_empty = (cur_lane.name in self._runout_empty
                         or afcBambuAMS._bay_ran_out(self, cur_lane))
-        cur_lane._bambu_runout_empty = False
+        self._runout_empty.discard(cur_lane.name)
         cur_lane.status = AFCLaneState.TOOL_UNLOADING
         self._unload_in_progress = True
         # The follower stand-down for this unload is the explicit assist-off

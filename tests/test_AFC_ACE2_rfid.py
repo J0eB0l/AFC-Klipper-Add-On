@@ -521,7 +521,7 @@ class TestAFCACE2RFIDInit:
         assert reader.scan_seconds == 30.0
 
 class TestAFCACE2RFIDOnReady:
-    def test_binds_ace2_and_marks_scanner(self, monkeypatch):
+    def test_binds_ace2(self, monkeypatch):
         unit = make_ace2_unit(lanes=["scan1"])
         printer = unit.printer
         reader = make_ace2_rfid({"scanner_lanes": "scan1", "ace2_object": "AFC_ACE2 Ace2_1"},
@@ -533,14 +533,13 @@ class TestAFCACE2RFIDOnReady:
         assert reader.afc is printer.afc
         assert reader.ace2 is unit                       # found by its configured name
         assert reader.bambu_master_key == b"\xaa"
-        assert printer.afc.lanes["scan1"].spool_scanner is True
         assert printer.logger.messages == [("info", "ACE2 RFID bound to Ace2_1")]
         assert printer.reactor.pending == []             # identify waits for the connect
 
     def test_warns_when_ace2_missing(self, monkeypatch):
         reader = make_ace2_rfid({"scanner_lanes": "scan1"}, ace2=None, bind=False)
         printer = reader.printer
-        del printer.objects["AFC"]                       # no AFC either: no lanes to mark
+        del printer.objects["AFC"]                       # no AFC either
         monkeypatch.setattr(ace2_rfid_module, "resolve_rfid_keys",
                             lambda pr, b, c, d: (b, c, d))
         reader._on_ready()

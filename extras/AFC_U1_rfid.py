@@ -131,6 +131,8 @@ class AFC_U1_RFID:
         self._cfg_scanners: set = {s.strip() for s in
                                    config.get('scanner_lanes', '').split(',')
                                    if s.strip()}
+        # The AFC lanes those name, once resolved at ready.
+        self._scanner_lane_names: set = set()
         # OpenRFID full-colour webhook: filament_detect only carries the primary
         # colour, so a webhook POST to /printer/afc/u1_rfid supplies the full
         # list. The first webhook on a channel makes it authoritative there;
@@ -177,12 +179,7 @@ class AFC_U1_RFID:
                     f"(neither a lane name nor a single-lane extruder)")
                 continue
             if lane_name in self._cfg_scanners:
-                # Mark the lane so any scanner-aware code (incl. bridge hooks
-                # that read lane.spool_scanner) sees it.
-                try:
-                    lane.spool_scanner = True
-                except Exception:
-                    pass
+                self._scanner_lane_names.add(lane.name)
             self.register_lane(lane, channel)
         # Standalone scanner channels register with a None lane.
         for channel in self._cfg_scanner_channels:
@@ -748,7 +745,7 @@ class AFC_U1_RFID:
         """
         Check a single channel for new or changed RFID data.
 
-        For spool_scanner lanes the spool is assigned directly to the lane
+        For scanner lanes the spool is assigned directly to the lane
         (bypassing the ``next_spool_id`` staging mechanism) so that Spoolman
         flow K sync triggers immediately on scan.
 
@@ -765,7 +762,7 @@ class AFC_U1_RFID:
         scanner_only = channel in self._cfg_scanner_channels
         lane = None if scanner_only else self._lane_objects.get(lane_name)
         is_scanner = scanner_only or (
-            lane is not None and getattr(lane, 'spool_scanner', False))
+            lane is not None and lane.name in self._scanner_lane_names)
 
         if info is None:
             return
@@ -1153,7 +1150,7 @@ class AFC_U1_RFID:
         :param color: Hex color string (without '#').
         :param slot_info: Full slot info dict from RFID tag.
         :param lane_name: Lane name; empty string if unknown.
-        :param is_scanner: True when this is a spool_scanner read.
+        :param is_scanner: True when this is a scanner lane's read.
         """
         try:
             # Rich "<brand> <material> <sub_type>" name (e.g. "Bambu PLA Basic");
@@ -1201,7 +1198,7 @@ class AFC_U1_RFID:
             self.afc.gcode.respond_info("\n".join(lines))
 
             # Mainsail/Fluidd popup + U1 factory display are reserved for the
-            # spool_scanner. A normal lane load only prints the console read-out
+            # scanner lanes. A normal lane load only prints the console read-out
             # above (no popup), so loads don't spam a dialog on every insert.
             if is_scanner:
                 prompt_lines = []

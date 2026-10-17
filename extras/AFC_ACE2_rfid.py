@@ -598,16 +598,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
          self.creality_encryption_key) = resolve_rfid_keys(
             self.printer, self.bambu_master_key, self.creality_key,
             self.creality_encryption_key)
-        # Mark configured scanner lanes so scanner-aware code (and any bridge
-        # hooks) sees lane.spool_scanner, mirroring the U1.
-        if self.afc is not None and hasattr(self.afc, "lanes"):
-            for n in self._scanner_lanes:
-                lane = self.afc.lanes.get(n)
-                if lane is not None:
-                    try:
-                        lane.spool_scanner = True
-                    except Exception:
-                        pass
         # The ACE2 serial object is a named section: "AFC_ACE2 <name>" (e.g.
         # "AFC_ACE2 Ace2_1"). Try the configured/bare name, else auto-discover
         # the first AFC_ACE2* object.

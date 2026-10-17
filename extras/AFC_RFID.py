@@ -1148,7 +1148,7 @@ def prompt_hold_spool(respond: Callable[[str], None], where: str) -> None:
     Pop a Mainsail/Fluidd dialog asking the user to hold a detected spool at
     the reader until the read completes.
 
-    For the spool_scanner rest-scan, which needs several confirmation reads.
+    For a scanner lane's rest-scan, which needs several confirmation reads.
     The result notification (or dismiss_prompt on a timeout) replaces it.
 
     :param respond: Emits a raw gcode line (e.g. ``gcode.respond_raw``).
@@ -1591,12 +1591,6 @@ def _spoolman_prepare(afc: Any, lane: Any, slot_info: dict,
     :param set_next: stage as next spool rather than assigning the lane
     :return dict: values for _spoolman_resolve, or None to stop here
     """
-    if set_next:
-        try:
-            afc.spool.next_spool_info = dict(slot_info)
-        except Exception:
-            pass
-
     if afc.spoolman is None or afc.moonraker is None:
         return None
     if not set_next and getattr(lane, "spool_id", None) not in (None, "", 0):

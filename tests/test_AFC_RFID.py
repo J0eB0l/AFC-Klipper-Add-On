@@ -1875,7 +1875,6 @@ class TestSyncRfidToSpoolman:
             """
             :param raises: exception set_spoolID raises, if any
             """
-            self.next_spool_info: Any = None
             self.next_spool_id: Optional[int] = None
             self.assigned: List[Tuple[str, Any]] = []
             self._raises = raises
@@ -2075,11 +2074,9 @@ class TestSyncRfidToSpoolman:
                               on_done=on_done, **flags)
         return afc, lane, logger
 
-    def test_set_next_stashes_info_then_returns_no_spoolman(self):
+    def test_set_next_returns_with_no_spoolman(self):
         slot = {"uid": "AA", "material": "PLA"}
         afc, lane, logger = self._run(slot, self._routes([]), set_next=True, spoolman=None)
-        assert afc.spool.next_spool_info == {"uid": "AA", "material": "PLA"}
-        assert afc.spool.next_spool_info is not slot
         assert afc.moonraker.calls == []
         assert slot == {"uid": "AA", "material": "PLA"}
         assert logger.messages == []
@@ -2087,18 +2084,8 @@ class TestSyncRfidToSpoolman:
         other = self._AFC(None, self._Spool(), "http://spoolman:7912")
         other_logger = AceLogger()
         sync_rfid_to_spoolman(other, self._Lane(), slot, other_logger, "TEST", set_next=True)
-        assert other.spool.next_spool_info == {"uid": "AA", "material": "PLA"}
         assert slot == {"uid": "AA", "material": "PLA"}
         assert other_logger.messages == []
-
-    def test_set_next_dict_failure_swallowed(self):
-        spool = self._Spool()
-        spool.next_spool_info = "orig"
-        afc, lane, logger = self._run(123, self._routes([]), set_next=True, spool=spool,
-                                      spoolman=None)
-        assert afc.spool.next_spool_info == "orig"       # dict(123) raised
-        assert afc.moonraker.calls == []
-        assert logger.messages == []
 
     def test_existing_spool_id_skips(self):
         slot = {"uid": "AA", "material": "PLA", "color_hex": "00ff00"}
@@ -2427,7 +2414,6 @@ class TestSyncRfidToSpoolman:
                                      patched={"id": 99, "name": "PLA", "color_hex": "00ff00"})
         afc, lane, logger = self._run(slot, routes, set_next=True,
                                       lane=self._Lane(spool_id=42), allow_create=True)
-        assert afc.spool.next_spool_info == self._CREATE_TAG
         assert afc.spool.next_spool_id == 500
         assert afc.spool.assigned == []
         assert lane.spool_id == 42

@@ -124,7 +124,7 @@ class U1Lane:
     """
 
     def __init__(self, name: str, *, extruder_obj: Any = None,
-                 unit_obj: Any = None, spool_scanner: bool = False,
+                 unit_obj: Any = None,
                  status: str = "", spool_id: Any = None,
                  tool_loaded: bool = False, material: str = "",
                  color: str = "",
@@ -134,7 +134,6 @@ class U1Lane:
         :param name: the lane name
         :param extruder_obj: its AFC_extruder
         :param unit_obj: its unit
-        :param spool_scanner: the lane doubles as a spool scanner
         :param status: its AFCLaneState value
         :param spool_id: its Spoolman spool
         :param tool_loaded: loaded into the toolhead
@@ -146,7 +145,6 @@ class U1Lane:
         self.name = name
         self.extruder_obj = extruder_obj
         self.unit_obj = unit_obj
-        self.spool_scanner = spool_scanner
         self.status = status
         self.spool_id = spool_id
         self.tool_loaded = tool_loaded
@@ -352,27 +350,6 @@ class TestAFCU1RFIDInit:
 
 
 class TestAFCU1RFIDHandleReady:
-    class _ReadOnlyScannerLane(U1Lane):
-        """A lane whose spool_scanner flag cannot be set once it is built."""
-
-        def __init__(self, name: str) -> None:
-            """:param name: the lane name"""
-            self._frozen = False
-            super().__init__(name)
-            self._frozen = True
-
-        @property
-        def spool_scanner(self) -> bool:
-            """:return bool: the flag it was built with"""
-            return self._scanner
-
-        @spool_scanner.setter
-        def spool_scanner(self, value: bool) -> None:
-            """:param value: accepted only while the lane is being built"""
-            if self._frozen:
-                raise AttributeError("spool_scanner is read-only")
-            self._scanner = value
-
     @staticmethod
     def _timers(reader: AFC_U1_RFID) -> List[Tuple[Any, float]]:
         """:return list: each registered timer as (callback, waketime)"""
@@ -403,7 +380,7 @@ class TestAFCU1RFIDHandleReady:
         assert reader._last_uid == {1: None}
         assert reader._consecutive_failures == {1: 0}
         assert reader._cfg_scanner_channels == set()
-        assert lane.spool_scanner is False
+        assert reader._scanner_lane_names == set()
         assert self._timers(reader) == [(reader._poll_cb, 102.0)]
         assert reader._poll_timer is reader.reactor.timers[0]
         assert list(reader.printer._afc_rfid_write_registry) == ["u1:lane1"]
@@ -447,30 +424,15 @@ class TestAFCU1RFIDHandleReady:
                         "(neither a lane name nor a single-lane extruder)"),
         ]
 
-    def test_scanner_lane_flag_set_on_lane(self):
+    def test_scanner_lane_recorded_on_the_reader(self):
         reader = make_u1_reader({"lane_channels": "lane1:1",
                                  "scanner_lanes": "lane1"})
         lane = U1Lane("lane1")
         reader.printer.afc.lanes = {"lane1": lane}
         reader._handle_ready()
-        assert lane.spool_scanner is True
+        assert reader._scanner_lane_names == {"lane1"}
         assert reader._lane_channel_map == {"lane1": 1}
         assert reader._scanner_channels == {1}
-        assert reader.logger.messages == [
-            ("info", "U1 RFID: monitoring 1 lane channel(s): lane1=ch1"),
-            ("info", "U1 RFID: lane-attached scanner(s): lane1"),
-        ]
-
-    def test_scanner_flag_set_error_is_swallowed(self):
-        reader = make_u1_reader({"lane_channels": "lane1:1",
-                                 "scanner_lanes": "lane1"})
-        lane = self._ReadOnlyScannerLane("lane1")
-        reader.printer.afc.lanes = {"lane1": lane}
-        reader._handle_ready()
-        assert lane.spool_scanner is False
-        assert reader._lane_objects == {"lane1": lane}
-        assert reader._lane_channel_map == {"lane1": 1}
-        assert self._timers(reader) == [(reader._poll_cb, 102.0)]
         assert reader.logger.messages == [
             ("info", "U1 RFID: monitoring 1 lane channel(s): lane1=ch1"),
             ("info", "U1 RFID: lane-attached scanner(s): lane1"),
@@ -1712,8 +1674,8 @@ class TestAFCU1RFIDCheckChannel:
 
     class _SyncSpy:
         """sync_rfid_to_spoolman as the reader calls it: each call is
-        recorded, then the real one runs (with no Spoolman it stages a scanned
-        spool and calls on_done)."""
+        recorded, then the real one runs (with no Spoolman it calls
+        on_done)."""
 
         def __init__(self) -> None:
             """Start with no calls."""
@@ -2027,16 +1989,15 @@ class TestAFCU1RFIDCheckChannel:
 
     def test_scanner_lane_scans_when_loaded_with_the_lane_auto_create(self, sync):
         ext = U1Extruder(name="e0", auto_spoolman_create=True)
-        lane = U1Lane("lane1", extruder_obj=ext, spool_scanner=True,
-                      status="Tooled")
+        lane = U1Lane("lane1", extruder_obj=ext, status="Tooled")
         reader = self._reader({"scanner_auto_create": False}, lane)
+        reader._scanner_lane_names.add(lane.name)
         reader._check_channel("lane1", 0, info=dict(self.SCAN_TAG), source="poll")
         assert reader._last_uid == {0: U1_UID}
         assert reader._tag_reads == {"lane1": self.SCAN_RECORD}
         args, kwargs = sync.calls[0]
         assert args[1] is lane
         assert (kwargs["allow_create"], kwargs["set_next"]) == (True, True)
-        assert reader.afc.spool.next_spool_info == self.SCAN_SLOT
         assert reader.printer.gcode.messages == [
             ("respond_info", "Spool scanned on lane1:\n  Name: PLA\n"
                              "  Material: PLA")]
@@ -2176,7 +2137,6 @@ class TestAFCU1RFIDCheckChannel:
         assert sorted(kwargs) == ["allow_create", "on_done", "reactor", "set_next"]
         assert (kwargs["allow_create"], kwargs["set_next"]) == (True, True)
         assert kwargs["reactor"] is reader.reactor
-        assert reader.afc.spool.next_spool_info == self.SCAN_SLOT
         assert reader._tag_reads == {"scanner-ch0": self.SCAN_RECORD}
         assert reader.afc.save_vars.call_count == 0
         assert [when for _cb, when in reader.reactor.callbacks] == [110.0]

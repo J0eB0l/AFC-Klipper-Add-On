@@ -777,7 +777,7 @@ class TestBambuSpoolmanBindLanded:
         sp, lane = unit._measure, unit.lanes["lane15"]
         sp._bind_landed(lane, 3, self.UID, miss=miss)
         assert self._profile(lane) == expected
-        assert lane.bambu_sku == "" and lane.empty_spool_weight == 190.0
+        assert lane.empty_spool_weight == 190.0
         assert sp._bind_pending == set()
         assert sp._bound_uid == {} and sp._spoolman_no_match == set()
         assert unit.afc.save_vars.call_count == 1
@@ -942,8 +942,7 @@ class TestBambuSpoolmanBindLanded:
             color="#0086D6", spool_id=136, weight=670,
             extras={"sub_type": "Basic", "spool_vendor": "Bambu",
                     "filament_name": "Bambu PLA Basic",
-                    "extruder_temp": 190.0, "bed_temp": 55.0,
-                    "bambu_sku": "GFA00"})])
+                    "extruder_temp": 190.0, "bed_temp": 55.0})])
         use_spoolman_client(monkeypatch, FakeSpoolmanClient([
             {"id": 136, "remaining_weight": 670.8,
              "extra": {"card_uids": '"4B8E44F6,95F2C30C"',

@@ -676,7 +676,7 @@ def _p2_flap_unit(monkeypatch: pytest.MonkeyPatch, *,
         color="#0086D6", spool_id=136, weight=670,
         extras={"sub_type": "Basic", "spool_vendor": "Bambu",
                 "filament_name": "Bambu PLA Basic", "extruder_temp": 190.0,
-                "bed_temp": 55.0, "bambu_sku": "GFA00"})]
+                "bed_temp": 55.0})]
     if toolhead:
         lanes.insert(0, LaneSpec("lane12", 0, prep=True, load=True,
                                  loaded_to_hub=True, tool_loaded=True,
@@ -10723,14 +10723,10 @@ class TestAfcBambuAMSSyncLanes:
         return unit
 
     def test_no_tag_applies_defaults_instead_of_the_record(self, monkeypatch):
-        # The record's type code is what surfacing it would write; the
-        # defaults blank it.
-        unit = self._no_tag(monkeypatch, sku="GFA00")
+        unit = self._no_tag(monkeypatch)
         lane = unit.lanes["lane23"]
         unit._afc_owned = {0}
-        assert getattr(lane, "bambu_sku", None) is None
         unit._sync_lanes()
-        assert lane.bambu_sku == ""
         assert self._matte_lane(lane) == ("PLA", "", "", None, 1000)
         assert unit._scan_notag == [True, False, False, False]
         assert unit._afc_owned == set()
@@ -11065,11 +11061,10 @@ class TestAfcBambuAMSSyncLanes:
         """
         :param lane: the lane
         :return tuple: (material, sub_type, spool_vendor, filament_name,
-          color, bambu_sku, spool_id)
+          color, spool_id)
         """
         return (lane.material, lane.sub_type, lane.spool_vendor,
-                lane.filament_name, lane.color,
-                getattr(lane, "bambu_sku", None), lane.spool_id)
+                lane.filament_name, lane.color, lane.spool_id)
 
     #: The verdict trace for bay 0's PLA Basic reel with no scan open.
     BASIC_NONE = ("debug", "AFC bambu BambuAMS_2: slot 0 scan verdict -> none "
@@ -11083,12 +11078,11 @@ class TestAfcBambuAMSSyncLanes:
 
     def test_a_marked_bay_is_not_surfaced_with_no_scan_open(
             self, monkeypatch):
-        # Only the blank fields are filled; the record's type code, which
-        # only the surface path writes, does not reach the lane.
+        # Only the blank fields are filled.
         unit = self._restored(monkeypatch, owned=True)
         unit._sync_lanes()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", None, 109)
+            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", 109)
         assert unit._afc_owned == {0}
         assert unit.logger.messages == [
             self.BASIC_NONE,
@@ -11097,12 +11091,11 @@ class TestAfcBambuAMSSyncLanes:
                      "bay's record (PLA Basic)")]
 
     def test_an_unmarked_bay_is_surfaced_as_before(self, monkeypatch):
-        # Surfaced, and the boot hold keeps the record off the restored lane
-        # but for its type code.
+        # Surfaced, and the boot hold keeps the record off the restored lane.
         unit = self._restored(monkeypatch, owned=False)
         unit._sync_lanes()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "", "", "", "", "GFA00", 109)
+            "PLA", "", "", "", "", 109)
         assert unit.logger.messages == [self.BASIC_NONE]
 
     def test_a_read_outranks_the_mark_and_clears_it(self, monkeypatch):
@@ -11113,8 +11106,7 @@ class TestAfcBambuAMSSyncLanes:
         bridge.rfid_ok[unit.dry_dev_addr] = 100.0
         unit._sync_lanes()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", "GFA00",
-            109)
+            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", 109)
         assert unit._afc_owned == set()
         assert unit.logger.messages == [
             ("debug", "AFC bambu BambuAMS_2: slot 0 scan verdict -> read (fw "
@@ -11131,7 +11123,7 @@ class TestAfcBambuAMSSyncLanes:
         unit._sync_lanes()
         assert unit._afc_owned == set()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "", "", "", "", None, 109)
+            "PLA", "", "", "", "", 109)
         assert unit.logger.messages == [
             self._verdict("BambuAMS_2", 0, "none", present=False)]
 
@@ -11141,7 +11133,7 @@ class TestAfcBambuAMSSyncLanes:
         unit._sync_lanes()
         assert unit._afc_owned == set()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "", "", "", "", "", "")
+            "PLA", "", "", "", "", "")
         assert unit.logger.messages == [
             self._verdict("BambuAMS_2", 0, "notag"),
             ("debug", "AFC bambu BambuAMS_2: unbinding lane19 from spool 109 "
@@ -11158,7 +11150,7 @@ class TestAfcBambuAMSSyncLanes:
         unit.afc.prep_done = False
         unit._sync_lanes()
         assert self._profile(unit.lanes["lane19"]) == (
-            None, "", "", "", "", None, None)
+            None, "", "", "", "", None)
         assert unit.logger.messages == []
 
     def test_the_sensor_half_still_runs_before_prep(self, monkeypatch):
@@ -11179,8 +11171,7 @@ class TestAfcBambuAMSSyncLanes:
         unit._prep_seen = True
         unit._sync_lanes()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", "GFA00",
-            None)
+            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", None)
         assert unit.logger.messages == [
             self.BASIC_NONE,
             ("info", "AFC bambu BambuAMS_2: applied tag to lane19: Bambu PLA "
@@ -11194,7 +11185,7 @@ class TestAfcBambuAMSSyncLanes:
             0, material="PLA Sparkle", uid="04c07001", sku="GFA08"))
         unit._sync_lanes()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "Sparkle", "Bambu", "Bambu PLA Sparkle", "", None, 109)
+            "PLA", "Sparkle", "Bambu", "Bambu PLA Sparkle", "", 109)
         assert unit._afc_owned == {0}
         assert unit.logger.messages == [
             self._verdict("BambuAMS_2", 0, "none", mat="PLA Sparkle",
@@ -11212,8 +11203,7 @@ class TestAfcBambuAMSSyncLanes:
         unit._sync_lanes()
         assert unit._afc_owned == set()
         assert self._profile(unit.lanes["lane19"]) == (
-            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", "GFA00",
-            None)
+            "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", None)
         assert unit.logger.messages == [
             self.BASIC_NONE,
             ("info", "AFC bambu BambuAMS_2: applied tag to lane19: Bambu PLA "
@@ -11229,7 +11219,7 @@ class TestAfcBambuAMSSyncLanes:
         unit._sync_lanes()
         assert unit._afc_owned == {0}
         assert self._profile(unit.lanes["lane19"]) == (
-            None, "", "", "", "", None, 109)
+            None, "", "", "", "", 109)
         assert unit.logger.messages == [self.BASIC_NONE]
 
     # A measurement is applied once, when it is taken. The unit below has
@@ -12126,25 +12116,15 @@ class TestAfcBambuAMSSyncLanes:
             ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 70% (seq 6) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had")]
 
-    @staticmethod
-    def _gfa00_reel() -> Dict[str, Any]:
-        """
-        :return dict: bay 1's record of the tagged reel with its type code,
-          GFA00, which only surfacing the record writes to the lane
-        """
-        return slot_info(1, material="PLA Basic", uid=_P3_UID, weight=1000,
-                         remain=80, sku="GFA00")
-
     @SECTIONS
     def test_a_held_summary_is_said_when_the_record_lands(self, monkeypatch,
                                                           section):
         # The measurement finishes before the bay's record catches up, so its
         # summary waits on the delegate that queued it, and the frame that
-        # brings the record surfaces it onto the lane and says the summary.
+        # brings the record says the summary.
         unit = _bambu_p3_measuring_unit(monkeypatch, section=section,
                                         prep_seen=True,
-                                        values={"auto_scan": False},
-                                        record=self._gfa00_reel())
+                                        values={"auto_scan": False})
         lane = unit.lanes["lane8"]
         rec = dict(unit._slots[1])
         unit._slots[1] = {"index": 1, "present": True, "weight": 1000}
@@ -12157,11 +12137,9 @@ class TestAfcBambuAMSSyncLanes:
                       "radius_src=none source='capscan' nominal=1000 grams_written=518 "
                       "grams_modelled=518")]
         unit.logger.messages.clear()
-        assert getattr(lane, "bambu_sku", None) is None
         unit._slots[1] = rec
         unit._sync_lanes()
         assert unit._measure._pending_summary == {}
-        assert lane.bambu_sku == "GFA00"      # the record was surfaced
         assert (lane.material, lane.sub_type, lane.weight) == ("PLA", "Basic",
                                                                518)
         if section:
@@ -12182,35 +12160,32 @@ class TestAfcBambuAMSSyncLanes:
 
     # A scan of bay 1 that ended with no new read and an unchanged record:
     # with no bridge left to ask, the real _scan_verdict answers "notag".
-    # An earlier no-tag answer latched the bay; settling releases the hold,
-    # clears the latch and surfaces the record.
+    # An earlier no-tag answer latched the bay; settling releases the hold
+    # and clears the latch.
 
     def _settling(self, monkeypatch: pytest.MonkeyPatch) -> afcBambuAMS:
         """
         :param monkeypatch: pytest's monkeypatch fixture
         :return afcBambuAMS: the measuring unit with the Spoolman section,
-          bay 1 holding the GFA00 reel
+          bay 1 holding the tagged reel
         """
         return _bambu_p3_measuring_unit(monkeypatch, section=True,
                                          prep_seen=True,
-                                         values={"auto_scan": False},
-                                         record=self._gfa00_reel())
+                                         values={"auto_scan": False})
 
     @staticmethod
     def _settle(unit: afcBambuAMS) -> None:
         """
         One frame on bay 1's scan, open since 50.0 with a no-tag answer
-        latched, the lane not yet carrying the record's type code.
+        latched.
 
         :param unit: the unit
         """
         unit._scan_t0 = [None, 50.0, None, None]
         unit._scan_notag[1] = True
-        assert getattr(unit.lanes["lane8"], "bambu_sku", None) is None
         unit._sync_lanes()
         assert unit._scan_t0 == [None] * 4        # the hold is released
         assert unit._scan_notag == [False] * 4
-        assert unit.lanes["lane8"].bambu_sku == "GFA00"
 
     def test_the_settle_path_sees_the_delegates_held_measurement(
             self, monkeypatch):
@@ -15833,7 +15808,7 @@ class TestAfcBambuAMSArmPresenceRunout:
         assert unit.afc.error.messages == [
             self._runout_error("lane6 has no runout lane set.")]
         assert unit.afc.error.calls[0][1][1] is True        # pause=True
-        assert lane._bambu_runout_empty is True
+        assert lane.name in unit._runout_empty
         assert lane.status == AFCLaneState.NONE
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [self.ARMED, self.CONFIRMED]
@@ -15848,7 +15823,7 @@ class TestAfcBambuAMSArmPresenceRunout:
         assert unit.afc.error.messages == [self._runout_error(
             "its runout lane lane4 feeds the same extruder, and the leftover "
             "filament is in the way.")]
-        assert unit.lanes["lane6"]._bambu_runout_empty is True
+        assert "lane6" in unit._runout_empty
         assert unit.logger.messages == [self.ARMED, self.CONFIRMED]
 
     def test_a_runout_lane_on_another_extruder_takes_afcs_infinite_spool(
@@ -15866,7 +15841,7 @@ class TestAfcBambuAMSArmPresenceRunout:
         unit.reactor.run_callbacks(until=101.5)
         assert infinite.call_count == 1
         assert unit.afc.error.messages == []
-        assert lane._bambu_runout_empty is True    # its unload skips the reel
+        assert lane.name in unit._runout_empty     # its unload skips the reel
         assert lane.status == AFCLaneState.TOOLED
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
@@ -17019,7 +16994,7 @@ class TestAfcBambuAMSMaybeAutoScan:
                      "while printing; runout if it stays empty for 1.5s")]
         unit.reactor.run_callbacks(until=101.5)
         assert unit.afc.error.messages == [self._runout_error("lane6")]
-        assert unit.lanes["lane6"]._bambu_runout_empty is True
+        assert "lane6" in unit._runout_empty
         assert unit._runout_pending == {}
         assert unit.logger.messages == [
             self._removed(2),
@@ -17061,7 +17036,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert len(unit.reactor.callbacks) == 1
         unit.reactor.run_callbacks(until=101.5)
         assert unit.afc.error.messages == [self._runout_error("lane14")]
-        assert lane._bambu_runout_empty is True
+        assert lane.name in unit._runout_empty
         assert unit.logger.messages == [
             self.INLET,
             ("info", "AFC bambu Bambu_AMS_1: RUNOUT on lane14: AMS bay 3 "
@@ -17329,7 +17304,7 @@ class TestAfcBambuAMSClearLaneFilament:
             "lane19", 0, material="PLA Matte", color="#7A7A7A", weight=1000,
             values=values or {},
             extras={"filament_name": "Bambu PLA Matte", "sub_type": "Matte",
-                    "spool_vendor": "Bambu", "bambu_sku": "GFA01",
+                    "spool_vendor": "Bambu",
                     "empty_spool_weight": 1000.0})])
 
     def test_every_tag_written_field_is_cleared(self, monkeypatch):
@@ -17337,8 +17312,8 @@ class TestAfcBambuAMSClearLaneFilament:
         lane = unit.lanes["lane19"]
         unit._clear_lane_filament(lane)
         assert lane.filament_name == ""
-        assert (lane.material, lane.color, lane.bambu_sku, lane.sub_type,
-                lane.spool_vendor) == ("", "", "", "", "")
+        assert (lane.material, lane.color, lane.sub_type,
+                lane.spool_vendor) == ("", "", "", "")
         assert lane.weight == 0
         assert unit.logger.messages == []
 
@@ -17374,14 +17349,12 @@ class TestAfcBambuAMSClearLaneFilament:
         assert lane.empty_spool_weight == 1000.0
         assert unit.logger.messages == []
 
-    def test_blanks_material_colour_weight_and_sku(self, monkeypatch):
+    def test_blanks_material_colour_and_weight(self, monkeypatch):
         unit = _p4_unit(monkeypatch, lanes=[LaneSpec(
-            "lane1", 0, material="PLA", color="FF0000", weight=1000,
-            extras={"bambu_sku": "X"})])
+            "lane1", 0, material="PLA", color="FF0000", weight=1000)])
         lane = unit.lanes["lane1"]
         unit._clear_lane_filament(lane)
-        assert (lane.material, lane.color, lane.weight,
-                lane.bambu_sku) == ("", "", 0, "")
+        assert (lane.material, lane.color, lane.weight) == ("", "", 0)
         assert unit.logger.messages == []
 
     def test_missing_attributes_are_tolerated(self, monkeypatch):
@@ -17664,7 +17637,6 @@ class TestAfcBambuAMSFinalizeScan:
                                                       sku="GFA10"))
         unit._finalize_scan(0)
         assert unit.lanes["lane1"].material == "Unknown"
-        assert unit.lanes["lane1"].bambu_sku == ""
         assert unit.logger.messages == [self._applied(self.SCANNED)]
 
     def test_the_hold_survives_a_failed_read(self, monkeypatch):
@@ -18435,7 +18407,6 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         lane = unit.lanes["lane1"]
         unit._surface_slot_info(lane, self._green())
         assert self._profile(lane) == ("PLA", "#00AE42", 210.0, None, 1000)
-        assert lane.bambu_sku == "GFA00"
         assert lane.bed_temp == 55.0
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == self._green_lines()
@@ -18485,18 +18456,6 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         assert unit.afc.save_vars.call_count == 0
         assert unit.logger.messages == []
 
-    def test_a_held_lane_still_takes_a_missing_sku(self, monkeypatch):
-        unit = self._unit(monkeypatch, LaneSpec("lane15", 0, material="ABS"))
-        lane = unit.lanes["lane15"]
-        unit._surface_slot_info(lane, self._green())
-        assert lane.bambu_sku == "GFA00"
-        lane.bambu_sku = "GFB00"
-        unit._surface_slot_info(lane, self._green())
-        assert lane.bambu_sku == "GFB00"
-        assert lane.material == "ABS"
-        assert unit.afc.save_vars.call_count == 0
-        assert unit.logger.messages == []
-
     def test_a_held_lane_still_has_its_tag_looked_up(self, monkeypatch):
         unit = _p4_lane15_unit(monkeypatch)
         delegate = make_bambu_spoolman(unit)
@@ -18526,7 +18485,6 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         unit._surface_slot_info(lane, info)
         assert sync.calls == []
         assert owed.calls == []
-        assert lane.bambu_sku == "GFA00"
         assert (lane.material, lane.sub_type) == ("PLA", "Basic")
         assert unit.afc.save_vars.call_count == 0
         assert unit.logger.messages == []
@@ -25731,14 +25689,14 @@ class TestAfcBambuAMSUnitUnloadLane:
         # the flag is spent. The follower is never stood down or stopped (a
         # stopped follower grips the leftover) and keeps pushing after.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
-        lane._bambu_runout_empty = True
+        unit._runout_empty.add(lane.name)
         lane.loaded_to_hub = True
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
         assert unit._bridge.sent == [self.SELECT, self.ASSIST_ON]
         assert unit.afc.e_moves == self.E_MOVES[:2]
         assert unit._runout_drain is lane
         assert lane.loaded_to_hub is False
-        assert lane._bambu_runout_empty is False
+        assert lane.name not in unit._runout_empty
         assert lane.status == AFCLaneState.NONE
         assert unit.afc.error.messages == []
         assert unit.logger.messages == [self.RAN_OUT]
@@ -25799,7 +25757,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch, sensor=[True],
                                   virtual_hub=False)
-        lane._bambu_runout_empty = True
+        unit._runout_empty.add(lane.name)
         lane._load_state = True
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
         assert lane._load_state is True
@@ -25824,7 +25782,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # Nothing the host reads says the leftover is gone, so nothing ends
         # the push on a clock.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
-        lane._bambu_runout_empty = True
+        unit._runout_empty.add(lane.name)
         timers = list(unit.reactor.timers)
         unit.unit_unload_lane(lane, lane.extruder_obj)
         assert unit.reactor.callbacks == []

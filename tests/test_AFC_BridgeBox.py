@@ -1634,16 +1634,15 @@ class TestDeactivateToPool:
 
     def test_release_gives_the_lane_back_its_configured_tare_and_profile(
             self):
-        # A Spoolman link or a record set the tare, density and diameter,
-        # and the tag the SKU: the next claimant starts from the lane's
-        # config, as AFC_lane reads it at startup.
+        # A Spoolman link or a record set the tare, density and diameter:
+        # the next claimant starts from the lane's config, as AFC_lane reads
+        # it at startup.
         printer, _unit, lane = self._live_lane(
             {"empty_spool_weight": 210.0}, empty_spool_weight=250.0,
-            filament_density=1.27, filament_diameter=2.85, bambu_sku="GFA00")
+            filament_density=1.27, filament_diameter=2.85)
         deactivate_to_pool(lane)
         assert (lane.empty_spool_weight, lane.filament_density,
-                lane.filament_diameter, lane.bambu_sku) == (
-            210.0, 1.24, 1.75, "")
+                lane.filament_diameter) == (210.0, 1.24, 1.75)
         self._quiet(printer)
 
     def test_release_leaves_none_of_the_spools_details(self):
@@ -1653,12 +1652,12 @@ class TestDeactivateToPool:
         printer, _unit, lane = self._live_lane(
             {"filament_density": 1.20}, extruder_temp=280, bed_temp=110,
             sub_type="CF", filament_name="PC-CF", spool_vendor="Bambu",
-            bambu_sku="GFC01", filament_density=1.3, filament_diameter=2.85,
+            filament_density=1.3, filament_diameter=2.85,
             empty_spool_weight=250.0)
         deactivate_to_pool(lane)
         assert (lane.extruder_temp, lane.bed_temp) == (None, None)
-        assert (lane.sub_type, lane.filament_name, lane.spool_vendor,
-                lane.bambu_sku) == ("", "", "", "")
+        assert (lane.sub_type, lane.filament_name, lane.spool_vendor) == (
+            "", "", "")
         assert (lane.filament_density, lane.filament_diameter,
                 lane.empty_spool_weight) == (1.20, 1.75, 190.0)
         self._quiet(printer)
