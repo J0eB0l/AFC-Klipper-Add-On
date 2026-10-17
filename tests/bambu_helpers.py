@@ -1095,10 +1095,10 @@ class FakeFunction:
 class SaveVars:
     """
     ``afc.save_vars`` as a recorder. Like AFC.save_vars once prep is done,
-    each call hands a snapshot of every unit's lanes
-    (``lane.get_status(save_to_file=True)``) and the system block to
-    ``afc._var_write_queue``, read at call time so a chain master's wrapper
-    sees it. :func:`drain_var_writes` reads the snapshots back.
+    each call sends ``afc:save_vars`` with a snapshot of every unit's lanes
+    (``lane.get_status(save_to_file=True)``) and the system block, so a
+    chain master fills it in, then hands it to ``afc._var_write_queue``.
+    :func:`drain_var_writes` reads the snapshots back.
     """
 
     def __init__(self, afc: "BambuAFC") -> None:
@@ -1128,6 +1128,7 @@ class SaveVars:
                           "num_extruders": len(afc.tools),
                           "extruders": extruders,
                           "bypass": {"enabled": False}}
+        afc.printer.send_event("afc:save_vars", snap)
         afc._var_write_queue.put_nowait(snap)
 
     @property
@@ -1168,6 +1169,7 @@ class BambuAFC(MockAFC):
     def __init__(self, printer: "BambuPrinter") -> None:
         """:param printer: the printer this AFC core lives on"""
         super().__init__()
+        self.printer = printer
         self.logger = BambuLogger()
         self.reactor = printer.reactor
         self.gcode = printer.gcode
@@ -2996,7 +2998,7 @@ def write_unit_vars(printer: BambuPrinter, data: Union[str, dict]) -> str:
 def drain_var_writes(printer: BambuPrinter) -> List[Dict[str, Any]]:
     """
     Drain the snapshots ``afc.save_vars`` queued for AFC's var-file writer,
-    after a chain master's wrapper (if installed) filled them in.
+    after a chain master filled them in.
 
     :param printer: the printer
     :return list: the snapshots, oldest first

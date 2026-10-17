@@ -936,17 +936,19 @@ module. `activate_from_pool`, `deactivate_to_pool`, `assign_pool_tcmd`,
 `lane_in_toolhead` and `unset_tool_loaded` are module-level functions in
 `AFC_BridgeBox.py`. The shared files carry small edits:
 
+- `AFC.py`: `save_vars` sends `afc:save_vars` with the snapshot before it is
+  queued, and the chain master writes there the details held for a bay no
+  unit is claimed on.
 - `AFC_lane.py`: the `unassigned` option and the registration gate.
 - `AFC_extruder.py`: `_lanes_pending`, so an extruder whose only lanes are
   pooled is not refused at ready as a standalone extruder with
   `pin_tool_start: buffer`. `AFC_BridgeBox` takes it out of standalone mode
   once a claim gives it lanes.
 - `AFC_prep.py`: skips pool units.
+- `AFC_spool.py`: the mapping reset sends `afc:reset_mapping`, and the chain
+  master names there each claimed Bambu lane's home `T#`, which the reset
+  keeps as it keeps a config `map:`.
 - `afc_dryer.py`: keeps pool units out of the live panel.
-
-AFC's own code is not edited for saved lane details: at ready the chain
-master wraps AFC's variable-file write queue, so each save writes the details
-held for a bay no unit is claimed on.
 
 A re-claim avoids a duplicate `T#` because release unregisters the lane's `T#`
 commands, the claim clears stale tool-table entries for the bay's lanes, and

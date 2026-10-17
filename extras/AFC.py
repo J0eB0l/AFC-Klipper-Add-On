@@ -1352,6 +1352,10 @@ class afc:
                 extruder_entry = str["system"]["extruders"][cur_extruder.name]
                 extruder_entry['virtual_tool_start'] = bool(cur_extruder.tool_start_state)
 
+        # Lets another module add what it saves for a unit's lanes (BridgeBox pool bays no
+        # unit is claimed onto)
+        self.printer.send_event("afc:save_vars", str)
+
         # Handing off to the background writer thread so a slow disk doesn't
         # block the reactor; queue.put_nowait never blocks the caller here
         self._var_write_queue.put_nowait(str)

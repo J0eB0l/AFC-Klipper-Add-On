@@ -18,7 +18,6 @@ from extras.AFC_BambuAMS import _BambuBufferChip, afcBambuAMS, DEFAULT_BOWDEN_MM
 from extras.AFC_BambuAMS_bridge import BambuBridge, TcpPort
 from extras.AFC_BridgeBox import (
     _ChildCommand,
-    _hook_reset_mapping,
     _norm_model,
     _parse_map,
     _plan_lane_map,
@@ -34,7 +33,6 @@ from extras.AFC_BridgeBox import (
     unset_tool_loaded,
 )
 from extras.AFC_lane import AFCLane, AFCLaneState
-from extras.AFC_spool import AFCSpool
 from tests.bambu_helpers import (
     add_buffer,
     add_extruder,
@@ -1798,8 +1796,8 @@ class TestChildCommandGetattr:
 
 class TestResetHome:
     """
-    AFC_RESET_MAPPING, through the chain master's wrap of AFC's real
-    AFC_spool, puts every claimed Bambu lane on its home T#.
+    AFC_RESET_MAPPING, through the chain master's afc:reset_mapping handler
+    and AFC's real AFC_spool, puts every claimed Bambu lane on its home T#.
 
     The printer has twelve lanes on a non-Bambu unit (lane0-lane11 on
     T0-T11) ahead of the pool: AMS bays lane12-15, lane16-19, lane20-23,
@@ -1824,8 +1822,7 @@ class TestResetHome:
                  var: Optional[Dict[str, Any]] = None,
                  owners: Optional[str] = None,
                  box: Optional[Dict[int, Tuple[List[str], List[str]]]] = None,
-                 print_state: Optional[str] = None,
-                 ready: bool = True) -> afcBridgeBox:
+                 print_state: Optional[str] = None) -> afcBridgeBox:
         """
         chain1 with AAAA, BBBB and HHHH recorded and online, AFC's real
         AFC_spool, and the Box unit ahead of it.
@@ -1835,8 +1832,8 @@ class TestResetHome:
         :param box: Box lane number -> (its T#s, its config map:); the
             others are on T<number> with no config map:
         :param print_state: print_stats state
-        :param ready: run klippy:ready's handler, which wraps the reset
-        :return afcBridgeBox: the master; its logger is AFC's
+        :return afcBridgeBox: the master, klippy:ready's handler run; its
+            logger is AFC's
         """
         printer = make_printer(monkeypatch=monkeypatch, fabricate=True,
                                print_state=print_state)
@@ -1863,8 +1860,7 @@ class TestResetHome:
             maps, config = (box or {}).get(n, ([f"T{n}"], []))
             lanes.append(_p1_other(afc, f"lane{n}", maps, config))
         afc.units = dict(Box=cls._Box(lanes), **afc.units)
-        if ready:
-            m._scout_ready()
+        m._scout_ready()
         return m
 
     @staticmethod
@@ -2028,10 +2024,10 @@ class TestResetHome:
             self.HOMES)
         assert snap["Box"]["lane0"]["map"] == "T0"
         assert m.logger.messages == [
+            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
+                      "lanes on their home T#s: lane28 T16->T28."),
             ("info", "T16 remain, removing these mappings"),
-            ("info", "Tool mappings reset"),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset put the Bambu "
-                      "lanes on their home T#s: lane28 T16->T28.")]
+            ("info", "Tool mappings reset")]
         assert (cmd.messages, m.printer.gcode.messages) == ([], [])
 
     def test_every_bay_claimed(self, tmp_path, monkeypatch):
@@ -2101,9 +2097,9 @@ class TestResetHome:
             T28="lane28")
         self._consistent(m)
         assert m.logger.messages == [
-            ("info", "Tool mappings reset"),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset put the Bambu "
-                      "lanes on their home T#s: lane28 T3->T28.")]
+            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
+                      "lanes on their home T#s: lane28 T3->T28."),
+            ("info", "Tool mappings reset")]
 
     @pytest.mark.parametrize("how", ["AFC_RESET_MAPPING",
                                      "AFC_ENABLE_MULTIPLE_MAPPING ENABLE=0"])
@@ -2117,17 +2113,17 @@ class TestResetHome:
         assert self._maps(m, "lane28", "lane2") == {"lane28": ["T28", "T2"],
                                                     "lane2": []}
         self._quiet(m)
-        moved = ("debug", "AFC_BridgeBox chain1: the mapping reset put the "
+        moved = ("debug", "AFC_BridgeBox chain1: the mapping reset puts the "
                           "Bambu lanes on their home T#s: lane28 T28+T2->T28.")
         if how == "AFC_RESET_MAPPING":
             self._reset(m)
-            expected = [("info", "Tool mappings reset"), moved]
+            expected = [moved, ("info", "Tool mappings reset")]
         else:
             spool.cmd_AFC_ENABLE_MULTIPLE_MAPPING(FakeGcmd({"ENABLE": 0}))
             expected = [
                 ("info", "Multiple T(n) mapping per lane and virtual tools "
                          "has been disabled"),
-                ("info", "Tool mappings reset"), moved,
+                moved, ("info", "Tool mappings reset"),
                 ("info", "\n<span class=info--text>Key enable_multiple_mapping "
                          "not found in section AFC added to AFC_auto_vars.cfg "
                          "file</span>")]
@@ -2164,20 +2160,20 @@ class TestResetHome:
             T15="lane15", T28="lane5")
         self._consistent(m)
         assert self._saved(m)["Hot"]["lane28"]["map"] == "T11"
-        left = ("AFC_BridgeBox chain1: the mapping reset left lane28 on T11, "
-                "not its home T28: map: T28 in [AFC_stepper lane5] keeps T28 "
-                "for lane5. Set that map: outside T12-T28 to have lane28 on "
-                "T28.")
+        left = ("AFC_BridgeBox chain1: the mapping reset numbers lane28 as "
+                "any other lane, not on its home T28: map: T28 in "
+                "[AFC_stepper lane5] keeps T28 for lane5. Set that map: "
+                "outside T12-T28 to have lane28 on T28.")
         # The claim had moved lane5 to T29; the reset drops it.
         assert m.logger.messages == [
+            ("warning", left),
             ("info", "T29 remain, removing these mappings"),
-            ("info", "Tool mappings reset"),
-            ("warning", left)]
+            ("info", "Tool mappings reset")]
         # Said once a session; AFC.log after that.
         self._quiet(m)
         self._reset(m)
-        assert m.logger.messages == [("info", "Tool mappings reset"),
-                                     ("debug", left)]
+        assert m.logger.messages == [("debug", left),
+                                     ("info", "Tool mappings reset")]
 
     @classmethod
     def _waiting(cls, m: afcBridgeBox) -> None:
@@ -2211,11 +2207,11 @@ class TestResetHome:
             T28="lane28")
         self._consistent(m)
         assert m.logger.messages == [
-            ("info", "Tool mappings reset"),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset put the Bambu "
+            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
                       "lanes on their home T#s: lane28 NONE->T28."),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset mapped "
-                      "lane28, so the T#s it waited for are not taken.")]
+            ("debug", "AFC_BridgeBox chain1: the mapping reset maps "
+                      "lane28, so the T#s it waited for are not taken."),
+            ("info", "Tool mappings reset")]
         # The print ends: nothing is left to take.
         m.printer.set_print_state("complete")
         self._quiet(m)
@@ -2225,12 +2221,11 @@ class TestResetHome:
         assert m.logger.messages == []
         assert drain_var_writes(m.printer) == []
 
-    def test_a_failed_reset_puts_the_wait_and_the_maps_back(
+    def test_a_reset_whose_save_fails_still_drops_the_wait(
             self, tmp_path, monkeypatch):
         m = self._printer(tmp_path, monkeypatch, box={11: (["T28"], [])})
         self._waiting(m)
         afc = m.printer.afc
-        entry = dict(m._deferred_takes["lane28"])
         save_vars = afc.save_vars
 
         def full_disk() -> None:
@@ -2241,58 +2236,30 @@ class TestResetHome:
         self._quiet(m)
         with pytest.raises(RuntimeError, match="disk full"):
             self._reset(m)
-        assert m._deferred_takes == {"lane28": entry}
-        assert {n: self._lane(m, f"lane{n}")._map
-                for n in (12, 13, 14, 15, 28)} == dict.fromkeys(
-            (12, 13, 14, 15, 28), [])
-        # AFC's reset mapped the lanes before its save failed.
+        # AFC's reset mapped the lanes before its save failed, so the take
+        # would put back the map the reset replaced.
+        assert m._deferred_takes == {}
         assert self._maps(m, "lane28", "lane11") == {"lane28": ["T28"],
                                                      "lane11": ["T11"]}
         assert afc.tool_cmds == self._table(T12="lane12", T13="lane13",
                                             T14="lane14", T15="lane15",
                                             T28="lane28")
-        # A failed reset says nothing of the lanes.
-        assert (m.logger.messages, m.printer.gcode.messages) == ([], [])
-        # The next reset that goes through takes the wait's place. The
-        # failed one left lane28 on T28 already, so nothing moved to report.
+        # No Bambu lane's map: is touched.
+        assert {n: self._lane(m, f"lane{n}")._map
+                for n in (12, 13, 14, 15, 28)} == dict.fromkeys(
+            (12, 13, 14, 15, 28), [])
+        assert m.logger.messages == [
+            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
+                      "lanes on their home T#s: lane28 NONE->T28."),
+            ("debug", "AFC_BridgeBox chain1: the mapping reset maps "
+                      "lane28, so the T#s it waited for are not taken.")]
+        # The next reset saves it, with nothing left to move.
         afc.save_vars = save_vars
         self._quiet(m)
         self._reset(m)
         assert self._lane(m, "lane28").map == ["T28"]
-        assert m._deferred_takes == {}
         assert self._saved(m)["Hot"]["lane28"]["map"] == "T28"
-        assert m.logger.messages == [
-            ("info", "Tool mappings reset"),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset mapped "
-                      "lane28, so the T#s it waited for are not taken.")]
-
-    def test_the_maps_come_back_when_the_reset_raises(
-            self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch, ready=False)
-        spool = m.printer.afc.spool
-        seen: Dict[str, List[str]] = {}
-
-        def boom(*args: Any, **kwargs: Any) -> None:
-            """AFC's reset, recording each lane's map: and failing."""
-            seen.update({n: list(self._lane(m, n)._map)
-                         for n in ("lane12", "lane28", "lane0")})
-            raise RuntimeError("reset failed")
-
-        spool._reset_mapping = boom
-        m._scout_ready()
-        assert spool._reset_mapping.__wrapped__ is boom
-        self._claimed(m, self.A, self.H)
-        self._quiet(m)
-        with pytest.raises(RuntimeError, match="reset failed"):
-            self._reset(m)
-        # During the call each Bambu lane had its home T# as its map:...
-        assert seen == {"lane12": ["T12"], "lane28": ["T28"], "lane0": []}
-        # ...and after it, the map: it had before.
-        assert {n: self._lane(m, f"lane{n}")._map
-                for n in (0, 12, 13, 14, 15, 28)} == dict.fromkeys(
-            (0, 12, 13, 14, 15, 28), [])
-        assert self._lane(m, "lane28").map == ["T28"]
-        assert m.logger.messages == []
+        assert m.logger.messages == [("info", "Tool mappings reset")]
 
     @classmethod
     def _two_tools(cls, tmp_path: pathlib.Path,
@@ -2381,12 +2348,12 @@ class TestResetHome:
             T16="lane28", T28="lane5")
         self._consistent(m)
         assert m.logger.messages == [
+            ("warning", "AFC_BridgeBox chain1: the mapping reset numbers "
+                        "lane28 as any other lane, not on its home T28: map: "
+                        "T28 in [AFC_stepper lane5] keeps T28 for lane5. Set "
+                        "that map: outside T12-T28 to have lane28 on T28."),
             ("info", "T5 remain, removing these mappings"),
-            ("info", "Tool mappings reset"),
-            ("warning", "AFC_BridgeBox chain1: the mapping reset left lane28 "
-                        "on T16, not its home T28: map: T28 in [AFC_stepper "
-                        "lane5] keeps T28 for lane5. Set that map: outside "
-                        "T12-T28 to have lane28 on T28.")]
+            ("info", "Tool mappings reset")]
 
     @pytest.mark.parametrize("force", [False, True])
     def test_the_reset_leaves_the_lane_to_afc(self, tmp_path, monkeypatch,
@@ -2435,17 +2402,17 @@ class TestResetHome:
         self._box_is_numbered_1_to_1(m)
         self._consistent(m)
         assert self._saved(m)["Hot"]["lane28"]["map"] == "T16"
-        left = ("AFC_BridgeBox chain1: the mapping reset left lane28 on T16, "
-                "not its home T28: T28 is a macro other than AFC's "
-                "CHANGE_TOOL, which AFC does not replace. Remove or rename "
-                "that macro to have lane28 on T28.")
-        assert m.logger.messages == [("info", "Tool mappings reset"),
-                                     ("warning", left)]
+        left = ("AFC_BridgeBox chain1: the mapping reset numbers lane28 as "
+                "any other lane, not on its home T28: T28 is a macro other "
+                "than AFC's CHANGE_TOOL, which AFC does not replace. Remove "
+                "or rename that macro to have lane28 on T28.")
+        assert m.logger.messages == [("warning", left),
+                                     ("info", "Tool mappings reset")]
         # Said once a session; AFC.log after that.
         self._quiet(m)
         self._reset(m)
-        assert m.logger.messages == [("info", "Tool mappings reset"),
-                                     ("debug", left)]
+        assert m.logger.messages == [("debug", left),
+                                     ("info", "Tool mappings reset")]
 
     def test_a_lane_already_on_it_stays_and_the_macro_too(
             self, tmp_path, monkeypatch):
@@ -2468,10 +2435,11 @@ class TestResetHome:
         self._consistent(m, macros=("T28",))
         assert m.logger.messages == [("info", "Tool mappings reset")]
 
-    def test_the_warning_says_when_the_tool_it_got_is_a_macro(
+    def test_afc_says_when_the_tool_it_numbers_the_lane_on_is_a_macro(
             self, tmp_path, monkeypatch):
         # lane5's config holds T28, and T11, where AFC's reset numbers the
-        # HT, is a macro (lane11 is on T40).
+        # HT, is a macro (lane11 is on T40). The warning comes before AFC
+        # numbers the HT, and AFC's own error names the macro.
         m = self._printer(tmp_path, monkeypatch,
                           box={5: (["T28"], ["T28"]), 11: (["T40"], [])})
         m.printer.gcode.register_command("T11", _p1_user_macro)
@@ -2482,17 +2450,14 @@ class TestResetHome:
         assert m.printer.gcode.ready_gcode_handlers["T11"] is _p1_user_macro
         self._consistent(m, macros=("T11",))
         assert m.logger.messages == [
+            ("warning", "AFC_BridgeBox chain1: the mapping reset numbers "
+                        "lane28 as any other lane, not on its home T28: map: "
+                        "T28 in [AFC_stepper lane5] keeps T28 for lane5. Set "
+                        "that map: outside T12-T28 to have lane28 on T28."),
             ("error", "Error trying to map lane lane28 to T11, please make "
                       "sure there are no macros already setup for T11"),
             ("info", "T29, T40 remain, removing these mappings"),
-            ("info", "Tool mappings reset"),
-            ("warning", "AFC_BridgeBox chain1: the mapping reset left lane28 "
-                        "on T11, not its home T28: map: T28 in [AFC_stepper "
-                        "lane5] keeps T28 for lane5. Set that map: outside "
-                        "T12-T28 to have lane28 on T28. T11 is a macro other "
-                        "than AFC's CHANGE_TOOL, so it does not select "
-                        "lane28: SET_MAP LANE=lane28 MAP=<T#> gives it a T# "
-                        "that does.")]
+            ("info", "Tool mappings reset")]
 
 
 class TestAfcBridgeBoxInit:
@@ -2707,12 +2672,6 @@ class TestAfcBridgeBoxInit:
         assert m._dry_note == note
         assert _bbx_ready(m) == [
             ("warning", note),
-            ("debug", "AFC_BridgeBox chain1: AFC has no var-file write "
-                      "queue; the records of a bay no unit is claimed onto "
-                      "are held for this session only"),
-            ("debug", "AFC_BridgeBox chain1: AFC has no mapping reset to "
-                      "wrap; AFC_RESET_MAPPING numbers the Bambu lanes as "
-                      "any other lane"),
             ("warning", "AFC_BridgeBox chain1: could not open the bridge for "
                         "scouting (could not open port "
                         "/dev/serial/by-id/usb-chain1-if00); will keep "
@@ -10284,49 +10243,6 @@ class TestAfcBridgeBoxScoutReady:
         assert _p3_log(m) == []
         assert _p3_console(m) == []
 
-    def test_the_writers_stop_passes_and_the_hook_is_set_once(
-            self, tmp_path, monkeypatch):
-        m = _p3_named(tmp_path, monkeypatch, var=self.VAR,
-                      owners="AAAA:Alpha", ready=False)
-        afc = m.printer.afc
-        inner = afc._var_write_queue
-        _p3_quiet(m)
-        m._scout_ready()
-        assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
-                      "records of Alpha for their units")]
-        assert _p3_console(m) == []
-        hook = afc._var_write_queue
-        assert hook is not inner
-        _p3_quiet(m)
-        m._scout_ready()
-        assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
-                      "records of Alpha for their units")]
-        assert _p3_console(m) == []
-        assert afc._var_write_queue is hook
-        # The writer's stop sentinel reaches AFC's queue as it is.
-        stop = object()
-        hook.put_nowait(stop)
-        assert inner.get_nowait() is stop
-        assert inner.empty()
-
-    def test_an_afc_without_the_queue_is_left_alone(self, tmp_path,
-                                                    monkeypatch):
-        m = _p3_named(tmp_path, monkeypatch, var=self.VAR,
-                      owners="AAAA:Alpha", ready=False)
-        afc = m.printer.afc
-        del afc._var_write_queue
-        _p3_quiet(m)
-        m._scout_ready()
-        assert hasattr(afc, "_var_write_queue") is False
-        assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
-                      "records of Alpha for their units"),
-            ("debug", "AFC_BridgeBox chain1: AFC has no var-file write "
-                      "queue; the records of a bay no unit is claimed onto "
-                      "are held for this session only")]
-
 
 class TestAfcBridgeBoxCaptureBootRecords:
     """What klippy:ready holds, and when it holds nothing."""
@@ -10471,8 +10387,11 @@ class TestAfcBridgeBoxMovedBayRecords:
             "lane27": {"tool_loaded": False}}
 
 
-class TestAfcBridgeBoxHookReset:
-    """AFC_RESET_MAPPING puts this chain's claimed lanes on their home T#."""
+class TestAfcBridgeBoxHandleResetMapping:
+    """
+    AFC_RESET_MAPPING keeps this chain's claimed lanes on their home T#,
+    through the master's afc:reset_mapping handler.
+    """
 
     class _Box:
         """A non-Bambu unit."""
@@ -10482,41 +10401,28 @@ class TestAfcBridgeBoxHookReset:
             self.name = "Box"
             self.lanes = {lane.name: lane for lane in lanes}
 
-    class _BareSpool:
-        """An AFC_spool with no mapping reset."""
-
-        def __init__(self, afc: Any) -> None:
-            """:param afc: the AFC core"""
-            self.afc = afc
-
     @classmethod
     def _printer(cls, tmp_path: pathlib.Path,
-                 monkeypatch: pytest.MonkeyPatch, *, ready: bool = True,
-                 online: bool = True, box: bool = False) -> afcBridgeBox:
+                 monkeypatch: pytest.MonkeyPatch) -> afcBridgeBox:
         """
-        :param ready: run klippy:ready's handler
-        :param online: wire the chain's bridge, AAAA, BBBB and HHHH online
-        :param box: put a non-Bambu unit first, its lane0 on T0
-        :return afcBridgeBox: AAAA, BBBB and HHHH rostered on four AMS bays
-            from lane12 and an HT bay on lane28, with AFC's real AFC_spool
-            and no Moonraker
+        :return afcBridgeBox: AAAA, BBBB and HHHH rostered and online on four
+            AMS bays from lane12 and an HT bay on lane28, with AFC's real
+            AFC_spool, no Moonraker, and a non-Bambu unit first, its lane0
+            on T0
         """
         m = _p3_chain(tmp_path, monkeypatch,
                       roster=f"boxed:{A}, boxed:{B}, ht:{H}", pool_ams=4,
                       pool_ht=1, ams_names="Alpha, Bravo, Charlie, Delta",
-                      ht_names="Hot", lane_base=12,
-                      online=(A, B, H) if online else None,
+                      ht_names="Hot", lane_base=12, online=(A, B, H),
                       uids=(A, B, "", "", H), htmask=1 << 4)
         make_afc_spool(m.printer)
         afc = m.printer.afc
         afc.moonraker = None
-        if box:
-            lane0 = _P3OtherLane("lane0", ["T0"])
-            afc.units = dict(Box=cls._Box([lane0]), **afc.units)
-            afc.lanes["lane0"] = lane0
-            afc.tool_cmds["T0"] = "lane0"
-        if ready:
-            m._scout_ready()
+        lane0 = _P3OtherLane("lane0", ["T0"])
+        afc.units = dict(Box=cls._Box([lane0]), **afc.units)
+        afc.lanes["lane0"] = lane0
+        afc.tool_cmds["T0"] = "lane0"
+        m._scout_ready()
         return m
 
     @staticmethod
@@ -10526,87 +10432,60 @@ class TestAfcBridgeBoxHookReset:
         m.printer.afc.spool.cmd_AFC_RESET_MAPPING(cmd)
         return cmd
 
-    def test_it_is_set_once_per_spool_object(self, tmp_path, monkeypatch):
-        # The next start's master of the same chain, on files of its own;
-        # built first, as each start has a bridge table of its own.
-        (tmp_path / "again").mkdir()
-        again = self._printer(tmp_path / "again", monkeypatch, ready=False,
-                              online=False)
-        m = self._printer(tmp_path, monkeypatch, ready=False, box=True)
+    def test_the_reset_keeps_the_claimed_lane_on_its_home_tool(
+            self, tmp_path, monkeypatch):
+        m = self._printer(tmp_path, monkeypatch)
         afc = m.printer.afc
-        spool = afc.spool
-        calls: List[tuple] = []
-        real = spool._reset_mapping
-
-        def counted(*args: Any, **kwargs: Any) -> Any:
-            """AFC's reset, counted."""
-            calls.append(args)
-            return real(*args, **kwargs)
-
-        spool._reset_mapping = counted
-        m._scout_ready()
-        wrapped = spool._reset_mapping
-        assert wrapped.__wrapped__ is counted
-        m._hook_reset(afc)
-        # The next start's master takes the old one's place on the same
-        # wrap.
-        again._hook_reset(afc)
-        assert spool._reset_mapping is wrapped
-        assert spool._bridgebox_reset_masters == {"chain1": again}
         assert m._claim_pool_unit(H, "ht") is not None
         lane = _p3_lane(m, "lane28")
         _p3_quiet(m)
         cmd = self._reset(m)
-        assert len(calls) == 1
-        assert (lane.map, lane.current_map) == (["T28"], "T28")
+        assert (lane.map, lane.current_map, lane._map) == (["T28"], "T28", [])
         # AFC numbers the Box's lane around it.
         assert afc.lanes["lane0"].map == ["T0"]
         assert afc.tool_cmds == {"T0": "lane0", "T28": "lane28"}
         assert cmd.messages == []
         assert _p3_log(m) == [("info", "Tool mappings reset")]
 
-    def test_a_restart_wraps_the_new_spool_object_not_the_class(
+    def test_it_adds_each_claimed_lane_to_what_others_keep(
             self, tmp_path, monkeypatch):
         m = self._printer(tmp_path, monkeypatch)
-        own = AFCSpool.__dict__["_reset_mapping"]
-        assert m.printer.afc.spool._reset_mapping.__wrapped__.__func__ is own
-        # RESTART: a new spool object; this module and its class stay.
-        afc = m.printer.afc
-        fresh = make_afc_spool()
-        assert "_reset_mapping" not in vars(fresh)
-        fresh.afc, fresh.function = afc, afc.function
-        fresh.gcode, fresh.logger = afc.gcode, afc.logger
-        afc.spool = fresh
+        assert m._claim_pool_unit(H, "ht") is not None
         _p3_quiet(m)
-        m._hook_reset(afc)
+        kept = {"lane0": "T5"}
+        m._handle_reset_mapping(kept)
+        assert kept == {"lane0": "T5", "lane28": "T28"}
         assert _p3_log(m) == []
-        assert fresh._reset_mapping.__wrapped__.__func__ is own
-        assert hasattr(own, "__wrapped__") is False
+
+    def test_a_plan_that_fails_leaves_the_lanes_to_afc(self, tmp_path,
+                                                       monkeypatch):
+        m = self._printer(tmp_path, monkeypatch)
         assert m._claim_pool_unit(H, "ht") is not None
         lane = _p3_lane(m, "lane28")
+
+        def broken(afc: Any) -> Dict[str, Any]:
+            """The plan, failing."""
+            raise RuntimeError("plan failed")
+
+        monkeypatch.setattr(m, "_reset_home_plan", broken)
+        kept: Dict[str, str] = {}
+        m._handle_reset_mapping(kept)
+        assert kept == {}
         _p3_quiet(m)
         cmd = self._reset(m)
-        assert (lane.map, lane.current_map) == (["T28"], "T28")
+        # AFC numbers it as any lane with no map:, after the Box's lane0,
+        # and drops T28.
+        assert (lane.map, lane.current_map) == (["T1"], "T1")
+        assert m.printer.afc.tool_cmds == {"T0": "lane0", "T1": "lane28"}
         assert cmd.messages == []
-        assert _p3_log(m) == [("info", "Tool mappings reset")]
+        assert _p3_log(m) == [("info", "T28 remain, removing these mappings"),
+                              ("info", "Tool mappings reset")]
 
-    def test_a_spool_object_without_a_reset_is_left_alone(self, tmp_path,
-                                                          monkeypatch):
-        m = self._printer(tmp_path, monkeypatch, ready=False)
-        afc = m.printer.afc
-        bare = self._BareSpool(afc)
-        afc.spool = bare
-        _p3_quiet(m)
-        m._scout_ready()
-        assert vars(bare) == {"afc": afc}
-        assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: AFC has no mapping reset to "
-                      "wrap; AFC_RESET_MAPPING numbers the Bambu lanes as "
-                      "any other lane")]
-        assert _hook_reset_mapping(None, m) is False
-        assert m._claim_pool_unit(H, "ht") is not None
-        lane = _p3_lane(m, "lane28")
-        assert (lane.map, lane.current_map) == (["T28"], "T28")
+    def test_the_master_handles_each_event_once(self, tmp_path, monkeypatch):
+        m = self._printer(tmp_path, monkeypatch)
+        handlers = m.printer._event_handlers
+        assert handlers["afc:reset_mapping"] == [m._handle_reset_mapping]
+        assert handlers["afc:save_vars"] == [m._handle_save_vars]
 
 
 class TestAfcBridgeBoxFillHeldBays:
@@ -10733,6 +10612,23 @@ class TestAfcBridgeBoxFillHeldBays:
         lane24 = self._lane(again, "lane24")
         assert (lane24.spool_id, lane24.material, lane24.color,
                 lane24.weight) == (159, "PLA", "#0086D6", 412.0)
+
+    def test_a_fault_in_the_fill_never_costs_afc_its_save(self, tmp_path,
+                                                         monkeypatch):
+        m = self._chain(tmp_path, monkeypatch, var=self.VAR)
+
+        def broken(data: Dict[str, Any]) -> None:
+            """The fill, failing."""
+            raise RuntimeError("fill failed")
+
+        monkeypatch.setattr(m, "_fill_held_bays", broken)
+        _p4_quiet(m)
+        m.printer.afc.save_vars()
+        (snap,) = drain_var_writes(m.printer)
+        # Saved as AFC built it: the unclaimed bays empty.
+        assert self._bays(snap) == {"Alpha": {}, "Bravo": {}, "Charlie": {},
+                                    "Hot": {}}
+        assert m.logger.messages == []
 
     def test_the_file_keeps_its_own_copy(self, tmp_path, monkeypatch):
         m = self._chain(tmp_path, monkeypatch, var=self.VAR)

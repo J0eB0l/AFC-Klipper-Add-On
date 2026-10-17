@@ -4785,6 +4785,19 @@ class TestSaveVars:
         assert data["system"]["bypass"] == {"enabled": False}
         assert data["system"]["extruders"]["extruder"]["lane_loaded"] == "lane1"
 
+    def test_listeners_add_to_the_snapshot_before_it_is_queued(self):
+        """afc:save_vars hands listeners the snapshot, so what they add is saved."""
+        obj = _make_afc_for_save_vars(prep_done=True)
+
+        def add_bay(data):
+            data["Pool_1"] = {"lane9": {"map": "T9"}}
+
+        obj.printer.register_event_handler("afc:save_vars", add_bay)
+        obj.save_vars()
+        data = obj._var_write_queue.put_nowait.call_args[0][0]
+        assert data["Pool_1"] == {"lane9": {"map": "T9"}}
+        assert data["Turtle_1"]["lane1"] == {"map": ["T0"]}
+
     def test_does_not_touch_disk_directly(self):
         """The actual write must happen on the background thread, not inline."""
         obj = _make_afc_for_save_vars(prep_done=True)

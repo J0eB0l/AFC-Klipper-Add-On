@@ -614,178 +614,6 @@ class _ChildCommand:
         return getattr(self._parent, attr)
 
 
-class _HeldBaysQueue:
-    """
-    AFC's var-file write queue, as a chain master sees it.
-
-    AFC.save_vars writes each unit's registered lanes and hands the snapshot
-    to this queue for its background writer, so a pool bay no unit is
-    claimed onto is saved empty. Each snapshot passes through the master
-    first, which writes the lane records it holds for such a bay, and the
-    planned T# map of a lane whose take waits for the print (see
-    afcBridgeBox._fill_held_bays); everything else reaches AFC's queue as
-    it was.
-    """
-
-    def __init__(self, inner: Any, fill: Callable[[Dict[str, Any]], None]
-                 ) -> None:
-        """
-        Wrap AFC's writer queue so each snapshot is filled in before it is queued.
-
-        :param inner: the queue AFC's writer reads
-        :param fill: called with each snapshot before it is queued
-        """
-        self._inner = inner
-        self._fill = fill
-
-    def _pass(self, item: Any) -> None:
-        """
-        Fill in a snapshot before it reaches the queue.
-
-        :param item: a snapshot, or the writer's stop sentinel
-        """
-        if isinstance(item, dict):
-            try:
-                self._fill(item)
-            except Exception:
-                pass
-
-    def put_nowait(self, item: Any) -> Any:
-        """
-        Fill in and queue an item without blocking.
-
-        :param item: what AFC queues for its writer
-        :return object: what AFC's queue returns
-        """
-        self._pass(item)
-        return self._inner.put_nowait(item)
-
-    def put(self, item: Any, *args: Any, **kwargs: Any) -> Any:
-        """
-        Fill in and queue an item.
-
-        :param item: what AFC queues for its writer
-        :param args: queue.put's positional options
-        :param kwargs: queue.put's keyword options
-        :return object: what AFC's queue returns
-        """
-        self._pass(item)
-        return self._inner.put(item, *args, **kwargs)
-
-    def __getattr__(self, attr: str) -> Any:
-        """
-        Fall back to AFC's queue for anything else.
-
-        :param attr: any other queue attribute (the writer's get)
-        :return object: AFC's queue's attribute
-        """
-        inner = self.__dict__.get("_inner")
-        if inner is None:
-            raise AttributeError(attr)
-        return getattr(inner, attr)
-
-
-#: The attribute on AFC's spool object naming the chain masters its wrapped
-#: _reset_mapping serves (see _hook_reset_mapping).
-_RESET_MASTERS = "_bridgebox_reset_masters"
-
-
-def _hook_reset_mapping(spool: Any, master: Any) -> bool:
-    """
-    Have AFC's mapping reset put every claimed Bambu lane on its home T#.
-
-    AFC_spool._reset_mapping, which AFC_RESET_MAPPING and
-    AFC_ENABLE_MULTIPLE_MAPPING ENABLE=0 run, gives each lane with a config
-    map: that T# and numbers every other lane from T0 up in unit order. A
-    pool lane has no map: (a claim gives it its home T#, see
-    afcBridgeBox._map_claimed_lanes), so the reset would number it like any
-    other lane: an HT on lane28 behind sixteen lanes comes out T16, and its
-    saved map keeps T16 across restarts. The wrapped reset gives each
-    claimed Bambu lane its home T# as its map: for the call only (see
-    afcBridgeBox._reset_home_plan), so AFC numbers every other lane around
-    it, unregisters what no lane has any more, and saves, as it does around
-    a config map:.
-
-    The wrap is set on the spool object, not on its class: a Klipper RESTART
-    builds a new spool object and keeps this module, so a wrapped class would
-    be wrapped again at every restart. One wrap serves every chain master on
-    the printer: a second install (another chain, or the same chain's ready
-    again) adds its master, and a master of the same name replaces the one
-    before it.
-
-    :param spool: AFC's AFC_spool object
-    :param master: the chain master whose lanes the reset puts home
-    :return bool: True when the reset is wrapped, False when there is no
-        _reset_mapping to wrap
-    """
-    orig = getattr(spool, "_reset_mapping", None)
-    if not callable(orig):
-        return False
-    masters = getattr(spool, _RESET_MASTERS, None)
-    if not isinstance(masters, dict):
-        masters = {}
-
-        def _reset_mapping(*args: Any, **kwargs: Any) -> Any:
-            """
-            AFC's _reset_mapping, with each claimed Bambu lane on its home T#.
-
-            :param args: the reset's arguments
-            :param kwargs: the reset's keyword arguments
-            :return object: what AFC's reset returns
-            """
-            return _reset_home(spool, orig, masters, args, kwargs)
-
-        _reset_mapping.__wrapped__ = orig  # type: ignore[attr-defined]
-        spool._reset_mapping = _reset_mapping
-        setattr(spool, _RESET_MASTERS, masters)
-    masters[getattr(master, "name", "")] = master
-    return True
-
-
-def _reset_home(spool: Any, orig: Callable[..., Any],
-                masters: Dict[str, Any], args: Tuple[Any, ...],
-                kwargs: Dict[str, Any]) -> Any:
-    """
-    Run AFC's _reset_mapping with each claimed Bambu lane's home T# as its
-    map: (see _hook_reset_mapping).
-
-    Every lane's map: is back to what it was when the call returns or
-    raises. A master whose plan fails leaves its lanes to AFC's numbering.
-
-    :param spool: AFC's AFC_spool object
-    :param orig: its own _reset_mapping
-    :param masters: chain master name -> master
-    :param args: the reset's arguments
-    :param kwargs: the reset's keyword arguments
-    :return object: what AFC's reset returns
-    """
-    afc = getattr(spool, "afc", None)
-    plans: List[Tuple[Any, Dict[str, Any]]] = []
-    for master in list(masters.values()):
-        try:
-            plans.append((master, master._reset_home_plan(afc)))
-        except Exception:
-            pass
-    given: List[Tuple[Any, Any]] = []
-    ok = False
-    try:
-        for _master, plan in plans:
-            for lane, home in plan["home"]:
-                given.append((lane, lane._map))
-                lane._map = [home]
-        result = orig(*args, **kwargs)
-        ok = True
-        return result
-    finally:
-        for lane, was in reversed(given):
-            lane._map = was
-        for master, plan in plans:
-            try:
-                master._reset_home_done(plan, ok)
-            except Exception:
-                pass
-
-
 class _SweptSection:
     """
     Stands in for a leftover auto_vars section klippy parsed at this start
@@ -1086,6 +914,10 @@ class afcBridgeBox:
         # run first and the first unit owns the bridge; a scout-created bridge
         # would leave every unit on the ownerless "sharing" path.
         self.printer.register_event_handler("klippy:ready", self._scout_ready)
+        self.printer.register_event_handler("afc:save_vars",
+                                            self._handle_save_vars)
+        self.printer.register_event_handler("afc:reset_mapping",
+                                            self._handle_reset_mapping)
 
     # ── pure parts, split out so tests can exercise them directly ───────────
 
@@ -4559,30 +4391,14 @@ class afcBridgeBox:
                 f"AFC_BridgeBox {self.name}: {note}")
         self._learned_notes = []
         # Before PREP's first save, which AFC would write with every unclaimed
-        # bay empty; the hook has each save write the records held for them.
+        # bay empty; each save then writes the records held for them (see
+        # _handle_save_vars).
         try:
             self._capture_boot_records()
         except Exception as e:
             try:
                 self.logger.debug(
                     f"AFC_BridgeBox {self.name}: no saved lane records held "
-                    f"({e})")
-            except Exception:
-                pass
-        try:
-            self._hook_var_writes(afc)
-        except Exception as e:
-            try:
-                self.logger.debug(
-                    f"AFC_BridgeBox {self.name}: var-file hook not set ({e})")
-            except Exception:
-                pass
-        try:
-            self._hook_reset(afc)
-        except Exception as e:
-            try:
-                self.logger.debug(
-                    f"AFC_BridgeBox {self.name}: mapping reset hook not set "
                     f"({e})")
             except Exception:
                 pass
@@ -4757,49 +4573,49 @@ class afcBridgeBox:
             out[now] = rec
         return out
 
-    def _hook_var_writes(self, afc: Any) -> None:
+    def _handle_save_vars(self, data: Dict[str, Any]) -> None:
         """
-        Pass AFC's var-file saves through _fill_held_bays.
+        Fill in AFC's var-file snapshot with what this chain holds for its
+        bays (see _fill_held_bays), on AFC's afc:save_vars.
 
-        AFC.save_vars hands each snapshot to its background writer through
-        _var_write_queue, which the hook wraps (_HeldBaysQueue), once per
-        chain. An AFC with no such queue is left alone: its saves write a
-        bay no unit is claimed onto empty, and the bay's records are held for
-        this session only.
+        A fault here is dropped, so it cannot cost AFC its save.
 
-        :param afc: the AFC object
+        :param data: the snapshot AFC.save_vars is about to write
         """
-        if afc is None or getattr(self, "_var_hook", None) is not None:
+        try:
+            self._fill_held_bays(data)
+        except Exception:
+            pass
+
+    def _handle_reset_mapping(self, kept: Dict[str, str]) -> None:
+        """
+        Keep each claimed Bambu lane on its home T# through AFC's mapping
+        reset, on AFC's afc:reset_mapping.
+
+        AFC_spool._reset_mapping, which AFC_RESET_MAPPING and
+        AFC_ENABLE_MULTIPLE_MAPPING ENABLE=0 run, gives each lane with a
+        config map: that T# and numbers every other lane from T0 up in unit
+        order. A pool lane has no map: (a claim gives it its home T#, see
+        _map_claimed_lanes), so the reset would number it like any other
+        lane: an HT on lane28 behind sixteen lanes would come out T16. Each
+        lane _reset_home_plan puts home goes in ``kept``, which the reset
+        keeps as it keeps a config map:, so AFC numbers every other lane
+        around it. A plan that fails leaves the lanes to AFC's numbering.
+
+        :param kept: lane name -> the T# AFC's reset keeps for it, filled
+            in here
+        """
+        try:
+            plan = self._reset_home_plan(
+                self.printer.lookup_object("AFC", None))
+        except Exception:
             return
-        queue = getattr(afc, "_var_write_queue", None)
-        if queue is None or not callable(getattr(queue, "put_nowait", None)):
-            self.logger.debug(
-                f"AFC_BridgeBox {self.name}: AFC has no var-file write queue; "
-                f"the records of a bay no unit is claimed onto are held for "
-                f"this session only")
-            return
-        hook = _HeldBaysQueue(queue, self._fill_held_bays)
-        afc._var_write_queue = hook
-        self._var_hook = hook
-
-    def _hook_reset(self, afc: Any) -> None:
-        """
-        Have AFC_RESET_MAPPING put this chain's claimed lanes on their home T#s
-        (see _hook_reset_mapping).
-
-        An AFC whose spool object has no _reset_mapping is left alone: its
-        reset numbers the Bambu lanes as any other lane.
-
-        :param afc: the AFC object
-        """
-        spool = getattr(afc, "spool", None) if afc is not None else None
-        if spool is None:
-            spool = self.printer.lookup_object("AFC_spool", None)
-        if not _hook_reset_mapping(spool, self):
-            self.logger.debug(
-                f"AFC_BridgeBox {self.name}: AFC has no mapping reset to "
-                f"wrap; AFC_RESET_MAPPING numbers the Bambu lanes as any "
-                f"other lane")
+        for lane, home in plan["home"]:
+            kept[lane.name] = home
+        try:
+            self._say_reset_home(plan)
+        except Exception:
+            pass
 
     def _bambu_span(self) -> Tuple[int, int]:
         """
@@ -4815,8 +4631,8 @@ class afcBridgeBox:
 
     def _reset_home_plan(self, afc: Any) -> Dict[str, Any]:
         """
-        What a mapping reset (see _hook_reset_mapping) does with this chain's
-        claimed lanes.
+        What a mapping reset (see _handle_reset_mapping) does with this
+        chain's claimed lanes.
 
         Each claimed Bambu lane takes its home T#, as AFC gives a lane its
         config map:, so the reset leaves it where every claim puts it, and a
@@ -4824,7 +4640,7 @@ class afcBridgeBox:
         A home T# that is the first T# of a lane's config map:, the one AFC's
         reset gives that lane, stays that lane's, as at any reset, and the
         Bambu lane is numbered by AFC like any lane with no map: (said once,
-        see _reset_home_done). So is a Bambu lane whose home T# is a macro
+        see _say_reset_home). So is a Bambu lane whose home T# is a macro
         other than AFC's CHANGE_TOOL: AFC's reset registers a T# without
         renaming what holds it, so the lane would be on a T# that does not
         select it, as a claim with a saved record leaves it (see
@@ -4836,8 +4652,7 @@ class afcBridgeBox:
         A T# take waiting for the print (see _map_claimed_lanes) is dropped:
         the reset gives the lane its T#, and the take would put back the
         map the reset replaced. Its save would too (see _planned_maps), so it
-        is dropped before AFC saves the reset, and put back when the reset
-        fails.
+        is dropped before AFC saves the reset.
 
         A bay no unit is claimed onto has no lanes in AFC's units, which the
         reset numbers, and is left as it is.
@@ -4889,41 +4704,26 @@ class afcBridgeBox:
                 plan["home"].append((lane, home))
         return plan
 
-    def _reset_home_done(self, plan: Dict[str, Any], ok: bool) -> None:
+    def _say_reset_home(self, plan: Dict[str, Any]) -> None:
         """
-        Say what a mapping reset did with this chain's lanes (see
-        _reset_home_plan), or, when it failed, put back the T# takes it
-        dropped.
+        Say what a mapping reset does with this chain's lanes (see
+        _reset_home_plan).
 
-        A lane whose home T# a config map: or a macro kept from it is said
+        A lane whose home T# a config map: or a macro keeps from it is said
         on the console once per session, as a claim says it (see
-        _take_home_tool), and to AFC.log at every later reset; so is the T#
-        AFC numbered it onto when that is a macro, which AFC's reset does not
-        replace and which so does not select the lane. A lane the reset
-        moved to its home T#, and a take it dropped, go to AFC.log.
+        _take_home_tool), and to AFC.log at every later reset. A lane the
+        reset puts on its home T#, and a take it drops, go to AFC.log.
 
         :param plan: what _reset_home_plan returned
-        :param ok: whether AFC's reset returned
         """
-        if not ok:
-            pending = getattr(self, "_deferred_takes", None)
-            if pending is None:
-                pending = self._deferred_takes = {}
-            for lname, entry in plan["waits"].items():
-                pending.setdefault(lname, entry)
-            return
         told: Set[Tuple[str, str, str]] = getattr(self, "_reset_told",
                                                   None) or set()
         self._reset_told = told
         lo, hi = self._bambu_span()
         afc = plan["afc"]
-        handlers = _tcmd_handlers(afc)
         for lane, home, holder in plan["left"]:
-            cmds = [m for m in getattr(lane, "map", None) or []
-                    if m != "NONE"]
-            msg = (f"AFC_BridgeBox {self.name}: the mapping reset left "
-                   f"{lane.name} on {', '.join(cmds) or 'without a T#'}, not "
-                   f"its home {home}: ")
+            msg = (f"AFC_BridgeBox {self.name}: the mapping reset numbers "
+                   f"{lane.name} as any other lane, not on its home {home}: ")
             if holder is None:
                 msg += (f"{home} is a macro other than AFC's CHANGE_TOOL, "
                         f"which AFC does not replace. Remove or rename that "
@@ -4935,13 +4735,6 @@ class afcBridgeBox:
                 msg += (f"map: {home} in [{section}] keeps {home} for "
                         f"{holder}. Set that map: outside T{lo}-T{hi} to have "
                         f"{lane.name} on {home}.")
-            for cmd in cmds:
-                handler = handlers.get(cmd)
-                if handler is not None and not _tcmd_is_ours(afc, handler):
-                    msg += (f" {cmd} is a macro other than AFC's CHANGE_TOOL, "
-                            f"so it does not select {lane.name}: SET_MAP "
-                            f"LANE={lane.name} MAP=<T#> gives it a T# that "
-                            f"does.")
             key = (lane.name, home, holder or "")
             (self.logger.debug if key in told else self.logger.warning)(msg)
             told.add(key)
@@ -4950,11 +4743,11 @@ class afcBridgeBox:
                  if plan["maps"].get(lane.name) != [home]]
         if moved:
             self.logger.debug(
-                f"AFC_BridgeBox {self.name}: the mapping reset put the Bambu "
+                f"AFC_BridgeBox {self.name}: the mapping reset puts the Bambu "
                 f"lanes on their home T#s: {', '.join(moved)}.")
         if plan["waits"]:
             self.logger.debug(
-                f"AFC_BridgeBox {self.name}: the mapping reset mapped "
+                f"AFC_BridgeBox {self.name}: the mapping reset maps "
                 f"{' and '.join(plan['waits'])}, so the T#s "
                 f"{'it' if len(plan['waits']) == 1 else 'they'} waited for "
                 f"are not taken.")
