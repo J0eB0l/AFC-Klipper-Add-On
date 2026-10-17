@@ -573,7 +573,7 @@ unit_install_additional_BridgeBox() {
 
 unit_message_BridgeBox() {
   message+="""
-- Set serial_port and extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
+- Set serial_port (USB, or tcp:// for a WiFi BridgeBox) and extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
   """
 }
 
