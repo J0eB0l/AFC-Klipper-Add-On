@@ -87,7 +87,7 @@ install_menu() {
         printf "A. Toolhead sensor pin : %s \n" "$toolhead_sensor_pin"
       fi
       fi
-      if [ "$installation_type" != "ViViD" ] && [ "$installation_type" != "OpenAMS" ]; then
+      if [ "$installation_type" != "ViViD" ] && [ "$installation_type" != "OpenAMS" ] && [ "$installation_type" != "BridgeBox" ]; then
         printf "B. Buffer type : %s \n" "$(buffer_type_label "$buffer_type")"
       fi
       unit_print_install_menu_options "$installation_type"
