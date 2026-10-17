@@ -554,11 +554,12 @@ unit_additional_menu_row_OpenAMS() {
 
 # ─── BridgeBox ───────────────────────────────────────────────────────────────
 # NOTE: no unit_buffer_target_BridgeBox adapter. Each chain builds its own
-# [AFC_buffer], so a PSF-style buffer selection is skipped with a warning.
+# [AFC_buffer] from the AMS's buffer, set to type bambu here.
 
 unit_copy_files_BridgeBox() {
   safe_copy "${afc_path}/templates/AFC_Hardware-AFC.cfg" "${afc_config_dir}/AFC_Hardware.cfg"
   safe_copy "${afc_path}/templates/AFC_BridgeBox.cfg" "${afc_config_dir}/AFC_BridgeBox.cfg"
+  sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_BridgeBox.cfg"
 }
 
 unit_install_additional_BridgeBox() {
@@ -567,13 +568,12 @@ unit_install_additional_BridgeBox() {
   safe_copy "${afc_path}/templates/AFC_BridgeBox.cfg" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   sed -i "s/^\[AFC_BridgeBox chain1\]/[AFC_BridgeBox ${boxturtle_name}]/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   sed -i "s/^\(ams_names\|ht_names\):/#\1:/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
 }
 
 unit_message_BridgeBox() {
   message+="""
 - Set serial_port and extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
-
-- See docs/bambu_hotswap.md for the bay pool, lane layout and AFC_BRIDGEBOX_* commands.
   """
 }
 

@@ -5,8 +5,6 @@
 - AFC-Klipper-Add-On python extensions installed to <WORKDIR>/klipper/klippy/extras/
 
 - Set serial_port and extruder in the <WORKDIR>/AFC/AFC_BridgeBox.cfg file.
-
-- See docs/bambu_hotswap.md for the bay pool, lane layout and AFC_BRIDGEBOX_* commands.
   
 You may now quit the script or return to the main menu.
 

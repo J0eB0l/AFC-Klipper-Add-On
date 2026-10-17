@@ -73,7 +73,9 @@ install_menu() {
       for i in "${!toggle_items[@]}"; do
         printf "%s. %s : %s\n" "$((i + 1))" "${toggle_labels[$i]}" "${!toggle_items[$i]}"
       done
-      if [ "$installation_type" != "OpenAMS" ]; then
+      if [ "$installation_type" == "BridgeBox" ]; then
+        printf "9. Use a toolhead sensor or ramming? : %s \n" "$toolhead_sensor"
+      elif [ "$installation_type" != "OpenAMS" ]; then
         printf "9. Use a toolhead sensor or ramming with a TurtleNeck buffer? : %s \n" "$toolhead_sensor"
       elif [ "$installation_type" == "OpenAMS" ]; then
         printf "9. Use a toolhead sensor or ramming with an FPS Board? : %s \n" "$toolhead_sensor"
@@ -114,6 +116,9 @@ install_menu() {
           else
             buffer_type="None"
           fi
+        elif [ "$installation_type" == "BridgeBox" ]; then
+          # The AMS's own buffer is built into each chain and can't be swapped.
+          buffer_type="Bambu"
         fi
         ;;
       [1-8])
@@ -127,6 +132,8 @@ install_menu() {
         elif [ "$installation_type" == "OpenAMS" ]; then
           message="Using ramming with an FPS board"
           buffer_type="FPS_PSF"
+        elif [ "$installation_type" == "BridgeBox" ]; then
+          message="Using ramming with the Bambu AMS buffer"
         else
           message="Using ramming with a TurtleNeck buffer"
         fi ;;
@@ -134,7 +141,7 @@ install_menu() {
         read -p "Enter toolhead sensor pin (Example: nhk:gpio13): " toolhead_sensor_pin
         message="Toolhead sensor pin set to $toolhead_sensor_pin" ;;
       B)
-        if [ "$installation_type" == "ViViD" ] || [ "$installation_type" == "OpenAMS" ]; then
+        if [ "$installation_type" == "ViViD" ] || [ "$installation_type" == "OpenAMS" ] || [ "$installation_type" == "BridgeBox" ]; then
           # Buffer type isn't a user choice for these currently.
           message="Buffer type is not selectable for $installation_type"
         else
