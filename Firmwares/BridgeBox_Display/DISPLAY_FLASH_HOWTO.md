@@ -105,40 +105,6 @@ If a new version fails to start, the panel goes back to the version it was
 running on the next start. This protection comes with the full image, so it
 works on any panel that had its first flash from this folder.
 
-## Updating the bridge from the panel
-
-The same update page can also update the bridge, with no computer on the
-printer. This needs panel version AFC-1.30 or later, so update the panel first
-if its Settings sheet shows an older one, and AFC from this same branch on the
-printer.
-
-It updates a **Pico 2 on USB** only, and refuses when the printer has more
-than one bridge. Update a BridgeBox S3, or a printer with several bridges,
-from the printer console, as in
-[BRIDGE_FLASH_HOWTO.md](../BridgeBox/BRIDGE_FLASH_HOWTO.md).
-
-1. **Make sure the printer is idle.** Klipper refuses the update during a
-   print.
-2. On the **Bridge** card, choose the image and its manifest from
-   `Firmwares/BridgeBox/`: `enc_flash_pico2.uf2` and
-   `enc_flash_pico2.uf2.manifest.json`. They always travel together.
-3. **Dry run.** Tick **Check only** and press **Check bridge image**. The bridge
-   takes the image and checks it, then throws it away. After a few seconds the
-   page says `Checked.` and nothing on the bridge has changed. The one thing a
-   dry run cannot check is the signature; the bridge does that as it flashes.
-4. **Update.** Untick **Check only** and press **Flash bridge**. When the page
-   says `Sent. The whole image reached the bridge...`, the bridge is writing
-   its own flash. It drops offline for a few seconds, then comes back online
-   and the card shows the version it now runs. That is the same number as
-   before if you sent the version it already had, so note the version first.
-   If it is not back online after a minute, check the printer's console.
-
-The panel checks the two files are a pair before sending anything. The printer's
-answer shows on the page, so a refusal names its reason there. The messages mean
-the same as in
-[BRIDGE_FLASH_HOWTO.md](../BridgeBox/BRIDGE_FLASH_HOWTO.md), which also covers
-recovery and updating from Mainsail or Fluidd instead.
-
 ## What can go wrong
 
 | the panel shows | meaning |
