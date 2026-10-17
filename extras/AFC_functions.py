@@ -1164,6 +1164,10 @@ class afcFunction:
         set_tool_start_back_to_none = False
         error = False
         failed_msg = ""
+        # ACE lanes calibrate to the U1 toolhead sensor's switch themselves
+        if (cur_lane.unit_obj.type in ("ACE", "ACE2")
+            and cur_lane.extruder_obj.fila_tool_start is not None):
+            return error, set_tool_start_back_to_none, failed_msg
         if cur_lane.extruder_obj.tool_start is None:
             if cur_lane.extruder_obj.tool_end is not None and cur_lane.buffer_obj is not None:
                 self.logger.info("Cannot run calibration using post extruder sensor, using buffer to calibrate bowden length")

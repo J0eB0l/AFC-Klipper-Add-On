@@ -396,41 +396,6 @@ class afcACE(afcUnit):
         # a FIRMWARE_RESTART keeps the process, so _ACE_CLAIMED_PORTS survives.
         self.printer.register_event_handler(
             "klippy:disconnect", self._handle_klippy_disconnect)
-        self._allow_bowden_calibration_on_u1_sensor()
-
-    def _allow_bowden_calibration_on_u1_sensor(self) -> None:
-        """
-        Let AFC's bowden calibration run on an ACE lane whose toolhead has only
-        a U1 filament sensor.
-
-        AFC refuses bowden calibration when the extruder has no pin_tool_start
-        and no buffer to stand in for it. An ACE lane measures to the toolhead
-        sensor itself (_toolhead_sensor_triggered reads the U1 sensor's switch),
-        so for those lanes the check is passed and the rest of the calibration
-        (tool select, park, save) runs as usual. Every other lane gets AFC's own
-        check. Wrapped once, however many ACE units there are.
-        """
-        function = getattr(self.afc, "function", None)
-        check = getattr(function, "_calibration_check_tool_start", None)
-        if check is None or getattr(check, "_ace_u1_sensor", False):
-            return
-
-        def check_tool_start(cur_lane: AFCLane) -> tuple[bool, bool, str]:
-            """
-            Pass an ACE lane whose toolhead has only a U1 filament sensor.
-
-            :param cur_lane: lane being calibrated
-            :return tuple: (failed_check, set_tool_start_back_to_none, msg)
-            """
-            extruder = getattr(cur_lane, "extruder_obj", None)
-            if (isinstance(getattr(cur_lane, "unit_obj", None), afcACE)
-                    and getattr(extruder, "tool_start", None) is None
-                    and getattr(extruder, "fila_tool_start", None) is not None):
-                return False, False, ""
-            return check(cur_lane)
-
-        check_tool_start._ace_u1_sensor = True
-        function._calibration_check_tool_start = check_tool_start
 
     def _handle_klippy_disconnect(self) -> None:
         """

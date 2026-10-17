@@ -1645,6 +1645,45 @@ class TestCalibrateAFC:
         )
 
 
+class TestCalibrationCheckToolStart:
+    REFUSED = (
+        True, False,
+        "\nBowden Calibration Error:"
+        "\nCannot calibrate with only post extruder sensor and no turtleneck buffer defined in config"
+    )
+
+    def _lane(self, unit_type="ACE", sensor=True):
+        lane = _make_afc_lane()
+        lane.unit_obj.type = unit_type
+        lane.extruder_obj.tool_start = None
+        lane.extruder_obj.tool_end = None
+        lane.extruder_obj.fila_tool_start = MagicMock() if sensor else None
+        return lane
+
+    @pytest.mark.parametrize("unit_type", ["ACE", "ACE2"])
+    def test_ace_lane_on_a_u1_sensor_passes(self, unit_type):
+        func = _make_func()
+        lane = self._lane(unit_type)
+
+        assert func._calibration_check_tool_start(lane) == (False, False, "")
+        assert lane.extruder_obj.tool_start is None
+        assert func.logger.messages == []
+
+    def test_other_unit_on_a_u1_sensor_is_refused(self):
+        func = _make_func()
+        lane = self._lane("BoxTurtle")
+
+        assert func._calibration_check_tool_start(lane) == self.REFUSED
+        assert func.logger.messages == []
+
+    def test_ace_lane_without_a_u1_sensor_is_refused(self):
+        func = _make_func()
+        lane = self._lane(sensor=False)
+
+        assert func._calibration_check_tool_start(lane) == self.REFUSED
+        assert func.logger.messages == []
+
+
 # ── cmd_AFC_LANE_RESET: stepperless unit delegation ─────────────────────────
 # New branch: units that expose get_lane_reset_command (e.g. OpenAMS) can't be
 # retracted with a lane-stepper move loop, so the reset command is delegated

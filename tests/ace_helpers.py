@@ -1064,8 +1064,6 @@ class AceFunction(FakeFunction):
         self.ConfigRewrite = Recorder()
         self.check_for_td1_id = Recorder(result=(True, ""))
         self.register_mux_command = Recorder()
-        # AFC's bowden-calibration check: (failed_check, reset_tool_start, msg).
-        self._calibration_check_tool_start = Recorder(result=(False, False, ""))
         self.log_toolhead_pos = Recorder()
         self.get_extruder_pos = Recorder(result=0.0)
         self.check_macro_present = Recorder(result=False)
