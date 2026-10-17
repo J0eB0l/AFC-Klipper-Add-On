@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 from datetime import datetime
+import importlib.util
 import json
 import logging
 import logging.handlers
@@ -7310,20 +7311,6 @@ class TestAfcACESyncSlotLoadedState:
 
 
 class TestAfcACEGetAutoSpoolmanCreate:
-    def test_fallback_when_helper_absent(self, monkeypatch):
-        monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
-        unit = ace_p2_unit("lane1", values={"auto_spoolman_create": True})
-
-        assert unit._get_auto_spoolman_create(unit.lanes["lane1"]) is True
-
-    def test_fallback_ignores_extruder_opt_in(self, monkeypatch):
-        monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
-        unit = ace_p2_unit("lane1")
-        lane = unit.lanes["lane1"]
-        lane.extruder_obj.auto_spoolman_create = True
-
-        assert unit._get_auto_spoolman_create(lane) is False
-
     def test_delegates_to_helper_when_present(self):
         # The AFC_RFID helper honours the extruder's opt-in over the unit default.
         unit = ace_p2_unit("lane1")
@@ -7338,10 +7325,30 @@ class TestAfcACEGetAutoSpoolmanCreate:
         unit = ace_p2_unit("lane1")
         lane = unit.lanes["lane1"]
 
-        assert afc_ace_module.get_auto_spoolman_create is not None
         assert unit.auto_spoolman_create is False
         assert not hasattr(lane.extruder_obj, "auto_spoolman_create")
         assert unit._get_auto_spoolman_create(lane) is False
+
+
+def _exec_ace_with_blocked_import(monkeypatch: pytest.MonkeyPatch, blocked: str) -> None:
+    """
+    Run a throwaway copy of AFC_ACE.py with one dependency made unimportable.
+
+    :param monkeypatch: restores the blocked sys.modules entry afterward
+    :param blocked: module name whose import should fail
+    """
+    monkeypatch.setitem(sys.modules, blocked, None)
+    spec = importlib.util.spec_from_file_location("extras._ace_import_guard_probe",
+                                                  afc_ace_module.__file__)
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+
+class TestAfcACEModuleImportGuards:
+    def test_afc_rfid_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_ace_with_blocked_import(monkeypatch, "extras.AFC_RFID")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_RFID, please rerun install-afc.sh")
 
 
 class TestCrc16CcittReflected:

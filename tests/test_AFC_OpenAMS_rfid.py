@@ -36,8 +36,6 @@ BAMBU_BYTES = bytes([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
 CREALITY_BYTES = bytes([1, 2, 3, 4, 5, 6, 7, 8])
 CREALITY_ENC_BYTES = bytes(range(0xA0, 0xB0))
 
-TOO_OLD_WARNING = ("AFC_OpenAMS_rfid: AFC_RFID.py is too old to resolve "
-                   "[AFC_rfid_keys]. Update it or Bambu keys are ignored")
 NO_BAMBU_WARNING = ("AFC_OpenAMS_rfid: no bambu_master_key resolved (section "
                     "option or [AFC_rfid_keys]). Bambu tags will not decode")
 NO_READERS_WARNING = ("AFC_OpenAMS_rfid: no [AFC_OpenAMS_rfid <name>] reader "
@@ -214,29 +212,26 @@ def _boom(*args, **kwargs):
     raise RuntimeError("boom")
 
 
-# ── Module-level optional helper imports ──────────────────────────────────────
+# ── Module-level import guards ────────────────────────────────────────────────
 
-class TestModuleOptionalHelperImports:
-    def _load_without_helpers(self, monkeypatch):
-        # An older AFC_RFID that lacks both optional helpers.
-        stub = types.ModuleType("extras.AFC_RFID")
-        stub.AFCUnitRFID = afc_rfid_mod.AFCUnitRFID
-        stub.map_tag_to_slot_info = afc_rfid_mod.map_tag_to_slot_info
-        monkeypatch.setitem(sys.modules, "extras.AFC_RFID", stub)
+class TestModuleImportGuards:
+    def _load_with_blocked(self, monkeypatch, blocked):
+        monkeypatch.setitem(sys.modules, blocked, None)
         spec = importlib.util.spec_from_file_location(
-            "extras._oams_rfid_old_afc", os.path.abspath(oams_rfid.__file__))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
+            "extras._oams_rfid_import_guard_probe", os.path.abspath(oams_rfid.__file__))
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
-    def test_helpers_bound_when_afc_rfid_has_them(self):
-        assert oams_rfid.get_auto_spoolman_create is afc_rfid_mod.get_auto_spoolman_create
-        assert oams_rfid.resolve_rfid_keys is afc_rfid_mod.resolve_rfid_keys
+    def test_afc_utils_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            self._load_with_blocked(monkeypatch, "extras.AFC_utils")
+        assert str(exc_info.value).startswith(
+            "Error when trying to import AFC_utils.ERROR_STR")
 
-    def test_helpers_none_when_afc_rfid_is_too_old(self, monkeypatch):
-        mod = self._load_without_helpers(monkeypatch)
-        assert mod.get_auto_spoolman_create is None
-        assert mod.resolve_rfid_keys is None
+    def test_afc_rfid_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            self._load_with_blocked(monkeypatch, "extras.AFC_RFID")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_RFID, please rerun install-afc.sh")
 
 
 # ── _OamsSpiRegLink ───────────────────────────────────────────────────────────
@@ -481,23 +476,6 @@ class TestAFCOpenAMSRfidInit:
         assert coord.creality_key == CREALITY_BYTES
         assert coord.creality_encryption_key == b"shared-enc"
         assert printer._afc.logger.messages == []
-
-    def test_old_afc_rfid_warns_and_keeps_section_keys(self, monkeypatch):
-        monkeypatch.setattr(oams_rfid, "resolve_rfid_keys", None)
-        printer = MockPrinter()
-        printer._objects["AFC_rfid_keys"] = _SharedKeys()
-        coord, _ = _make_coord(printer, {"bambu_master_key": BAMBU_HEX})
-        assert coord.bambu_master_key == BAMBU_BYTES
-        # Without the resolver the shared keys are never consulted.
-        assert coord.creality_key is None
-        assert coord.creality_encryption_key is None
-        assert printer._afc.logger.messages == [("warning", TOO_OLD_WARNING)]
-
-    def test_old_afc_rfid_without_bambu_key_warns_only_too_old(self, monkeypatch):
-        monkeypatch.setattr(oams_rfid, "resolve_rfid_keys", None)
-        coord, printer = _make_coord()
-        assert coord.bambu_master_key is None
-        assert printer._afc.logger.messages == [("warning", TOO_OLD_WARNING)]
 
     def test_lane_slot_map_is_parsed(self):
         coord, _ = _make_coord(values={**KEYS, "lane_slot_map": "lane4:0, lane5:1"})

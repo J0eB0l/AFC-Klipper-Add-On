@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import configparser
+import importlib.util
+import sys
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import pytest
@@ -550,7 +553,8 @@ class TestAFCACE2RFIDOnReady:
         unit = make_ace2_unit(name="Ace2_9")
         printer = unit.printer
         reader = make_ace2_rfid({"skip_factory_autostage": False}, ace2=unit, bind=False)
-        monkeypatch.setattr(ace2_rfid_module, "resolve_rfid_keys", None)
+        monkeypatch.setattr(ace2_rfid_module, "resolve_rfid_keys",
+                            lambda pr, b, c, d: (b, c, d))
         reader._on_ready()
         assert reader.ace2 is unit                       # found as "AFC_ACE2 Ace2_9"
         assert reader.bambu_master_key is None
@@ -2909,3 +2913,30 @@ class TestAFCACE2RFIDUntaggedDefaults:
                             lambda name: {"uid": "04a1b2c3", "filament": {"type": "ABS"}})
         reader._auto_read("lane0")
         assert lane.material == ""
+
+
+def _exec_ace2_rfid_with_blocked_import(monkeypatch: pytest.MonkeyPatch, blocked: str) -> None:
+    """
+    Run a throwaway copy of AFC_ACE2_rfid.py with one dependency made unimportable.
+
+    :param monkeypatch: restores the blocked sys.modules entry afterward
+    :param blocked: module name whose import should fail
+    """
+    monkeypatch.setitem(sys.modules, blocked, None)
+    spec = importlib.util.spec_from_file_location("extras._ace2_rfid_import_guard_probe",
+                                                  ace2_rfid_module.__file__)
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+
+class TestAFCACE2RFIDModuleImportGuards:
+    def test_afc_utils_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_ace2_rfid_with_blocked_import(monkeypatch, "extras.AFC_utils")
+        assert str(exc_info.value).startswith(
+            "Error when trying to import AFC_utils.ERROR_STR")
+
+    def test_afc_rfid_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_ace2_rfid_with_blocked_import(monkeypatch, "extras.AFC_RFID")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_RFID, please rerun install-afc.sh")

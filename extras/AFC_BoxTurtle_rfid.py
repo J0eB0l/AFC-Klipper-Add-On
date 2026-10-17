@@ -33,7 +33,9 @@
 from __future__ import annotations
 import math
 import threading
+import traceback
 import chelper
+from configparser import Error as error
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional,
                     Tuple)
 
@@ -44,10 +46,15 @@ try:                                        # pragma: no cover - import shim
 except Exception:                           # pragma: no cover
     serial = None
 
-try:                                        # pragma: no cover - import shim
-    from extras.AFC_lane import AssistActive, MoveDirection, SpeedMode
-except Exception:                           # pragma: no cover
-    AssistActive = MoveDirection = SpeedMode = None
+try: from extras.AFC_utils import ERROR_STR
+except:
+    error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
+    raise error(error_str)
+
+try: from extras.AFC_lane import AssistActive, MoveDirection, SpeedMode
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc())
+    raise error(error_str)
 
 from extras.AFC_rfid_readers import read_tag
 from extras.AFC_rfid_write import StageError, register_reader
@@ -1169,12 +1176,9 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         Whether AFC's own homing moves can be used on this lane.
 
         :param lane: the AFC lane
-        :return bool: True when move_to, the enums and homing are all present
+        :return bool: True when move_to and homing are both present
         """
-        return (SpeedMode is not None
-                and MoveDirection is not None
-                and AssistActive is not None
-                and callable(getattr(lane, "move_to", None))
+        return (callable(getattr(lane, "move_to", None))
                 and bool(getattr(self.afc, "homing_enabled", False)))
 
     def _restage_sibling(self, lane: Any, given_back: float) -> None:
@@ -1492,7 +1496,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         if assist:
             active = True
             getter = getattr(lane, "get_active_assist", None)
-            if callable(getter) and AssistActive is not None:
+            if callable(getter):
                 try:
                     active = getter(distance, AssistActive.YES)
                 except Exception:

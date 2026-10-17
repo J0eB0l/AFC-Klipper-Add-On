@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import chelper
 import traceback
+from configparser import Error as error
 from typing import Any, Callable, Dict, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -24,30 +25,20 @@ if TYPE_CHECKING:
 # this one back lazily, so there is no import cycle.
 from extras.AFC_BambuAMS import BAMBU_BRAND, _split_bambu_material
 
-#: Why AFC_RFID could not be imported, or None. The measurement-only delegate
-#: works without it; for_unit() refuses a Spoolman delegate while this is set.
-_AFC_RFID_ERR: Optional[str] = None
-try:
-    from extras.AFC_RFID import (sync_rfid_to_spoolman,
-                                 get_auto_spoolman_create,
-                                 find_spool_by_uid, match_spool_for_tag,
-                                 SpoolmanClient, density_for_material,
-                                 _spool_uids, _norm_uid, _norm_tray_uid,
-                                 _spool_tray_uid, _set_spoolid_takes_on_done)
-except Exception as _e:                     # AFC_RFID not deployed
-    _AFC_RFID_ERR = f"{type(_e).__name__}: {_e}"
-    # Same fallback shape as the unit module's own AFC_RFID import.
-    sync_rfid_to_spoolman = None                 # type: ignore[assignment]
-    get_auto_spoolman_create = None              # type: ignore[assignment]
-    find_spool_by_uid = None                     # type: ignore[assignment]
-    match_spool_for_tag = None                   # type: ignore[assignment]
-    SpoolmanClient = None                        # type: ignore[misc,assignment]
-    density_for_material = None                  # type: ignore[assignment]
-    _spool_uids = None                           # type: ignore[assignment]
-    _norm_uid = None                             # type: ignore[assignment]
-    _norm_tray_uid = None                        # type: ignore[assignment]
-    _spool_tray_uid = None                       # type: ignore[assignment]
-    _set_spoolid_takes_on_done = None            # type: ignore[assignment]
+try: from extras.AFC_utils import ERROR_STR
+except:
+    error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
+    raise error(error_str)
+
+try: from extras.AFC_RFID import (sync_rfid_to_spoolman,
+                                  get_auto_spoolman_create,
+                                  match_spool_for_tag, density_for_material,
+                                  _spool_uids, _norm_uid, _norm_tray_uid,
+                                  _spool_tray_uid, _set_spoolid_takes_on_done,
+                                  _cached_spoolman_client)
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
+    raise error(error_str)
 
 
 def _bambu_spoolman_client(afc: Any) -> Optional[Any]:
@@ -61,19 +52,14 @@ def _bambu_spoolman_client(afc: Any) -> Optional[Any]:
     :return Optional[SpoolmanClient]: the client, or None if Spoolman or
         moonraker is unavailable
     """
-    if (SpoolmanClient is None
-        or afc is None
+    if (afc is None
         or getattr(afc, "spoolman", None) is None
         or getattr(afc, "moonraker", None) is None):
         return None
     try:
         # The shared per-afc cache (AFC_RFID._cached_spoolman_client), so the
         # client's ensure-fields memos survive between calls here too.
-        try:
-            from extras.AFC_RFID import _cached_spoolman_client
-            return _cached_spoolman_client(afc)
-        except Exception:
-            return SpoolmanClient(afc.moonraker)
+        return _cached_spoolman_client(afc)
     except Exception:
         return None
 
@@ -285,7 +271,7 @@ class BambuSpoolman:
         :param uid: the tag UID actually present in the bay
         :return bool: True only if Spoolman positively contradicts the binding
         """
-        if not spool_id or not uid or _spool_uids is None or _norm_uid is None:
+        if not spool_id or not uid:
             return False
         memo = getattr(self, "_binding_check", None)
         if memo is None:
@@ -405,7 +391,7 @@ class BambuSpoolman:
           not bound (see _spool_weighed), and a lookup Spoolman did not answer
           is no miss; the bay is asked again after LOOKUP_RETRY_S.
         """
-        if not uid or find_spool_by_uid is None:
+        if not uid:
             return
         # Normalized once so the lookup, conflict check and log line agree.
         tray_uid = _norm_tray_uid(tray_uid)
@@ -523,8 +509,7 @@ class BambuSpoolman:
                         # AFC's set_spoolID binds when its fetch answers
                         # (on_done). Until then the bind stays pending
                         # (_bind_landed), holding the measurement and summary.
-                        if (_set_spoolid_takes_on_done is not None
-                            and _set_spoolid_takes_on_done(afc)):
+                        if _set_spoolid_takes_on_done(afc):
                             afc.spool.set_spoolID(
                                 lane, spool.get("id"),
                                 on_done=lambda: BambuSpoolman._bind_landed(
@@ -1035,14 +1020,11 @@ class BambuSpoolman:
             if uid in miss:
                 return
         try:
-            allow = False
-            if get_auto_spoolman_create is not None:
-                allow = get_auto_spoolman_create(
-                    lane, getattr(self._u, "auto_spoolman_create", False))
+            allow = get_auto_spoolman_create(
+                lane, getattr(self._u, "auto_spoolman_create", False))
             if (have_profile
                 and allow
-                and not restored
-                and sync_rfid_to_spoolman is not None):
+                and not restored):
                 # Create needs the full shared-helper flow. Passing the reactor
                 # sends its HTTP off the reactor; the answer is read in
                 # _bind_landed.
@@ -1734,7 +1716,7 @@ class BambuSpoolman:
                 break
         material = self._material_key(lane, info)
         density = getattr(lane, "density", None)
-        if not density and density_for_material is not None and material:
+        if not density and material:
             density = density_for_material(material)
         return density or None
 
@@ -1867,7 +1849,7 @@ class BambuSpoolman:
             # The lane's density is Spoolman's, which is the filament's own
             # figure; the table is the fallback for an unbound lane.
             density = getattr(lane, "density", None)
-            if not density and density_for_material is not None:
+            if not density:
                 density = density_for_material(material)
             # Use a radius source only when its own percent agrees with this
             # measurement, and name the source in the row:
@@ -2131,9 +2113,6 @@ class AFC_BambuAMS_RFID:
     #: Class defaults so an object that skipped __init__ still works.
     enabled: bool = True
     _units: set = frozenset()
-    #: Whether the missing-AFC_RFID warning has been given (once per section,
-    #: not once per unit asking).
-    _warned_no_afc_rfid: bool = False
 
     def __init__(self, config: "ConfigWrapper") -> None:
         """
@@ -2169,24 +2148,9 @@ class AFC_BambuAMS_RFID:
 
         :param unit: the afcBambuAMS asking for its delegate
         :return Optional[BambuSpoolman]: the delegate the unit's shims call
-            through, or None when the section is present but disabled, or
-            when AFC_RFID could not be imported
+            through, or None when the section is present but disabled
         """
         if not self.enabled:
-            return None
-        if _AFC_RFID_ERR is not None:
-            # No AFC_RFID means no Spoolman delegate; say why once. The unit
-            # still measures.
-            if not self._warned_no_afc_rfid:
-                self._warned_no_afc_rfid = True
-                try:
-                    unit.logger.warning(
-                        f"AFC_BambuAMS_rfid: Spoolman is off for every AMS "
-                        f"unit -- AFC_RFID could not be loaded "
-                        f"({_AFC_RFID_ERR}). Measurements are still kept on "
-                        f"the lanes.")
-                except Exception:
-                    pass
             return None
         try:
             self._units.add(str(getattr(unit, "name", unit)))

@@ -52,88 +52,12 @@ except:
     error_str = ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc())
     raise error(error_str)
 
-try:
-    from extras.AFC_RFID import (
-        rgb_array_to_hex, apply_filament_defaults,
-        sync_rfid_to_spoolman, get_auto_spoolman_create,
-        log_new_filament, log_new_spool,
+try: from extras.AFC_RFID import (
+    rgb_array_to_hex, apply_filament_defaults, get_auto_spoolman_create,
     )
-except Exception:
-    # AFC_RFID is optional. Provide self-contained fallbacks for the lane-info
-    # path; the Spoolman helpers stay None so their guarded paths no-op.
-    sync_rfid_to_spoolman = None
-    get_auto_spoolman_create = None
-    log_new_filament = None
-    log_new_spool = None
-
-    def rgb_array_to_hex(color_array: Any) -> str:
-        """
-        [r, g, b] -> '#rrggbb' (fallback when AFC_RFID isn't present).
-
-        :param color_array: [r, g, b] values
-        :return str: '#rrggbb', or '' when the input is not a usable colour
-        """
-        if isinstance(color_array, (list, tuple)) and len(color_array) >= 3:
-            try:
-                r, g, b = (int(color_array[0]), int(color_array[1]),
-                           int(color_array[2]))
-                return f"#{r & 0xFF:02x}{g & 0xFF:02x}{b & 0xFF:02x}"
-            except (TypeError, ValueError):
-                return ""
-        return ""
-
-    def apply_filament_defaults(lane: Any, slot_info: Any,
-                                color_converter: Optional[Any] = None,
-                                afc_defaults: Optional[dict] = None) -> None:
-        """
-        Apply the ACE's RFID material/color/temps to a lane when not already
-        set, a dependency-free copy of AFC_RFID.apply_filament_defaults so the
-        ACE can populate the lane (shows in Mainsail) with no AFC_RFID present.
-
-        :param lane: lane to populate
-        :param slot_info: the slot's inventory dict
-        :param color_converter: optional callable turning a raw colour into hex
-        :param afc_defaults: optional default material/colour to fill gaps
-        """
-        info = slot_info or {}
-        has_material = getattr(lane, "material", None) not in (None, "")
-        has_color = getattr(lane, "color", None) not in (None, "", "#000000")
-        has_ext_temp = getattr(lane, "extruder_temp", None) is not None
-        has_bed_temp = getattr(lane, "bed_temp", None) is not None
-
-        material = (info.get("material", "") or "")
-        if material.lower() == "unknown":
-            material = ""
-        color_hex = info.get("color_hex", "") or ""
-        if not color_hex and color_converter is not None:
-            raw = info.get("color", [0, 0, 0])
-            if raw != [0, 0, 0]:
-                color_hex = color_converter(raw)
-
-        if not has_material and material:
-            lane.material = material
-        if not has_color and color_hex:
-            lane.color = color_hex if color_hex.startswith("#") else "#" + color_hex
-        if not has_ext_temp and info.get("extruder_temp") is not None:
-            try:
-                lane.extruder_temp = float(info.get("extruder_temp"))
-            except (TypeError, ValueError):
-                pass
-        if not has_bed_temp and info.get("bed_temp") is not None:
-            try:
-                lane.bed_temp = float(info.get("bed_temp"))
-            except (TypeError, ValueError):
-                pass
-
-        if afc_defaults is not None:
-            if not getattr(lane, "material", None):
-                dm = afc_defaults.get("default_material_type")
-                if dm:
-                    lane.material = dm
-            if not getattr(lane, "color", None):
-                dc = afc_defaults.get("default_color")
-                if dc:
-                    lane.color = dc
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
+    raise error(error_str)
 
 MODE_COMBINED = "combined"
 MODE_DIRECT = "direct"
@@ -4598,9 +4522,7 @@ class afcACE(afcUnit):
         :return bool: True if auto-creation is enabled (per-lane, else the unit
             default).
         """
-        if get_auto_spoolman_create is not None:
-            return get_auto_spoolman_create(lane, self.auto_spoolman_create)
-        return self.auto_spoolman_create
+        return get_auto_spoolman_create(lane, self.auto_spoolman_create)
 
 
 

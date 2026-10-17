@@ -16,7 +16,14 @@
 # every format it decodes (see AFC_rfid_readers) reads here and syncs to
 # Spoolman through AFC_RFID like the ACE2/U1 paths.
 from __future__ import annotations
+import traceback
+from configparser import Error as error
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+try: from extras.AFC_utils import ERROR_STR
+except:
+    error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
+    raise error(error_str)
 
 # Klipper's core `bus` module is imported lazily in AFC_Vivid_rfid_reader.__init__
 # so this module imports without the full Klipper tree (e.g. in unit tests).
@@ -25,20 +32,17 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 # MifareClassic also give a fast UID-only detect (activate) for the stage poll.
 from extras.AFC_rfid_readers import read_tag, Mfrc522, MifareClassic
 from extras.AFC_rfid_write import register_reader
-from extras.AFC_RFID import (format_tag_summary, AFCUnitRFID,
-                             map_tag_to_slot_info)
-try:
-    from extras.AFC_RFID import get_auto_spoolman_create
-except ImportError:                                    # older AFC without the helper
-    get_auto_spoolman_create = None
-try:
-    from extras.AFC_RFID import resolve_rfid_keys
-except ImportError:                                    # older AFC without the helper
-    resolve_rfid_keys = None
-try:                                                   # AFC move enums (sister nudge)
-    from extras.AFC_lane import SpeedMode, AssistActive, MoveDirection
-except ImportError:                                    # older AFC / import-time absence
-    SpeedMode = AssistActive = MoveDirection = None
+try: from extras.AFC_RFID import (format_tag_summary, AFCUnitRFID,
+                                  map_tag_to_slot_info, resolve_rfid_keys)
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
+    raise error(error_str)
+
+try: from extras.AFC_lane import SpeedMode, AssistActive, MoveDirection
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc())
+    raise error(error_str)
+
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
@@ -242,11 +246,10 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         """
         self.afc = self.printer.lookup_object("AFC", None)
         # Fall back to the shared [AFC_rfid_keys] for any key not set here.
-        if resolve_rfid_keys is not None:
-            (self.bambu_master_key, self.creality_key,
-             self.creality_encryption_key) = resolve_rfid_keys(
-                self.printer, self.bambu_master_key, self.creality_key,
-                self.creality_encryption_key)
+        (self.bambu_master_key, self.creality_key,
+         self.creality_encryption_key) = resolve_rfid_keys(
+            self.printer, self.bambu_master_key, self.creality_key,
+            self.creality_encryption_key)
         # Discover every [AFC_Vivid_rfid <name>] reader and index by physical slot.
         self._slot_reader = {}
         for name, obj in self.printer.lookup_objects():
@@ -671,7 +674,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
 
         :param p: The active probe state; sib_lane/sib_dist are filled if moved.
         """
-        if not self.auto_tag_adjust or MoveDirection is None:
+        if not self.auto_tag_adjust:
             return
         sib = self._sibling_slot(p["slot"])
         sib_lane_name = self._slot_lane.get(sib) if sib is not None else None
@@ -727,13 +730,10 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         Whether AFC's own homing moves can be used on this lane.
 
         :param lane: the AFC lane
-        :return bool: True when the enums, move_to, the endstop and AFC's
-                      homing setting are all present
+        :return bool: True when move_to, the endstop and AFC's homing
+                      setting are all present
         """
-        return (SpeedMode is not None
-                and MoveDirection is not None
-                and AssistActive is not None
-                and callable(getattr(lane, "move_to", None))
+        return (callable(getattr(lane, "move_to", None))
                 and getattr(lane, "load_es", None) is not None
                 and bool(getattr(self.afc, "homing_enabled", False)))
 
@@ -767,7 +767,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         if not p:
             return
         sib_lane, dist = p.get("sib_lane"), p.get("sib_dist") or 0.0
-        if sib_lane is None or dist <= 0.0 or MoveDirection is None:
+        if sib_lane is None or dist <= 0.0:
             return
         p["sib_lane"], p["sib_dist"] = None, 0.0       # once
         try:

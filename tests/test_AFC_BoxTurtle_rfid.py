@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import configparser
 from dataclasses import dataclass
+import importlib.util
 import math
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -3744,3 +3747,30 @@ class TestAFCBoxTurtlerfidCmdAFCBTRFIDStage:
                          " (filament restored and re-staged at the hub)")]
         assert rig.console == []
         assert rig.logged() == []
+
+
+def _exec_bt_rfid_with_blocked_import(monkeypatch: pytest.MonkeyPatch, blocked: str) -> None:
+    """
+    Run a throwaway copy of AFC_BoxTurtle_rfid.py with one dependency made unimportable.
+
+    :param monkeypatch: restores the blocked sys.modules entry afterward
+    :param blocked: module name whose import should fail
+    """
+    monkeypatch.setitem(sys.modules, blocked, None)
+    spec = importlib.util.spec_from_file_location("extras._bt_rfid_import_guard_probe",
+                                                  bt_rfid_mod.__file__)
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+
+class TestBoxTurtleRfidModuleImportGuards:
+    def test_afc_utils_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_bt_rfid_with_blocked_import(monkeypatch, "extras.AFC_utils")
+        assert str(exc_info.value).startswith(
+            "Error when trying to import AFC_utils.ERROR_STR")
+
+    def test_afc_lane_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_bt_rfid_with_blocked_import(monkeypatch, "extras.AFC_lane")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_lane, please rerun install-afc.sh")

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import configparser
 import contextlib
 import importlib
+import importlib.util
 import sys
 import threading
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pytest
 
-from extras import AFC_BambuAMS_rfid as rfid_mod
+from extras import AFC_BambuAMS_rfid as rfid_mod, AFC_RFID as afc_rfid_mod
 import extras
 from extras.AFC_BambuAMS import afcBambuAMS
 from extras.AFC_BambuAMS_rfid import _QuietInfo, AFC_BambuAMS_RFID, BambuSpoolman
@@ -183,7 +185,7 @@ class TestBambuSpoolmanClient:
         moonraker = self._Moonraker()
         afc = self._Afc(BRFID_SPOOLMAN_URL, moonraker)
         client = rfid_mod._bambu_spoolman_client(afc)
-        assert isinstance(client, rfid_mod.SpoolmanClient)
+        assert isinstance(client, afc_rfid_mod.SpoolmanClient)
         assert client.host == "http://localhost:7125"
         assert afc._afc_spoolman_client_cache is client
         assert rfid_mod._bambu_spoolman_client(afc) is client
@@ -350,20 +352,6 @@ class TestBambuSpoolmanBindingContradicted:
         assert client.asked == []
         assert sp._binding_check == {}
         assert sp._u.logger.messages == []
-
-    @pytest.mark.parametrize("helper", ["_spool_uids", "_norm_uid"])
-    def test_without_the_afc_rfid_helpers_it_asks_nothing(self, helper,
-                                                          monkeypatch):
-        # Spool 87 carries another tag, so Spoolman would contradict the
-        # binding: only the missing helper keeps it from being asked.
-        client = self._FlakyClient([brfid_spool(87, uids=["11223344"])])
-        sp = brfid_unit(monkeypatch, client=client)._measure
-        monkeypatch.setattr(rfid_mod, helper, None)
-        assert sp._binding_contradicted(87, "AABBCCDD") is False
-        assert client.asked == []
-        assert sp._binding_check == {}
-        assert sp._u.logger.messages == []
-
 
 class TestBambuSpoolmanSpoolmanBg:
     """Spoolman HTTP runs on the shared worker thread, or inline when off."""
@@ -1373,20 +1361,6 @@ class TestBambuSpoolmanSpoolmanSync:
         assert calls == []
         assert client.searches == 1
         assert unit._measure._spoolman_no_match == {"deadbeef"}
-        assert unit.logger.messages == []
-
-    def test_without_the_shared_binder_a_full_tag_is_only_matched(
-            self, monkeypatch):
-        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman", None)
-        client = self._CountingClient()
-        record = slot_info(0, material="PLA Basic", uid="ecb61cd0",
-                           weight=1000)
-        unit = self._sync_unit(monkeypatch, record, client=client)
-        unit.auto_spoolman_create = True
-        self._sync(unit, record)
-        assert client.searches == 1
-        assert unit._measure._spoolman_no_match == {"ecb61cd0"}
-        assert unit._measure._bind_pending == set()
         assert unit.logger.messages == []
 
     @pytest.mark.parametrize("sent", [False, True])
@@ -3589,49 +3563,25 @@ class TestAFCBambuAMSRFIDForUnit:
         sp = section.for_unit(unit)
         assert isinstance(sp, BambuSpoolman) and sp._u is unit
         assert section._units == set()
-        assert section._warned_no_afc_rfid is False
 
-    def test_with_afc_rfid_absent_the_section_says_why_once(self, monkeypatch):
-        # The section asks for Spoolman and cannot have it: say so once for
-        # the printer, not once per AMS, and measure anyway.
-        printer = make_printer(monkeypatch=monkeypatch)
-        unit1 = make_bambu_unit(
-            "Bambu_AMS_1", printer=printer, lanes=[LaneSpec("lane8", 1)],
-            slots=[slot_info(0, present=False),
-                   slot_info(1, material="ABS", weight=1000)])
-        unit2 = make_bambu_unit("Bambu_AMS_2", printer=printer)
-        unit1.logger.messages.clear()
-        with self._without_afc_rfid() as fresh:
-            cfg = BambuConfig("AFC_BambuAMS_rfid", printer, {})
-            section = fresh.AFC_BambuAMS_RFID(cfg)
-            printer.add_object("AFC_BambuAMS_rfid", section)
-            assert unit1._spool is None and unit2._spool is None
-            sp = unit1._measure
-            assert isinstance(sp, fresh.BambuSpoolman)
-            assert sp.spoolman_on is False
-            # No density table without AFC_RFID: 63% of 1000 g, tag-linear.
-            assert sp._adopt_measured_remain(1, 63, "capscan", seq=1) is True
-        assert fresh._AFC_RFID_ERR == "ImportError: AFC_RFID is not deployed"
-        assert section._warned_no_afc_rfid is True
-        assert section.get_status() == {"enabled": True, "units": []}
-        assert unit1.lanes["lane8"].weight == 630
-        assert unit1.afc.save_vars.call_count == 1
-        # One logger for the printer, so both units' asks land here.
-        assert unit2.logger is unit1.logger
-        assert unit1.logger.messages == [
-            ("warning", "AFC_BambuAMS_rfid: Spoolman is off for every AMS "
-                        "unit -- AFC_RFID could not be loaded (ImportError: "
-                        "AFC_RFID is not deployed). Measurements are still "
-                        "kept on the lanes."),
-            ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane8 "
-                      "spool=None material='ABS' density=None pct_raw=63 "
-                      "radius_m=None circ_m=None save_r_m=None "
-                      "radius_src=none source='capscan' nominal=1000 "
-                      "grams_written=630 grams_modelled=None"),
-            ("info", "Bambu_AMS_1 lane8: tag read: ABS. Measured about 63% "
-                     "left -- roughly 630 g of a 1000 g spool; kept on the "
-                     "lane -- the Spoolman module ([AFC_BambuAMS_rfid]) is "
-                     "off.")]
+    def test_with_afc_rfid_absent_the_module_refuses_to_load(self):
+        # A broken install is reported the way AFC core reports one.
+        with pytest.raises(configparser.Error) as exc_info:
+            with self._without_afc_rfid():
+                pass
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_RFID, please rerun install-afc.sh")
+        assert str(exc_info.value).endswith(
+            "ImportError: AFC_RFID is not deployed\n")
+
+    def test_with_afc_utils_absent_the_module_refuses_to_load(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "extras.AFC_utils", None)
+        spec = importlib.util.spec_from_file_location(
+            "extras._bambu_rfid_import_guard_probe", rfid_mod.__file__)
+        with pytest.raises(configparser.Error) as exc_info:
+            spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        assert str(exc_info.value).startswith(
+            "Error when trying to import AFC_utils.ERROR_STR")
 
 
 class TestLoadConfig:

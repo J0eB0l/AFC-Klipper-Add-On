@@ -23,6 +23,7 @@
 from __future__ import annotations
 import struct
 import traceback
+from configparser import Error as error
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple)
 
 if TYPE_CHECKING:
@@ -31,22 +32,23 @@ if TYPE_CHECKING:
     from extras.AFC import afc
     from extras.AFC_lane import AFCLane
 
+try: from extras.AFC_utils import ERROR_STR
+except:
+    error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
+    raise error(error_str)
+
 # Shared MFRC522/MIFARE primitives + multi-brand decoders. This module supplies
 # the ACE2 transport they run on.
 from extras.AFC_rfid_readers import read_tag, Mfrc522, MifareClassic
 from extras.AFC_rfid_write import StageError, register_reader
-from extras.AFC_RFID import (sync_rfid_to_spoolman, apply_filament_defaults,
-                             build_filament_name, prompt_hold_spool,
-                             dismiss_prompt, AFCUnitRFID,
-                             map_tag_to_slot_info, SpoolmanClient)
-try:
-    from extras.AFC_RFID import get_auto_spoolman_create
-except ImportError:                                    # older AFC without the helper
-    get_auto_spoolman_create = None
-try:
-    from extras.AFC_RFID import resolve_rfid_keys
-except ImportError:                                    # older AFC without the helper
-    resolve_rfid_keys = None
+try: from extras.AFC_RFID import (sync_rfid_to_spoolman, apply_filament_defaults,
+                                  build_filament_name, prompt_hold_spool,
+                                  dismiss_prompt, AFCUnitRFID,
+                                  map_tag_to_slot_info, SpoolmanClient,
+                                  get_auto_spoolman_create, resolve_rfid_keys)
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
+    raise error(error_str)
 
 
 # ═════════════════════════════
@@ -592,11 +594,10 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         self.afc = self.printer.lookup_object("AFC", None)
         # Fall back to the shared [AFC_rfid_keys] section for any brand key this
         # section didn't set.
-        if resolve_rfid_keys is not None:
-            (self.bambu_master_key, self.creality_key,
-             self.creality_encryption_key) = resolve_rfid_keys(
-                self.printer, self.bambu_master_key, self.creality_key,
-                self.creality_encryption_key)
+        (self.bambu_master_key, self.creality_key,
+         self.creality_encryption_key) = resolve_rfid_keys(
+            self.printer, self.bambu_master_key, self.creality_key,
+            self.creality_encryption_key)
         # Mark configured scanner lanes so scanner-aware code (and any bridge
         # hooks) sees lane.spool_scanner, mirroring the U1.
         if self.afc is not None and hasattr(self.afc, "lanes"):
@@ -1033,7 +1034,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         slot_info = self._map(tag)
         self.record_tag_read(lane_name, slot_info)
         allow_create = self.auto_create
-        if get_auto_spoolman_create is not None and lane is not None:
+        if lane is not None:
             try:
                 allow_create = get_auto_spoolman_create(lane, self.auto_create)
             except Exception:

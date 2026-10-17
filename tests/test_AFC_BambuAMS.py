@@ -25465,26 +25465,6 @@ class TestAfcBambuAMSAdoptMeasuredRemain:
             ("info", "AFC bambu Bambu_AMS_1: wrote 518.0 g remaining to "
                      "Spoolman spool 164 (physical AMS measurement)")]
 
-    def test_with_afc_rfid_absent_the_measurement_still_lands(self,
-                                                              monkeypatch):
-        # No density table without AFC_RFID: the grams are tag-linear, 63% of
-        # the tag's 1000 g, and still land and save.
-        with _p6_fresh_import("extras.AFC_BambuAMS_rfid", "extras.AFC_RFID"
-                              ) as (fresh_rfid,):
-            assert fresh_rfid._AFC_RFID_ERR == ("ImportError: extras.AFC_RFID "
-                                                "is not deployed")
-            unit = _p6_measuring_unit(monkeypatch, material="ABS",
-                                      lane_material="ABS")
-            assert unit._adopt_measured_remain(1, 63, "capscan",
-                                               seq=1.0) is True
-            assert isinstance(unit._measure, fresh_rfid.BambuSpoolman)
-        assert unit.lanes["lane8"].weight == 630
-        assert unit.afc.save_vars.call_count == 1
-        assert unit._measure.spoolman_on is False
-        assert unit.logger.messages == [
-            self._sample(630, material="ABS", density=None),
-            self._said(630, self.OFF, material="ABS")]
-
     @NO_SPOOLMAN
     def test_a_summary_without_the_module_is_not_held_for_a_bind(
             self, monkeypatch, section):
@@ -26808,8 +26788,23 @@ class TestModuleImport:
         ("extras.AFC_utils",
          "Error when trying to import from AFC_utils\nTraceback (most recent "
          "call last):\n"),
+        ("extras.AFC_unit",
+         "Error trying to import AFC_unit, please rerun "
+         "install-afc.sh script in your AFC-Klipper-Add-On directory then "
+         "restart klipper\n\nTraceback (most recent call last):\n"),
+        ("extras.AFC_lane",
+         "Error trying to import AFC_lane, please rerun "
+         "install-afc.sh script in your AFC-Klipper-Add-On directory then "
+         "restart klipper\n\nTraceback (most recent call last):\n"),
+        ("extras.AFC_RFID",
+         "Error trying to import AFC_RFID, please rerun "
+         "install-afc.sh script in your AFC-Klipper-Add-On directory then "
+         "restart klipper\n\nTraceback (most recent call last):\n"),
     ], ids=["AFC_BambuAMS-needs-AFC_BambuAMS_bridge",
-            "AFC_BambuAMS-needs-AFC_utils"])
+            "AFC_BambuAMS-needs-AFC_utils",
+            "AFC_BambuAMS-needs-AFC_unit",
+            "AFC_BambuAMS-needs-AFC_lane",
+            "AFC_BambuAMS-needs-AFC_RFID"])
     def test_a_missing_dependency_names_itself(self, blocked, head):
         # The name says which module; the traceback says why (a missing
         # file reads differently from a syntax error inside it).
@@ -26836,24 +26831,6 @@ class TestModuleImport:
             assert fresh.BambuBridge is bridge_mod.BambuBridge
             assert fresh.TcpPort is bridge_mod.TcpPort
             assert fresh._bridge_mod is bridge_mod
-
-
-class TestModule:
-    """The unit module loads with or without AFC_RFID deployed."""
-
-    def test_the_unit_module_imports_with_no_afc_rfid_present(self):
-        with _p6_fresh_import("extras.AFC_BambuAMS", "extras.AFC_RFID"
-                              ) as (fresh,):
-            # Its own dependency-free copies stand in.
-            assert fresh.apply_filament_defaults.__module__ == (
-                "extras.AFC_BambuAMS")
-            assert fresh.build_filament_name.__module__ == (
-                "extras.AFC_BambuAMS")
-            assert fresh.bed_temp_for_material.__module__ == (
-                "extras.AFC_BambuAMS")
-            assert fresh.default_bed_temp_for_material is None
-            assert fresh.build_filament_name("Bambu", "PLA", "Basic") == (
-                "Bambu PLA Basic")
 
 
 class TestAMSModeIdle:
@@ -27145,77 +27122,6 @@ class TestMCAddressing:
         assert unit._bridge.sent == [{"cmd": "mcaddr", "unit": 1,
                                       "addr": 0x1800, "pay": 1}]
         assert unit.logger.messages == []
-
-
-class TestApplyFilamentDefaults:
-    """With no AFC_RFID deployed a bay still shows its filament."""
-
-    #: What a Bambu PLA Matte tag reads as.
-    TAG = {"material": "PLA", "sub_type": "Matte", "brand": "Bambu",
-           "color_hex": "0086D6", "extruder_temp": 220, "bed_temp": 60}
-
-    @staticmethod
-    def _lane(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> Any:
-        """
-        :param monkeypatch: pytest's monkeypatch fixture
-        :param fields: lane4's filament fields as the test starts them
-        :return AFCLane: lane4 of a unit
-        """
-        unit = _p6_unit(monkeypatch, lanes=["lane4"])
-        lane = unit.lanes["lane4"]
-        for key, value in fields.items():
-            setattr(lane, key, value)
-        return lane
-
-    @staticmethod
-    def _filament(lane: Any) -> Tuple[Any, ...]:
-        """
-        :param lane: the lane
-        :return tuple: its material, colour, temperatures, variant, vendor
-          and weight
-        """
-        return (lane.material, lane.color, lane.extruder_temp, lane.bed_temp,
-                lane.sub_type, lane.spool_vendor, lane.weight)
-
-    def test_lane_data_is_still_applied_with_no_afc_rfid_present(
-            self, monkeypatch):
-        lane = self._lane(monkeypatch, material=None, color=None,
-                          extruder_temp=None, bed_temp=None, sub_type="",
-                          spool_vendor="", weight=0)
-        with _p6_fresh_import("extras.AFC_BambuAMS", "extras.AFC_RFID"
-                              ) as (fresh,):
-            fresh.apply_filament_defaults(lane, dict(self.TAG))
-        assert self._filament(lane) == ("PLA", "#0086D6", 220.0, 60.0,
-                                        "Matte", "Bambu", 1000)
-
-    def test_the_fallback_only_fills_blanks(self, monkeypatch):
-        # Never overwrite what the operator or an earlier read set.
-        lane = self._lane(monkeypatch, material="ABS", color="#112233",
-                          extruder_temp=250.0, bed_temp=100.0,
-                          sub_type="Custom", spool_vendor="Mine", weight=750)
-        with _p6_fresh_import("extras.AFC_BambuAMS", "extras.AFC_RFID"
-                              ) as (fresh,):
-            fresh.apply_filament_defaults(lane, dict(self.TAG))
-        assert self._filament(lane) == ("ABS", "#112233", 250.0, 100.0,
-                                        "Custom", "Mine", 750)
-
-
-class TestBuildFilamentName:
-    """The fallback names a filament exactly as AFC_RFID does."""
-
-    @pytest.mark.parametrize("args,name", [
-        (("Bambu", "PLA", "Basic"), "Bambu PLA Basic"),
-        (("Bambu", "PLA", "PLA Matte"), "Bambu PLA Matte"),
-        (("", "PETG", ""), "PETG"),
-        (("Bambu", "", ""), "Bambu"),
-        (("", "", ""), ""),
-    ])
-    def test_the_fallback_name_matches_the_real_one(self, args, name):
-        from extras.AFC_RFID import build_filament_name as real
-        with _p6_fresh_import("extras.AFC_BambuAMS", "extras.AFC_RFID"
-                              ) as (fresh,):
-            assert fresh.build_filament_name(*args) == name
-        assert real(*args) == name
 
 
 class TestAfcBambuAMSFinishFrames:

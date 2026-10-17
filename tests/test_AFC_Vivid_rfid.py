@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 from dataclasses import dataclass
+import importlib.util
 import sys
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -800,16 +801,6 @@ class TestAFCVividrfidOnReady:
         assert rig.unit.bambu_master_key == b"\x01"
         assert rig.unit.creality_key == b"\x02"
         assert rig.unit.creality_encryption_key == b"\x03"
-        assert rig.logger.messages == [self.MAPPED_ONE_READER]
-
-    def test_skips_resolve_when_helper_absent(self, monkeypatch):
-        rig = build_vivid(monkeypatch, ready=False,
-                          options={"bambu_master_key": "0011"})
-        self._add_keys(rig, {"creality_key": "bb"})
-        monkeypatch.setattr(vivid_mod, "resolve_rfid_keys", None)
-        rig.printer.send_event("klippy:ready")
-        assert rig.unit.bambu_master_key == b"\x00\x11"
-        assert rig.unit.creality_key is None
         assert rig.logger.messages == [self.MAPPED_ONE_READER]
 
     def test_duplicate_slot_warns_and_keeps_first(self, monkeypatch):
@@ -1831,15 +1822,6 @@ class TestAFCVividrfidRetractSibling:
         assert p == {"slot": 0}
         assert rig.logger.messages == []
 
-    def test_noop_when_movedirection_none(self, monkeypatch):
-        rig = vivid_pair_rig(monkeypatch)
-        monkeypatch.setattr(vivid_mod, "MoveDirection", None)
-        p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
-        assert rig.lane("lane1").moves == []
-        assert p == {"slot": 0}
-        assert rig.logger.messages == []
-
     def test_return_when_no_sibling(self, monkeypatch):
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:5, lane1:6"},
                           readers=(("reader0", "5"),),
@@ -2004,16 +1986,6 @@ class TestAFCVividrfidRestoreSibling:
         rig.unit._restore_sibling(p)
         assert sib.moves == []
         assert p == {"slot": 0, "sib_lane": sib, "sib_dist": 0.0}
-        assert rig.logger.messages == []
-
-    def test_noop_when_movedirection_none(self, monkeypatch):
-        rig = vivid_pair_rig(monkeypatch)
-        monkeypatch.setattr(vivid_mod, "MoveDirection", None)
-        sib = rig.lane("lane1")
-        p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 75.0}
-        rig.unit._restore_sibling(p)
-        assert sib.moves == []
-        assert p == {"slot": 0, "sib_lane": sib, "sib_dist": 75.0}
         assert rig.logger.messages == []
 
     def test_restores_and_resets(self, monkeypatch):
@@ -2315,3 +2287,36 @@ class TestLoadConfigPrefix:
         assert reader.slots == [0, 1]
         assert reader.spi is bus.spis[0]
         assert printer.afc.logger.messages == []
+
+
+def _exec_vivid_with_blocked_import(monkeypatch: pytest.MonkeyPatch, blocked: str) -> None:
+    """
+    Run a throwaway copy of AFC_Vivid_rfid.py with one dependency made unimportable.
+
+    :param monkeypatch: restores the blocked sys.modules entry afterward
+    :param blocked: module name whose import should fail
+    """
+    monkeypatch.setitem(sys.modules, blocked, None)
+    spec = importlib.util.spec_from_file_location("extras._vivid_rfid_import_guard_probe",
+                                                  vivid_mod.__file__)
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+
+class TestVividRfidModuleImportGuards:
+    def test_afc_utils_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_vivid_with_blocked_import(monkeypatch, "extras.AFC_utils")
+        assert str(exc_info.value).startswith(
+            "Error when trying to import AFC_utils.ERROR_STR")
+
+    def test_afc_rfid_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_vivid_with_blocked_import(monkeypatch, "extras.AFC_RFID")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_RFID, please rerun install-afc.sh")
+
+    def test_afc_lane_import_failure_raises_config_error(self, monkeypatch):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_vivid_with_blocked_import(monkeypatch, "extras.AFC_lane")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_lane, please rerun install-afc.sh")

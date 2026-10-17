@@ -21,22 +21,25 @@
 # ACE2/ViViD, so every format it decodes (see AFC_rfid_readers) reads here and
 # syncs to Spoolman through AFC_RFID.
 from __future__ import annotations
+import traceback
+from configparser import Error as error
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+try: from extras.AFC_utils import ERROR_STR
+except:
+    error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
+    raise error(error_str)
 
 # The shared transport-agnostic MFRC522 + MIFARE + multi-manufacturer
 # decode stack. read_tag() only needs an object exposing reg_read/reg_write.
 from extras.AFC_rfid_readers import read_tag, Mfrc522, MifareClassic
 from extras.AFC_rfid_write import StageError, register_reader
-from extras.AFC_RFID import (AFCUnitRFID,
-                             map_tag_to_slot_info)
-try:
-    from extras.AFC_RFID import get_auto_spoolman_create
-except ImportError:                                    # older AFC without the helper
-    get_auto_spoolman_create = None
-try:
-    from extras.AFC_RFID import resolve_rfid_keys
-except ImportError:                                    # older AFC without the helper
-    resolve_rfid_keys = None
+try: from extras.AFC_RFID import (AFCUnitRFID,
+                                  map_tag_to_slot_info,
+                                  resolve_rfid_keys)
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
+    raise error(error_str)
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
@@ -198,17 +201,12 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         self.bambu_master_key = bytes.fromhex(bk) if bk else None
         self.creality_key = bytes.fromhex(ck) if ck else None
         self.creality_encryption_key = bytes.fromhex(cek) if cek else None
-        if resolve_rfid_keys is not None:
-            self.bambu_master_key, self.creality_key, self.creality_encryption_key = \
-                resolve_rfid_keys(self.printer, self.bambu_master_key,
-                                  self.creality_key, self.creality_encryption_key)
+        self.bambu_master_key, self.creality_key, self.creality_encryption_key = \
+            resolve_rfid_keys(self.printer, self.bambu_master_key,
+                              self.creality_key, self.creality_encryption_key)
         # Warn loudly: a missing key makes every Bambu tag uid-only, which looks
         # like an antenna/positioning problem.
-        if resolve_rfid_keys is None:
-            self.logger.warning(
-                "AFC_OpenAMS_rfid: AFC_RFID.py is too old to resolve "
-                "[AFC_rfid_keys]. Update it or Bambu keys are ignored")
-        elif self.bambu_master_key is None:
+        if self.bambu_master_key is None:
             self.logger.warning(
                 "AFC_OpenAMS_rfid: no bambu_master_key resolved (section "
                 "option or [AFC_rfid_keys]). Bambu tags will not decode")

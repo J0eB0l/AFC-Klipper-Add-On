@@ -235,164 +235,28 @@ except:
 
 from extras import AFC_BambuAMS_bridge as _bridge_mod  # noqa: E402
 
-try:
-    from extras.AFC_unit import afcUnit
-except Exception:                        # allow import under unit tests
-    afcUnit = object                     # type: ignore
+try: from extras.AFC_unit import afcUnit
+except:
+    err_str = ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc())
+    raise error(err_str)
 
-try:
-    from configfile import error as config_error
-except Exception:                        # pragma: no cover - klipper runtime only
-    config_error = Exception             # type: ignore
+try: from extras.AFC_lane import AFCLaneState
+except:
+    err_str = ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc())
+    raise error(err_str)
 
-try:
-    from extras.AFC_lane import AFCLaneState
-except Exception:                        # allow import under unit tests
-    class AFCLaneState:                   # type: ignore
-        """
-        Fallback lane-state constants when AFC_lane can't be imported
-        (unit tests import this module without a Klipper runtime).
-        """
-        NONE = 0
-        ERROR = "Error"
-        LOADED = "Loaded"
-        TOOLED = "Tooled"
-        TOOL_LOADED = "Tool Loaded"
-        TOOL_LOADING = "Tool Loading"
-        TOOL_UNLOADING = "Tool Unloading"
-        EJECTING = "Ejecting"
+try: from extras.AFC_RFID import (
+    apply_filament_defaults,
+    bed_temp_for_material,
+    build_filament_name,
+    default_bed_temp_for_material,
+    )
+except:
+    err_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
+    raise error(err_str)
 
-try:
-    from extras.AFC_RFID import (apply_filament_defaults, bed_temp_for_material,
-                                 build_filament_name)
-except Exception:
-    # AFC_RFID is optional: the AMS reads its own tags, so the lane-info path
-    # has local fallbacks, as AFC_ACE does. Spoolman lives in
-    # AFC_BambuAMS_rfid, reached through shims that no-op without it.
-
-    def build_filament_name(brand: str, material: str, sub_type: str) -> str:
-        """
-        "<brand> <material> <sub_type>", skipping empties and not repeating
-        the material when the variant already spells it out ("Bambu PLA Basic",
-        never "Bambu PLA PLA Basic"), a dependency-free copy of
-        AFC_RFID.build_filament_name.
-
-        :param brand: filament brand, may be ""
-        :param material: base material such as "PLA", may be ""
-        :param sub_type: variant such as "Matte", may be ""
-        :return str: the joined name, or "" when nothing is known
-        """
-        parts = []
-        if brand:
-            parts.append(brand)
-        if material and not (sub_type and material.lower() in sub_type.lower()):
-            parts.append(material)
-        if sub_type:
-            parts.append(sub_type)
-        return " ".join(parts).strip()
-
-    def bed_temp_for_material(material: str) -> Optional[int]:
-        """
-        A default bed temperature for a material, or None when unknown:
-        a dependency-free copy of AFC_RFID.bed_temp_for_material, kept because
-        a Bambu tag almost never states one and this path has to work with no
-        RFID module deployed.
-
-        :param material: material string, any casing/separators
-        :return Optional[int]: bed temperature in C, or None
-        """
-        if not material:
-            return None
-        key = material.strip().lower()
-        for ch in (' ', '-', '_', '/'):
-            key = key.replace(ch, '')
-        table = {'pla': 55, 'placf': 55, 'plagf': 55, 'petg': 70, 'pet': 70,
-                 'petgcf': 70, 'petgf': 70, 'tpu': 35, 'abs': 90, 'abscf': 90,
-                 'absgf': 90, 'asa': 90, 'asacf': 90, 'pc': 100, 'pccf': 100,
-                 'pa': 100, 'nylon': 100, 'pacf': 100, 'pagf': 100, 'pa6': 100,
-                 'pa12': 100, 'pps': 100, 'ppscf': 100, 'hips': 100, 'pva': 45,
-                 'bvoh': 45}
-        if key in table:
-            return table[key]
-        for k in sorted(table, key=len, reverse=True):
-            if key.startswith(k):
-                return table[k]
-        return None
-
-    def apply_filament_defaults(lane: Any, slot_info: Any,
-                                color_converter: Optional[Any] = None,
-                                afc_defaults: Optional[dict] = None) -> None:
-        """
-        Apply the AMS's tag material/colour/temps to a lane when not already
-        set: a dependency-free copy of AFC_RFID.apply_filament_defaults, so a
-        bay still shows its filament in Mainsail with no AFC_RFID present.
-
-        Only fills blanks: a field the operator or a previous read already set
-        is never overwritten, so it is safe to call on every surface pass.
-
-        :param lane: lane to populate
-        :param slot_info: normalized slot info from the AMS record
-        :param color_converter: optional [r,g,b] -> "#rrggbb" callable
-        :param afc_defaults: optional default_material_type / default_color
-        """
-        info = slot_info or {}
-        has_material = getattr(lane, "material", None) not in (None, "")
-        has_color = getattr(lane, "color", None) not in (None, "", "#000000")
-        has_ext_temp = getattr(lane, "extruder_temp", None) is not None
-        has_bed_temp = getattr(lane, "bed_temp", None) is not None
-
-        material = (info.get("material", "") or "")
-        if material.lower() == "unknown":
-            material = ""
-        color_hex = info.get("color_hex", "") or ""
-        if not color_hex and color_converter is not None:
-            raw = info.get("color", [0, 0, 0])
-            if raw != [0, 0, 0]:
-                color_hex = color_converter(raw)
-
-        if not has_material and material:
-            lane.material = material
-        if not has_color and color_hex:
-            lane.color = color_hex if color_hex.startswith("#") else "#" + color_hex
-        if not has_ext_temp and info.get("extruder_temp") is not None:
-            try:
-                lane.extruder_temp = float(info.get("extruder_temp"))
-            except (TypeError, ValueError):
-                pass
-        if not has_bed_temp and info.get("bed_temp") is not None:
-            try:
-                lane.bed_temp = float(info.get("bed_temp"))
-            except (TypeError, ValueError):
-                pass
-        sub_type = info.get("sub_type", "") or ""
-        if sub_type and not getattr(lane, "sub_type", ""):
-            lane.sub_type = sub_type
-        brand = info.get("brand", "") or ""
-        if brand and not getattr(lane, "spool_vendor", ""):
-            lane.spool_vendor = brand
-
-        if afc_defaults is not None:
-            if not getattr(lane, "material", None):
-                dm = afc_defaults.get("default_material_type")
-                if dm:
-                    lane.material = dm
-            if not getattr(lane, "color", None):
-                dc = afc_defaults.get("default_color")
-                if dc:
-                    lane.color = dc
-
-        if not getattr(lane, "weight", 0):
-            lane.weight = 1000
-
-try:
-    from extras.AFC_RFID import default_bed_temp_for_material
-except Exception:
-    # Without it the defaults derive no bed temperature (the fallback
-    # apply_filament_defaults above).
-    default_bed_temp_for_material = None  # type: ignore
 # Spoolman lives in AFC_BambuAMS_rfid, enabled by an [AFC_BambuAMS_rfid]
-# section and reached only through the shims further down. Nothing here imports
-# AFC_RFID's Spoolman half, so this module loads with or without it.
+# section and reached only through the shims further down.
 
 
 
@@ -4582,9 +4446,8 @@ class afcBambuAMS(afcUnit):
             return False
         if weight and abs(weight - 1000.0) > 0.05:
             return False
-        derived = {bed_temp_for_material(material)}
-        if default_bed_temp_for_material is not None:
-            derived.add(default_bed_temp_for_material(material))
+        derived = {bed_temp_for_material(material),
+                   default_bed_temp_for_material(material)}
         return (bed is None
                 or any(d is not None and abs(bed - float(d)) < 0.05
                        for d in derived))
@@ -4901,10 +4764,7 @@ class afcBambuAMS(afcUnit):
         :return str: lowercase hex, "" for none or an unread all-zero one, and ""
                      without [AFC_BambuAMS_rfid]'s Spoolman half
         """
-        try:
-            from extras import AFC_BambuAMS_rfid as rfid
-        except Exception:
-            return ""
+        from extras import AFC_BambuAMS_rfid as rfid
         norm = getattr(rfid, "_norm_tray_uid", None)
         return norm(tray_uid) if callable(norm) and tray_uid else ""
 
@@ -5252,7 +5112,7 @@ class afcBambuAMS(afcUnit):
                 self._slot_map = build_slot_map(self.lanes, self.SLOTS_PER_UNIT)
             except ValueError as e:
                 error_str = f"AFC_BambuAMS {self.name}: {e}"
-                raise config_error(error_str)
+                raise error(error_str)
         # Seed virtual-hub occupancy: pinless lanes default _load_state=True
         # and would read loaded until the first status frame.
         for lane in self.lanes.values():
