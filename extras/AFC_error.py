@@ -360,9 +360,14 @@ class afcError:
             # Save position
             self.afc.save_pos()
             # The user's PAUSE saves its state after the switch to absolute mode below, so
-            # keep the print's own modes for AFC_RESUME to put back
-            self.pause_modes = (self.afc.gcode_move.absolute_coord,
-                                get_gcode_absolute_extrude(self.afc.gcode_move))
+            # keep the print's own modes for AFC_RESUME to put back. A tool change that
+            # pauses part way has already switched to absolute mode, so take the modes
+            # its saved position holds from before that.
+            if self.afc.position_saved:
+                self.pause_modes = (self.afc.absolute_coord, self.afc.absolute_extrude)
+            else:
+                self.pause_modes = (self.afc.gcode_move.absolute_coord,
+                                    get_gcode_absolute_extrude(self.afc.gcode_move))
             # Need to pause as soon as possible to stop more gcode from executing, this needs to be done before movement in Z
             self.pause_resume.send_pause_command()
             # Verify that printer is in absolute mode

@@ -1312,6 +1312,19 @@ class TestPauseResumeExtrudeMode:
         assert err.pause_modes == (True, False)
         assert afc.gcode_move.allow_absolute_extrude is True
 
+    def test_a_pause_inside_a_tool_change_keeps_the_print_modes(self):
+        # A tool change saved the print's position, then switched to absolute
+        # mode, then failed and paused
+        err, afc = self._make(absolute_coord=True, absolute_extrude=True)
+        afc.position_saved = True
+        afc.absolute_coord = True
+        afc.absolute_extrude = False
+        self._pause_then_resume(err, afc)
+        assert afc.gcode_move.allow_absolute_extrude is False
+        assert afc.gcode_move.absolute_coord is True
+        assert ("debug", "AFC_RESUME: restored absolute_coord True, absolute_extrude False") \
+            in err.logger.messages
+
     def test_resume_without_pause_snapshot_leaves_modes(self):
         from tests.conftest import MockGCodeCommand
         err, afc = self._make(absolute_coord=True, absolute_extrude=False)
