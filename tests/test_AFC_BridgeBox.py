@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import configparser
+import json
 import os
 import pathlib
 import sys
@@ -3137,6 +3138,147 @@ class TestAfcBridgeBoxInit:
         assert _bbx_loaded(m)[1] == "AFC_lane lane24"
         _bbx_quiet(m.printer)
 
+    # the automatic lane base: the T#s AFC's PREP gives the other lanes
+
+    @staticmethod
+    def _turtle(printer: BambuPrinter, lanes: int = 4) -> BambuPrinter:
+        """
+        Declare a Turtle_1 with lanes lane0.. mapped T0.., as a BoxTurtle's
+        config does.
+
+        :param printer: the printer
+        :param lanes: how many lanes
+        :return BambuPrinter: the printer
+        """
+        for n in range(lanes):
+            printer.add_section(f"AFC_lane lane{n}",
+                                {"unit": f"Turtle_1:{n + 1}", "map": f"T{n}"})
+        return printer
+
+    @staticmethod
+    def _ace(printer: BambuPrinter, lanes: int = 1) -> BambuPrinter:
+        """
+        Declare an Ace_1 with lanes ace_1.. and no map:, which PREP gives the
+        lowest free T#s.
+
+        :param printer: the printer
+        :param lanes: how many lanes
+        :return BambuPrinter: the printer
+        """
+        for n in range(1, lanes + 1):
+            printer.add_section(f"AFC_lane ace_{n}", {"unit": f"Ace_1:{n}"})
+        return printer
+
+    def test_auto_tools_past_the_last_lane_raise_the_base(self, tmp_path):
+        printer = self._ace(self._turtle(make_printer()), lanes=4)
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        # ace_1..4 take T4..T7 at PREP, past lane3.
+        assert m.lane_base == 8
+        assert _bbx_loaded(m)[1] == "AFC_lane lane8"
+        _bbx_quiet(printer)
+
+    def test_a_gap_below_the_last_tool_is_left(self, tmp_path):
+        printer = self._turtle(make_printer())
+        printer.add_section("AFC_lane lane4",
+                            {"unit": "Turtle_1:5", "map": "T11"})
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        assert m.lane_base == 12
+        assert _bbx_loaded(m)[1] == "AFC_lane lane12"
+        _bbx_quiet(printer)
+
+    def test_a_saved_map_counts_over_the_config_map(self, tmp_path):
+        printer = self._turtle(make_printer(var_file=str(tmp_path / "AFC.var")))
+        write_unit_vars(printer, {"Turtle_1": {"lane3": {"map": "T9"}}})
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        assert m.lane_base == 10
+        _bbx_quiet(printer)
+
+    def test_a_saved_none_holds_no_tool(self, tmp_path):
+        printer = self._turtle(make_printer(var_file=str(tmp_path / "AFC.var")),
+                               lanes=1)
+        printer.add_section("AFC_lane lane1", {"unit": "Turtle_1:2",
+                                               "map": "T7"})
+        write_unit_vars(printer, {"Turtle_1": {"lane1": {"map": "NONE"}}})
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        assert m.lane_base == 2
+        _bbx_quiet(printer)
+
+    @pytest.mark.parametrize("force, base", [(None, 3), ("True", 2)])
+    def test_a_tool_macro_holds_its_tool_unless_maps_are_forced(
+            self, tmp_path, force, base):
+        printer = self._ace(self._turtle(make_printer(), lanes=1))
+        printer.add_section("gcode_macro T1", {"gcode": "M117 T1"})
+        if force:
+            printer.add_section("AFC", {"force_assign_map": force})
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        assert m.lane_base == base
+        _bbx_quiet(printer)
+
+    def test_an_unassigned_lane_holds_no_tool(self, tmp_path):
+        printer = self._turtle(make_printer(), lanes=1)
+        printer.add_section("AFC_lane spare", {"unit": "Turtle_1:2",
+                                               "unassigned": "True"})
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        assert m.lane_base == 1
+        _bbx_quiet(printer)
+
+    # the automatic lane base: a stored base other units have grown into
+
+    def test_a_stored_base_another_unit_grew_into_moves_up(self, tmp_path):
+        var = str(tmp_path / "AFC.var")
+        m = _bbx_boot(tmp_path, self._turtle(make_printer(var_file=var)),
+                      lane_base=0)
+        assert (m.lane_base, m._lane_map) == (4, {HT_UID: (4, 1)})
+        m._state_set({"AFC_lane lane4": {"remember_spool": "False",
+                                         "dist_hub": "800"}})
+        autov = tmp_path / "AFC_auto_vars.cfg"
+        autov.write_text(self.AUTOV_HEADER + "[AFC_lane lane4]\n"
+                                             "dist_hub : 900\n")
+        printer = self._ace(self._turtle(make_printer(var_file=var)))
+        printer.add_section("AFC_lane lane4", {"dist_hub": "900"})
+        write_unit_vars(printer, {
+            "Bambu_AMS_HT_1": {"lane4": {"map": "T4", "spool_id": 7}},
+            "Turtle_1": {"lane0": {"map": "T0", "runout_lane": "lane4"}},
+            "system": {"current_load": "lane4",
+                       "extruders": {"extruder": {"lane_loaded": "lane4"}}}})
+        # ace_1 takes T4 at PREP, the HT's T#.
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
+        assert (m.lane_base, m._lane_map) == (5, {HT_UID: (5, 1)})
+        assert _bbx_loaded(m)[1] == "AFC_lane lane5"
+        assert m._state_get(SEC, "lane_base") == "5"
+        with open(var + ".unit") as fh:
+            assert json.load(fh) == {
+                "Bambu_AMS_HT_1": {"lane5": {"map": "T5", "spool_id": 7}},
+                "Turtle_1": {"lane0": {"map": "T0", "runout_lane": "lane5"}},
+                "system": {"current_load": "lane5",
+                           "extruders": {"extruder": {"lane_loaded": "lane5"}}}}
+        assert m._read_state().has_section("AFC_lane lane4") is False
+        assert dict(m._read_state().items("AFC_lane lane5")) == {
+            "remember_spool": "False", "dist_hub": "900"}
+        assert autov.read_text() == self.AUTOV_HEADER
+        assert isinstance(printer.lookup_object("AFC_lane lane4"),
+                          _SweptSection)
+        assert m._learned_notes == [
+            (False, "Other units now hold lane numbers or T#s among this "
+                    "chain's lanes, so its lanes moved up past the highest of "
+                    "those (4): lane4 became lane5, with their saved lane "
+                    "records, T# maps and learned values.")]
+        _bbx_quiet(printer)
+        # The next start finds it past them and leaves it there.
+        m = _bbx_boot(tmp_path, self._ace(self._turtle(
+            make_printer(var_file=var))), lane_base=0)
+        assert (m.lane_base, m._lane_map) == (5, {HT_UID: (5, 1)})
+        assert m._learned_notes == []
+        _bbx_quiet(m.printer)
+
+    def test_a_lane_base_option_is_never_moved(self, tmp_path):
+        m = _bbx_boot(tmp_path, self._turtle(make_printer()), lane_base=4)
+        m = _bbx_boot(tmp_path, self._ace(self._turtle(make_printer())),
+                      lane_base=4)
+        assert (m.lane_base, m._lane_map) == (4, {HT_UID: (4, 1)})
+        assert m._learned_notes == []
+        _bbx_quiet(m.printer)
+
     # the chain's buffer
 
     def test_the_buffer_loads_after_the_units(self, tmp_path):
@@ -5300,30 +5442,40 @@ class TestAfcBridgeBoxInit:
         assert printer.gcode.messages == []
         return m1, m2, list(printer.afc.logger.messages)
 
-    def test_reverting_the_change_that_stopped_it_starts_again(
-            self, tmp_path):
+    def test_a_chain_grown_into_moves_the_next_chain_past_it(self, tmp_path):
         m1, m2, logs = self._pair(tmp_path)
         assert m1._lane_map[A] == (9, 1)
-        assert m2.lane_base == 11
+        assert (m2.lane_base, m2._lane_map[B]) == (11, (15, 1))
         assert logs == []
-        # pool_ams 2 moves chain1's HT onto lane13, inside chain2's lanes.
-        m1, err, logs = self._pair(tmp_path, pool_ams=2)
+        # pool_ams 2 moves chain1's HT onto lane13, inside chain2's lanes, so
+        # chain2 moves up past chain1's last lane (lane14).
+        m1, m2, logs = self._pair(tmp_path, pool_ams=2)
         assert m1._lane_map[A] == (13, 1)
-        assert str(err) == (
-            f"[AFC_BridgeBox chain2] would fabricate [AFC_lane lane11], but "
-            f"[AFC_BridgeBox chain1] above it in the config already builds "
-            f"it: this chain's lane_base 11 (saved in the #~# block of "
-            f"{tmp_path / 'AFC_BridgeBox.cfg'}, used while lane_base: is "
-            f"unset or 0) falls inside that chain's lanes. Set lane_base: in "
-            f"one chain's section past the other chain's last lane.")
-        moved = [("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) "
-                             f"keeps its name, and its lanes and T# changed: "
-                             f"lane13 (T13) -> lane9 (T9).")]
-        for notes in (moved, []):
+        assert (m2.lane_base, m2._lane_map[B]) == (15, (19, 1))
+        assert m2._state_get("AFC_BridgeBox chain2", "lane_base") == "15"
+        assert logs == [
+            ("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) keeps "
+                        f"its name, and its lanes and T# changed: lane9 (T9) "
+                        f"-> lane13 (T13)."),
+            ("info", "AFC_BridgeBox chain2: Other units now hold lane numbers "
+                     "or T#s among this chain's lanes, so its lanes moved up "
+                     "past the highest of those (14): lane11-lane16 became "
+                     "lane15-lane20, with their saved lane records, T# maps "
+                     "and learned values.")]
+        # Back to pool_ams 1: the recorded HT keeps lane13, and chain2, now
+        # past it, stays.
+        kept = [("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) on "
+                            f"lane13 (T13) keeps its lanes, so the AMS band "
+                            f"stays 2 bays although pool_ams and the recorded "
+                            f"AMS need only 1. Set pool_ams: 2 to silence "
+                            f"this. AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID={A} "
+                            f"lets the band shrink to 1 at the next RESTART, "
+                            f"and erases what it learned.")]
+        for _start in range(2):
             m1, m2, logs = self._pair(tmp_path)
-            assert isinstance(m2, afcBridgeBox)
-            assert m1._lane_map[A] == (9, 1)
-            assert logs == notes
+            assert m1._lane_map[A] == (13, 1)
+            assert (m2.lane_base, m2._lane_map[B]) == (15, (19, 1))
+            assert logs == kept
 
     def test_a_lane_base_given_in_the_section_is_named(self, tmp_path):
         printer = _bbx_steppers(make_printer())

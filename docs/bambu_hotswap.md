@@ -132,13 +132,25 @@ With `lane_base` 12 and the default pools:
 The HT band starts at lane28 whether one AMS is plugged in or four. On a new
 install, `pool_ams: 2` starts it at lane20.
 
-`lane_base` defaults to 0, which means automatic: one past the highest `laneN`
-in the config's `[AFC_lane]` / `[AFC_stepper]` sections or built by a chain
-above this one, else one past the highest `T#` (or `AFC_extruder eN`) in use,
-else 24. Once resolved it is locked in the state file, so adding lanes
-elsewhere later does not move the Bambu lanes. Setting `lane_base` explicitly
-moves every Bambu lane and `T#`, and the moved lanes start without their
-saved details (see below).
+`lane_base` defaults to 0, which means automatic: one past the highest number
+any other unit holds, so the Bambu lanes and `T#` come after every other
+unit's. That counts the `laneN` of each `[AFC_lane]` / `[AFC_stepper]` section
+in the config or built by a chain above this one, and the `T#` AFC's PREP
+gives each of the config's lanes: the map saved in `AFC.var.unit`, else its
+`map:`, else the lowest `T#` still free. A gap below the highest number is
+left alone: with lanes on `T0`-`T3` and one more on `T11`, the Bambu lanes
+start at lane12. With no `laneN` sections, the `T#` an `[AFC_extruder]` maps
+and the number in an `[AFC_extruder eN]` name count too. With nothing
+numbered at all, the base is 24.
+
+Once resolved, the base is locked in the state file, so adding lanes
+elsewhere later does not move the Bambu lanes, unless another unit then holds
+a lane number or `T#` among them. At the next start the chain's lanes then
+move up past the highest number held outside it, and each lane keeps its
+saved record, `T#` map and learned values. The startup log names the lanes
+that moved; update macros keyed to their old lanes or `T#`. A `lane_base` set
+in the section never moves. Changing it moves every Bambu lane and `T#`, and
+the moved lanes start without their saved details (see below).
 
 Set `pool_ams` to the most AMS you will run on this chain. A Bambu bus
 addresses at most 4 AMS, so `pool_ams` above 4 is treated as 4 and the startup
@@ -160,8 +172,9 @@ log says so. Keep `pool_ht` at 8 or below, the most HT a Bambu bus takes.
 
 Lanes whose numbers change at startup start without their saved details, even
 when the unit keeps its name (see [Spools across a
-release](#spools-across-a-release)). Settle `pool_ams`, `lane_base` and the
-names lists early, before those details matter.
+release](#spools-across-a-release)), unless the whole chain moved up past
+other units (see above). Settle `pool_ams`, `lane_base` and the names lists
+early, before those details matter.
 
 A new unit is claimed only onto a free bay of its family (see [No free bay:
 Replace](#no-free-bay-replace) for when none is free).
@@ -223,9 +236,9 @@ These still stop Klipper starting:
   chain's own, so keep hand-written sections off the Bambu lane numbers and
   bay names wherever they sit in the config.
 - Two chains that build the same section, such as a second chain added above
-  an existing one (see [Names](#names)), or a chain whose `lane_base` (set in
-  its section, or locked in the state file) falls inside another chain's
-  lanes. The error reads `[AFC_BridgeBox <chain>] would fabricate
+  an existing one (see [Names](#names)), or a chain whose `lane_base` set in
+  its section falls inside another chain's lanes (a locked one moves up past
+  them, see [Lane layout](#lane-layout)). The error reads `[AFC_BridgeBox <chain>] would fabricate
   [<section>], but [AFC_BridgeBox <other>] above it in the config already
   builds it` and says what to change. For a lane it says where this chain's
   `lane_base` comes from and to set `lane_base:` in one chain's section past
@@ -279,7 +292,8 @@ first chain's; that prefix is saved in the state file, so the chain keeps its
 names if the chains above it change. Set `unit_prefix` to choose another, and
 leave `ams_names` / `ht_names` out of the second chain, or give it names of
 its own. `lane_base` can stay automatic:
-each chain starts one past the last lane the chains above it built. The first
+each chain starts one past the last lane the chains above it built, and moves
+up past them if a chain above grows into its lanes. The first
 chain's units register the `bambu_buffer` pin chip and each later chain's units
 register `bambu_buffer_<chain name>`; `buffer_chip_name` on a chain overrides
 that. A chain that only scouts (see [Turning live claiming
@@ -966,7 +980,7 @@ Set on the `[AFC_BridgeBox <name>]` section:
 | `ams_names` | empty | Comma list naming the AMS bays, lowest lanes first. Only the first four entries are used. |
 | `ht_names` | empty | Comma list naming the HT bays, lowest lanes first. |
 | `unit_prefix` | `Bambu_AMS` (`Bambu_AMS_<chain name>` on a later chain) | Default bay names `<prefix>_N` and `<prefix>_HT_N`. |
-| `lane_base` | `0` | First Bambu lane. 0 resolves it automatically and locks it in the state file. |
+| `lane_base` | `0` | First Bambu lane. 0 resolves it past every other unit's lanes and `T#` and locks it in the state file (see [Lane layout](#lane-layout)). |
 | `roster` | empty | `model:uid` list of known units, for example `ht:0123456789ABCDEF00003331`. The model is `ams1`, `ams2`, `ht`, `boxed` or `lite`. When set, it overrides the recorded roster. |
 | `state_file` | the file holding this section | Where the roster, names, lane map, bay owners, `lane_base` and learned values are kept, as `#~#` lines. Falls back to `~/printer_data/config/AFC/AFC_BridgeBox.cfg`. |
 | `auto_vars_file` | `~/printer_data/config/AFC/AFC_auto_vars.cfg` | AFC's file of learned values. The chain reads bowden lengths saved there under a bay name at startup (see [Learned values](#learned-values)), and `AFC_BRIDGEBOX_FORGET` erases what is stored there under the unit's name and lanes. |

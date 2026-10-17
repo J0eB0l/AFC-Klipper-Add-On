@@ -867,8 +867,23 @@ class afcBridgeBox:
         # Lanes a recorded HT may not keep (see _band_note).
         self._declared_lanes = self._declared_lane_numbers(config)
         self._later_lanes = self._later_chain_lanes(config)
+        names_at, lanes_at = dict(self._name_map), dict(self._lane_map)
         try:
             sections = self._roster_sections(roster)
+            # A stored base whose lanes another unit's lane or T# has grown
+            # into moves up past them, and the bays are laid out again there.
+            step = self._renumber_step(config)
+            if step:
+                was = {pu["name"]: list(pu["lanes"])
+                       for pu in self._pool_units}
+                self._name_map = names_at
+                self._lane_map = {uid: (first + step, span)
+                                  for uid, (first, span) in lanes_at.items()}
+                self._lanes_at_boot = dict(self._lane_map)
+                self.lane_base += step
+                self._resolved_base = self.lane_base
+                sections = self._roster_sections(roster)
+                self._renumber_records(config, step, was, lanes_at)
         except ValueError as e:
             error_str = f"[AFC_BridgeBox {self.name}] {e}"
             raise config.error(error_str)
@@ -1369,19 +1384,23 @@ class afcBridgeBox:
         """
         The auto lane base: stored if ever resolved, else computed.
 
-        Computed = one past the highest laneN the parsed config declares
-        under [AFC_lane] or [AFC_stepper], case-insensitively (the two
-        section families lanes live in), or that a chain master above this
-        one in the config has already fabricated (see _loaded_lane_numbers).
+        Computed = one past the highest number anything outside this chain
+        holds (see _others_numbers): the laneN of every [AFC_lane] or
+        [AFC_stepper], declared or fabricated by a chain master above this
+        one, and every T# AFC's PREP gives the config's lanes. The pool's
+        lanes and T#s then follow every other unit's, leaving any gap below
+        that top alone.
 
         When no numbered laneN sections exist (a machine whose toolhead lanes
-        are named, e.g. [AFC_extruder e1] map: T1, not laneN), fall in behind
-        the highest tool number (map: T<n>, or the number an [AFC_extruder eN]
-        section carries) already assigned to any AFC lane / stepper /
-        extruder instead of jumping to 24, so the fabricated pool
-        continues the tool sequence with lane# == T# (T1/T2/T3 in use -> base 4
-        -> lane4/T4). The 24 is only a last resort, when the config cannot be
-        seen at all (no fileconfig) or nothing at all is numbered or mapped.
+        are named, e.g. [AFC_extruder e1] map: T1, not laneN), the T# an
+        [AFC_extruder] maps and the number an [AFC_extruder eN] section
+        carries count too, so the fabricated pool continues the tool sequence
+        with lane# == T# (T1/T2/T3 in use -> base 4 -> lane4/T4). The 24 is
+        only a last resort, when the config cannot be seen at all (no
+        fileconfig) or nothing at all is numbered or mapped.
+
+        A stored base is checked against the same numbers once the bays are
+        laid out (see _renumber_step).
 
         :param config: this section's wrapper
         :return int: the base to allocate fabricated lanes from
@@ -1390,46 +1409,321 @@ class afcBridgeBox:
                                  "lane_base")
         if stored:
             try:
-                return int(stored)
+                base = int(stored)
             except Exception:
-                pass
+                base = 0
+            if base:
+                self._base_stored = True
+                return base
         base = 24
         try:
-            import re as _re
-            fc = getattr(config, "fileconfig", None)
-            secs = list(fc.sections()) if fc else []
-            # One past the highest laneN, declared here or fabricated by an
-            # earlier chain.
-            nums = [int(m.group(1)) for sec in secs
-                    for m in [_re.match(r"(?i)afc_(?:lane|stepper)\s+lane(\d+)$",
-                                        sec)] if m]
-            nums += self._loaded_lane_numbers()
+            nums = self._others_numbers(config)
+            if not self._declared_lane_numbers(config):
+                nums |= self._extruder_tool_numbers(config)
             if nums:
                 base = max(nums) + 1
-            else:
-                # No numbered lanes: start after the highest T# in use so lane#
-                # == T#.
-                tnums = []
-                for sec in secs:
-                    if not _re.match(r"(?i)afc_(?:lane|stepper|extruder)\s+", sec):
-                        continue
-                    try:
-                        mv = fc.get(sec, "map")
-                    except Exception:
-                        mv = ""
-                    tnums += [int(t) for t in _re.findall(r"[Tt](\d+)", mv or "")]
-                    # A toolchanger's tools are numbered by their extruder
-                    # sections ([AFC_extruder e0] .. e3 are T0..T3) even when
-                    # no map: is written, since the T# is assigned at runtime.
-                    me = _re.match(r"(?i)afc_extruder\s+\D*(\d+)$", sec)
-                    if me:
-                        tnums.append(int(me.group(1)))
-                if tnums:
-                    base = max(tnums) + 1
         except Exception:
             pass
         self._resolved_base = base            # _fold_and_sweep persists it
         return base
+
+    def _others_numbers(self, config: Any) -> Set[int]:
+        """
+        The lane numbers and T#s held outside this chain.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return set: the laneN numbers of _declared_lane_numbers and the T#
+            numbers of _prep_tool_numbers
+        """
+        return (self._declared_lane_numbers(config)
+                | set(self._prep_tool_numbers(config)))
+
+    @staticmethod
+    def _extruder_tool_numbers(config: Any) -> Set[int]:
+        """
+        The T#s a config's extruders carry: the map: of an [AFC_extruder],
+        and the number an [AFC_extruder eN] section name ends in. A
+        toolchanger's tools are numbered by their extruder sections ([AFC_extruder
+        e0] .. e3 are T0..T3) even when no map: is written, since the T# is
+        assigned at runtime.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return set: the T# numbers
+        """
+        import re as _re
+        fc = getattr(config, "fileconfig", None)
+        nums: Set[int] = set()
+        for sec in (fc.sections() if fc else []):
+            if not _re.match(r"(?i)afc_extruder\s+", sec):
+                continue
+            mv = fc.get(sec, "map") if fc.has_option(sec, "map") else ""
+            nums |= {int(t) for t in _re.findall(r"[Tt](\d+)", mv or "")}
+            me = _re.match(r"(?i)afc_extruder\s+\D*(\d+)$", sec)
+            if me:
+                nums.add(int(me.group(1)))
+        return nums
+
+    def _prep_tool_numbers(self, config: Any) -> List[int]:
+        """
+        The T#s the config's own lanes hold once AFC's PREP has run.
+
+        Numbered as AFC_prep and AFC_functions.TcmdAssign number them: a lane
+        takes the map AFC.var.unit saved for it, else its map: (or cmd:). A
+        lane with neither takes the lowest T# that no lane's map: names, no
+        saved map holds, and no [gcode_macro T<n>] holds unless [AFC]
+        force_assign_map is set. A pooled lane (unassigned:) holds none, and a
+        section auto_vars alone carries is a learned value, not a lane (see
+        _learned_only). A T# command another module registers at runtime is
+        not visible here.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return list: the T# numbers, in no order
+        """
+        import re as _re
+        fc = getattr(config, "fileconfig", None)
+        if fc is None:
+            return []
+
+        def opt(sec: str, key: str) -> str:
+            """:return str: the option's value, empty when unset"""
+            return str(fc.get(sec, key)) if fc.has_option(sec, key) else ""
+
+        def flag(sec: str, key: str) -> bool:
+            """:return bool: whether the option reads as true"""
+            return opt(sec, key).strip().lower() in ("1", "true", "yes", "on")
+
+        def tools(raw: Any) -> List[int]:
+            """:return list: the T# numbers a map names"""
+            text = raw if isinstance(raw, str) else ",".join(map(str, raw))
+            return [int(t) for t in _re.findall(r"[Tt](\d+)", text)]
+
+        saved = self._read_var_unit(config)
+        autov = self._read_ini(self.auto_vars_file)
+        held: List[int] = []
+        taken: Set[int] = set()
+        autos = 0
+        for sec in fc.sections():
+            m = _re.match(r"(?i)afc_(?:lane|stepper)\s+(\S+)$", sec)
+            if (not m or flag(sec, "unassigned")
+                or self._learned_only(fc, autov, sec)):
+                continue
+            mine = tools(opt(sec, "map") or opt(sec, "cmd"))
+            taken.update(mine)
+            unit = opt(sec, "unit").split(":", 1)[0].strip()
+            rec = (saved.get(unit) or {}).get(m.group(1))
+            raw = rec.get("map") if isinstance(rec, dict) else None
+            if raw:
+                mine = tools(raw)             # NONE holds none, and is no auto
+            elif not mine:
+                autos += 1
+                continue
+            held += mine
+            taken.update(mine)
+        if not flag("AFC", "force_assign_map"):
+            taken |= {int(m.group(1)) for m in
+                      (_re.match(r"(?i)gcode_macro\s+T(\d+)$", sec)
+                       for sec in fc.sections()) if m}
+        free = (t for t in range(99) if t not in taken)
+        held += [t for _n, t in zip(range(autos), free)]
+        return held
+
+    def _var_unit_path(self, config: Any) -> str:
+        """
+        Where AFC keeps its lane records: its VarFile plus ``.unit``.
+
+        AFC's own VarFile when [AFC] has loaded, else what [AFC] sets, else
+        AFC's default.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return str: the path
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        path = getattr(afc, "VarFile", None)
+        fc = getattr(config, "fileconfig", None)
+        if not path and fc is not None and fc.has_option("AFC", "VarFile"):
+            path = fc.get("AFC", "VarFile")
+        return os.path.expanduser(
+            path or "../printer_data/config/AFC/AFC.var") + ".unit"
+
+    def _read_var_unit(self, config: Any) -> Dict[str, Any]:
+        """
+        AFC.var.unit as last saved.
+
+        :param config: this section's wrapper
+        :return dict: unit name -> lane name -> record, plus "system"; {} when
+            the file is missing or unreadable
+        """
+        try:
+            with open(self._var_unit_path(config)) as fh:
+                data = json.load(fh)
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _renumber_step(self, config: Any) -> int:
+        """
+        How far a stored lane_base must move for this chain's lanes to sit
+        past every other unit's again.
+
+        A stored base was one past the others when it was resolved. A unit
+        added since can hold a lane number or T# among this chain's lanes, and
+        a pool lane's home T# is its lane number, so two lanes would share one
+        T#. Such a chain moves up past the highest number held outside it,
+        skipping the gap below. A chain the others only sit below or above
+        stays where it is, and a lane_base: in the section is never moved.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return int: the lanes to move up by, 0 for none
+        """
+        if not getattr(self, "_base_stored", False):
+            return 0
+        mine = {int(home[1:]) for pu in self._pool_units
+                for home in map(_home_tool, pu["lanes"]) if home}
+        others = self._others_numbers(config)
+        if not mine & others:
+            return 0
+        return max(others) + 1 - self.lane_base
+
+    @staticmethod
+    def _shift_tools(value: Any, step: int, nums: Set[int]) -> Any:
+        """
+        A saved map with each T# of a moved lane moved by the same step.
+
+        :param value: a map or current_map as AFC.var.unit saves it, a string
+            or a list of strings
+        :param step: the lanes moved up by
+        :param nums: the lane numbers that moved
+        :return: the value in the same shape
+        """
+        import re as _re
+
+        def one(text: str) -> str:
+            """:return str: text with each moved T# moved"""
+            return _re.sub(
+                r"\b([Tt])(\d+)\b",
+                lambda m: (f"{m.group(1)}{int(m.group(2)) + step}"
+                           if int(m.group(2)) in nums else m.group(0)),
+                text)
+
+        if isinstance(value, str):
+            return one(value)
+        if isinstance(value, list):
+            return [one(v) if isinstance(v, str) else v for v in value]
+        return value
+
+    def _renumber_records(self, config: Any, step: int,
+                          was: Dict[str, List[str]],
+                          lanes_at: Dict[str, Tuple[int, int]]) -> None:
+        """
+        Move what is saved under this chain's old lane names to the new ones
+        (see _renumber_step), before anything reads it this start.
+
+        Every lane moved by the same step, so each bay keeps its rank and the
+        HT band its place. In AFC.var.unit, each bay's lane records move to
+        its new lanes, and a T# in their maps that was a moved lane's moves
+        with it; a runout lane or toolhead load naming a moved lane names its
+        new one. The store's lane sections move, and so do the ones auto_vars
+        alone carries, which this start parsed under the old names: those
+        names get a stand-in unless a lane is built under them now (see
+        _stand_in). AFC.var.unit is written first and the state, with the new
+        lane_base and lane map, straight after it, so a start that fails
+        later moves nothing a second time.
+
+        :param config: this section's wrapper
+        :param step: the lanes moved up by
+        :param was: bay name -> its lanes before the move
+        :param lanes_at: the lane map before the move
+        """
+        nums = {int(home[1:]) for lanes in was.values()
+                for home in map(_home_tool, lanes) if home}
+        for first, span in lanes_at.values():
+            nums |= set(range(first, first + span))
+        if not nums:
+            return
+        ren = {f"lane{n}": f"lane{n + step}" for n in nums}
+        bays = (set(was) | set(self._name_map.values())
+                | set(self._load_bay_owner()[0]))
+        data = self._read_var_unit(config)
+        if data:
+            for unit, recs in data.items():
+                if not isinstance(recs, dict) or unit == "system":
+                    continue
+                if unit in bays:
+                    recs = data[unit] = {ren.get(ln, ln): dict(rec)
+                                         if isinstance(rec, dict) else rec
+                                         for ln, rec in recs.items()}
+                for rec in recs.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    if unit in bays:
+                        for key in ("map", "current_map"):
+                            if key in rec:
+                                rec[key] = self._shift_tools(rec[key], step,
+                                                             nums)
+                    if rec.get("runout_lane") in ren:
+                        rec["runout_lane"] = ren[rec["runout_lane"]]
+            system = data.get("system")
+            if isinstance(system, dict):
+                if system.get("current_load") in ren:
+                    system["current_load"] = ren[system["current_load"]]
+                for ext in (system.get("extruders") or {}).values():
+                    if isinstance(ext, dict) and ext.get("lane_loaded") in ren:
+                        ext["lane_loaded"] = ren[ext["lane_loaded"]]
+            path = self._var_unit_path(config)
+            try:
+                with open(path + ".tmp", "w") as fh:
+                    fh.write(json.dumps(data, indent=4))
+                os.replace(path + ".tmp", path)
+            except Exception:
+                pass                          # persistence is best-effort
+        cp = self._read_state()
+        autov = self._read_ini(self.auto_vars_file)
+        fc = getattr(config, "fileconfig", None)
+        parsed: Dict[str, Dict[str, str]] = {}
+        moving: Dict[str, Dict[str, str]] = {}
+        for n in sorted(nums):
+            old = f"AFC_lane lane{n}"
+            items = dict(cp.items(old)) if cp.has_section(old) else {}
+            cp.remove_section(old)
+            if (autov is not None and autov.has_section(old)
+                and not (fc is not None and fc.has_section(old)
+                         and not self._learned_only(fc, autov, old))):
+                parsed[old] = dict(autov.items(old))
+                items.update(parsed[old])     # auto_vars newest, wins last
+                autov.remove_section(old)
+            if items:
+                moving[f"AFC_lane lane{n + step}"] = items
+        for name, items in moving.items():
+            if cp.has_section(name):
+                self._note_learned(
+                    f"[{name}] in {os.path.basename(self.state_file)} is "
+                    f"another chain's, so the values learned for the lane "
+                    f"that moved onto it are dropped")
+                continue
+            cp.add_section(name)
+            for k, v in items.items():
+                cp.set(name, k, v)
+        chain = self._BASE_SECTION + " " + self.name
+        if not cp.has_section(chain):
+            cp.add_section(chain)
+        cp.set(chain, "lane_base", str(self.lane_base))
+        for k, v in self._ser_maps(self._lane_map, self._name_map).items():
+            cp.set(chain, k, v)
+        self._write_state(cp)
+        if parsed:
+            self._write_auto_vars(autov)
+        built = {f"AFC_lane {ln}" for pu in self._pool_units
+                 for ln in pu["lanes"]}
+        for old, keys in parsed.items():
+            self._stand_in(config, old, keys, hold=old not in built)
+        lo, hi = min(nums), max(nums)
+        old, new = ((f"lane{lo}", f"lane{lo + step}") if lo == hi else
+                    (f"lane{lo}-lane{hi}", f"lane{lo + step}-lane{hi + step}"))
+        self._note_learned(
+            f"Other units now hold lane numbers or T#s among this chain's "
+            f"lanes, so its lanes moved up past the highest of those "
+            f"({self.lane_base - 1}): {old} became {new}, with their saved "
+            f"lane records, T# maps and learned values.")
 
     def _loaded_lane_numbers(self) -> List[int]:
         """
@@ -1478,17 +1772,29 @@ class afcBridgeBox:
         try:
             for sec in fc.sections():
                 m = _re.match(r"(?i)afc_(?:lane|stepper)\s+lane(\d+)$", sec)
-                if not m:
-                    continue
-                if (autov is not None
-                    and autov.has_section(sec)
-                    and not set(dict(fc.items(sec)))
-                    - set(dict(autov.items(sec)))):
-                    continue
-                nums.add(int(m.group(1)))
+                if m and not self._learned_only(fc, autov, sec):
+                    nums.add(int(m.group(1)))
         except Exception:
             pass
         return nums
+
+    @staticmethod
+    def _learned_only(fc: Any, autov: Optional[configparser.RawConfigParser],
+                      sec: str) -> bool:
+        """
+        Whether auto_vars alone carries a section of the merged config: a
+        value AFC learned and filed under the section's name, which is no
+        section of its own.
+
+        :param fc: the merged fileconfig
+        :param autov: auto_vars as read; None when absent
+        :param sec: the section name
+        :return bool: True when every option the section has is auto_vars'
+        """
+        return bool(autov is not None
+                    and autov.has_section(sec)
+                    and not set(dict(fc.items(sec)))
+                    - set(dict(autov.items(sec))))
 
     def _earlier_chains(self) -> List["afcBridgeBox"]:
         """
@@ -3785,8 +4091,8 @@ class afcBridgeBox:
                 f"section now")
         return changed
 
-    def _stand_in(self, config: Any, name: str, keys: Dict[str, str]
-                  ) -> None:
+    def _stand_in(self, config: Any, name: str, keys: Dict[str, str],
+                  hold: bool = True) -> None:
         """
         Hold a swept leftover's name for the rest of this start (see
         _sweep_orphans).
@@ -3794,11 +4100,14 @@ class afcBridgeBox:
         :param config: this section's wrapper
         :param name: the section name
         :param keys: its options, read so klippy finds them used
+        :param hold: False when this start builds a section under the name,
+            so only its options are read
         """
         try:
-            if self.printer.lookup_object(name, None) is not None:
+            if hold and self.printer.lookup_object(name, None) is not None:
                 return
-            self.printer.add_object(name, _SweptSection())
+            if hold:
+                self.printer.add_object(name, _SweptSection())
         except Exception:
             return
         try:
