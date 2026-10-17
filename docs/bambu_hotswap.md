@@ -310,9 +310,11 @@ ceiling. A new AMS claims as `boxed`, with no heater, unless `roster:` lists it
 as `ams1` or `ams2`. Once it is recorded and the bus confirms `ams1` or `ams2`,
 its heater and dry ceiling follow the confirmed model, including a `heater` or
 `dry_max_temp` set in its model section (such as `[AFC_BridgeBox ams2]`), and a
-`measure_on_insert` set there is applied live too. Bowden lengths set in the
-model section apply from the unit's next claim. Other keys in a model section
-take effect at the next restart.
+`measure_on_insert` set there is applied live too. `measure_on_insert` is on
+by default for every model, so each unit measures how much filament a new
+spool holds; set it False in a model section to turn that off. Bowden lengths
+set in the model section apply from the unit's next claim. Other keys in a
+model section take effect at the next restart.
 
 What stays with a bay and what follows the unit:
 

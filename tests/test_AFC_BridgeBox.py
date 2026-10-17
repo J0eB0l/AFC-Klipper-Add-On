@@ -4780,11 +4780,11 @@ class TestAfcBridgeBoxInit:
                                          "afc_bowden_length": "3632.0"}})
         autov = tmp_path / "AFC_auto_vars.cfg"
         autov.write_text(
-            "[AFC_BambuAMS Bambu_AMS_1]\nmeasure_on_insert : True\n")
+            "[AFC_BambuAMS Bambu_AMS_1]\nmeasure_on_insert : False\n")
         m = _bbx_restart(tmp_path, **self.POOL3)
         keys = _bbx_keys(m, "AFC_BambuAMS Bambu_AMS_1")
         assert (keys["pool"], keys["measure_on_insert"],
-                keys["afc_bowden_length"]) == ("True", "False", "3632.0")
+                keys["afc_bowden_length"]) == ("True", "True", "3632.0")
         assert "heater" not in keys
         assert m._learned_for(A) == {"afc_bowden_length": "3632.0"}
         assert {s: dict(m._read_state().items(s))
@@ -5644,7 +5644,7 @@ class TestAfcBridgeBoxRosterSections:
 
     @staticmethod
     def _unit(name: str, uid: Optional[str], model: str,
-              measure: bool = False, buffer: str = "Bamb_1",
+              measure: bool = True, buffer: str = "Bamb_1",
               **extra: Any) -> Dict[str, Any]:
         """
         :param name: the unit's name
@@ -5717,8 +5717,8 @@ class TestAfcBridgeBoxRosterSections:
     def test_the_unit_keys_mirror_the_handwritten_block(self, tmp_path):
         m = _bbx_boot(tmp_path)
         u = self._sections(m)["AFC_BambuAMS Bambu_AMS_HT_1"]
-        assert u == self._unit("Bambu_AMS_HT_1", HT_UID, "ht", measure=True,
-                               heater=True, dry_max_temp=85)
+        assert u == self._unit("Bambu_AMS_HT_1", HT_UID, "ht", heater=True,
+                               dry_max_temp=85)
         # getint on the consuming side: "85.0" halts the printer at config
         # parse, so the value must be an int, stringified with no point.
         assert type(u["dry_max_temp"]) is int
@@ -5727,8 +5727,8 @@ class TestAfcBridgeBoxRosterSections:
         m = _bbx_boot(tmp_path, tcp_key="k")
         u = self._sections(m)["AFC_BambuAMS Bambu_AMS_HT_1"]
         assert u == dict(self._unit("Bambu_AMS_HT_1", HT_UID, "ht",
-                                    measure=True, heater=True,
-                                    dry_max_temp=85), tcp_key="k")
+                                    heater=True, dry_max_temp=85),
+                         tcp_key="k")
 
     def test_a_store_flag_rides_along_to_the_units(self, tmp_path):
         # Written as given: each unit splits it the same way the master does.
@@ -5911,7 +5911,7 @@ class TestAfcBridgeBoxRosterSections:
     def test_buffer_type_never_reaches_a_unit_section(self, tmp_path):
         m = _bbx_boot(tmp_path, buffer=None, buffer_type="bambu")
         assert self._sections(m)["AFC_BambuAMS Bambu_AMS_HT_1"] == \
-            self._unit("Bambu_AMS_HT_1", HT_UID, "ht", measure=True,
+            self._unit("Bambu_AMS_HT_1", HT_UID, "ht",
                        buffer="Bambu_AMS_Buffer", heater=True,
                        dry_max_temp=85)
 
@@ -9601,10 +9601,10 @@ class TestAfcBridgeBoxFoldAndSweep:
                 "False")
             assert folded[f"AFC_BambuAMS {name}"]["dry_max_temp"] == 85
         # The ams2 unit, named with no generation, matches by model; the
-        # ht block does not reach it, so it keeps its own default.
+        # ht block does not reach it, so it keeps the default.
         ams2 = folded["AFC_BambuAMS Bambu_AMS_1"]
         assert (ams2["dry_max_temp"], ams2["measure_on_insert"]) == (
-            "60", False)
+            "60", True)
         assert m._unmatched_overrides == []
         assert m._learned_notes == []
 
@@ -11960,12 +11960,12 @@ class TestAfcBridgeBoxScoutTick:
                                [12])
         master, unit = self._live_refine(
             tmp_path, monkeypatch, bridge, resolved=False,
-            sections={"AFC_BridgeBox ams1": {"measure_on_insert": "True"}})
-        assert (unit.ams_model, unit.measure_on_insert) == ("ams1", True)
+            sections={"AFC_BridgeBox ams1": {"measure_on_insert": "False"}})
+        assert (unit.ams_model, unit.measure_on_insert) == ("ams1", False)
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=True from "
+             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
             ("info",
@@ -11981,20 +11981,20 @@ class TestAfcBridgeBoxScoutTick:
                                [12])
         master, unit = self._live_refine(
             tmp_path, monkeypatch, bridge,
-            sections={"AFC_BridgeBox ams1": {"measure_on_insert": "True"}})
-        assert unit.measure_on_insert is True
+            sections={"AFC_BridgeBox ams1": {"measure_on_insert": "False"}})
+        assert unit.measure_on_insert is False
         assert self._sent(bridge) == [
             {"cmd": "model", "unit": 0, "m": 0},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0},
             {"cmd": "htunit", "unit": 0, "on": 0},
-            {"cmd": "capen", "unit": 0, "on": 1},
+            {"cmd": "capen", "unit": 0, "on": 0},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0},
             {"cmd": "idsave"},
         ]
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=True from "
+             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
             ("info",
@@ -12331,12 +12331,12 @@ class TestAfcBridgeBoxScoutTick:
             FakeBridge(uids=[C24, A24], online=[True, True]), 0, [0, 12])
         master, unit = self._live_refine(
             tmp_path, monkeypatch, bridge, index=0,
-            sections={"AFC_BridgeBox ams1": {"measure_on_insert": "True"}})
-        assert (unit.ams_model, unit.measure_on_insert) == ("ams1", True)
+            sections={"AFC_BridgeBox ams1": {"measure_on_insert": "False"}})
+        assert (unit.ams_model, unit.measure_on_insert) == ("ams1", False)
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=True from "
+             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
             ("info",
@@ -12856,14 +12856,14 @@ class TestAfcBridgeBoxScoutTick:
         held = [
             {"cmd": "status"},
             {"cmd": "htunit", "unit": 0, "on": 0},
-            {"cmd": "capen", "unit": 0, "on": 0},
+            {"cmd": "capen", "unit": 0, "on": 1},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 1},
             {"cmd": "bind", "uid": HT_UID, "idx": 1, "m": 2},
             {"cmd": "model", "unit": 0, "m": 1},
             {"cmd": "mcaddr", "unit": 0, "addr": 1792, "pay": 0},
             {"cmd": "units", "n": 1},
             {"cmd": "htunit", "unit": 0, "on": 0},
-            {"cmd": "capen", "unit": 0, "on": 0},
+            {"cmd": "capen", "unit": 0, "on": 1},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 1},
             {"cmd": "bind", "uid": HT_UID, "idx": 1, "m": 2},
             {"cmd": "model", "unit": 0, "m": 1},
@@ -12899,7 +12899,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == [
             {"cmd": "status"},
             {"cmd": "htunit", "unit": 0, "on": 0},
-            {"cmd": "capen", "unit": 0, "on": 0},
+            {"cmd": "capen", "unit": 0, "on": 1},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 1},
             {"cmd": "bind", "uid": HT_UID, "idx": 1, "m": 2},
             {"cmd": "idsave"},
@@ -12907,7 +12907,7 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "mcaddr", "unit": 0, "addr": 1792, "pay": 0},
             {"cmd": "units", "n": 1},
             {"cmd": "htunit", "unit": 0, "on": 0},
-            {"cmd": "capen", "unit": 0, "on": 0},
+            {"cmd": "capen", "unit": 0, "on": 1},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 1},
             {"cmd": "bind", "uid": HT_UID, "idx": 1, "m": 2},
             {"cmd": "idsave"},
@@ -16542,9 +16542,9 @@ class TestAfcBridgeBoxClaimPoolUnit:
             self, tmp_path, monkeypatch):
         # An AMS 1 claims the spare and takes its model section's
         # measure_on_insert; an AMS 2 claiming the bay next has no section
-        # and gets the spare's default, not the AMS 1's setting.
+        # and gets the default, not the AMS 1's setting.
         m = _p6_chain(tmp_path, monkeypatch, pool_ams=1, sections={
-            "AFC_BridgeBox ams1": {"measure_on_insert": "True"}})
+            "AFC_BridgeBox ams1": {"measure_on_insert": "False"}})
         assert _p6_bay(m, "Bambu_AMS_1")["spare"] is True
         unit = _p6_unit(m, "Bambu_AMS_1")
         at_claim: List[bool] = []
@@ -16556,35 +16556,47 @@ class TestAfcBridgeBoxClaimPoolUnit:
             return real(uid, model)
         monkeypatch.setattr(unit, "claim", _claim)
         assert m._claim_pool_unit(self.A24, "ams1") is unit
-        assert unit.measure_on_insert is True
+        assert unit.measure_on_insert is False
         m._release_pool_unit(self.A24)
         _p6_quiet(m)
         assert m._claim_pool_unit(self.B24, "ams2") is unit
-        assert unit.measure_on_insert is False
+        assert unit.measure_on_insert is True
         assert _p6_log(m) == _p6_claim_log(self.B24, "Bambu_AMS_1", "ams2")
         # In place when each claim() ran: the index adoption the claim
         # starts sends it to the firmware from the attribute.
-        assert at_claim == [True, False]
+        assert at_claim == [False, True]
 
     def test_the_fabricated_measure_default_still_holds(self, tmp_path,
                                                         monkeypatch):
-        # No section sets it: a known HT measures on insert, a spare stays
-        # off.
+        # No section sets it: a known HT and one claimed onto a spare both
+        # measure on insert.
         m = _p6_chain(tmp_path, monkeypatch, roster=f"ht:{self.A24}",
                       pool_ht=2)
         known, spare = (_p6_unit(m, "Bambu_AMS_HT_1"),
                         _p6_unit(m, "Bambu_AMS_HT_2"))
         assert (_p6_bay(m, "Bambu_AMS_HT_1")["spare"],
                 _p6_bay(m, "Bambu_AMS_HT_2")["spare"]) == (False, True)
-        known.measure_on_insert, spare.measure_on_insert = False, True
+        known.measure_on_insert, spare.measure_on_insert = False, False
         _p6_quiet(m)
         assert m._claim_pool_unit(self.A24, "ht") is known
         assert m._claim_pool_unit(self.B24, "ht") is spare
         assert (known.measure_on_insert, spare.measure_on_insert) == (
-            True, False)
+            True, True)
         assert _p6_log(m) == (
             _p6_claim_log(self.A24, "Bambu_AMS_HT_1", "ht", 1)
             + _p6_claim_log(self.B24, "Bambu_AMS_HT_2", "ht", 1))
+
+    @pytest.mark.parametrize("model", ["ams1", "ams2"])
+    def test_a_boxed_unit_claimed_onto_a_spare_measures_on_insert(
+            self, tmp_path, monkeypatch, model):
+        m = _p6_chain(tmp_path, monkeypatch, pool_ams=1)
+        assert _p6_bay(m, "Bambu_AMS_1")["spare"] is True
+        unit = _p6_unit(m, "Bambu_AMS_1")
+        unit.measure_on_insert = False
+        _p6_quiet(m)
+        assert m._claim_pool_unit(self.A24, model) is unit
+        assert unit.measure_on_insert is True
+        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1", model)
 
     # ── the home tool a Bambu lane takes ─────────────────────────────────
 
@@ -18545,27 +18557,27 @@ class TestAfcBridgeBoxReapplyModelOverride:
         m = _p6_chain(tmp_path, monkeypatch, roster=f"boxed:{a24}",
                       uids=(a24,), online=(a24,),
                       sections={"AFC_BridgeBox ams1": {
-                          "measure_on_insert": "True"}})
+                          "measure_on_insert": "False"}})
         unit = m._claim_pool_unit(a24, "boxed")
-        assert (unit._id_resolved, unit.measure_on_insert) == (False, False)
+        assert (unit._id_resolved, unit.measure_on_insert) == (False, True)
         bridge = live_bridges()[m.serial_port]
         bridge.sent.clear()
         _p6_quiet(m)
         applied = [(
             "info",
             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied "
-            "measure_on_insert=True from [AFC_BridgeBox ams1] (the bay was "
+            "measure_on_insert=False from [AFC_BridgeBox ams1] (the bay was "
             "fabricated as a spare, before its model was known)")]
         m._reapply_model_override(unit, "ams1")
-        assert unit.measure_on_insert is True
+        assert unit.measure_on_insert is False
         assert bridge.sent == []
         assert _p6_log(m) == applied
-        unit._id_resolved, unit.measure_on_insert = True, False
+        unit._id_resolved, unit.measure_on_insert = True, True
         _p6_quiet(m)
         m._reapply_model_override(unit, "ams1")
-        assert unit.measure_on_insert is True
+        assert unit.measure_on_insert is False
         assert bridge.sent[:2] == [{"cmd": "htunit", "unit": 0, "on": 0},
-                                   {"cmd": "capen", "unit": 0, "on": 1}]
+                                   {"cmd": "capen", "unit": 0, "on": 0}]
         assert bridge.sent[-1] == {"cmd": "idsave"}
         assert _p6_log(m) == applied
 

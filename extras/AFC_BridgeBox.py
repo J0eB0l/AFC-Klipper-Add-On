@@ -149,8 +149,7 @@ def _dry_ceiling(chain_max: int, model: str) -> int:
     own = _DRY_CEILING[model]
     return min(chain_max, own) if chain_max else own
 
-#: Models whose fabricated section arms measure_on_insert. See the emission
-#: site for why this is an allow-list rather than every model.
+#: The models of the HT family.
 _HT_MODELS_BB = set(_HT_MODELS)
 
 
@@ -1211,11 +1210,9 @@ class afcBridgeBox:
                 "extruder": self.extruder,
                 "hub": name,
                 "auto_error_recovery": True,
-                # A known HT measures on insert; a boxed unit does not (it can
-                # wedge an AMS 2 Pro mid-auth). Spares wait for a claim.
-                # Overridable per model.
-                "measure_on_insert": (not b["spare"]
-                                      and b["model"] in _HT_MODELS_BB),
+                # Every model measures a spool on insert unless a unit, model
+                # or chain section turns it off.
+                "measure_on_insert": True,
                 "buffer": self.buffer,
                 # The unit registers the chain's buffer pin chip under this
                 # name, which the fabricated buffer's adc_pin reads.
@@ -6981,7 +6978,7 @@ class afcBridgeBox:
             except Exception: pass
         # measure_on_insert is resolved before claim(), which leaves it alone:
         # the index adoption the claim starts sends it to the firmware.
-        self._apply_model_measure(unit, model, bool(chosen.get("spare")))
+        self._apply_model_measure(unit, model)
         # From the lanes' registration on, every save writes each lane not
         # mapped yet with the map it comes back with (see _unmapped_maps).
         self._claim_plans = self._claim_map_plans(activated, held)
@@ -7875,8 +7872,8 @@ class afcBridgeBox:
         A model override cannot reach a spare at config load: a pool bay is
         fabricated before anything is plugged into it, so its ams_model is the
         placeholder ``boxed`` and _fold_and_sweep looks up ``model:boxed``.
-        Without this, e.g. ``[AFC_BridgeBox ams1] measure_on_insert: True``
-        would match nothing and the bay would keep the spare default (False,
+        Without this, e.g. ``[AFC_BridgeBox ams1] measure_on_insert: False``
+        would match nothing and the bay would keep the fabricated default (on,
         see the emission site).
 
         The attribute is always set; the firmware is told only when
@@ -8047,7 +8044,7 @@ class afcBridgeBox:
                 f"AFC_BridgeBox {self.name}: {getattr(obj, 'name', '?')} "
                 f"takes the {', '.join(used)} that UID {uid} learned.")
 
-    def _apply_model_measure(self, obj: Any, model: str, spare: bool) -> None:
+    def _apply_model_measure(self, obj: Any, model: str) -> None:
         """
         Resolve measure_on_insert for the model a unit is being claimed as.
 
@@ -8055,21 +8052,19 @@ class afcBridgeBox:
         or last claimed as, which may have come from that model's
         ``[AFC_BridgeBox <model>]`` section. This resolves it the way
         _fold_and_sweep does for the bay's section: the unit, model or chain
-        section that sets it, else the fabricated default (on for a known
-        HT, off for a boxed unit and for every spare; see the emission site).
-        Nothing learns this key, so the store is not consulted.
+        section that sets it, else the fabricated default (on; see the
+        emission site). Nothing learns this key, so the store is not
+        consulted.
 
         :param obj: the live AFC_BambuAMS unit object
         :param model: the model the unit is being claimed as
-        :param spare: whether the bay was fabricated as a spare
         """
         raw = self._unit_override(obj, model, "measure_on_insert")
         if raw is not None:
             obj.measure_on_insert = (
                 str(raw).strip().lower() in ("1", "true", "yes", "on"))
         else:
-            obj.measure_on_insert = (not spare
-                                     and _norm_model(model) in _HT_MODELS_BB)
+            obj.measure_on_insert = True
 
     def _apply_model_live(self, uid: str, model: str,
                           index: int) -> List[Any]:
