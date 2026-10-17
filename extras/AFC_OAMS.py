@@ -198,6 +198,11 @@ class AFC_OAMS:
         # Set while a load cancel's CANCEL acknowledgement is still due, so it
         # is not read as the result of a later operation.
         self._pending_cancel_ack: bool = False
+        # Set from a load or unload command until the firmware reports how it
+        # ended, and kept after an ERROR_BUSY reply: only then can the unit be
+        # moving with nothing tracked host-side. The firmware holds a cancel
+        # sent while it is idle and drops the next load with it.
+        self._unit_busy: bool = False
 
         # Last firmware-reported motor state and when it arrived. The firmware
         # only reports on a refused command or a state change, never on a timer.
@@ -460,6 +465,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.action_status_code = None
         self.action_status_value = None
         self._pending_cancel_ack = False
+        self._unit_busy = False
         self.logger.info(f"OAMS[{self.oams_idx}]: Cleared software error states on ready")
 
     def get_spool_status(self, bay_index: int) -> int:
@@ -1243,6 +1249,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             :class:`OAMSOpCode` and ``message`` describes the outcome.
         """
         self.action_status = OAMSStatus.LOADING
+        self._unit_busy = True
         self.oams_load_spool_cmd.send([spool_idx])
         start          = self.reactor.monotonic()
         timeout        = start + 45.0
@@ -1350,6 +1357,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             the bay ends up empty and ``message`` describes the outcome.
         """
         self.action_status = OAMSStatus.UNLOADING
+        self._unit_busy = True
         self.oams_unload_spool_cmd.send()
         start          = self.reactor.monotonic()
         stall_enabled  = self.unload_stall_dwell > 0.0
@@ -1453,7 +1461,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         code = gcmd.get_int("CODE", OAMSOpCode.ERROR_KLIPPER_CALL)
         wait = gcmd.get_int("WAIT", 1)
         # force: an operator abort must reach the firmware even when no
-        # action is tracked host-side.
+        # action is tracked host-side, while the unit may still be busy.
         self.abort_current_action(code=code, wait=bool(wait), force=True)
 
     def set_oams_follower(self, enable: int, direction: int) -> None:
@@ -1472,7 +1480,8 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         """
         Clear the in-flight action, optionally waiting for firmware to settle.
         Returns immediately if no action is in progress, unless ``force`` is
-        set. When ``wait`` is set it polls (with backoff) for up to 5 s before
+        set and the unit has not reported the end of its last command. When
+        ``wait`` is set it polls (with backoff) for up to 5 s before
         force-clearing the status.
 
         :param code: result code to record for the aborted action.
@@ -1480,7 +1489,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         :param force: send the firmware cancel even when no action is tracked
             host-side, as a unit that refused a command busy may still be moving.
         """
-        if self.action_status is None and not force:
+        if self.action_status is None and not (force and self._unit_busy):
             return
         # With nothing tracked, keep the caller's recorded code (e.g. ERROR_BUSY).
         had_action = self.action_status is not None
@@ -1644,12 +1653,15 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         code   = params["code"]
 
         if action in (OAMSStatus.LOADING, OAMSStatus.UNLOADING, OAMSStatus.ERROR):
+            self._unit_busy = code == OAMSOpCode.ERROR_BUSY
             if self._pending_cancel_ack and code == OAMSOpCode.CANCEL:
                 self._pending_cancel_ack = False
                 # A load in flight is waiting on this ack, so let it finish.
                 # Otherwise the load was already given up on (e.g. the stall
                 # path's auto-unload has started) and the ack must not end it.
                 if self.action_status != OAMSStatus.LOADING:
+                    # The auto-unload may already be running.
+                    self._unit_busy = self.action_status is not None
                     self.logger.debug(
                         f"OAMS[{self.oams_idx}]: swallowed the cancel ack for the "
                         f"load that was just cancelled")
@@ -1663,6 +1675,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             if (action in (OAMSStatus.LOADING, OAMSStatus.UNLOADING)
                 and action != self.action_status):
                 # A reply about the other operation cannot finish this one.
+                self._unit_busy = True
                 self.logger.debug(
                     f"OAMS[{self.oams_idx}]: action_status for {action} while "
                     f"waiting on {self.action_status} -- ignored")

@@ -1223,6 +1223,7 @@ class TestAWedgedUnitIsActuallyCancelled:
         oams = _make_oams()
         oams.action_status = None
         oams.action_status_code = OAMSOpCode.ERROR_BUSY
+        oams._unit_busy = True
         oams.load_spool_cancel = MagicMock()
         oams.abort_current_action(wait=False, force=True)
         oams.load_spool_cancel.assert_called_once()
@@ -1233,6 +1234,7 @@ class TestAWedgedUnitIsActuallyCancelled:
         oams = _make_oams()
         oams.action_status = None
         oams.action_status_code = OAMSOpCode.ERROR_BUSY
+        oams._unit_busy = True
         oams.load_spool_cancel = MagicMock()
         oams.abort_current_action(wait=False, force=True)
         assert oams.action_status_code == OAMSOpCode.ERROR_BUSY
@@ -2215,6 +2217,7 @@ class TestAbortCurrentAction:
         oams = _make_oams()
         oams.action_status = None
         oams.action_status_code = OAMSOpCode.ERROR_BUSY
+        oams._unit_busy = True
         oams.logger.messages.clear()
 
         oams.abort_current_action(wait=False, force=True)
@@ -2232,6 +2235,69 @@ class TestAbortCurrentAction:
                                   "code": OAMSOpCode.CANCEL})
         assert oams.action_status is None
         assert oams.action_status_code == OAMSOpCode.CANCEL
+
+    def test_forced_abort_sends_nothing_to_a_unit_that_finished(self):
+        # The firmware holds a cancel sent while idle and drops the next load
+        # with it, so a load that reported SUCCESS gets no cancel after it.
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.LOADING
+        oams._unit_busy = True
+        oams._oams_action_status({"action": OAMSStatus.LOADING,
+                                  "code": OAMSOpCode.SUCCESS})
+        oams.logger.messages.clear()
+
+        oams.abort_current_action(wait=True, force=True)
+
+        oams.oams_load_spool_cancel_cmd.send.assert_not_called()
+        assert oams._unit_busy is False
+        assert oams.action_status_code == OAMSOpCode.SUCCESS
+        assert oams.logger.messages == []
+
+    def test_a_busy_refusal_leaves_the_unit_busy(self):
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.UNLOADING
+        oams._oams_action_status({"action": OAMSStatus.UNLOADING,
+                                  "code": OAMSOpCode.ERROR_BUSY})
+        assert oams._unit_busy is True
+
+        oams.abort_current_action(wait=False, force=True)
+
+        oams.oams_load_spool_cancel_cmd.send.assert_called_once_with()
+
+    def test_a_late_cancel_ack_ends_the_busy_state(self):
+        # The stall path gives up on a load host-side; the cancel's ack comes
+        # with nothing in flight and still says the unit has stopped.
+        oams = _make_oams()
+        oams.action_status = None
+        oams._unit_busy = True
+        oams._oams_action_status({"action": OAMSStatus.LOADING,
+                                  "code": OAMSOpCode.CANCEL})
+        assert oams._unit_busy is False
+
+    def test_the_swallowed_cancel_ack_leaves_the_auto_unload_busy(self):
+        # Printer 3: the stall path cancels the load and starts the auto-unload;
+        # the swallowed ack says nothing about the unload still running.
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.LOADING
+        oams.load_spool_cancel()
+        oams.action_status = None
+        oams.action_status = OAMSStatus.UNLOADING
+        oams._unit_busy = True
+        oams._oams_action_status({"action": OAMSStatus.LOADING,
+                                  "code": OAMSOpCode.CANCEL})
+        assert oams._unit_busy is True
+
+        oams._oams_action_status({"action": OAMSStatus.UNLOADING,
+                                  "code": OAMSOpCode.SUCCESS})
+        assert oams._unit_busy is False
+
+    def test_a_reply_about_the_other_operation_leaves_the_unit_busy(self):
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.UNLOADING
+        oams._unit_busy = True
+        oams._oams_action_status({"action": OAMSStatus.LOADING,
+                                  "code": OAMSOpCode.SUCCESS})
+        assert oams._unit_busy is True
 
     def test_abort_without_wait_keeps_the_flag_for_the_unwaited_ack(self):
         # A load was in flight and nobody waits for its cancel, so the ack
