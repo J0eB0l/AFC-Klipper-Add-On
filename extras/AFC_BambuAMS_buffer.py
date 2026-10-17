@@ -284,6 +284,11 @@ class AFCBambuBuffer(AFCFPSBuffer):
         """
         Update pressure as an FPS buffer does, then apply the odometer gate.
 
+        The gate changes advance_state only. The buffer's two GUI sensors keep
+        what the FPS buffer set from pressure, so `<name>_expanded` and
+        `<name>_compressed` show where the buffer sits even while the gate
+        has not called a load; its answer is ``load_detected`` in get_status.
+
         :param read_time: reactor time, or a list of (time, value) samples
         :param read_value: the 0..1 reading when read_time is a bare time
         """
@@ -325,8 +330,6 @@ class AFCBambuBuffer(AFCFPSBuffer):
         # or the next tick re-latches off the pressure alone.
         self.advance_state = False
         self._advance_latched = False
-        # _now_t, not read_time: that can be a bare value or an empty batch.
-        self._update_virtual_sensors(self._now_t)
 
     def _adopt_recorded_load(self) -> None:
         """
@@ -467,9 +470,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
                 f"{held:.1f}s, releasing the load latch")
             self._reset_gate()
             return
-        if not self.advance_state:
-            self.advance_state = True
-            self._update_virtual_sensors(self._now_t)
+        self.advance_state = True
 
     @property
     def buffer_triggered(self) -> bool:

@@ -856,11 +856,11 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._now_t == 3.5
         assert buf._first_sample_t == 3.5
         assert buf.fps_value == 0.96
-        # Compressed but never moved: the gate clears the sensor the pressure
-        # set, at the sample's own time rather than the list's.
+        # Compressed but never moved: the gate refuses the load, while the
+        # GUI sensor shows the pressure at the last sample's own time.
         assert buf.advance_state is False
-        assert buf.fila_adv.runout_helper.filament_present is False
-        assert idle.eventtimes == [3.5, 3.5]
+        assert buf.fila_adv.runout_helper.filament_present is True
+        assert idle.eventtimes == [3.5]
         assert buf.logger.messages == []
 
     def test_a_bare_value_refused_by_the_gate_takes_the_reactor_clock(self):
@@ -872,11 +872,11 @@ class TestAFCBambuBufferAdcCallback:
 
         buf._adc_callback(0.96)
 
-        # Compressed but never moved: the gate clears the sensor at the
-        # reactor time, not at the reading.
+        # Compressed but never moved: the gate refuses the load, while the
+        # GUI sensor shows the pressure at the reactor time, not the reading.
         assert buf.advance_state is False
-        assert buf.fila_adv.runout_helper.filament_present is False
-        assert idle.eventtimes == [9.0, 9.0]
+        assert buf.fila_adv.runout_helper.filament_present is True
+        assert idle.eventtimes == [9.0]
         assert buf.logger.messages == []
 
     def test_an_empty_sample_list_takes_the_reactor_clock(self):
@@ -908,9 +908,9 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._gate_latched is False
         assert buf.advance_state is False
         assert buf._advance_latched is False
-        assert buf.fila_adv.runout_helper.filament_present is False
-        # The sensors get the reactor time, not the empty list.
-        assert idle.eventtimes == [7.0]
+        # The gate leaves the GUI sensors as the pressure last set them.
+        assert buf.fila_adv.runout_helper.filament_present is True
+        assert idle.eventtimes == []
         assert buf.logger.messages == []
 
     def test_a_latched_load_holds_through_an_empty_sample_list(self):
@@ -928,8 +928,9 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._tension_since is None
         assert buf._gate_latched is True
         assert buf.advance_state is True
-        assert buf.fila_adv.runout_helper.filament_present is True
-        assert idle.eventtimes == [7.0]
+        # The latch holds advance_state only; no sample reached the sensors.
+        assert buf.fila_adv.runout_helper.filament_present is False
+        assert idle.eventtimes == []
         assert buf.logger.messages == []
 
     def test_a_latched_load_holds_through_a_list_sample(self):
@@ -944,9 +945,42 @@ class TestAFCBambuBufferAdcCallback:
         buf._adc_callback([(0.5, 0.30)])
 
         assert buf.advance_state is True
-        assert buf.fila_adv.runout_helper.filament_present is True
-        assert idle.eventtimes == [0.25, 0.5, 0.5]
+        # The GUI sensor follows the pressure back into the deadband.
+        assert buf.fila_adv.runout_helper.filament_present is False
+        assert idle.eventtimes == [0.25, 0.5]
         assert buf.logger.messages == [self.ADOPTED_AT_081]
+
+    def test_the_gui_sensors_show_both_ends_of_travel_with_no_load(self):
+        # The gate refuses the compressed end (the odometer never moved), and
+        # its sensor still lights, as the other end's does.
+        buf, (unit,) = make_bambu_gate_buffer()
+
+        feed_bambu_gate(buf, unit, [(0.96, 1.500)] * 3)
+        high = (buf.fila_adv.runout_helper.filament_present,
+                buf.fila_trail.runout_helper.filament_present)
+        feed_bambu_gate(buf, unit, [(0.02, 1.500)] * 3)
+        low = (buf.fila_adv.runout_helper.filament_present,
+               buf.fila_trail.runout_helper.filament_present)
+
+        assert buf._gate_latched is False
+        assert buf.advance_state is False
+        assert high == (True, False)
+        assert low == (False, True)
+        assert buf.logger.messages == []
+
+    def test_a_latched_load_leaves_the_gui_sensors_to_the_pressure(self):
+        buf, (unit,) = make_bambu_gate_buffer()
+        feed_bambu_gate(buf, unit, BAMBU_GATE_LOAD3)
+        assert buf._gate_latched is True
+
+        # Past the deadband but above low_point, so the latch holds.
+        feed_bambu_gate(buf, unit, [(0.15, 2.545)] * 4)
+
+        assert buf._gate_latched is True
+        assert buf.advance_state is True
+        assert buf.fila_adv.runout_helper.filament_present is False
+        assert buf.fila_trail.runout_helper.filament_present is True
+        assert buf.logger.messages == [BAMBU_GATE_LOAD3_DETECTED]
 
     def test_oversampling_a_moving_feed_is_not_mistaken_for_stillness(self):
         """
@@ -1014,7 +1048,8 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._odom_prev == {"Bambu_AMS_1": 1500.0}
         assert buf._odom_moved is False
         assert buf._compressed_since == 0.25
-        assert buf.fila_adv.runout_helper.filament_present is False
+        # The GUI sensor still shows the buffer at the compressed end.
+        assert buf.fila_adv.runout_helper.filament_present is True
         assert buf.logger.messages == []
 
     def test_a_refused_sample_clears_the_fps_load_latch(self):
@@ -1048,7 +1083,9 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._odom_confirms() is False
         assert buf._gate_latched is True
         assert buf._tension_since is None
-        assert buf.fila_adv.runout_helper.filament_present is True
+        # The GUI sensor shows pressure, not the latch: the last sample sits
+        # mid-travel.
+        assert buf.fila_adv.runout_helper.filament_present is False
         assert buf.logger.messages == [BAMBU_GATE_LOAD3_DETECTED]
 
     def test_afcs_own_record_is_believed_at_startup(self):
