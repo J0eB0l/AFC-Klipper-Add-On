@@ -1,4 +1,5 @@
 === OUTPUT ===
 1. BridgeBox Chain Name: Foo_1 
+P. Units on this chain : 4 AMS, 8 AMS HT 
 === VARS ===
 boxturtle_name=Foo_1

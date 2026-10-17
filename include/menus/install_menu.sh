@@ -168,6 +168,12 @@ install_menu() {
         elif  [ "$installation_type" == "Claymore" ]; then
           cycle_array htlf2_board_types board_counter htlf2_board_type "Claymore Board Type"
         fi ;;
+      P)
+        if [ "$installation_type" == "BridgeBox" ]; then
+          bridgebox_ask_pool
+        else
+          message="Invalid selection"
+        fi ;;
       I) install_afc ;;
       M) main_menu ;;
       Q) exit_afc_install ;;

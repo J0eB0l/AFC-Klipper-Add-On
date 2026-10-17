@@ -15,6 +15,8 @@
 # MODE=name_additional_unit   -> run name_additional_unit() (default answer, empty stdin)
 #                                  and dump $boxturtle_name / $turtle_renamed
 # MODE=installation_options   -> dump the installation_options array, one entry per line
+# MODE=bridgebox_ask_pool     -> answer bridgebox_ask_pool() with $answers and dump the
+#                                  pool counts and $message
 # MODE=install_menu_options   -> run unit_print_install_menu_options() (install_menu.sh's
 #                                  type-specific option rows) and dump its stdout
 # MODE=additional_menu_row    -> run unit_print_additional_menu_row() (additional_system_menu.sh's
@@ -114,6 +116,12 @@ case "${MODE:-}" in
     ;;
   installation_options)
     printf '%s\n' "${installation_options[@]}"
+    ;;
+  bridgebox_ask_pool)
+    bridgebox_ask_pool < <(printf '%b' "$answers") > /dev/null
+    printf 'bridgebox_pool_ams=%s\n' "$bridgebox_pool_ams"
+    printf 'bridgebox_pool_ht=%s\n' "$bridgebox_pool_ht"
+    printf 'message=%s\n' "$message"
     ;;
   install_menu_options)
     echo "=== OUTPUT ==="

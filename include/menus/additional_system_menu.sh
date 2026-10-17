@@ -116,6 +116,10 @@ additional_system_menu() {
       1)
         name_additional_unit
         export message ;;
+      P)
+        if [ "$installation_type" == "BridgeBox" ]; then
+          bridgebox_ask_pool
+        fi ;;
       Q) exit_afc_install ;;
       M) main_menu ;;
       I)

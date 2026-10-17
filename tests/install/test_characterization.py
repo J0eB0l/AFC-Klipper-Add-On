@@ -215,6 +215,27 @@ try:
         actual = run_case("no_adapter_survival", {})
         assert actual == "still alive\n"
 
+    @pytest.mark.parametrize("mode", ["copy_unit_files", "install_additional_unit"])
+    def test_bridgebox_chain_gets_the_unit_counts(mode):
+        actual = run_case(mode, {
+            "installation_type": "BridgeBox",
+            "boxturtle_name": "chain2",
+            "bridgebox_pool_ams": "2",
+            "bridgebox_pool_ht": "1",
+        })
+        assert "\npool_ams: 2\npool_ht: 1\n" in actual
+
+    @pytest.mark.parametrize("answers,ams,ht,message", [
+        ("2\\n1\\n", "2", "1", "Units on this chain: 2 AMS, 1 AMS HT"),
+        ("\\n\\n", "4", "8", "Units on this chain: 4 AMS, 8 AMS HT"),
+        ("5\\n1\\n", "4", "8", "Enter 0 to 4 AMS units and 0 to 8 AMS HT units."),
+        ("0\\n0\\n", "4", "8", "A chain needs at least one AMS or AMS HT."),
+    ])
+    def test_bridgebox_ask_pool(answers, ams, ht, message):
+        lines = run_case("bridgebox_ask_pool", {"answers": answers}).splitlines()
+        assert lines[:2] == [f"bridgebox_pool_ams={ams}", f"bridgebox_pool_ht={ht}"]
+        assert message in lines[2]
+
 except ImportError:
     pass
 

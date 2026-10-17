@@ -556,10 +556,39 @@ unit_additional_menu_row_OpenAMS() {
 # NOTE: no unit_buffer_target_BridgeBox adapter. Each chain builds its own
 # [AFC_buffer] from the AMS's buffer, set to type bambu here.
 
+bridgebox_ask_pool() {
+  # Sets how many AMS and AMS HT bays the chain builds (pool_ams, pool_ht).
+  local ams ht
+  echo "Count the most units this chain will run: raising the AMS count later moves every AMS HT lane and T#."
+  read -p "How many AMS or AMS 2 Pro units on this chain? (0-4, Enter keeps ${bridgebox_pool_ams}): " ams
+  read -p "How many AMS HT units on this chain? (0-8, Enter keeps ${bridgebox_pool_ht}): " ht
+  ams="${ams:-$bridgebox_pool_ams}"
+  ht="${ht:-$bridgebox_pool_ht}"
+  if ! [[ "$ams" =~ ^[0-4]$ && "$ht" =~ ^[0-8]$ ]]; then
+    message="${RED}Enter 0 to 4 AMS units and 0 to 8 AMS HT units.${RESET}"
+  elif [ "$ams" = 0 ] && [ "$ht" = 0 ]; then
+    message="${RED}A chain needs at least one AMS or AMS HT.${RESET}"
+  else
+    bridgebox_pool_ams="$ams"
+    bridgebox_pool_ht="$ht"
+    message="Units on this chain: ${ams} AMS, ${ht} AMS HT"
+  fi
+}
+
+bridgebox_write_pool() {
+  sed -i -e "s/^pool_ams: .*/pool_ams: ${bridgebox_pool_ams}/" \
+    -e "s/^pool_ht: .*/pool_ht: ${bridgebox_pool_ht}/" "$1"
+}
+
+unit_install_menu_options_BridgeBox() {
+  printf "P. Units on this chain : %s AMS, %s AMS HT \n" "$bridgebox_pool_ams" "$bridgebox_pool_ht"
+}
+
 unit_copy_files_BridgeBox() {
   safe_copy "${afc_path}/templates/AFC_Hardware-AFC.cfg" "${afc_config_dir}/AFC_Hardware.cfg"
   safe_copy "${afc_path}/templates/AFC_BridgeBox.cfg" "${afc_config_dir}/AFC_BridgeBox.cfg"
   sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_BridgeBox.cfg"
+  bridgebox_write_pool "${afc_config_dir}/AFC_BridgeBox.cfg"
 }
 
 unit_install_additional_BridgeBox() {
@@ -569,6 +598,7 @@ unit_install_additional_BridgeBox() {
   sed -i "s/^\[AFC_BridgeBox chain1\]/[AFC_BridgeBox ${boxturtle_name}]/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   sed -i "s/^\(ams_names\|ht_names\):/#\1:/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  bridgebox_write_pool "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
 }
 
 unit_message_BridgeBox() {
@@ -582,6 +612,7 @@ unit_additional_menu_row_BridgeBox() {
     boxturtle_name="chain2"
   fi
   printf "1. BridgeBox Chain Name: %s \n" "$boxturtle_name"
+  unit_install_menu_options_BridgeBox
 }
 
 # ─── ViViD ───────────────────────────────────────────────────────────────────
