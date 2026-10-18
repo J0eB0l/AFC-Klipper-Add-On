@@ -17,6 +17,7 @@ import sys
 import types
 
 from extras.AFC_extruder import AFCExtruderStats, AFCExtruder
+from extras.AFC_utils import PollingEndstopWrapper
 from extras.AFC import State
 from tests.conftest import MockGCodeCommand
 from tests.test_AFC_lane import _make_afc_lane, AFCLaneState
@@ -452,6 +453,102 @@ class TestVirtualToolStart:
         assert ext.tool_start_state is False
         assert ext.fila_tool_start.runout_helper.filament_present is False
         assert ext.tc_lane._load_state is False
+
+
+# -- u1_filament_sensor_name: a U1-style motion sensor -------------------------
+
+class TestU1ToolStartEndstop:
+    def _make_u1_extruder(self):
+        return _make_afc_extruder_as_standalone(
+            extruder_values={"u1_filament_sensor_name": "e0_filament"})
+
+    def test_builds_a_polling_endstop(self):
+        ext = self._make_u1_extruder()
+        assert ext.tool_start is None
+        assert isinstance(ext.tool_start_endstop, PollingEndstopWrapper)
+
+    def test_endstop_trigger_reads_runout_buttun_state(self):
+        ext = self._make_u1_extruder()
+        ext.fila_tool_start.runout_buttun_state = True
+        assert ext.tool_start_endstop._trigger_func() is True
+        ext.fila_tool_start.runout_buttun_state = False
+        assert ext.tool_start_endstop._trigger_func() is False
+
+    def test_endstop_get_mcu_uses_printers_mcu(self):
+        ext = self._make_u1_extruder()
+        mcu = ext.printer.lookup_object('mcu')
+        assert ext.tool_start_endstop.get_mcu() is mcu
+
+    def test_no_endstop_when_no_tool_start_configured(self):
+        ext = _make_afc_extruder_as_standalone()
+        assert ext.tool_start is None
+        assert ext.fila_tool_start is None
+        assert ext.tool_start_endstop is None
+
+    def test_no_endstop_for_plain_switch_pin(self):
+        ext = _make_afc_extruder_as_standalone(
+            extruder_values={"pin_tool_start": "PD3"})
+        assert ext.tool_start_endstop is None
+
+    def _make_u1_extruder_with_query_endstops(self, query_endstops):
+        from extras import AFC
+        from tests.conftest import MockPrinter, MockConfig
+
+        afc_config = MockConfig("AFC", MockPrinter())
+        afc = AFC.load_config(afc_config)
+        printer = MockPrinter(afc=afc)
+        printer.objects["query_endstops"] = query_endstops
+        config = MockConfig(
+            "AFC_extruder extruder", printer,
+            {"u1_filament_sensor_name": "e0_filament"})
+        return AFCExtruder(config)
+
+    def test_registers_with_query_endstops(self):
+        query_endstops = MagicMock()
+
+        ext = self._make_u1_extruder_with_query_endstops(query_endstops)
+
+        query_endstops.register_endstop.assert_called_once_with(
+            ext.tool_start_endstop, "extruder_tool_start")
+
+    def test_registration_failure_raises_wrapped_error(self):
+        query_endstops = MagicMock()
+        query_endstops.register_endstop.side_effect = RuntimeError("boom")
+
+        with pytest.raises(Exception):
+            self._make_u1_extruder_with_query_endstops(query_endstops)
+
+
+class TestHasToolheadSensor:
+    def test_plain_switch_pin_is_true(self):
+        ext = _make_afc_extruder()
+        ext.tool_start = "PD3"
+        ext.fila_tool_start = None
+        assert ext.has_toolhead_sensor is True
+
+    def test_buffer_is_true(self):
+        ext = _make_afc_extruder()
+        ext.tool_start = "buffer"
+        ext.fila_tool_start = None
+        assert ext.has_toolhead_sensor is True
+
+    def test_virtual_is_false(self):
+        ext = _make_afc_extruder()
+        ext.tool_start = "virtual"
+        ext.fila_tool_start = MagicMock()  # virtual mode also sets this
+        assert ext.has_toolhead_sensor is False
+
+    def test_u1_sensor_is_true(self):
+        ext = _make_afc_extruder()
+        ext.tool_start = None
+        ext.fila_tool_start = MagicMock()
+        assert ext.has_toolhead_sensor is True
+
+    def test_nothing_configured_is_false(self):
+        ext = _make_afc_extruder()
+        ext.tool_start = None
+        ext.fila_tool_start = None
+        assert ext.has_toolhead_sensor is False
 
 
 class TestAFCExtruderStr:
@@ -1648,6 +1745,38 @@ class TestPrepOnShuttleCheck:
         lane.unit_obj.lane_tool_loaded.assert_called_once_with(lane)
         lane.unit_obj.lane_tool_loaded_idle.assert_called_once_with(lane)
         assert "<span class=primary--text> in ToolHead and toolhead on shuttle</span>" in msg
+
+
+class TestClearStaleSensorState:
+    def test_clears_sensor_and_buffer_latch(self):
+        ext = _make_afc_extruder()
+        ext.fila_tool_start = types.SimpleNamespace(
+            runout_helper=types.SimpleNamespace(filament_present=True))
+        ext.tool_start_state = True
+        ext.reactor.pause = MagicMock()
+        lane = MagicMock()
+        lane.buffer_obj = types.SimpleNamespace(clear_advance_latch=MagicMock())
+
+        ext.clear_stale_sensor_state(lane)
+
+        assert ext.fila_tool_start.runout_helper.filament_present is False
+        assert ext.tool_start_state is False
+        lane.buffer_obj.clear_advance_latch.assert_called_once()
+        ext.reactor.pause.assert_called_once_with(ext.reactor.monotonic() + 0.5)
+
+    def test_handles_missing_objects(self):
+        ext = _make_afc_extruder()
+        ext.fila_tool_start = None
+        ext.reactor.pause = MagicMock()
+        lane = MagicMock()
+        # A buffer with no advance latch.
+        lane.buffer_obj = types.SimpleNamespace()
+
+        ext.clear_stale_sensor_state(lane)
+
+        assert ext.tool_start_state is False
+        ext.reactor.pause.assert_called_once()
+
 
 class TestExtruderMoveCB:
     def _make_afc_extruder_for_move_cb(self, extruder_values={}, afc_values={}):

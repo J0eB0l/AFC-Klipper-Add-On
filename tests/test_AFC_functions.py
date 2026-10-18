@@ -1318,6 +1318,7 @@ class TestCalibrateAFC:
         func, afc, lane = self._setup_calibration()
         lane.extruder_obj.tool_start = None
         lane.extruder_obj.tool_end = None
+        lane.extruder_obj.fila_tool_start = None
         lane_name = "all"
         bowden_lane = lane.name
         gcmd = self._make_gcmd_for_calibration(lane=lane_name, bowden=bowden_lane)
@@ -1343,6 +1344,7 @@ class TestCalibrateAFC:
         func, afc, lane = self._setup_calibration()
         lane.extruder_obj.tool_start = None
         lane.extruder_obj.tool_end = MagicMock(return_value="Turtle_1:SW1")
+        lane.extruder_obj.fila_tool_start = None
         lane.buffer_obj = "Test"
         lane_name = "all"
         bowden_lane = lane.name
@@ -1359,6 +1361,32 @@ class TestCalibrateAFC:
         self._assert_calibrate_bowden_called(lane)
         self._assert_afc_cali_comp_called(func, calibrated_msg, lane_calibration_call[2])
         self._assert_info_contains(func, "Cannot run calibration using post extruder sensor, using buffer to calibrate bowden length")
+
+    def test_calibration_lanes_valid_bowden_success_u1_sensor_needs_no_buffer(self):
+        """A U1-style motion sensor (u1_filament_sensor_name) already gives
+        get_toolhead_pre_sensor_state() something real to confirm against, so
+        calibration must pass without tool_end/buffer_obj and without the
+        tool_start='buffer' override the tool_end+buffer path uses."""
+        func, afc, lane = self._setup_calibration()
+        lane.extruder_obj.tool_start = None
+        lane.extruder_obj.tool_end = None
+        lane.extruder_obj.fila_tool_start = MagicMock()
+        lane.buffer_obj = None
+        lane_name = "all"
+        bowden_lane = lane.name
+        gcmd = self._make_gcmd_for_calibration(lane=lane_name, bowden=bowden_lane)
+        lane_calibration_call = (True, [lane_name], ["success"])
+        calibrated_msg = [lane_calibration_call[1][0], f"Bowden_length: {bowden_lane}"]
+        self._set_lane_calibration_result(func, lane_calibration_call)
+        self._set_calibrate_bowden_result(lane, (True, "afc_bowden_length successful", 1000))
+
+        self._call_cmd_calibrate_afc(func, gcmd)
+
+        # No "using buffer to calibrate" override: tool_start stays None.
+        assert lane.extruder_obj.tool_start is None
+        self._assert_lane_calibration_called(func, lane_name)
+        self._assert_calibrate_bowden_called(lane)
+        self._assert_afc_cali_comp_called(func, calibrated_msg, lane_calibration_call[2])
         self._assert_info_contains(func, "Starting AFC distance Calibrations")
         self._assert_info_contains(func, "Bowden length calibration Done!")
         self._assert_calibrate_td1_not_called(lane)
@@ -1660,20 +1688,13 @@ class TestCalibrationCheckToolStart:
         lane.extruder_obj.fila_tool_start = MagicMock() if sensor else None
         return lane
 
-    @pytest.mark.parametrize("unit_type", ["ACE", "ACE2"])
-    def test_ace_lane_on_a_u1_sensor_passes(self, unit_type):
+    @pytest.mark.parametrize("unit_type", ["ACE", "ACE2", "BoxTurtle"])
+    def test_lane_on_a_u1_sensor_passes(self, unit_type):
         func = _make_func()
         lane = self._lane(unit_type)
 
         assert func._calibration_check_tool_start(lane) == (False, False, "")
         assert lane.extruder_obj.tool_start is None
-        assert func.logger.messages == []
-
-    def test_other_unit_on_a_u1_sensor_is_refused(self):
-        func = _make_func()
-        lane = self._lane("BoxTurtle")
-
-        assert func._calibration_check_tool_start(lane) == self.REFUSED
         assert func.logger.messages == []
 
     def test_ace_lane_without_a_u1_sensor_is_refused(self):

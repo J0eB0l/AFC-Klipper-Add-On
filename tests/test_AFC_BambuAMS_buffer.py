@@ -46,6 +46,7 @@ class BambuGateAdc:
         self.sample_setup: Optional[Tuple[float, float, int]] = None
         self.report_time: Optional[float] = None
         self.callback: Optional[Callable[..., None]] = None
+        self.mcu = object()
 
     def setup_adc_sample(self, report_time: float, sample_time: float,
                          sample_count: int) -> None:
@@ -55,6 +56,11 @@ class BambuGateAdc:
                            callback: Callable[..., None]) -> None:
         self.report_time = report_time
         self.callback = callback
+
+    def get_mcu(self) -> object:
+        """The FPS endstops take this bound method at construction, as the
+        real virtual pin (AFC_BambuAMS._BambuBufferADC) offers it."""
+        return self.mcu
 
 
 class BambuGatePins:

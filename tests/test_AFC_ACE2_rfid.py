@@ -20,15 +20,17 @@ from tests.ace_helpers import (
     AcePrinter,
     DEFAULT,
     FakeAce2Connection,
-    FakeTransport,
     LaneSpec,
-    make_ace2_link,
-    make_ace2_reg_link,
-    make_ace2_rfid,
     make_ace2_unit,
     make_fake_ace_connection,
     make_gcmd,
     Recorder,
+)
+from tests.ace2_rfid_helpers import (
+    FakeTransport,
+    make_ace2_link,
+    make_ace2_reg_link,
+    make_ace2_rfid,
 )
 
 

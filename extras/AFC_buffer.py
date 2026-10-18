@@ -17,7 +17,7 @@ import inspect
 
 from configparser import Error as error
 
-from typing import TYPE_CHECKING, Optional, Callable, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     from extras.AFC import afc
@@ -25,10 +25,9 @@ if TYPE_CHECKING:
     from extras.AFC_stepper import AFCExtruderStepper
     from gcode import GCodeCommand
     from configfile import ConfigWrapper
-    from reactor import SelectReactor as Reactor, ReactorCompletion
-    from mcu import MCU, MCU_adc
+    from mcu import MCU_adc
 
-try: from extras.AFC_utils import add_filament_switch, VirtualFilamentSensor
+try: from extras.AFC_utils import add_filament_switch, VirtualFilamentSensor, PollingEndstopWrapper
 except: raise error("Error when trying to import AFC_utils.add_filament_switch\n{trace}".format(trace=traceback.format_exc()))
 
 TRAILING_STATE_NAME = "Trailing"
@@ -703,123 +702,6 @@ class AFCBuffer:
 
         return self.response
 
-class FPSEndstopWrapper:
-    """
-    Software endstop that triggers based on FPS reading threshold.
-
-    Implements the MCU endstop interface so klipper's homing/drip_move system
-    can use the FPS analog reading as a buffer endstop — just like a turtleneck
-    switch, but triggered at a configurable threshold.
-
-    For advance endstop: triggers when smoothed_fps >= high_point (buffer compressed)
-    For trailing endstop: triggers when smoothed_fps <= low_point (buffer stretched)
-    """
-
-    def __init__(self, fps_buffer: AFCFPSBuffer, trigger_func: Callable[[], bool]) -> None:
-        """
-        Initialize the software endstop wrapper.
-
-        :param fps_buffer: Owning :class:`AFCFPSBuffer` providing the ADC/reactor.
-        :param trigger_func: Callable returning True when the FPS threshold for
-                             this endstop is reached.
-        """
-        self._fps_buffer: AFCFPSBuffer = fps_buffer
-        self._reactor: Reactor = fps_buffer.reactor
-        self._trigger_func: Callable[[], bool] = trigger_func
-        self._steppers: list = []
-        self._trigger_time: float = 0.
-        self._completion: Optional[ReactorCompletion] = None
-        self._poll_timer: Optional[object] = None
-
-    def get_mcu(self) -> MCU:
-        """
-        Return the MCU that owns the FPS ADC pin.
-
-        :return: The MCU object backing the FPS ADC.
-        """
-        return self._fps_buffer.adc.get_mcu()
-
-    def add_stepper(self, stepper) -> None:
-        """
-        Register a stepper as homed by this endstop.
-
-        :param stepper: Stepper object to associate with the endstop.
-        """
-        if stepper in self._steppers:
-            return
-        self._steppers.append(stepper)
-
-    def get_steppers(self) -> list:
-        """
-        Return the steppers registered on this endstop.
-
-        :return: A new list of the associated stepper objects.
-        """
-        return list(self._steppers)
-
-    def home_start(self, print_time: float, sample_time: float, sample_count: int,
-                   rest_time: float, triggered: bool = True) -> ReactorCompletion:
-        """
-        Begin a homing move, polling the FPS reading for the trigger condition.
-
-        If the trigger condition is already met, completes immediately;
-        otherwise starts a reactor timer that polls until it is.
-
-        :param print_time: Print time at which homing starts (unused).
-        :param sample_time: Endstop sample time (unused).
-        :param sample_count: Endstop sample count (unused).
-        :param rest_time: Endstop rest time (unused).
-        :param triggered: Trigger state to home toward; defaults to True.
-        :return: A reactor completion that resolves when triggered.
-        """
-        self._trigger_time = 0.
-        self._completion = self._reactor.completion()
-        # Check if already triggered before starting poll timer
-        if self._trigger_func() == triggered:
-            mcu = self.get_mcu()
-            self._trigger_time = mcu.estimated_print_time(
-                self._reactor.monotonic())
-            self._completion.complete(True)
-        else:
-            self._poll_timer = self._reactor.register_timer(
-                self._poll_fps, self._reactor.NOW)
-        return self._completion
-
-    def _poll_fps(self, eventtime: float) -> float:
-        """
-        Reactor timer callback that checks the FPS trigger condition.
-
-        :param eventtime: Reactor event time of the poll.
-        :return: `reactor.NEVER` once triggered, otherwise the next poll time.
-        """
-        if self._trigger_func():
-            mcu = self.get_mcu()
-            self._trigger_time = mcu.estimated_print_time(eventtime)
-            self._completion.complete(True)
-            return self._reactor.NEVER
-        return eventtime + FPS_ENDSTOP_POLL_TIME
-
-    def home_wait(self, home_end_time: float) -> float:
-        """
-        Finish a homing move, stopping the poll timer.
-
-        :param home_end_time: Latest print time the move may run to (unused).
-        :return: The print time at which the endstop triggered, or 0 if not.
-        """
-        if self._poll_timer is not None:
-            self._reactor.unregister_timer(self._poll_timer)
-            self._poll_timer = None
-        return self._trigger_time
-
-    def query_endstop(self, print_time: float) -> int:
-        """
-        Report the instantaneous triggered state of the endstop.
-
-        :param print_time: Print time of the query (unused).
-        :return: 1 when the FPS trigger condition is met, otherwise 0.
-        """
-        return 1 if self._trigger_func() else 0
-
 # Works with any analog filament-position sensor reporting a 0.0-1.0 signal,
 # including:
 # - The native OpenAMS FPS (Filament Pressure Sensor)
@@ -996,10 +878,12 @@ class AFCFPSBuffer(AFCBuffer):
 
         # Software endstop wrappers so homing can use FPS thresholds like
         # turtleneck switches (advance triggers at high_point, trailing at low_point).
-        self.fps_endstop: FPSEndstopWrapper = FPSEndstopWrapper(
-            self, lambda: self.buffer_triggered)
-        self.fps_trailing_endstop: FPSEndstopWrapper = FPSEndstopWrapper(
-            self, lambda: self.buffer_trailing_triggered)
+        self.fps_endstop: PollingEndstopWrapper = PollingEndstopWrapper(
+            self.reactor, self.adc.get_mcu, lambda: self.buffer_triggered,
+            poll_time=FPS_ENDSTOP_POLL_TIME)
+        self.fps_trailing_endstop: PollingEndstopWrapper = PollingEndstopWrapper(
+            self.reactor, self.adc.get_mcu, lambda: self.buffer_trailing_triggered,
+            poll_time=FPS_ENDSTOP_POLL_TIME)
 
         # Register macros
         self.gcode.register_mux_command("AFC_SET_FPS_SET_POINT", "BUFFER", self.name,

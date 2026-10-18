@@ -306,3 +306,44 @@ class TestCalibrateBowdenNegativeDistance:
         # The whole point of the fix: dist_hub must be left untouched.
         assert lane.dist_hub == 900
         unit.afc.function.ConfigRewrite.assert_not_called()
+
+
+class TestCalibrateBowdenU1Sensor:
+    """A U1-style motion sensor (u1_filament_sensor_name) leaves tool_start
+    None, so the toolhead-confirm retry loop must also check fila_tool_start
+    directly rather than only cur_extruder.tool_start."""
+
+    def test_u1_sensor_enters_the_retry_loop(self):
+        from extras.AFC_lane import AFCMoveWarning
+
+        unit = _make_box_turtle()
+        unit.afc.homing_enabled = False
+        unit.afc.error = MagicMock()
+        unit.afc.function = MagicMock()
+
+        lane = TestCalibrateBowdenNegativeDistance()._make_lane_for_calibration()
+        lane.extruder_obj.tool_start = None
+        lane.extruder_obj.fila_tool_start = MagicMock()
+        unit.calc_position = MagicMock(return_value=(10, "retract from toolhead sensor", True))
+
+        unit.calibrate_bowden(lane, dis=1, tol=1)
+
+        # The retry loop's homed move only runs when the presence check
+        # passes; with tool_start None this proves fila_tool_start was
+        # consulted instead of short-circuiting as "no sensor configured".
+        lane.move_to.assert_called()
+
+    def test_no_sensor_at_all_skips_the_retry_loop(self):
+        unit = _make_box_turtle()
+        unit.afc.homing_enabled = False
+        unit.afc.error = MagicMock()
+        unit.afc.function = MagicMock()
+
+        lane = TestCalibrateBowdenNegativeDistance()._make_lane_for_calibration()
+        lane.extruder_obj.tool_start = None
+        lane.extruder_obj.fila_tool_start = None
+        unit.calc_position = MagicMock(return_value=(0, "retract from toolhead sensor", True))
+
+        unit.calibrate_bowden(lane, dis=1, tol=1)
+
+        lane.move_to.assert_not_called()

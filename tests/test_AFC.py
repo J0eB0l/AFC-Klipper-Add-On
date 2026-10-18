@@ -3832,6 +3832,9 @@ class TestLoadSequenceToolStartVirtualSkip:
     def _make(self, tool_start):
         afc, lane, hub, extruder = TestLoadSequenceDefaultPathSuccess()._make()
         extruder.tool_start = tool_start
+        # extruder is a MagicMock, not a real AFCExtruder, so its
+        # has_toolhead_sensor property isn't live -- mirror it by hand.
+        extruder.has_toolhead_sensor = tool_start not in (None, "virtual")
         afc.home_to_tool = False
         afc.tool_homing_distance = 200
         lane.short_move_dis = 10
@@ -3857,6 +3860,16 @@ class TestLoadSequenceToolStartVirtualSkip:
 
     def test_real_tool_start_pin_runs_retry_loop(self):
         afc, lane, hub, extruder = self._make("^PD3")
+        result = afc.load_sequence(lane, hub, extruder)
+        assert result is not False
+        lane.move_to.assert_called_once()
+
+    def test_u1_sensor_runs_retry_loop(self):
+        """A U1-style motion sensor (u1_filament_sensor_name) leaves tool_start
+        None, so has_toolhead_sensor -- not a raw tool_start truthy check --
+        must be what gates this loop."""
+        afc, lane, hub, extruder = self._make(None)
+        extruder.has_toolhead_sensor = True
         result = afc.load_sequence(lane, hub, extruder)
         assert result is not False
         lane.move_to.assert_called_once()

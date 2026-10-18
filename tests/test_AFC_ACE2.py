@@ -165,19 +165,19 @@ class Ace2Wire:
         return cls.frame(seq, cmd, payload, flags=cls.RESPONSE)
 
 
-def ace2_status_slot(index: int, status: str = "empty", slot_status: str = "unknown",
-                     rfid: int = 0) -> Dict[str, Any]:
+def ace2_status_slot(index: int, status: str = "empty",
+                     slot_status: str = "unknown") -> Dict[str, Any]:
     """
     One slot of a V1-shaped ACE 2 status, written out for expected values.
 
     :param index: 0-based slot
     :param status: "ready" (filament present) or "empty"
     :param slot_status: the slot's motor state name
-    :param rfid: 2 when the filament was identified, else 0
     :return dict: the slot entry
     """
-    return {"index": index, "status": status, "slot_status": slot_status, "sku": "",
-            "type": "", "rfid": rfid, "brand": "", "color": [0, 0, 0]}
+    # Uncomment below once RFID and spoolman creation support is added
+    # "sku": "", "type": "", "rfid": 0, "brand": "", "color": [0, 0, 0]
+    return {"index": index, "status": status, "slot_status": slot_status}
 
 
 def ace2_link(next_id: int = 0, **kwargs: Any) -> Tuple[AcePrinter, ACE2Connection]:
@@ -633,8 +633,9 @@ class TestDecodeStatus:
         status = _decode_status({9: [(2, Ace2Wire.message((1, code), (2, 2)))]})
 
         assert status["status"] == overall
-        # Filament state 2 (identified) is present and RFID-read.
-        assert status["slots"][0] == ace2_status_slot(0, "ready", name, rfid=2)
+        # Uncomment below once RFID and spoolman creation support is added
+        # # Filament state 2 (identified) is present and RFID-read.
+        assert status["slots"][0] == ace2_status_slot(0, "ready", name)
 
     def test_unknown_filament_state_reads_empty(self):
         status = _decode_status({9: [(2, bytes([0x08, 0x00, 0x10, 0x09]))]})
@@ -697,9 +698,10 @@ class TestV2ResponseToV1:
         :param fields: values other than the empty-tag defaults
         :return dict: a whole filament-info result
         """
+        # Uncomment "rfid" below once RFID and spoolman creation support is added
         expected: Dict[str, Any] = {
             "index": 0, "version": 0, "sku": "", "type": "", "brand": "",
-            "color": [0, 0, 0], "colors_rgba": [], "rfid": 0, "diameter": 0.0,
+            "color": [0, 0, 0], "colors_rgba": [], "diameter": 0.0,
             "total_length": 0, "length": 0, "icon_type": 0,
             "extruder_temp": {}, "hotbed_temp": {}, "raw": {}}
         expected.update(fields)
@@ -792,7 +794,7 @@ class TestV2ResponseToV1:
                              "remain_time": 1800},
             "temp": 25, "humidity": 40, "enable_rfid": 1, "fan_speed": 0,
             "feed_assist_count": 9, "cont_assist_time": 12.0,
-            "slots": [ace2_status_slot(0, "ready", "feeding", rfid=2),
+            "slots": [ace2_status_slot(0, "ready", "feeding"),
                       ace2_status_slot(1, "empty", "ready"), ace2_status_slot(2),
                       ace2_status_slot(3)]})
         assert isinstance(ret["result"]["cont_assist_time"], float)
@@ -902,7 +904,7 @@ class TestV2ResponseToV1:
 
         assert ret == self._ok(13, 1, self._filament(
             index=2, sku="SKU9", type="PLA", color=[0x11, 0x22, 0x33],
-            colors_rgba=[0x11223344], rfid=2,
+            colors_rgba=[0x11223344],
             diameter=1.75, total_length=330000, extruder_temp={"min": 190, "max": 230},
             hotbed_temp={"min": 55, "max": 65},
             raw={1: 2, 3: "'SKU9'", 4: "'PLA'", 5: "hex:08c4e6888901", 6: "hex:08be0110e601",
@@ -935,7 +937,7 @@ class TestV2ResponseToV1:
     def test_filament_info_temp_range_non_message_skipped(self):
         ret, logs = self._convert(13, 1, Ace2Wire.message((4, "PETG"), (6, 5)))
 
-        assert ret == self._ok(13, 1, self._filament(type="PETG", rfid=2,
+        assert ret == self._ok(13, 1, self._filament(type="PETG",
                                                      raw={4: "'PETG'", 6: 5}))
         assert logs == []
 
@@ -957,7 +959,7 @@ class TestV2ResponseToV1:
         ret, logs = self._convert(68, 5, payload)
 
         assert ret == self._ok(68, 5, self._filament(
-            index=1, version=258, sku="SM0123ABCD", type="PLA Basic", rfid=2,
+            index=1, version=258, sku="SM0123ABCD", type="PLA Basic",
             raw={1: 1, 2: 258, 3: "'SM0123ABCD'", 4: "'PLA Basic'"}))
         assert logs == []
 
@@ -1824,52 +1826,56 @@ class TestACE2ConnectionParseFrames:
         assert printer.logger.messages == []
 
 
-class TestACE2ConnectionEnableRfid:
-    def test_enables_every_slot(self):
-        printer, conn = ace2_link()
+# Uncomment below once RFID and spoolman creation support is added
+# class TestACE2ConnectionEnableRfid:
+    # def test_enables_every_slot(self):
+        # printer, conn = ace2_link()
 
-        conn.enable_rfid()
+        # conn.enable_rfid()
 
-        assert conn._serial.frames == [
-            Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x01]))
-            for slot in range(4)]
-        assert list(conn._async_ids) == [0, 1, 2, 3]
-        assert printer.logger.messages == [
-            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
+        # assert conn._serial.frames == [
+            # Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x01]))
+            # for slot in range(4)]
+        # assert list(conn._async_ids) == [0, 1, 2, 3]
+        # assert printer.logger.messages == [
+            # ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
 
-    def test_follows_slot_count(self):
-        printer, conn = ace2_link()
-        conn.slot_count = 2
+    # def test_follows_slot_count(self):
+        # printer, conn = ace2_link()
+        # conn.slot_count = 2
 
-        conn.enable_rfid()
+        # conn.enable_rfid()
 
-        assert conn._serial.frames == [
-            Ace2Wire.frame(0, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x00, 0x10, 0x01])),
-            Ace2Wire.frame(1, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x01, 0x10, 0x01]))]
-        assert list(conn._async_ids) == [0, 1]
-        assert printer.logger.messages == [
-            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=1 set_rfid_enable")]
+        # assert conn._serial.frames == [
+            # Ace2Wire.frame(0, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x00, 0x10, 0x01])),
+            # Ace2Wire.frame(1, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x01, 0x10, 0x01]))]
+        # assert list(conn._async_ids) == [0, 1]
+        # assert printer.logger.messages == [
+            # ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=1 set_rfid_enable")]
 
 
-class TestACE2ConnectionDisableRfid:
-    def test_disables_every_slot(self):
-        printer, conn = ace2_link()
 
-        conn.disable_rfid()
+# Uncomment below once RFID and spoolman creation support is added
+# class TestACE2ConnectionDisableRfid:
+    # def test_disables_every_slot(self):
+        # printer, conn = ace2_link()
 
-        assert conn._serial.frames == [
-            Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x00]))
-            for slot in range(4)]
-        assert list(conn._async_ids) == [0, 1, 2, 3]
-        assert printer.logger.messages == [
-            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
+        # conn.disable_rfid()
+
+        # assert conn._serial.frames == [
+            # Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x00]))
+            # for slot in range(4)]
+        # assert list(conn._async_ids) == [0, 1, 2, 3]
+        # assert printer.logger.messages == [
+            # ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
+            # ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
+
 
 
 class TestAfcACE2ApplyFeedCheck:
@@ -1969,15 +1975,14 @@ class TestAfcACE2Staging:
         assert unit._ace is None or unit._ace.async_commands == []
         assert unit.printer.logger.messages == []
 
-    def test_connect_turns_identify_off_after_the_unit_turns_it_on(self):
+    def test_connect_turns_identify_off(self):
         unit = make_ace2_unit(connect=False)
 
         with unit.printer.connections.routed():
             unit._deferred_ace_connect(unit.printer.reactor.monotonic())
 
         sent = [cmd for cmd in unit._ace.async_commands if cmd[0] == "set_rfid_enable"]
-        assert sent == [("set_rfid_enable", {"index": s, "enable": True})
-                        for s in range(4)] + self.OFF
+        assert sent == self.OFF
         assert ("afc_ace:connected", (unit, False)) in unit.printer.events
 
     @pytest.mark.parametrize("values,initial", [
@@ -2281,19 +2286,21 @@ class TestAfcACE2MakeConnection:
         assert printer.logger.messages == []
 
 
-class TestAfcACE2ReaderSiblingSlot:
-    def test_pairs_within_range(self):
-        # Two readers: slots 0 and 1 share one, slots 2 and 3 the other.
-        unit = make_ace2_unit()
+# Uncomment below once RFID and spoolman creation support is added
+# class TestAfcACE2ReaderSiblingSlot:
+    # def test_pairs_within_range(self):
+        # # Two readers: slots 0 and 1 share one, slots 2 and 3 the other.
+        # unit = make_ace2_unit()
 
-        assert [unit._reader_sibling_slot(slot) for slot in range(4)] == [1, 0, 3, 2]
+        # assert [unit._reader_sibling_slot(slot) for slot in range(4)] == [1, 0, 3, 2]
 
-    def test_out_of_range_sibling_returns_none(self):
-        unit = make_ace2_unit()
+    # def test_out_of_range_sibling_returns_none(self):
+        # unit = make_ace2_unit()
 
-        assert unit._reader_sibling_slot(100) is None
-        assert unit._reader_sibling_slot(4) is None
-        assert unit._reader_sibling_slot(-1) is None
+        # assert unit._reader_sibling_slot(100) is None
+        # assert unit._reader_sibling_slot(4) is None
+        # assert unit._reader_sibling_slot(-1) is None
+
 
 
 class TestAce2EncoderScale:
@@ -2313,16 +2320,18 @@ class TestAce2EncoderScale:
             "feed_error_length - feed_check_length / 1.2342).")
 
 
-class TestAfcACE2UsesFirmwareRfid:
-    def test_v2_uses_firmware_rfid_false(self):
-        # The ACE 2 reads tags host-side, so even on a live link with tag data
-        # to give, the startup inventory sends no firmware get_filament_info.
-        unit = make_ace2_unit(lanes=["lane1", "lane2"])
-        unit._ace.set_reply("get_filament_info", {"index": 0, "sku": "PLA-1", "type": "PLA"})
+# Uncomment below once RFID and spoolman creation support is added
+# class TestAfcACE2UsesFirmwareRfid:
+    # def test_v2_uses_firmware_rfid_false(self):
+        # # The ACE 2 reads tags host-side, so even on a live link with tag data
+        # # to give, the startup inventory sends no firmware get_filament_info.
+        # unit = make_ace2_unit(lanes=["lane1", "lane2"])
+        # unit._ace.set_reply("get_filament_info", {"index": 0, "sku": "PLA-1", "type": "PLA"})
 
-        unit._sync_inventory()
+        # unit._sync_inventory()
 
-        assert unit._ace.connected is True
-        assert unit._ace.commands == []
-        assert unit._slot_inventory == [{}, {}, {}, {}]
-        assert unit.printer.logger.messages == []
+        # assert unit._ace.connected is True
+        # assert unit._ace.commands == []
+        # assert unit._slot_inventory == [{}, {}, {}, {}]
+        # assert unit.printer.logger.messages == []
+

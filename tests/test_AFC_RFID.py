@@ -49,9 +49,11 @@ from tests.ace_helpers import (
     AceLogger,
     AcePrinter,
     Hook,
-    make_ace2_rfid,
     make_ace2_unit,
     Recorder,
+)
+from tests.ace2_rfid_helpers import (
+    make_ace2_rfid,
 )
 
 
@@ -1513,7 +1515,8 @@ class TestGetAutoSpoolmanCreate:
 
     def test_extruder_opts_in_when_unit_off(self):
         lane = rfid_lane()
-        assert lane.unit_obj.auto_spoolman_create is False
+        # The ACE unit has no auto_spoolman_create of its own (commented out upstream)
+        assert getattr(lane.unit_obj, "auto_spoolman_create", False) is False
         lane.extruder_obj.auto_spoolman_create = True
         assert get_auto_spoolman_create(lane) is True
 

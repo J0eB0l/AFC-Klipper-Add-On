@@ -1699,24 +1699,6 @@ class afcAMS(afcUnit):
         except Exception as e:
             return False, f"PTFE calibration failed for {cur_lane.name}: {e}", 0
 
-    def _toolhead_sensor_triggered(self, cur_lane: AFCLane) -> bool:
-        """
-        Check if the toolhead sensor is triggered, using the raw hardware
-        button state for U1 motion sensors (which need encoder rotation for
-        filament_present but have a physical switch for static detection).
-
-        :param cur_lane: the lane whose extruder sensor is checked.
-        :return bool: True if the toolhead sensor sees filament.
-        """
-        # The U1 toolhead motion sensor is stored by AFC_extruder as
-        # 'fila_tool_start' (when u1_filament_sensor_name is configured);
-        # 'filament_sensor_obj' is never assigned, so fall back to it.
-        sensor_obj = (getattr(cur_lane.extruder_obj, 'filament_sensor_obj', None)
-                      or getattr(cur_lane.extruder_obj, 'fila_tool_start', None))
-        if sensor_obj is not None and hasattr(sensor_obj, 'runout_buttun_state'):
-            return bool(sensor_obj.runout_buttun_state)
-        return cur_lane.get_toolhead_pre_sensor_state()
-
     # ── Custom load/unload gcode handlers ───────────────────────────
     def unit_load_lane(self, cur_lane: AFCLane, cur_extruder: AFCExtruder) -> bool:
         """
@@ -1940,7 +1922,7 @@ class afcAMS(afcUnit):
         toolhead_loaded = False
         if hw_spool is not None and hw_spool == spool_index:
             try:
-                toolhead_loaded = bool(self._toolhead_sensor_triggered(cur_lane))
+                toolhead_loaded = bool(cur_lane.get_toolhead_pre_sensor_state())
             except Exception:
                 toolhead_loaded = False
             if not toolhead_loaded:

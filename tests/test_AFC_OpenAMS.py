@@ -18,7 +18,7 @@ Selectively covered (afcAMS unit driver -- built via its real constructor,
 same as everything else in this file; afcUnit.__init__ runs for real too):
   - __init__ config parsing
   - calibration_lane_message / calibrate_lane / calibrate_bowden
-  - _toolhead_sensor_triggered / get_engagement_params / _is_virtual_hub
+  - get_engagement_params / _is_virtual_hub
   - _get_oams_index / _get_openams_spool_index / _resolve_lane_reference
   - _should_block_sensor_for_runout / _is_same_extruder / _get_monitor_state
   - _calibrate_hub_hes_spool / _wait_for_idle / check_runout
@@ -2506,33 +2506,6 @@ class TestCalibrateHubHesSpool:
         assert (
             "error", "Hub HES calibration failed for spool 0: boom"
         ) in ams.logger.messages
-
-
-class TestToolheadSensorTriggered:
-    def test_uses_filament_sensor_obj_button_state(self):
-        ams, afc, printer, reactor = _make_ams()
-        sensor = MagicMock()
-        sensor.runout_buttun_state = True
-        ext = MagicMock()
-        ext.filament_sensor_obj = sensor
-        lane = _make_lane("lane1", extruder_obj=ext)
-        assert ams._toolhead_sensor_triggered(lane) is True
-
-    def test_falls_back_to_fila_tool_start(self):
-        ams, afc, printer, reactor = _make_ams()
-        sensor = MagicMock()
-        sensor.runout_buttun_state = False
-        ext = MagicMock(spec=["fila_tool_start"])
-        ext.fila_tool_start = sensor
-        lane = _make_lane("lane1", extruder_obj=ext)
-        assert ams._toolhead_sensor_triggered(lane) is False
-
-    def test_no_sensor_falls_back_to_lane_pre_sensor_state(self):
-        ams, afc, printer, reactor = _make_ams()
-        ext = MagicMock(spec=[])
-        lane = _make_lane("lane1", extruder_obj=ext)
-        lane.get_toolhead_pre_sensor_state.return_value = True
-        assert ams._toolhead_sensor_triggered(lane) is True
 
 
 class TestShouldBlockSensorForRunout:
@@ -5038,7 +5011,6 @@ class TestOamsLoad:
         oams.determine_current_spool.return_value = 0
         ams, afc, printer, reactor = _make_ams(oams=oams)
         ams._wait_for_idle = MagicMock(return_value=True)
-        ams._toolhead_sensor_triggered = MagicMock(return_value=True)
         follower = MagicMock()
         monitor = MagicMock()
         ams._follower = follower
@@ -5064,7 +5036,6 @@ class TestOamsLoad:
         oams.determine_current_spool.return_value = 0
         ams, afc, printer, reactor = _make_ams(oams=oams)
         ams._wait_for_idle = MagicMock(return_value=True)
-        ams._toolhead_sensor_triggered = MagicMock(return_value=True)
         ams._follower = None
         ams._monitor = None
         lane = self._lane()
@@ -5079,11 +5050,11 @@ class TestOamsLoad:
         oams.determine_current_spool.return_value = 0
         oams.load_spool_with_retry.return_value = (True, "ok")
         ams, afc, printer, reactor = _make_ams(oams=oams)
-        ams._toolhead_sensor_triggered = MagicMock(return_value=False)
         ams._verify_engagement = MagicMock(return_value=True)
         ams._advance_tool_stn_to_nozzle = MagicMock()
         ams._wait_for_idle = MagicMock(return_value=True)
         lane = self._lane()
+        lane.get_toolhead_pre_sensor_state = MagicMock(return_value=False)
 
         result = ams._oams_load(lane)
 
@@ -5099,11 +5070,11 @@ class TestOamsLoad:
         oams.determine_current_spool.return_value = 0
         oams.load_spool_with_retry.return_value = (True, "ok")
         ams, afc, printer, reactor = _make_ams(oams=oams)
-        ams._toolhead_sensor_triggered = MagicMock(side_effect=Exception("boom"))
         ams._verify_engagement = MagicMock(return_value=True)
         ams._advance_tool_stn_to_nozzle = MagicMock()
         ams._wait_for_idle = MagicMock(return_value=True)
         lane = self._lane()
+        lane.get_toolhead_pre_sensor_state = MagicMock(side_effect=Exception("boom"))
 
         result = ams._oams_load(lane)
 

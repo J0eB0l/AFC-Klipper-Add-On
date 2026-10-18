@@ -576,6 +576,13 @@ class AFCExtruderStepper(AFCLane):
             and tool_start_pin.lower() == "virtual"):
             # Virtual toolhead sensor: no hardware pin to register an endstop for
             pass
+        elif (tool_start_pin is None
+              and getattr(getattr(self, "extruder_obj", None),
+                         "tool_start_endstop", None) is not None):
+            # A U1 motion sensor has no MCU pin to resolve; home against its
+            # software endstop (AFCExtruder.tool_start_endstop) instead.
+            self._add_endstop('tool_start', None, 'tool_start',
+                              mcu_endstop=self.extruder_obj.tool_start_endstop)
         elif tool_start_pin != 'buffer':
             self._add_endstop('tool_start', tool_start_pin, 'tool_start')
         else:

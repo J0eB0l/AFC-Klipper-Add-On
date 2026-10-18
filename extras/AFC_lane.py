@@ -322,12 +322,7 @@ class AFCLane:
         if (self.afc_extruder_name
             and not self.standalone_lane): # Protects against standalone lanes
             self._get_extruder_object()
-            pin = self.extruder_obj.tool_start
-            if (pin
-                and "buffer" not in pin
-                and pin.lower() != "virtual"):
-                self._set_homing_endstop(query_endstops, ppins,
-                                         pin, AFCHomingPoints.TOOL)
+            self._setup_tool_start_endstop(query_endstops, ppins, self.extruder_obj)
 
         self.connect_done = False
         self.prep_active = False
@@ -593,6 +588,67 @@ class AFCLane:
 
         self.endstops.update({name: {"endstop": endstop, "endstop_name": endstop_name}})
 
+    def _set_object_homing_endstop(self, query_endstops: QueryEndstops, mcu_endstop, name: str):
+        """
+        Register a pre-built endstop object for homing, like
+        _set_homing_endstop but for endstops with no MCU pin to resolve.
+
+        :param query_endstops: Klippers query endstops object
+        :param mcu_endstop: Pre-built endstop object (get_mcu/home_start/etc.)
+        :param name: Name of endstop to register
+        """
+        endstop_name = f"{self.name}_{name}"
+        try:
+            query_endstops.register_endstop(mcu_endstop, endstop_name)
+        except Exception as e:
+            err_msg = f"Error trying to register {name} endstop for {self.name}.\n Error:{e}"
+            raise error(err_msg)
+
+        self.endstops.update({name: {"endstop": mcu_endstop, "endstop_name": endstop_name}})
+
+    def _setup_tool_start_endstop(self, query_endstops: QueryEndstops, ppins: PrinterPins,
+                                  extruder_obj) -> None:
+        """
+        Register a TOOL homing endstop for extruder_obj's toolhead sensor: a
+        real pin_tool_start switch, or a pre-built software endstop when
+        there's no pin to resolve one from. Buffer, virtual, or no sensor at
+        all registers nothing.
+
+        :param query_endstops: Klippers query endstops object
+        :param ppins: Klipper pins object
+        :param extruder_obj: AFCExtruder providing the toolhead sensor
+        """
+        pin = extruder_obj.tool_start
+        if (pin
+            and "buffer" not in pin
+            and pin.lower() != "virtual"):
+            self._set_homing_endstop(query_endstops, ppins, pin, AFCHomingPoints.TOOL)
+        elif (pin is None
+              and getattr(extruder_obj, "tool_start_endstop", None) is not None):
+            self._set_object_homing_endstop(query_endstops, extruder_obj.tool_start_endstop,
+                                            AFCHomingPoints.TOOL)
+
+    def _attach_tool_start_endstop_to_stepper(self) -> None:
+        """
+        Attach self.extruder_obj's pre-built tool_start_endstop (already
+        registered with query_endstops by AFCExtruder.__init__) to whichever
+        stepper this lane homes through.
+
+        Needed for lanes with no extruder config of their own, which never
+        ran _setup_tool_start_endstop in __init__. No-op when a pin-based
+        endstop is already registered, there's no software endstop to
+        attach, or this lane has no stepper to home through.
+        """
+        homing_stepper = self.drive_stepper or (self if hasattr(self, "_endstops") else None)
+        if (homing_stepper is None
+            or "tool_start" in homing_stepper._endstops
+            or getattr(self.extruder_obj, "tool_start_endstop", None) is None):
+            return
+        endstop = self.extruder_obj.tool_start_endstop
+        endstop_name = f"{self.extruder_obj.name}_tool_start"
+        endstop.add_stepper(homing_stepper.extruder_stepper.stepper)
+        homing_stepper._endstops["tool_start"] = (endstop, endstop_name)
+
     def handle_moonraker_connect(self):
         """
         Function that should be called at the beginning of PREP so that moonraker has
@@ -678,6 +734,10 @@ class AFCLane:
         if add_to_other_obj:
             self.extruder_obj.lanes[self.name] = self
             self.extruder_obj.check_lanes()
+
+        # Attaches a U1-sensor endstop for lanes with no extruder of their own
+        # (see _attach_tool_start_endstop_to_stepper's docstring).
+        self._attach_tool_start_endstop_to_stepper()
 
         # Use buffer defined in stepper and override buffers that maybe set at the UNIT or extruder levels
         self.buffer_obj = self.unit_obj.buffer_obj
@@ -1749,14 +1809,21 @@ class AFCLane:
 
     def get_toolhead_pre_sensor_state(self):
         """
-        Helper function that returns current state of toolhead pre sensor or buffer if user has extruder setup for ramming
+        Helper function that returns current state of toolhead pre sensor or buffer if user has extruder setup for ramming.
+
+        For a U1 toolhead motion sensor (needs encoder rotation for filament_present
+        but has a physical switch for static detection), the raw hardware button
+        state is used instead so a static read still works.
 
         returns Status of toolhead pre sensor or the current buffer advance state
         """
         if self.extruder_obj.tool_start == "buffer":
             return self.buffer_obj.advance_state
-        else:
-            return self.extruder_obj.tool_start_state
+        fila_tool_start = self.extruder_obj.fila_tool_start
+        if (fila_tool_start is not None
+            and hasattr(fila_tool_start, 'runout_buttun_state')):
+            return bool(fila_tool_start.runout_buttun_state)
+        return self.extruder_obj.tool_start_state
 
     def get_toolhead_endstop(self) -> str:
         """

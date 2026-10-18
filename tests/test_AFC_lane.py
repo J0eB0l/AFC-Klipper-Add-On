@@ -236,6 +236,52 @@ def _make_afc_lane(fullname="AFC_stepper lane1"):
     return lane
 
 
+class TestGetToolheadPreSensorState:
+    def test_buffer_mode_reads_the_buffer_advance_state(self):
+        lane = _make_afc_lane()
+        del lane.get_toolhead_pre_sensor_state
+        lane.extruder_obj.tool_start = "buffer"
+        lane.buffer_obj = MagicMock(advance_state=True)
+
+        assert lane.get_toolhead_pre_sensor_state() is True
+
+    def test_u1_button_state_true(self):
+        lane = _make_afc_lane()
+        del lane.get_toolhead_pre_sensor_state
+        lane.extruder_obj.tool_start = "tool_start_pin"
+        lane.extruder_obj.fila_tool_start = MagicMock(runout_buttun_state=1)
+
+        assert lane.get_toolhead_pre_sensor_state() is True
+
+    def test_u1_button_state_false(self):
+        lane = _make_afc_lane()
+        del lane.get_toolhead_pre_sensor_state
+        lane.extruder_obj.tool_start = "tool_start_pin"
+        lane.extruder_obj.fila_tool_start = MagicMock(runout_buttun_state=0)
+        lane.extruder_obj.tool_start_state = True
+
+        assert lane.get_toolhead_pre_sensor_state() is False
+
+    def test_plain_sensor_without_button_state_falls_back_to_tool_start_state(self):
+        lane = _make_afc_lane()
+        del lane.get_toolhead_pre_sensor_state
+        lane.extruder_obj.tool_start = "tool_start_pin"
+        # A switch sensor with no runout_buttun_state.
+        lane.extruder_obj.fila_tool_start = MagicMock(spec=[])
+        lane.extruder_obj.tool_start_state = True
+
+        assert lane.get_toolhead_pre_sensor_state() is True
+
+    def test_no_u1_sensor_falls_back_to_tool_start_state(self):
+        lane = _make_afc_lane()
+        del lane.get_toolhead_pre_sensor_state
+        lane.extruder_obj.tool_start = "tool_start_pin"
+        lane.extruder_obj.fila_tool_start = None
+        lane.extruder_obj.tool_start_state = False
+
+        assert lane.get_toolhead_pre_sensor_state() is False
+
+
 class TestAFCLaneInit:
     def test_lane_name_extracted_from_fullname(self):
         lane = _make_afc_lane("AFC_stepper lane1")
@@ -399,6 +445,171 @@ class TestSetHomingEndstop:
         ppins.parse_pin.assert_called_once_with("!PA0", True, True)
         ppins.setup_pin.assert_called_once_with("endstop", "!PA0")
         query_endstops.register_endstop.assert_called_once_with(endstop, f"{lane.name}_hub")
+
+
+# ── _set_object_homing_endstop ────────────────────────────────────────────────
+# Mirrors _set_homing_endstop but for a pre-built endstop object (e.g. a U1
+# sensor's PollingEndstopWrapper), which has no MCU pin to resolve one from.
+
+class TestSetObjectHomingEndstop:
+    def test_registers_the_object_and_updates_endstops(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        endstop = MagicMock()
+
+        lane._set_object_homing_endstop(query_endstops, endstop, "tool")
+
+        query_endstops.register_endstop.assert_called_once_with(endstop, f"{lane.name}_tool")
+        assert lane.endstops["tool"] == {"endstop": endstop, "endstop_name": f"{lane.name}_tool"}
+
+    def test_register_failure_raises_wrapped_error(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        query_endstops.register_endstop.side_effect = RuntimeError("boom")
+
+        with pytest.raises(Exception):
+            lane._set_object_homing_endstop(query_endstops, MagicMock(), "tool")
+
+
+# ── _setup_tool_start_endstop ─────────────────────────────────────────────────
+# Dispatches a TOOL endstop registration between a real pin_tool_start switch
+# and a U1-style motion sensor's software endstop (no pin to resolve); buffer,
+# virtual, and no-sensor-at-all extruders register nothing.
+
+class TestSetupToolStartEndstop:
+    def test_real_pin_registers_a_pin_based_endstop(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        ppins = MagicMock()
+        endstop = MagicMock()
+        ppins.setup_pin.return_value = endstop
+        extruder = MagicMock(tool_start="PD3", tool_start_endstop=None)
+
+        lane._setup_tool_start_endstop(query_endstops, ppins, extruder)
+
+        ppins.setup_pin.assert_called_once_with("endstop", "PD3")
+        assert lane.endstops["tool"]["endstop"] is endstop
+
+    def test_u1_sensor_registers_its_polling_endstop(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        ppins = MagicMock()
+        u1_endstop = MagicMock()
+        extruder = MagicMock(tool_start=None, tool_start_endstop=u1_endstop)
+
+        lane._setup_tool_start_endstop(query_endstops, ppins, extruder)
+
+        query_endstops.register_endstop.assert_called_once_with(u1_endstop, f"{lane.name}_tool")
+        ppins.setup_pin.assert_not_called()
+        assert lane.endstops["tool"]["endstop"] is u1_endstop
+
+    def test_buffer_tool_start_registers_nothing(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        ppins = MagicMock()
+        extruder = MagicMock(tool_start="buffer", tool_start_endstop=None)
+
+        lane._setup_tool_start_endstop(query_endstops, ppins, extruder)
+
+        ppins.setup_pin.assert_not_called()
+        query_endstops.register_endstop.assert_not_called()
+        assert "tool" not in lane.endstops
+
+    def test_virtual_tool_start_registers_nothing(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        ppins = MagicMock()
+        extruder = MagicMock(tool_start="virtual", tool_start_endstop=None)
+
+        lane._setup_tool_start_endstop(query_endstops, ppins, extruder)
+
+        ppins.setup_pin.assert_not_called()
+        query_endstops.register_endstop.assert_not_called()
+        assert "tool" not in lane.endstops
+
+    def test_no_sensor_at_all_registers_nothing(self):
+        lane = _make_afc_lane()
+        query_endstops = MagicMock()
+        ppins = MagicMock()
+        extruder = MagicMock(tool_start=None, tool_start_endstop=None)
+
+        lane._setup_tool_start_endstop(query_endstops, ppins, extruder)
+
+        ppins.setup_pin.assert_not_called()
+        query_endstops.register_endstop.assert_not_called()
+        assert "tool" not in lane.endstops
+
+
+# ── _attach_tool_start_endstop_to_stepper ─────────────────────────────────────
+# Lanes with no extruder of their own (e.g. Vivid) never set a TOOL endstop in
+# __init__; handle_unit_connect attaches the extruder's U1 endstop instead.
+
+class TestAttachToolStartEndstopToStepper:
+    def test_attaches_to_the_shared_drive_stepper(self):
+        lane = _make_afc_lane()
+        drive_stepper = MagicMock()
+        drive_stepper._endstops = {}
+        lane.drive_stepper = drive_stepper
+        endstop = MagicMock()
+        lane.extruder_obj = MagicMock(tool_start_endstop=endstop)
+        lane.extruder_obj.name = "extruder"
+
+        lane._attach_tool_start_endstop_to_stepper()
+
+        assert drive_stepper._endstops["tool_start"] == (endstop, "extruder_tool_start")
+        endstop.add_stepper.assert_called_once_with(drive_stepper.extruder_stepper.stepper)
+
+    def test_attaches_to_its_own_stepper_when_not_shared(self):
+        """A lane with its own real stepper (self.drive_stepper is None) and
+        a U1 sensor instead of its own AFC_extruder resolution attaches onto
+        itself."""
+        lane = _make_afc_lane()
+        lane.drive_stepper = None
+        lane._endstops = {}
+        lane.extruder_stepper = MagicMock()
+        endstop = MagicMock()
+        lane.extruder_obj = MagicMock(tool_start_endstop=endstop)
+        lane.extruder_obj.name = "extruder"
+
+        lane._attach_tool_start_endstop_to_stepper()
+
+        assert lane._endstops["tool_start"] == (endstop, "extruder_tool_start")
+
+    def test_noop_when_real_pin_tool_start_already_registered(self):
+        """A real pin_tool_start endstop already resolved correctly (via the
+        normal AFCExtruderStepper._init_endstops path); must not be
+        overwritten by the U1 fallback."""
+        lane = _make_afc_lane()
+        drive_stepper = MagicMock()
+        existing = (MagicMock(), "tool_start")
+        drive_stepper._endstops = {"tool_start": existing}
+        lane.drive_stepper = drive_stepper
+        lane.extruder_obj = MagicMock(tool_start_endstop=MagicMock())
+
+        lane._attach_tool_start_endstop_to_stepper()
+
+        assert drive_stepper._endstops["tool_start"] is existing
+
+    def test_noop_when_no_u1_sensor(self):
+        lane = _make_afc_lane()
+        drive_stepper = MagicMock()
+        drive_stepper._endstops = {}
+        lane.drive_stepper = drive_stepper
+        lane.extruder_obj = MagicMock(tool_start_endstop=None)
+
+        lane._attach_tool_start_endstop_to_stepper()
+
+        assert "tool_start" not in drive_stepper._endstops
+
+    def test_noop_for_stepperless_lane(self):
+        """A lane with no drive_stepper and no _endstops of its own (e.g. a
+        stepperless unit like ACE/OpenAMS) has nothing to attach to."""
+        lane = _make_afc_lane()
+        lane.drive_stepper = None
+        assert not hasattr(lane, "_endstops")
+        lane.extruder_obj = MagicMock(tool_start_endstop=MagicMock())
+
+        lane._attach_tool_start_endstop_to_stepper()  # should not raise
 
 
 # ── move_advanced: stepperless unit delegation ───────────────────────────────

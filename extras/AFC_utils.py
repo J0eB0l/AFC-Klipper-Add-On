@@ -425,6 +425,128 @@ class VirtualFilamentSensor:
         if self.enable_cb is not None:
             self.enable_cb(enable)
 
+class PollingEndstopWrapper:
+    """
+    Software endstop that implements Klipper's MCU endstop interface
+    (get_mcu/add_stepper/get_steppers/home_start/home_wait/query_endstop) by
+    polling a boolean trigger_func() on a reactor timer, instead of an MCU
+    reporting a real hardware trigger.
+
+    Used wherever a sensor reading needs to back a homed move the same way a
+    physical switch endstop would: a U1-style toolhead motion sensor's raw
+    button state (AFC_extruder.fila_tool_start.runout_buttun_state), which has
+    no MCU pin of its own to resolve a normal pin-based endstop from, and
+    AFC_buffer.AFCFPSBuffer's FPS analog-threshold endstops (advance/trailing).
+    """
+
+    def __init__(self, reactor: Reactor, get_mcu: Callable[[], Any],
+                trigger_func: Callable[[], bool], poll_time: float = 0.01) -> None:
+        """
+        :param reactor: Reactor used to schedule the poll timer/completion.
+        :param get_mcu: Callable returning the MCU used for trigger-time
+            estimation. Any MCU works here: triggering is detected by polling
+            trigger_func(), not by MCU-timed step counting, so this doesn't
+            need to be the exact MCU behind the sensor's pin.
+        :param trigger_func: Callable returning True when this endstop should
+            report triggered.
+        :param poll_time: Seconds between trigger_func() polls while homing.
+        """
+        self._reactor = reactor
+        self._get_mcu = get_mcu
+        self._trigger_func = trigger_func
+        self._poll_time = poll_time
+        self._steppers: list = []
+        self._trigger_time: float = 0.
+        self._completion: Optional[Any] = None
+        self._poll_timer: Optional[object] = None
+
+    def get_mcu(self) -> Any:
+        """
+        :return: The MCU used for trigger-time estimation.
+        """
+        return self._get_mcu()
+
+    def add_stepper(self, stepper) -> None:
+        """
+        Register a stepper as homed by this endstop.
+
+        :param stepper: Stepper object to associate with the endstop.
+        """
+        if stepper in self._steppers:
+            return
+        self._steppers.append(stepper)
+
+    def get_steppers(self) -> list:
+        """
+        Return the steppers registered on this endstop.
+
+        :return: A new list of the associated stepper objects.
+        """
+        return list(self._steppers)
+
+    def home_start(self, print_time: float, sample_time: float, sample_count: int,
+                   rest_time: float, triggered: bool = True) -> Any:
+        """
+        Begin a homing move, polling trigger_func() for the trigger condition.
+
+        If the trigger condition is already met, completes immediately;
+        otherwise starts a reactor timer that polls until it is.
+
+        :param print_time: Print time at which homing starts (unused).
+        :param sample_time: Endstop sample time (unused).
+        :param sample_count: Endstop sample count (unused).
+        :param rest_time: Endstop rest time (unused).
+        :param triggered: Trigger state to home toward; defaults to True.
+        :return: A reactor completion that resolves when triggered.
+        """
+        self._trigger_time = 0.
+        self._completion = self._reactor.completion()
+        # Check if already triggered before starting poll timer
+        if self._trigger_func() == triggered:
+            mcu = self.get_mcu()
+            self._trigger_time = mcu.estimated_print_time(
+                self._reactor.monotonic())
+            self._completion.complete(True)
+        else:
+            self._poll_timer = self._reactor.register_timer(
+                self._poll_sensor, self._reactor.NOW)
+        return self._completion
+
+    def _poll_sensor(self, eventtime: float) -> float:
+        """
+        Reactor timer callback that checks the trigger condition.
+
+        :param eventtime: Reactor event time of the poll.
+        :return: `reactor.NEVER` once triggered, otherwise the next poll time.
+        """
+        if self._trigger_func():
+            mcu = self.get_mcu()
+            self._trigger_time = mcu.estimated_print_time(eventtime)
+            self._completion.complete(True)
+            return self._reactor.NEVER
+        return eventtime + self._poll_time
+
+    def home_wait(self, home_end_time: float) -> float:
+        """
+        Finish a homing move, stopping the poll timer.
+
+        :param home_end_time: Latest print time the move may run to (unused).
+        :return: The print time at which the endstop triggered, or 0 if not.
+        """
+        if self._poll_timer is not None:
+            self._reactor.unregister_timer(self._poll_timer)
+            self._poll_timer = None
+        return self._trigger_time
+
+    def query_endstop(self, print_time: float) -> int:
+        """
+        Report the instantaneous triggered state of the endstop.
+
+        :param print_time: Print time of the query (unused).
+        :return: 1 when trigger_func() is True, otherwise 0.
+        """
+        return 1 if self._trigger_func() else 0
+
 class AFC_moonraker:
     """
     This class is used to communicate with moonraker to look up information and post

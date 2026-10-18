@@ -27,7 +27,6 @@ import pytest
 
 from extras.AFC_buffer import (
     AFCBuffer,
-    FPSEndstopWrapper,
     AFCFPSBuffer,
     TRAILING_STATE_NAME,
     ADVANCING_STATE_NAME,
@@ -35,6 +34,7 @@ from extras.AFC_buffer import (
     CHECK_RUNOUT_TIMEOUT,
     FPS_ENDSTOP_POLL_TIME,
 )
+from extras.AFC_utils import PollingEndstopWrapper
 from tests.test_AFC_lane import _make_afc_lane
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -2073,118 +2073,10 @@ class TestExtruderProperty:
         toolhead.get_extruder.assert_called_once()
 
 # ═════════════════════════════════════════════════════════════════════════
-# FPSEndstopWrapper
+# FPS buffer software endstops (AFC_utils.PollingEndstopWrapper)
 # ═════════════════════════════════════════════════════════════════════════
 
-def _make_endstop(trigger_value=False):
-    """Build a FPSEndstopWrapper with a mock owning fps_buffer."""
-    from tests.conftest import MockReactor
-    fps_buffer = MagicMock()
-    fps_buffer.reactor = MockReactor()
-    triggered = {"value": trigger_value}
-    endstop = FPSEndstopWrapper(fps_buffer, lambda: triggered["value"])
-    return endstop, fps_buffer, triggered
-
-
-class TestFPSEndstopWrapperInit:
-    def test_initial_state(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        assert endstop._steppers == []
-        assert endstop._trigger_time == 0.
-        assert endstop._completion is None
-        assert endstop._poll_timer is None
-        assert endstop._fps_buffer is fps_buffer
-        assert endstop._reactor is fps_buffer.reactor
-
-
-class TestFPSEndstopWrapperGetMcu:
-    def test_returns_adc_mcu(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        mcu = MagicMock()
-        fps_buffer.adc.get_mcu.return_value = mcu
-        assert endstop.get_mcu() is mcu
-
-
-class TestFPSEndstopWrapperSteppers:
-    def test_add_stepper_appends(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        s1, s2 = MagicMock(), MagicMock()
-        endstop.add_stepper(s1)
-        endstop.add_stepper(s2)
-        assert endstop._steppers == [s1, s2]
-    
-    def test_add_stepper_duplicate_stepper(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        s1 = MagicMock()
-        endstop.add_stepper(s1)
-        endstop.add_stepper(s1)
-        assert endstop._steppers == [s1]
-
-    def test_get_steppers_returns_copy(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        s1 = MagicMock()
-        endstop.add_stepper(s1)
-        result = endstop.get_steppers()
-        assert result == [s1]
-        result.append(MagicMock())
-        assert endstop._steppers == [s1]  # original list untouched
-
-
-class TestFPSEndstopWrapperHomeStart:
-    def test_already_triggered_completes_immediately(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=True)
-        mcu = MagicMock()
-        mcu.estimated_print_time.return_value = 42.0
-        fps_buffer.adc.get_mcu.return_value = mcu
-        fps_buffer.reactor.register_timer = MagicMock()
-
-        completion = endstop.home_start(0, 0, 0, 0, triggered=True)
-
-        assert endstop._trigger_time == 42.0
-        assert completion.result is True
-        fps_buffer.reactor.register_timer.assert_not_called()
-
-    def test_not_triggered_starts_poll_timer(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=False)
-        endstop._trigger_time = 999.0  # seed nonzero so the reset is proven
-        fps_buffer.reactor.register_timer = MagicMock(return_value="timer1")
-
-        endstop.home_start(0, 0, 0, 0, triggered=True)
-
-        fps_buffer.reactor.register_timer.assert_called_once_with(
-            endstop._poll_fps, fps_buffer.reactor.NOW)
-        assert endstop._poll_timer == "timer1"
-        assert endstop._trigger_time == 0.
-
-    def test_triggered_false_target_completes_when_untriggered(self):
-        """triggered=False means we're homing toward the *un*triggered state;
-        with the sensor currently untriggered, that condition is already met."""
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=False)
-        mcu = MagicMock()
-        mcu.estimated_print_time.return_value = 10.0
-        fps_buffer.adc.get_mcu.return_value = mcu
-        fps_buffer.reactor.register_timer = MagicMock()
-
-        completion = endstop.home_start(0, 0, 0, 0, triggered=False)
-
-        assert completion.result is True
-        fps_buffer.reactor.register_timer.assert_not_called()
-    
-    # TODO: add test_triggered_false_target_waits_until_untriggered when code is updated to home to
-    # untriggered state
-
-    def test_resets_trigger_time_and_creates_new_completion(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=True)
-        endstop._trigger_time = 999.0
-        mcu = MagicMock()
-        mcu.estimated_print_time.return_value = 5.0
-        fps_buffer.adc.get_mcu.return_value = mcu
-
-        endstop.home_start(0, 0, 0, 0, triggered=True)
-
-        assert endstop._trigger_time == 5.0
-        assert endstop._completion is not None
-
+class TestFPSBufferEndstops:
     def test_endstop_already_triggered_completes_immediately(self):
         buf, adc, reactor = fps_recording_buffer()
         buf.smoothed_fps = 0.75  # past homing_high_point (0.7)
@@ -2222,30 +2114,6 @@ class TestFPSEndstopWrapperHomeStart:
         assert endstop._trigger_time == 52.0
         assert buf.logger.messages == []
 
-
-class TestFPSEndstopWrapperPollFps:
-    def test_triggered_completes_and_returns_never(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=True)
-        endstop._completion = fps_buffer.reactor.completion()
-        mcu = MagicMock()
-        mcu.estimated_print_time.return_value = 7.5
-        fps_buffer.adc.get_mcu.return_value = mcu
-
-        result = endstop._poll_fps(100.0)
-
-        assert result == fps_buffer.reactor.NEVER
-        assert endstop._trigger_time == 7.5
-        assert endstop._completion.result is True
-
-    def test_not_triggered_reschedules(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=False)
-        endstop._completion = fps_buffer.reactor.completion()
-
-        result = endstop._poll_fps(100.0)
-
-        assert result == 100.0 + FPS_ENDSTOP_POLL_TIME
-        assert endstop._completion.result is None
-
     def test_endstop_polls_until_triggered(self):
         buf, adc, reactor = fps_recording_buffer()
         buf.smoothed_fps = 0.5  # centred: the filament is not at the gears yet
@@ -2254,46 +2122,21 @@ class TestFPSEndstopWrapperPollFps:
         completion = endstop.home_start(0.0, 0.0, 0, 0.0)
         poll = endstop._poll_timer
         assert reactor.timers == [poll]
-        assert (poll.callback, poll.waketime) == (endstop._poll_fps, 0.0)
+        assert (poll.callback, poll.waketime) == (endstop._poll_sensor, 0.0)
         assert endstop._completion is completion
         assert completion.results == []
 
         # Drive the poll callback as the reactor would.
-        assert endstop._poll_fps(1.0) == 1.01
+        assert endstop._poll_sensor(1.0) == 1.01
         assert completion.results == []
         assert adc.mcu.queries == []
         buf.smoothed_fps = 0.75  # the filament reaches the gears
-        assert endstop._poll_fps(2.0) == 9_999_999_999.0
+        assert endstop._poll_sensor(2.0) == 9_999_999_999.0
         assert completion.results == [True]
         # The trigger time is the poll's own eventtime (2.0) in print time.
         assert adc.mcu.queries == [2.0]
         assert endstop._trigger_time == 34.0
         assert buf.logger.messages == []
-
-
-class TestFPSEndstopWrapperHomeWait:
-    def test_stops_poll_timer_when_active(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        endstop._poll_timer = "timer1"
-        endstop._trigger_time = 12.5
-        fps_buffer.reactor.unregister_timer = MagicMock()
-
-        result = endstop.home_wait(999.0)
-
-        fps_buffer.reactor.unregister_timer.assert_called_once_with("timer1")
-        assert endstop._poll_timer is None
-        assert result == 12.5
-
-    def test_no_poll_timer_is_noop(self):
-        endstop, fps_buffer, triggered = _make_endstop()
-        endstop._poll_timer = None
-        endstop._trigger_time = 3.0
-        fps_buffer.reactor.unregister_timer = MagicMock()
-
-        result = endstop.home_wait(999.0)
-
-        fps_buffer.reactor.unregister_timer.assert_not_called()
-        assert result == 3.0
 
     def test_endstop_home_wait_unregisters_poll_timer(self):
         buf, adc, reactor = fps_recording_buffer()
@@ -2310,16 +2153,6 @@ class TestFPSEndstopWrapperHomeWait:
         assert result == 0.0  # never triggered
         assert adc.mcu.queries == []
         assert buf.logger.messages == []
-
-
-class TestFPSEndstopWrapperQueryEndstop:
-    def test_triggered_returns_one(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=True)
-        assert endstop.query_endstop(0) == 1
-
-    def test_not_triggered_returns_zero(self):
-        endstop, fps_buffer, triggered = _make_endstop(trigger_value=False)
-        assert endstop.query_endstop(0) == 0
 
     def test_endstop_query(self):
         # Every query reads the live reading. The advance endstop trips at
@@ -3588,8 +3421,23 @@ class TestAFCFPSBufferInit:
 
     def test_creates_fps_endstops(self):
         buf, afc, printer, adc = _build_real_fps_buffer()
-        assert isinstance(buf.fps_endstop, FPSEndstopWrapper)
-        assert isinstance(buf.fps_trailing_endstop, FPSEndstopWrapper)
+        assert isinstance(buf.fps_endstop, PollingEndstopWrapper)
+        assert isinstance(buf.fps_trailing_endstop, PollingEndstopWrapper)
+
+    def test_fps_endstops_wired_to_the_adc_mcu_and_buffer_thresholds(self):
+        buf, afc, printer, adc = _build_real_fps_buffer()
+        assert buf.fps_endstop.get_mcu() is adc.get_mcu()
+        assert buf.fps_trailing_endstop.get_mcu() is adc.get_mcu()
+
+        buf.smoothed_fps = buf._homing_high_point
+        assert buf.fps_endstop._trigger_func() is True
+        buf.smoothed_fps = buf.set_point
+        assert buf.fps_endstop._trigger_func() is False
+
+        buf.smoothed_fps = buf.low_point
+        assert buf.fps_trailing_endstop._trigger_func() is True
+        buf.smoothed_fps = buf.set_point
+        assert buf.fps_trailing_endstop._trigger_func() is False
 
     def test_registers_set_fps_set_point_command(self):
         afc = None

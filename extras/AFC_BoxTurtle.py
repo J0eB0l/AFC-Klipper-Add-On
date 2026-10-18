@@ -208,7 +208,10 @@ class afcBoxTurtle(afcUnit):
             return False, msg, hub_pos
 
         bow_pos = 0
-        if cur_extruder.tool_start:
+        # A U1-style motion sensor (u1_filament_sensor_name) leaves tool_start
+        # None, so also check for it directly here.
+        if (cur_extruder.tool_start
+            or cur_extruder.fila_tool_start is not None):
             # if tool_start is defined move and confirm distance
             while not cur_lane.get_toolhead_pre_sensor_state():
                 if self.afc.homing_enabled:

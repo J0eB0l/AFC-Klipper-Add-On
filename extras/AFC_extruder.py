@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 try: from extras.AFC_utils import ERROR_STR
 except: raise error("Error when trying to import AFC_utils.ERROR_STR\n{trace}".format(trace=traceback.format_exc()))
 
-try: from extras.AFC_utils import add_filament_switch, VirtualFilamentSensor
+try: from extras.AFC_utils import add_filament_switch, VirtualFilamentSensor, PollingEndstopWrapper
 except: raise error(ERROR_STR.format(import_lib="AFC_utils", trace=traceback.format_exc()))
 
 try: from extras.AFC_lane import AFCLane, AFCU1Lane
@@ -293,6 +293,9 @@ class AFCExtruder:
 
         self.tool_start_state = False
         self.fila_tool_start: SwitchSensor|VirtualFilamentSensor|None=None
+        # Software MCU endstop for a U1-style motion sensor (set below when one
+        # is configured), so it can be homed against like a pin_tool_start switch.
+        self.tool_start_endstop: Optional[PollingEndstopWrapper] = None
         if self.tool_start is not None:
             if "unknown" == self.tool_start.lower():
                 raise error(f"Unknown is not valid for pin_tool_start in [{self.fullname}] config.")
@@ -324,6 +327,20 @@ class AFCExtruder:
             self.fila_tool_start.runout_helper.runout_pause = False
             self.fila_tool_start.runout_helper.runout_gcode = 1
             self.fila_tool_start.runout_helper._runout_event_handler = self.handle_start_runout
+            # Already a plain boolean, so this just needs a poll loop, not
+            # threshold math; any MCU works since the sensor's own MCU isn't reachable from here.
+            self.tool_start_endstop = PollingEndstopWrapper(
+                self.reactor, lambda: self.printer.lookup_object('mcu'),
+                lambda: bool(getattr(self.fila_tool_start, 'runout_buttun_state', False)))
+            # Registered here since unit_obj.extruder_obj isn't resolved until
+            # connect time; attaching it to a stepper is deferred to handle_unit_connect.
+            query_endstops = self.printer.load_object(config, "query_endstops")
+            try:
+                query_endstops.register_endstop(self.tool_start_endstop,
+                                                f"{self.name}_tool_start")
+            except Exception as e:
+                err_msg = f"Error trying to register tool_start endstop for {self.fullname}.\n Error:{e}"
+                raise error(err_msg)
 
         self.tool_end_state = False
         if self.tool_end is not None:
@@ -1096,6 +1113,36 @@ class AFCExtruder:
                 lane.unit_obj.lane_tool_loaded(lane)
         msg += f"<span class=primary--text> in ToolHead{on_shuttle}</span>"
         return msg
+
+    def clear_stale_sensor_state(self, lane: AFCLane) -> None:
+        """
+        Clear stale tool_start_state / filament_present / FPS latch so
+        calibration reads real-time sensor values.
+
+        :param lane: AFCLane whose buffer latch state to clear.
+        """
+        if self.fila_tool_start is not None:
+            self.fila_tool_start.runout_helper.filament_present = False
+        self.tool_start_state = False
+        buffer_obj = getattr(lane, 'buffer_obj', None)
+        if (buffer_obj is not None
+            and hasattr(buffer_obj, 'clear_advance_latch')):
+            buffer_obj.clear_advance_latch()
+        self.reactor.pause(self.reactor.monotonic() + 0.5)
+
+    @property
+    def has_toolhead_sensor(self) -> bool:
+        """
+        True when there is a real toolhead sensor to confirm/home against,
+        either a pin_tool_start switch/buffer-ramming setup or a U1-style
+        motion sensor (u1_filament_sensor_name). False for a virtual sensor
+        (no hardware to confirm against) or no toolhead sensor configured.
+
+        :return bool: True if a real toolhead sensor is configured.
+        """
+        if self.tool_start == "virtual":
+            return False
+        return bool(self.tool_start) or self.fila_tool_start is not None
 
     def is_standalone(self):
         """
