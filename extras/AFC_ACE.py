@@ -633,8 +633,9 @@ class afcACE(afcUnit):
     def _finish_connect(self) -> None:
         """
         Set the unit up once its serial link is connected: RFID on, feed-check
-        tuning, slot state, and the heartbeat and reconnect callbacks. Then
-        fires ``afc_ace:connected`` so listeners can redo their own setup.
+        tuning, slot state, the heartbeat and reconnect callbacks, and the
+        factory identify. Then fires ``afc_ace:connected`` so listeners can redo
+        their own setup.
         """
         self.logger.info(
             f"ACE {self.name}: connected, mode={self.mode}, "
@@ -682,6 +683,8 @@ class afcACE(afcUnit):
         # hardware). The ACE firmware resets on reconnect and forgets any
         # running feed assist, so resync it back to the active lane.
         self._ace.reconnect_callback = self._on_ace_reconnect
+        # Last, once the unit has finished its own detection cycle.
+        self._apply_identify()
         self.printer.send_event("afc_ace:connected", self, False)
 
     def _on_ace_reconnect(self) -> None:
@@ -702,8 +705,8 @@ class afcACE(afcUnit):
         self._prev_states_stale = True
         # Defer off the reconnect/serial path so the ACE acks don't block it.
         self.afc.reactor.register_callback(self._resync_assist_after_reconnect)
-        # The reset also undid any setup listeners made (AFC_ACE2_rfid's
-        # identify off), so tell them, off the serial path too.
+        # The reset also undid any setup listeners made, so tell them, off the
+        # serial path too.
         self.afc.reactor.register_callback(
             lambda et: self.printer.send_event("afc_ace:connected", self, True))
 
@@ -713,6 +716,24 @@ class afcACE(afcUnit):
         afcACE2 overrides it to send the V2 SET_FEED_CHECK command.
         """
         pass
+
+    def _apply_identify(self) -> None:
+        """
+        Set the factory identify after a connect or reset. No-op for V1 ACE,
+        which keeps the identify enable_rfid gave it; afcACE2 overrides it to
+        turn identify off for skip_factory_autostage.
+        """
+        pass
+
+    def stage_initial_load(self) -> float:
+        """
+        Distance fed into the unit ahead of dist_hub when an insert is staged.
+        Nothing for V1 ACE, whose firmware stages the insert itself; afcACE2
+        overrides it.
+
+        :return float: the distance in mm
+        """
+        return 0.0
 
     def _resync_assist_after_reconnect(self, eventtime: float) -> None:
         """
@@ -736,8 +757,10 @@ class afcACE(afcUnit):
                         pass
                 self._feed_assist_active.clear()
             self._maybe_assist_watchdog()
-        # The ACE forgets its feed-check window across a reset too, re-apply it.
+        # The ACE forgets its feed-check window and identify across a reset too,
+        # re-apply them.
         self._apply_feed_check()
+        self._apply_identify()
 
     def _on_hw_status_callback(self, response: dict) -> None:
         """
@@ -1535,19 +1558,20 @@ class afcACE(afcUnit):
         Feed the filament into the unit and on to the hub, giving an RFID
         integration a chance to read the tag *during* the load.
 
-        A stage-read listener (``afc_ace:stage_probe_begin``) runs the whole RFID
-        scan on a continuous feed and reports how far it fed via ``ctx['fed']``
-        plus a mandatory ``ctx['initial']`` load. The remainder (``initial +
-        dist_hub - fed``) is then staged in a single move at full feed speed. With
-        no listener this is just one ``initial + dist_hub`` feed.
+        ``ctx['initial']`` starts as the unit's stage_initial_load. A stage-read
+        listener (``afc_ace:stage_probe_begin``) runs the whole RFID scan on a
+        continuous feed and reports how far it fed via ``ctx['fed']``. The
+        remainder (``initial + dist_hub - fed``) is then staged in a single move
+        at full feed speed. With no listener this is just one ``initial +
+        dist_hub`` feed.
 
         :param lane: lane being staged
         :param slot: 0-based ACE slot index for the lane
         :param dist_hub: lane-to-hub distance in mm
         :return bool: False when the spool was removed mid-stage, else True
         """
-        ctx = {"active": False, "done": False, "initial": 0.0, "fed": 0.0,
-               "removed": False}
+        ctx = {"active": False, "done": False, "initial": self.stage_initial_load(),
+               "fed": 0.0, "removed": False}
         try:
             self.printer.send_event("afc_ace:stage_probe_begin", lane, ctx)
         except Exception as e:

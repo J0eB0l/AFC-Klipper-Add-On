@@ -966,8 +966,8 @@ class TestAfcACEOnAceReconnect:
 
 
 class TestAfcACEResyncAssistAfterReconnect:
-    def test_operation_active_only_reapplies_feed_check(self):
-        # An ACE 2 unit, whose feed-check push is observable on its link.
+    def test_operation_active_only_reapplies_feed_check_and_identify(self):
+        # An ACE 2 unit, whose feed-check and identify pushes are observable on its link.
         unit = make_ace2_unit(lanes=[LaneSpec("lane0", prep=True, tool_loaded=True)],
                               operation_active=True, feed_assist_active=[0])
         unit.lanes["lane0"].extruder_obj.lane_loaded = "lane0"
@@ -975,11 +975,12 @@ class TestAfcACEResyncAssistAfterReconnect:
         unit._resync_assist_after_reconnect(unit.printer.reactor.monotonic())
 
         assert unit._ace.commands == [("set_feed_check",
-                                       {"check_length": 200, "error_length": 185})]
+                                       {"check_length": 200, "error_length": 185})] + [("set_rfid_enable", {"index": s, "enable": False}) for s in range(4)]
         assert unit._feed_assist_active == {0}
         assert unit.afc.reactor.pending == []
         assert unit.logger.messages == [
-            ("info", "ACE2 Ace2_1: feed check set check_length=200 error_length=185")]
+            ("info", "ACE2 Ace2_1: feed check set check_length=200 error_length=185"),
+            ("info", "ACE2 Ace2_1: factory identify off on every slot")]
 
     def test_clears_all_slots_then_reconciles(self):
         # An ACE 2 unit, so the feed-check push that ends the resync is visible.
@@ -994,13 +995,14 @@ class TestAfcACEResyncAssistAfterReconnect:
                                       ("stop_feed_assist", {"index": 2}),
                                       ("stop_feed_assist", {"index": 3}),
                                       ("set_feed_check",
-                                       {"check_length": 200, "error_length": 185})]
+                                       {"check_length": 200, "error_length": 185})] + [("set_rfid_enable", {"index": s, "enable": False}) for s in range(4)]
         assert unit._feed_assist_active == set()
         # The watchdog then queued the reconcile for the active lane.
         assert len(unit.afc.reactor.pending) == 1
         assert unit.logger.messages == [
             ("info", "ACE assist watchdog: enabling feed assist for lane0 (slot 0)"),
-            ("info", "ACE2 Ace2_1: feed check set check_length=200 error_length=185")]
+            ("info", "ACE2 Ace2_1: feed check set check_length=200 error_length=185"),
+            ("info", "ACE2 Ace2_1: factory identify off on every slot")]
 
     def test_a_failed_stop_does_not_end_the_sweep(self):
         unit = ace_p1_unit("lane0", feed_assist_active=[2])

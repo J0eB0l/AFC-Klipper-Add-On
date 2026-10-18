@@ -34,6 +34,7 @@ from tests.ace_helpers import (
     AceLogger,
     AcePrinter,
     capture_log,
+    DEFAULT,
     FakeAce2Connection,
     FakeSerial,
     LaneSpec,
@@ -1919,6 +1920,85 @@ class TestAfcACE2ApplyFeedCheck:
             ("set_feed_check", {"check_length": 200, "error_length": 185})]
         assert printer.logger.messages == [
             ("warning", "ACE2 Ace2_1: set_feed_check failed (non-fatal): serial down")]
+
+
+class TestAfcACE2Staging:
+    OFF = [("set_rfid_enable", {"index": s, "enable": False}) for s in range(4)]
+
+    def test_defaults_skip_the_factory_autostage(self):
+        unit = make_ace2_unit()
+        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (True, 500.0)
+        assert unit.stage_initial_load() == 500.0
+
+    def test_factory_staging_has_no_initial_load(self):
+        unit = make_ace2_unit(values={"skip_factory_autostage": False,
+                                      "stage_initial_dist": 300.0})
+        assert unit.stage_initial_load() == 0.0
+
+    def test_the_rfid_section_still_sets_them_for_the_unit(self):
+        printer = AcePrinter()
+        printer.add_section("AFC_ACE2_rfid", object(), {"skip_factory_autostage": False,
+                                                        "stage_initial_dist": 300.0})
+        unit = make_ace2_unit(printer=printer)
+        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (False, 300.0)
+
+    def test_the_unit_wins_over_the_rfid_section(self):
+        printer = AcePrinter()
+        printer.add_section("AFC_ACE2_rfid", object(), {"skip_factory_autostage": False,
+                                                        "stage_initial_dist": 300.0})
+        unit = make_ace2_unit(printer=printer, values={"skip_factory_autostage": True,
+                                                       "stage_initial_dist": 400.0})
+        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (True, 400.0)
+
+    def test_identify_off_on_every_slot(self):
+        unit = make_ace2_unit()
+
+        unit._apply_identify()
+
+        assert unit._ace.async_commands == self.OFF
+        assert unit.printer.logger.messages == [
+            ("info", "ACE2 Ace2_1: factory identify off on every slot")]
+
+    @pytest.mark.parametrize("values,connection", [
+        ({"skip_factory_autostage": False}, DEFAULT), ({}, None)])
+    def test_identify_left_alone(self, values, connection):
+        unit = make_ace2_unit(values=values, connection=connection)
+
+        unit._apply_identify()
+
+        assert unit._ace is None or unit._ace.async_commands == []
+        assert unit.printer.logger.messages == []
+
+    def test_connect_turns_identify_off_after_the_unit_turns_it_on(self):
+        unit = make_ace2_unit(connect=False)
+
+        with unit.printer.connections.routed():
+            unit._deferred_ace_connect(unit.printer.reactor.monotonic())
+
+        sent = [cmd for cmd in unit._ace.async_commands if cmd[0] == "set_rfid_enable"]
+        assert sent == [("set_rfid_enable", {"index": s, "enable": True})
+                        for s in range(4)] + self.OFF
+        assert ("afc_ace:connected", (unit, False)) in unit.printer.events
+
+    @pytest.mark.parametrize("values,initial", [
+        ({}, 500.0), ({"stage_initial_dist": 250.0}, 250.0),
+        ({"skip_factory_autostage": False}, 0.0)])
+    def test_staging_starts_from_the_initial_load(self, values, initial):
+        unit = make_ace2_unit(lanes=[LaneSpec("lane0", prep=True)], values=values)
+        seen = []
+
+        def begin(lane: Any, ctx: Dict[str, Any]) -> None:
+            """
+            :param lane: lane being staged
+            :param ctx: the stage context
+            """
+            seen.append(ctx["initial"])
+            ctx["removed"] = True                        # stop before any feed
+
+        unit.printer.register_event_handler("afc_ace:stage_probe_begin", begin)
+
+        assert unit._feed_to_hub_probing(unit.lanes["lane0"], 0, dist_hub=200.0) is False
+        assert seen == [initial]
 
 
 class TestAfcACE2CheckStuck:

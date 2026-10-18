@@ -417,10 +417,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         self.auto_tag_adjust = config.getboolean("auto_tag_adjust", True)
         self.auto_tag_adjust_dist = config.getfloat(
             "auto_tag_adjust_dist", 75.0, minval=1.0)
-        # Initial load fed before dist_hub when the factory autostage is skipped
-        # (it replaces the factory's own staging). Net load = this + dist_hub.
-        self.stage_initial_dist = config.getfloat(
-            "stage_initial_dist", 500.0, minval=0.0)
         # Scan window: how far to feed at scan speed while polling. It must exceed
         # one spool revolution so the tag sweeps past; it adds no net distance.
         self.stage_scan_dist = config.getfloat(
@@ -431,22 +427,15 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         self.shared_reader_dedup = config.getboolean("shared_reader_dedup", True)
         # Last UID successfully read per PHYSICAL slot, used for the dedup above.
         self._slot_uid: Dict[int, str] = {}
-        # Skip the ACE's slow (~30-45s) factory autostage by disabling identify
-        # on every slot at boot, so our own staging runs instead.
-        self.skip_factory_autostage = config.getboolean(
-            "skip_factory_autostage", True)
-        # The boot-time identify-disable races the ACE's own deferred serial
-        # connect (which re-enables identify), so poll until connected then
-        # disable. These bound that poll (default ~30s window).
-        self._identify_disable_delay = config.getfloat(
-            "identify_disable_retry", 0.5, minval=0.05)
-        self._identify_disable_max = config.getint(
-            "identify_disable_max_tries", 60, minval=1)
-        self._identify_disable_tries = 0
-        # Restore factory identify after each read. Needed only when factory
-        # autostaging is in use, or the next insert won't autostage.
-        self.probe_restore_identify = config.getboolean(
-            "restore_identify", not self.skip_factory_autostage)
+        # skip_factory_autostage and stage_initial_dist are the unit's now
+        # ([AFC_ACE2 <name>]), which turns identify off at connect. Deprecated:
+        # the old identify-off retry's bounds, still read so existing configs that
+        # set them don't raise an "unused option" error at startup.
+        config.getfloat("identify_disable_retry", 0.5, minval=0.05)
+        config.getint("identify_disable_max_tries", 60, minval=1)
+        # Restore factory identify after each read; unset, only when the unit
+        # leaves the factory autostage on (see probe_restore_identify).
+        self._restore_identify = config.getboolean("restore_identify", None)
         self.probe_power_off = config.getboolean("probe_power_off", True)
         self.probe_settle = config.getfloat("probe_settle", 0.2, minval=0.0)
         # Name of the ACE2 printer object exposing send_command (afcACE subclass).
@@ -481,8 +470,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         self.printer.register_event_handler("klippy:ready", self._on_ready)
         self.printer.register_event_handler("afc_ace:post_insert",
                                             self._on_post_insert)
-        self.printer.register_event_handler("afc_ace:connected",
-                                            self._on_ace_connected)
         # Continuous read during staging (see stage_read).
         self._probe: Optional[dict] = None
         # slots whose feed assist we suppressed
@@ -613,77 +600,29 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         else:
             self.logger.info(f"ACE2 RFID bound to {getattr(self.ace2, 'name', self.ace2)}")
             self._register_writers()
-            # Identify is set once the ACE connects (_on_ace_connected), at boot
-            # and after every late connect or reset.
 
-    def _on_ace_connected(self, unit: Any, reconnect: bool) -> None:
+    @property
+    def skip_factory_autostage(self) -> bool:
         """
-        Set the factory identify whenever the unit connects or reconnects.
+        Whether the bound unit skips the factory autostage (its
+        skip_factory_autostage), True while no unit is bound.
 
-        Identify off skips the slow factory autostage (AFC's staging takes
-        over). A unit that reset on a USB drop, or came up late, has identify
-        back on and would autostage the next insert, so this runs on every
-        connect.
-
-        :param unit: the ACE unit that connected
-        :param reconnect: True for a reconnect after a drop (unused)
+        :return bool: True when AFC stages inserts itself
         """
-        if unit is not self.ace2 or not self.skip_factory_autostage:
-            return
-        if getattr(self, "_identify_retry_pending", False):
-            return                  # a retry is already waiting for it
-        self._identify_disable_tries = 0
-        self._identify_retry_pending = True
-        self.reactor.register_callback(self._retry_disable_identify)
+        return bool(getattr(self.ace2, "skip_factory_autostage", True))
 
-    def _retry_disable_identify(self, eventtime: float) -> None:
+    @property
+    def probe_restore_identify(self) -> bool:
         """
-        Disable factory identify once the ACE serial is connected.
+        Whether a read puts the factory identify back on afterwards:
+        restore_identify when set, else only when the factory autostage is in
+        use, or the next insert would not autostage.
 
-        The ACE's deferred connect races klippy:ready and re-enables identify as
-        it comes up, so poll until connected, then disable so it sticks.
-
-        :param eventtime: reactor event time (unused)
+        :return bool: True to re-enable identify after a read
         """
-        conn = getattr(self.ace2, "_ace", None) if self.ace2 is not None else None
-        if conn is not None and getattr(conn, "connected", False):
-            self._identify_retry_pending = False
-            self._disable_factory_identify()
-            return
-        self._identify_disable_tries += 1
-        if self._identify_disable_tries >= self._identify_disable_max:
-            self._identify_retry_pending = False
-            self.logger.warning(
-                f"ACE2 RFID: ACE serial not ready after {self._identify_disable_tries} tries; "
-                f"factory identify not set (autostage may run on insert)")
-            return
-        self.reactor.register_callback(
-            self._retry_disable_identify,
-            self.reactor.monotonic() + self._identify_disable_delay)
-
-    def _disable_factory_identify(self, slots: Optional[Any] = None) -> None:
-        """
-        Disable the firmware identify so the ACE stops driving the reader.
-
-        This also stops its autonomous autostage. Best-effort; each insert's
-        stage read disables it again for its own reader pair.
-
-        :param slots: slots to disable, defaults to all of the unit's slots
-        """
-        if self.ace2 is None:
-            return
-        if slots is None:
-            n = int(getattr(self.ace2, "slot_count", 4) or 4)
-            slots = range(n)
-        link = self._new_link(0)
-        for s in slots:
-            try:
-                link.set_rfid_enable(int(s), False)
-                self.logger.info(f"ACE2 RFID: factory identify disabled on slot {s}")
-            except Exception:
-                self.logger.info(
-                    f"ACE2 RFID: could not disable factory identify on slot {s} yet (serial not "
-                    f"ready?)")
+        if self._restore_identify is not None:
+            return self._restore_identify
+        return not self.skip_factory_autostage
 
     # ── mapping ───────────────────────
     def _slot_for_lane(self, lane_name: str) -> Optional[int]:
@@ -1359,12 +1298,9 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             name = getattr(lane, "name", None)
             if name is None:
                 return
-            # RFID off: stage as a plain feed, no chunk-probe, no reads. Still
-            # request the mandatory initial load so a skip_factory_autostage
-            # insert reaches the hub (fed in one move, not chunked).
+            # RFID off: stage as a plain feed of the unit's initial load plus
+            # dist_hub, no scan, no reads.
             if self.disable_rfid:
-                ctx["initial"] = (self.stage_initial_dist
-                                  if self.skip_factory_autostage else 0.0)
                 return
             if not self._rfid_enabled(name):
                 return
@@ -1400,10 +1336,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             # watching the encoder it trips the stuck-spool error (fast flash).
             self._suppress_assist(shared)
             ctx["active"] = True
-            # Mandatory initial load, only when we bypassed the factory initial
-            # staging (otherwise the factory already loaded it).
-            ctx["initial"] = (self.stage_initial_dist
-                              if self.skip_factory_autostage else 0.0)
             # Run the scan-and-read now on a continuous feed; report how far it fed
             # so the feeder stages the remainder at full speed.
             ctx["fed"] = self._run_stage_scan(lane, ctx)
@@ -2145,8 +2077,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :return float: the distance to wind back, mm
         """
         staged = float(getattr(lane, "dist_hub", 0.0) or 0.0)
-        if self.skip_factory_autostage:
-            staged += float(self.stage_initial_dist)
+        staged += float(self.ace2.stage_initial_load())
         if staged > 0:
             dist = min(dist, staged - self.RESCAN_MARGIN_MM)
         if dist < 10.0:

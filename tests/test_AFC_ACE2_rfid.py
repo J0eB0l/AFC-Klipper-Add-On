@@ -56,23 +56,30 @@ class Ace2RfidConnection(FakeAce2Connection):
                 raise error
 
 
+#: Staging options of [AFC_ACE2 <name>] that tests still write with the reader's.
+UNIT_STAGING = ("skip_factory_autostage", "stage_initial_dist")
+
+
 def ace2_rfid_rig(values: Optional[Dict[str, Any]] = None, *,
                   lanes: Iterable[Union[str, LaneSpec]] = (),
-                  link: bool = True,
-                  bind: bool = True, settle: bool = True,
+                  link: bool = True, bind: bool = True,
                   **unit_options: Any) -> Tuple[AFC_ACE2_RFID, afcACE2]:
     """
     Build an afcACE2 with real lanes on an Ace2RfidConnection, and an
     AFC_ACE2_RFID bound to it, both through their real __init__.
 
-    :param values: [AFC_ACE2_rfid] options
+    :param values: [AFC_ACE2_rfid] options, except that UNIT_STAGING ones go
+        to the unit, whose options they are
     :param lanes: the unit's lanes (names or LaneSpecs); prepped slots read "ready"
     :param link: give the unit a link; False leaves unit._ace None
     :param bind: run the reader's klippy:ready handler
-    :param settle: run the bind-time identify retry while it is due
     :param unit_options: other make_ace2_unit keywords
     :return tuple: (reader, unit)
     """
+    values = dict(values or {})
+    staging = {k: values.pop(k) for k in UNIT_STAGING if k in values}
+    if staging:
+        unit_options["values"] = {**(unit_options.get("values") or {}), **staging}
     printer = AcePrinter()
     lanes = list(lanes)
     states = ["empty"] * 4
@@ -84,7 +91,7 @@ def ace2_rfid_rig(values: Optional[Dict[str, Any]] = None, *,
         conn = make_fake_ace_connection(ace2=True, printer=printer, info=DEFAULT,
                                         status=ace_status(*states), cls=Ace2RfidConnection)
     unit = make_ace2_unit(lanes=lanes, printer=printer, connection=conn, **unit_options)
-    reader = make_ace2_rfid(values, ace2=unit, bind=bind, settle=settle)
+    reader = make_ace2_rfid(values, ace2=unit, bind=bind)
     return reader, unit
 
 
@@ -534,7 +541,7 @@ class TestAFCACE2RFIDOnReady:
         assert reader.ace2 is unit                       # found by its configured name
         assert reader.bambu_master_key == b"\xaa"
         assert printer.logger.messages == [("info", "ACE2 RFID bound to Ace2_1")]
-        assert printer.reactor.pending == []             # identify waits for the connect
+        assert printer.reactor.pending == []             # identify is the unit's
 
     def test_warns_when_ace2_missing(self, monkeypatch):
         reader = make_ace2_rfid({"scanner_lanes": "scan1"}, ace2=None, bind=False)
@@ -548,147 +555,40 @@ class TestAFCACE2RFIDOnReady:
         assert printer.logger.messages == [("warning", "ACE2 object not found; RFID disabled")]
         assert printer.reactor.pending == []
 
-    def test_discovers_named_object_no_callback_when_not_skipping(self, monkeypatch):
+    def test_discovers_named_object(self, monkeypatch):
         unit = make_ace2_unit(name="Ace2_9")
         printer = unit.printer
-        reader = make_ace2_rfid({"skip_factory_autostage": False}, ace2=unit, bind=False)
+        reader = make_ace2_rfid({}, ace2=unit, bind=False)
         monkeypatch.setattr(ace2_rfid_module, "resolve_rfid_keys",
                             lambda pr, b, c, d: (b, c, d))
         reader._on_ready()
         assert reader.ace2 is unit                       # found as "AFC_ACE2 Ace2_9"
         assert reader.bambu_master_key is None
         assert printer.logger.messages == [("info", "ACE2 RFID bound to Ace2_9")]
-        assert printer.reactor.pending == []             # skip off: no retry
-
-
-class TestAFCACE2RFIDOnAceConnected:
-    @pytest.mark.parametrize("reconnect", [False, True])
-    def test_a_late_or_reset_unit_gets_identify_off_again(self, reconnect):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True})
-        printer = unit.printer
-        printer.reactor.pending.clear()
-        unit._ace.commands.clear()
-        reader._identify_disable_tries = 7
-        printer.send_event("afc_ace:connected", unit, reconnect)
-        assert reader._identify_disable_tries == 0
-        printer.reactor.run_callbacks()
-        assert unit._ace.commands == [("set_rfid_enable", {"index": s, "enable": False})
-                                      for s in range(4)]
-        assert reader._identify_retry_pending is False
-
-    def test_waits_for_a_retry_already_queued(self):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True})
-        printer = unit.printer
-        printer.reactor.pending.clear()
-        reader._identify_retry_pending = True
-        reader._on_ace_connected(unit, False)
-        assert printer.reactor.pending == []
-
-    def test_ignores_another_unit_and_factory_autostage(self):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True})
-        printer = unit.printer
-        printer.reactor.pending.clear()
-        reader._on_ace_connected(object(), False)
-        assert printer.reactor.pending == []
-        reader.skip_factory_autostage = False
-        reader._on_ace_connected(unit, False)
         assert printer.reactor.pending == []
 
 
-class TestAFCACE2RFIDRetryDisableIdentify:
-    def test_retry_disable_identify_when_connected(self):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True})
-        printer = unit.printer
-        reader._retry_disable_identify(100.0)
-        assert unit._ace.commands == [("set_rfid_enable", {"index": 0, "enable": False}),
-                                      ("set_rfid_enable", {"index": 1, "enable": False}),
-                                      ("set_rfid_enable", {"index": 2, "enable": False}),
-                                      ("set_rfid_enable", {"index": 3, "enable": False})]
-        assert printer.logger.messages == [
-            ("info", "ACE2 RFID: factory identify disabled on slot 0"),
-            ("info", "ACE2 RFID: factory identify disabled on slot 1"),
-            ("info", "ACE2 RFID: factory identify disabled on slot 2"),
-            ("info", "ACE2 RFID: factory identify disabled on slot 3")]
-        assert reader._identify_disable_tries == 0
-        assert printer.reactor.pending == []
+class TestAFCACE2RFIDFollowsTheUnit:
+    @pytest.mark.parametrize("skip", [True, False])
+    def test_staging_and_identify_restore_follow_the_unit(self, skip):
+        reader, unit = ace2_rfid_rig({"skip_factory_autostage": skip})
+        assert unit.skip_factory_autostage is skip
+        assert reader.skip_factory_autostage is skip
+        assert reader.probe_restore_identify is not skip
 
-    def test_retry_disable_identify_gives_up_when_never_ready(self):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True,
-                                      "identify_disable_max_tries": 3,
-                                      "identify_disable_retry": 0.05},
-                                     link=False, settle=False)
-        printer = unit.printer
-        printer.reactor.pending.clear()
-        reader._retry_disable_identify(100.0)
-        assert reader._identify_disable_tries == 1
-        assert [(e.callback, e.waketime) for e in printer.reactor.pending] == [
-            (reader._retry_disable_identify, 100.05)]
-        assert printer.logger.messages == []
-        printer.reactor.advance(1.0)                     # the queued retries run
-        assert reader._identify_disable_tries == 3
-        assert printer.logger.messages == [
-            ("warning", "ACE2 RFID: ACE serial not ready after 3 tries; factory identify not "
-                        "set (autostage may run on insert)")]
-        assert printer.reactor.pending == []
+    def test_restore_identify_overrides(self):
+        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True, "restore_identify": True})
+        assert reader.probe_restore_identify is True
 
-    def test_retry_disable_identify_handles_missing_ace2(self):
-        reader = make_ace2_rfid({"skip_factory_autostage": True,
-                                 "identify_disable_max_tries": 1}, ace2=None)
-        reader._retry_disable_identify(100.0)
-        assert reader._identify_disable_tries == 1
-        assert reader.printer.logger.messages == [
-            ("warning", "ACE2 RFID: ACE serial not ready after 1 tries; factory identify not "
-                        "set (autostage may run on insert)")]
+    def test_unbound_reader_assumes_ace_staging(self):
+        reader = make_ace2_rfid({}, ace2=None)
+        assert reader.skip_factory_autostage is True
+        assert reader.probe_restore_identify is False
+
+    def test_old_identify_retry_options_still_load(self):
+        reader = make_ace2_rfid({"identify_disable_retry": 0.5,
+                                 "identify_disable_max_tries": 60}, ace2=None)
         assert reader.printer.reactor.pending == []
-
-    def test_retry_waits_while_the_link_is_down(self):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": True}, settle=False)
-        printer = unit.printer
-        printer.reactor.pending.clear()
-        unit._ace.connected = False
-        reader._retry_disable_identify(100.0)
-        assert unit._ace.commands == []
-        assert reader._identify_disable_tries == 1
-        assert [(e.callback, e.waketime) for e in printer.reactor.pending] == [
-            (reader._retry_disable_identify, 100.5)]
-        assert unit.printer.logger.messages == []
-
-
-class TestAFCACE2RFIDDisableFactoryIdentify:
-    def test_disable_factory_identify_all_slots(self):
-        reader, unit = ace2_rfid_rig({"skip_factory_autostage": False,
-                                      "lane_slot_map": "lane1:0"})
-        reader._disable_factory_identify()               # no slots: all of them
-        assert unit._ace.commands == [("set_rfid_enable", {"index": 0, "enable": False}),
-                                      ("set_rfid_enable", {"index": 1, "enable": False}),
-                                      ("set_rfid_enable", {"index": 2, "enable": False}),
-                                      ("set_rfid_enable", {"index": 3, "enable": False})]
-        assert unit.printer.logger.messages == [
-            ("info", "ACE2 RFID: factory identify disabled on slot 0"),
-            ("info", "ACE2 RFID: factory identify disabled on slot 1"),
-            ("info", "ACE2 RFID: factory identify disabled on slot 2"),
-            ("info", "ACE2 RFID: factory identify disabled on slot 3")]
-
-    def test_noop_without_ace2(self):
-        reader, unit = ace2_rfid_rig()
-        reader.ace2 = None
-        reader._disable_factory_identify()
-        assert unit._ace.commands == []
-        assert unit.printer.logger.messages == []
-
-    def test_logs_when_enable_call_fails(self):
-        reader, unit = ace2_rfid_rig(link=False)         # the link raises IOError
-        reader._disable_factory_identify([0])
-        assert unit.printer.logger.messages == [
-            ("info", "ACE2 RFID: could not disable factory identify on slot 0 yet (serial not "
-                     "ready?)")]
-
-    def test_logs_success_per_slot(self):
-        reader, unit = ace2_rfid_rig()
-        reader._disable_factory_identify([1])
-        assert unit._ace.commands == [("set_rfid_enable", {"index": 1, "enable": False})]
-        assert unit.printer.logger.messages == [
-            ("info", "ACE2 RFID: factory identify disabled on slot 1")]
 
 
 class TestAFCACE2RFIDSlotForLane:
@@ -1598,7 +1498,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         lane = unit.printer.afc.lanes["lane1"]
         self._field(monkeypatch, ["beef"])               # tag seen on the first poll
         Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(lane, ctx)
         # one 0.1s poll at 25 mm/s before the stop
         assert ctx == {"active": True, "done": True, "initial": 500.0,
@@ -1622,7 +1522,7 @@ class TestAFCACE2RFIDStageProbeBegin:
 
     def test_stage_begin_disables_identify_with_barrier(self):
         reader, unit, motion = self._rig({"stage_scan_dist": 0.0})   # no scan window
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         assert ctx == {"active": True, "done": False, "initial": 500.0, "fed": 0.0}
         assert ace2_rfid_sent(unit) == [
@@ -1634,37 +1534,29 @@ class TestAFCACE2RFIDStageProbeBegin:
         assert reader._probe["slot"] == 0 and reader._probe["sibling"] == 1
         assert unit.printer.logger.messages == ace2_rfid_assist_off(0, 1)
 
-    def test_stage_begin_no_initial_when_factory_stages(self):
+    @pytest.mark.parametrize("skip", [True, False])
+    def test_stage_begin_leaves_the_initial_load_to_the_unit(self, skip):
         reader, unit, motion = self._rig({"stage_scan_dist": 0.0,
-                                          "skip_factory_autostage": False})
-        ctx: Dict[str, Any] = {"active": False}
+                                          "skip_factory_autostage": skip})
+        ctx: Dict[str, Any] = {"active": False, "initial": 123.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
-        assert ctx == {"active": True, "initial": 0.0, "fed": 0.0}   # factory does the load
+        assert ctx == {"active": True, "initial": 123.0, "fed": 0.0}
         assert unit.printer.logger.messages == ace2_rfid_assist_off(0, 1)
 
-    def test_disable_rfid_stage_begin_plain_feed_with_initial(self):
-        # No reads, no reader touched, but the initial load still reaches the hub.
+    def test_disable_rfid_stage_begin_leaves_a_plain_feed(self):
+        # No reads, no reader touched: the unit feeds its initial load and dist_hub.
         reader, unit, motion = self._rig({"disable_rfid": True})
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
-        assert ctx == {"active": False, "done": False, "initial": 500.0}
+        assert ctx == {"active": False, "done": False, "initial": 500.0}   # untouched
         assert unit._ace.commands == []
         assert reader._probe is None
-        assert unit.printer.logger.messages == []
-
-    def test_disable_rfid_stage_begin_no_initial_when_factory_stages(self):
-        reader, unit, motion = self._rig({"disable_rfid": True,
-                                          "skip_factory_autostage": False})
-        ctx: Dict[str, Any] = {"active": False}
-        reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
-        assert ctx == {"active": False, "initial": 0.0}
-        assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
     def test_stage_scan_no_tag_releases_reader(self, monkeypatch):
         reader, unit, motion = self._rig()
         self._field(monkeypatch, [])                     # never a tag
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         assert ctx == {"active": True, "done": False, "initial": 500.0, "fed": 560.0}
         assert ace2_rfid_sent(unit) == [
@@ -1687,7 +1579,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         unit.printer.afc.default_material_type = "PLA"
         unit.printer.afc.lanes["lane1"].material = ""
         self._field(monkeypatch, [])                     # never a tag
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         assert unit.printer.afc.lanes["lane1"].material == "PLA"
         assert unit.printer.logger.messages[-1] == (
@@ -1698,7 +1590,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader, unit, motion = self._rig(feed_assist_active=[0, 1])
         lane = unit.printer.afc.lanes["lane1"]
         self._field(monkeypatch, [])
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(lane, ctx)
         assert unit._assist_suppressed == {0, 1}         # stopped and held off on both
         assert unit._feed_assist_active == set()
@@ -1722,7 +1614,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader._slot_uid = {3: "cafe"}                   # the sibling slot read "cafe"
         self._field(monkeypatch, ["cafe", "beef"])       # sibling first, then our tag
         tags = Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane3"], ctx)
         assert ctx["done"] is True
         assert reader._slot_uid == {2: "beef", 3: "cafe"}   # ours, not the sibling's
@@ -1737,7 +1629,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader, unit, motion = self._rig()
         motion.empty_slots = {0}                         # spool pulled mid-scan
         self._field(monkeypatch, [])
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         # 0.1s poll plus two 0.15s confirmation polls at 25 mm/s
         assert ctx == {"active": True, "done": False, "initial": 500.0, "removed": True,
@@ -1751,7 +1643,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         self._field(monkeypatch, ["beef"])
         # the three reads at rest miss; one after a re-center retract succeeds
         Ace2RfidTagScript(monkeypatch, None, None, None, self._decoded("beef"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         assert ctx["done"] is True
         assert ctx["fed"] == 0.0                         # 2.5mm fed less the 3mm retract
@@ -1769,7 +1661,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         self._field(monkeypatch, ["aa"])
         Ace2RfidTagScript(monkeypatch, {"uid": "aa", "tag_type": "MifareClassic1k",
                                         "filament": None})
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         assert ctx == {"active": True, "done": False, "initial": 500.0, "fed": 0.0}
         assert reader._slot_uid == {}
@@ -1782,18 +1674,18 @@ class TestAFCACE2RFIDStageProbeBegin:
     def test_stage_probe_skips_unconfigured_lane(self):
         reader, unit = ace2_rfid_rig(dict(self.STAGE, lane_slot_map="lane1:0"),
                                      lanes=["lane1", "laneX"])
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["laneX"], ctx)
-        assert ctx == {"active": False, "done": False}
+        assert ctx == {"active": False, "done": False, "initial": 500.0}
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
     def test_stage_probe_disabled_leaves_ctx_inactive(self):
         reader, unit = ace2_rfid_rig(dict(self.STAGE, lane_slot_map="lane1:0",
                                           stage_read=False), lanes=["lane1"])
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
-        assert ctx == {"active": False, "done": False}
+        assert ctx == {"active": False, "done": False, "initial": 500.0}
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
@@ -1802,7 +1694,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         lane2 = unit.printer.afc.lanes["lane2"]
         self._field(monkeypatch, ["cafe", "beef"])       # sibling dominates, then our tag
         Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(lane2, ctx)
         assert ctx["done"] is True
         assert reader._slot_uid == {2: "beef", 3: "cafe"}
@@ -1830,7 +1722,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader, unit, motion = self._sister_rig()
         self._field(monkeypatch, ["cafe", "cafe", "cafe"])
         Ace2RfidTagScript(monkeypatch, None)
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
         unwinds = [c for c in unit._ace.commands if c[0] == "unwind_filament"]
         assert unwinds == [("unwind_filament", {"index": 3, "length": 75.0, "speed": 100.0,
@@ -1860,7 +1752,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader, unit, motion = self._sister_rig(sibling, **unit_options)
         self._field(monkeypatch, ["cafe", "cafe"])
         Ace2RfidTagScript(monkeypatch, None)
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
         assert [c for c in unit._ace.commands if c[0] == "unwind_filament"] == []
         assert motion.pos(3) == 0.0
@@ -1885,7 +1777,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader, unit, motion = self._sister_rig(values={"auto_tag_adjust": False})
         self._field(monkeypatch, ["cafe", "cafe", "cafe"])
         Ace2RfidTagScript(monkeypatch, None)
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
         assert [c for c in unit._ace.commands if c[0] == "unwind_filament"] == []
         assert unit.printer.gcode.messages == [self.HINT]   # once
@@ -1901,7 +1793,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader._slot_uid = {}                            # sibling UID unknown
         self._field(monkeypatch, ["cafe", "cafe", "cafe", "cafe"])   # only the sibling
         tags = Ace2RfidTagScript(monkeypatch, self._decoded("cafe"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
         assert ctx["done"] is False                      # sibling tag not assigned
         assert reader._slot_uid == {}
@@ -1917,7 +1809,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader._slot_uid = {}
         self._field(monkeypatch, ["cafe", "cafe", "beef"])   # sibling, then our own
         tags = Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
         assert ctx["done"] is True
         assert reader._slot_uid == {2: "beef"}
@@ -1934,7 +1826,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader.afc = None                                # no AFC to look the lane up in
         self._field(monkeypatch, ["beef"])
         Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(lane, ctx)
         assert ctx["done"] is True
         assert lane.material == "PLA"
@@ -1946,7 +1838,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         reader, unit, motion = self._rig({"stage_scan_dist": 0.0})
         unit._ace.set_reply("stop_feed_assist", lambda params: (
             RuntimeError("assist wedged") if params["index"] == 1 else {}))
-        ctx: Dict[str, Any] = {"active": False, "done": False}
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(unit.printer.afc.lanes["lane1"], ctx)
         assert unit._assist_suppressed == {0, 1}         # held off on both all the same
         assert reader._assist_slots == (0, 1)

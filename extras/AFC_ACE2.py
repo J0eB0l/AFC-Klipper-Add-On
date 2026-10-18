@@ -1231,6 +1231,20 @@ class afcACE2(afcACE):
         # Stuck/tangle detection defaults on for the ACE2: its encoder reports a
         # per-slot jam state, so _check_stuck reacts to that instead of assist duration.
         self._stuck_detection = config.getboolean("stuck_spool_detection", True)
+        # Staging: skip_factory_autostage turns the factory identify off on
+        # every slot, which skips the ACE's slow (~30-45 s) factory autostage;
+        # AFC then stages an insert itself, stage_initial_dist mm into the unit
+        # plus dist_hub. Both were [AFC_ACE2_rfid] options, which still sets them
+        # for a unit that doesn't.
+        legacy = (config.getsection("AFC_ACE2_rfid")
+                  if config.has_section("AFC_ACE2_rfid") else None)
+        self.skip_factory_autostage = config.getboolean(
+            "skip_factory_autostage",
+            legacy.getboolean("skip_factory_autostage", True) if legacy else True)
+        self.stage_initial_dist = config.getfloat(
+            "stage_initial_dist",
+            legacy.getfloat("stage_initial_dist", 500.0, minval=0.0) if legacy else 500.0,
+            minval=0.0)
 
     def _apply_feed_check(self) -> None:
         """
@@ -1250,6 +1264,30 @@ class afcACE2(afcACE):
         except Exception as e:
             self.logger.warning(
                 f"ACE2 {self.name}: set_feed_check failed (non-fatal): {e}")
+
+    def _apply_identify(self) -> None:
+        """
+        Turn the factory identify off on every slot for skip_factory_autostage,
+        so an insert is left to AFC's staging. The unit turns it back on across
+        a reset, so this is sent on connect and reconnect.
+        """
+        if self._ace is None or not self.skip_factory_autostage:
+            return
+        try:
+            self._ace.disable_rfid()
+            self.logger.info(f"ACE2 {self.name}: factory identify off on every slot")
+        except Exception as e:
+            self.logger.warning(
+                f"ACE2 {self.name}: factory identify off failed (non-fatal): {e}")
+
+    def stage_initial_load(self) -> float:
+        """
+        Distance fed into the unit ahead of dist_hub when an insert is staged:
+        stage_initial_dist when the factory autostage is skipped, else none.
+
+        :return float: the distance in mm
+        """
+        return self.stage_initial_dist if self.skip_factory_autostage else 0.0
 
     # ACE2 slot states that mean the encoder/odometer disagrees with the
     # commanded motor move, a real upstream jam, tangle, slip, or motor fault.

@@ -2967,28 +2967,19 @@ def make_ace2_unit(name: str = "Ace2_1", *, lanes: Iterable[Union[str, LaneSpec]
 
 def make_ace2_rfid(values: Optional[Mapping[str, Any]] = None, *, ace2: Any = DEFAULT,
                    printer: Optional[AcePrinter] = None, bind: bool = True,
-                   settle: bool = True, clear_records: bool = True,
+                   clear_records: bool = True,
                    cls: Optional[type] = None) -> AFC_ACE2_RFID:
     """
     Build AFC_ACE2_RFID through its real __init__ as [AFC_ACE2_rfid].
 
     bind runs its klippy:ready handler (_on_ready) once and drops it: that
-    resolves AFC, finds the afcACE2 by its "AFC_ACE2 <name>" section,
-    registers the tag writers and, with skip_factory_autostage, queues the
-    identify-disable retry (_retry_disable_identify) on the reactor.
-
-    settle then runs that retry while it is due, without moving the clock. On
-    a connected unit whose link reported its firmware (the default
-    connection's device_info does) it finishes at once: identify is turned
-    off (stock firmware) or kept on (firmware decode). On a unit with no
-    link, a down link or no firmware it re-queues itself for later and stays
-    in reactor.pending; settle=False leaves the first try queued too.
+    resolves AFC, finds the afcACE2 by its "AFC_ACE2 <name>" section and
+    registers the tag writers.
 
     :param values: [AFC_ACE2_rfid] options
     :param ace2: the afcACE2 to bind; DEFAULT builds one, None binds nothing
     :param printer: shared printer, defaults to ace2's or a new one
     :param bind: run _on_ready
-    :param settle: run the bind-time identify retry while it is due
     :param clear_records: clear every record once wiring is done
     :param cls: AFC_ACE2_RFID class to build, e.g. a test's module copy
     :return AFC_ACE2_RFID: the reader object
@@ -3007,9 +2998,6 @@ def make_ace2_rfid(values: Optional[Mapping[str, Any]] = None, *, ace2: Any = DE
     if bind:
         obj._on_ready()
         printer.remove_event_handler("klippy:ready", obj._on_ready)
-        if settle:
-            retry = getattr(obj, "_retry_disable_identify", None)
-            printer.reactor.run_callbacks(match=lambda entry: entry.callback == retry)
     if clear_records:
         printer.clear_records()
     return obj
