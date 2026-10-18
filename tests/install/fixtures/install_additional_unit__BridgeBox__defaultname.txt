@@ -23,7 +23,7 @@ placeholder
 #   2. Set serial_port and extruder below. That extruder needs a toolhead
 #      sensor (see the extruder note).
 #   3. Settle pool_ams, the bay names and lane_base now: changing them
-#      later can move lanes and T#s.
+#      later can move lanes, and moved lanes lose their saved details.
 # After boot:
 #   4. AFC_BAMBU_UIDS lists the units on the bus and the bridge firmware;
 #      AFC_BRIDGEBOX_BAYS shows the bay each unit claimed.
@@ -88,7 +88,7 @@ extruder: extruder
 # number of four-lane AMS bays (at most 4, the most a Bambu bus takes) and
 # pool_ht the number of one-lane AMS HT bays (keep it at 8 or below). Set
 # pool_ams to the most AMS you will run: raising it later moves every HT
-# lane and T# up. Both at 0 turn live claiming off, and then no unit's
+# lane up. Both at 0 turn live claiming off, and then no unit's
 # lanes come up by themselves: read "Turning live claiming off" in
 # docs/bambu_hotswap.md first.
 pool_ams: 4
@@ -99,7 +99,7 @@ pool_ht: 8
 # commands and what the panel shows. Unset, the bays are Bambu_AMS_1 to
 # Bambu_AMS_4 and Bambu_AMS_HT_1 to Bambu_AMS_HT_8, and past the end of a
 # list the default names carry on. Only four ams_names are used. Renaming
-# or reordering them later can move a unit to other lanes and T#s.
+# or reordering them later can move a unit to other lanes.
 #ams_names: Bambu_AMS_1, Bambu_AMS_2, Bambu_AMS_3, Bambu_AMS_4
 #ht_names: Bambu_AMS_HT_1, Bambu_AMS_HT_2, Bambu_AMS_HT_3, Bambu_AMS_HT_4, Bambu_AMS_HT_5, Bambu_AMS_HT_6, Bambu_AMS_HT_7, Bambu_AMS_HT_8
 # Prefix of the default names. Unset, it is Bambu_AMS, or
@@ -107,21 +107,26 @@ pool_ht: 8
 #unit_prefix: Bambu_AMS
 
 # ---- Lanes and T# ----
-# Each Bambu lane's T# is its lane number: lane24 is T24. AMS bay N takes
-# the four lanes from lane_base + 4 x (N - 1), and the HT bays follow the
-# AMS band, one lane each. With a base of 24 and the default pools,
-# Bambu_AMS_1 is lane24-lane27 (T24-T27), Bambu_AMS_4 is lane36-lane39
-# and Bambu_AMS_HT_1 is lane40.
+# AMS bay N takes the four lanes from lane_base + 4 x (N - 1), and the HT
+# bays follow the AMS band, one lane each. With a base of 1 and the default
+# pools, Bambu_AMS_1 is lane1-lane4, Bambu_AMS_4 is lane13-lane16 and
+# Bambu_AMS_HT_1 is lane17.
+#
+# T#s do not follow lane numbers. A claimed lane takes the next unused T#,
+# as AFC numbers any lane: beside a unit on T0-T3, the first AMS gets T4-T7.
+# A unit with a saved bay keeps its T#s while it is unplugged and across
+# restarts, until AFC_BRIDGEBOX_FORGET retires it. SET_MAP and AFC's other
+# mapping commands change them like any lane's, and the change is saved.
 #
 # lane_base 0 (the default) picks the base at the first start: one past the
-# highest laneN in your other [AFC_lane] / [AFC_stepper] sections, else one
-# past the highest T# (or [AFC_extruder eN]) in use, else 24. Beside an ACE
-# on lane0-lane3 that gives 4: Bambu_AMS_1 is lane4-lane7 (T4-T7) and the
-# HT lanes start at lane20. The base is then saved, so lanes added
-# elsewhere later do not move the Bambu ones; keep those off the Bambu
-# lanes. To put the Bambu lanes elsewhere, set lane_base before the first
-# start: changing it later moves every Bambu lane and T#, and those lanes
-# lose their saved spool details.
+# highest laneN in your other [AFC_lane] / [AFC_stepper] sections, else 1.
+# Beside an ACE on lane0-lane3 that gives 4: Bambu_AMS_1 is lane4-lane7 and
+# the HT lanes start at lane20. The base is then saved, so lanes added
+# elsewhere later do not move the Bambu ones. If another unit later takes
+# one of their lane numbers, the Bambu lanes move up past it at the next
+# start and keep their saved details and T#s. To put the Bambu lanes
+# elsewhere, set lane_base before the first start: changing it later moves
+# every Bambu lane, and those lanes lose their saved details.
 #lane_base: 0
 
 # ---- Known units ----

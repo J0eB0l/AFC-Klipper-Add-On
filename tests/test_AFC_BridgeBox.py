@@ -1304,7 +1304,7 @@ class TestParseMap:
 
 
 class TestPlanLaneMap:
-    """The T# map lane12 (home T12) comes back with from its saved record."""
+    """The saved T# map lane12 comes back with from its record."""
 
     @staticmethod
     def _rec(maps: str, current: Optional[str] = None) -> Dict[str, Any]:
@@ -1317,155 +1317,73 @@ class TestPlanLaneMap:
         return {"map": maps, "current_map": cur}
 
     @staticmethod
-    def _plan(afc: BambuAFC, rec: Dict[str, Any], *, notes: bool = False,
-              bambu: Sequence[str] = ()) -> Tuple[tuple, List[LogLine]]:
+    def _plan(afc: BambuAFC, rec: Dict[str, Any],
+              take_macros: bool = True) -> Tuple[tuple, List[LogLine]]:
         """
-        Plan lane12's map, its warnings as ("warning", line) and, with
-        ``notes``, the lines that need no action as ("debug", line).
+        Plan lane12's map and its warnings as ("warning", line).
 
         :param afc: the AFC core
         :param rec: lane12's saved record
-        :param notes: pass a note channel (None otherwise, as a caller with
-            none does)
-        :param bambu: the Bambu lanes whose home tool is theirs
+        :param take_macros: passed on
         :return tuple: the plan, then the lines in the order they came
         """
         log = BambuLogger()
-        plan = _plan_lane_map(afc, "lane12", "T12", rec, log.warning,
-                              log.debug if notes else None, set(bambu))
+        plan = _plan_lane_map(afc, "lane12", rec, log.warning, take_macros)
         return plan, log.messages
 
-    def test_no_record_or_no_map_takes_the_home_tool(self):
+    def test_no_record_or_no_map_leaves_it_to_the_next_unused_tool(self):
         afc = make_printer().afc
-        assert self._plan(afc, {}) == ((["T12"], "T12", True), [])
-        assert self._plan(afc, {"spool_id": 5}) == ((["T12"], "T12", True),
-                                                    [])
+        assert self._plan(afc, {}) == (([], ""), [])
+        assert self._plan(afc, {"spool_id": 5}) == (([], ""), [])
+        assert self._plan(afc, self._rec("", "")) == (([], ""), [])
 
-    def test_a_free_saved_tool_comes_back_and_home_is_not_taken(self):
+    def test_a_free_saved_tool_comes_back(self):
         afc = make_printer().afc
-        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3", False), [])
+        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3"), [])
 
     def test_a_tool_another_lane_holds_is_dropped(self):
         afc = make_printer().afc
         _p1_other(afc, "lane5", ["T3"])
         assert self._plan(afc, self._rec("T3")) == (
-            (["T12"], "T12", False),
-            [("warning", "lane12: saved T3 is held by lane5 -- not restored; "
-                         "lane12 is back on T12")])
-
-    def test_the_home_tool_of_the_bambu_lane_holding_it_is_a_note(self):
-        # The holder's home wins and the lane is back on its own: nothing
-        # for the user to do, so AFC.log only.
-        afc = make_printer().afc
-        _p1_other(afc, "lane28", ["T28"])
-        assert self._plan(afc, self._rec("T28"), notes=True,
-                          bambu=["lane28"]) == (
-            (["T12"], "T12", False),
-            [("debug", "lane12: saved T28 is held by lane28 -- not restored; "
-                       "lane12 is back on T12")])
-
-    @pytest.mark.parametrize("maps, bambu, notes, home_held, expected", [
-        # Not the holder's home tool.
-        (["T3"], ["lane28"], True, False,
-         ((["T12"], "T12", False),
-          [("warning", "lane12: saved T3 is held by lane28 -- not restored; "
-                       "lane12 is back on T12")])),
-        # Not a Bambu lane.
-        (["T28"], [], True, False,
-         ((["T12"], "T12", False),
-          [("warning", "lane12: saved T28 is held by lane28 -- not restored; "
-                       "lane12 is back on T12")])),
-        # The lane is left with no T#.
-        (["T28"], ["lane28"], True, True,
-         ((["NONE"], "", False),
-          [("warning", "lane12: saved T28 is held by lane28 -- not restored"),
-           ("warning", "lane12 has no T# -- its home T12 is held by lane6; "
-                       "use SET_MAP")])),
-        # A caller with no note channel.
-        (["T28"], ["lane28"], False, False,
-         ((["T12"], "T12", False),
-          [("warning", "lane12: saved T28 is held by lane28 -- not restored; "
-                       "lane12 is back on T12")])),
-    ], ids=["not-its-home-tool", "not-a-bambu-lane", "left-with-no-tool",
-            "no-note-channel"])
-    def test_anything_else_still_warns(self, maps, bambu, notes, home_held,
-                                       expected):
-        afc = make_printer().afc
-        _p1_other(afc, "lane28", maps)
-        if home_held:
-            _p1_other(afc, "lane6", ["T12"])
-        assert self._plan(afc, self._rec(maps[0]), notes=notes,
-                          bambu=bambu) == expected
-
-    def test_a_multi_map_keeping_its_home_tool_is_a_note(self):
-        afc = make_printer().afc
-        _p1_other(afc, "lane28", ["T28"])
-        assert self._plan(afc, self._rec("T12, T28"), notes=True,
-                          bambu=["lane28"]) == (
-            (["T12"], "T12", True),
-            [("debug", "lane12: saved T28 is held by lane28 -- not restored")])
-        # A non-Bambu holder still warns.
-        assert self._plan(afc, self._rec("T12, T28"), notes=True) == (
-            (["T12"], "T12", True),
-            [("warning",
-              "lane12: saved T28 is held by lane28 -- not restored")])
-
-    def test_with_the_home_tool_held_too_the_lane_gets_none(self):
-        afc = make_printer().afc
-        _p1_other(afc, "lane5", ["T3"])
-        _p1_other(afc, "lane6", ["T12"])
-        assert self._plan(afc, self._rec("T3")) == (
-            (["NONE"], "", False),
-            [("warning", "lane12: saved T3 is held by lane5 -- not restored"),
-             ("warning", "lane12 has no T# -- its home T12 is held by lane6; "
-                         "use SET_MAP")])
+            ([], ""),
+            [("warning", "lane12: saved T3 is held by lane5 -- not restored")])
 
     def test_a_left_over_table_entry_holds_nothing(self):
         afc = make_printer().afc
         afc.tool_cmds["T3"] = "lane5"                  # lane5 is not live
-        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3", False), [])
+        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3"), [])
         _p1_other(afc, "lane5", ["T7"])
         afc.tool_cmds["T3"] = "lane5"                  # its map lacks T3
-        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3", False), [])
+        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3"), [])
 
     def test_a_macro_keeps_its_tool_unless_force_assign_map(self):
         afc = make_printer().afc
         afc.gcode.register_command("T3", _p1_user_macro)
-        assert self._plan(afc, self._rec("T3")) == (
-            (["T12"], "T12", False),
-            [("warning", "lane12: saved T3 is held by a macro -- not "
-                         "restored; lane12 is back on T12")])
+        dropped = (([], ""),
+                   [("warning",
+                     "lane12: saved T3 is held by a macro -- not restored")])
+        assert self._plan(afc, self._rec("T3")) == dropped
         afc.force_assign_map = True
-        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3", False), [])
+        assert self._plan(afc, self._rec("T3")) == ((["T3"], "T3"), [])
+        # During a print the macro keeps it anyway.
+        assert self._plan(afc, self._rec("T3"), take_macros=False) == dropped
 
-    def test_a_saved_none_stays_none_whether_home_is_free_or_held(self):
+    def test_a_saved_none_stays_none(self):
         # As PREP restores an AFC lane's NONE: the owner took its last T#
         # away, and only SET_MAP gives it one.
         afc = make_printer().afc
-        assert self._plan(afc, self._rec("NONE", "")) == (
-            (["NONE"], "", False), [])
-        _p1_other(afc, "lane6", ["T12"])
-        assert self._plan(afc, self._rec("NONE", "")) == (
-            (["NONE"], "", False), [])
-
-    def test_a_blank_saved_map_is_home_while_free_and_none_while_held(self):
-        afc = make_printer().afc
-        assert self._plan(afc, self._rec("", "")) == (
-            (["T12"], "T12", False), [])
-        _p1_other(afc, "lane6", ["T12"])
-        assert self._plan(afc, self._rec("", "")) == (
-            (["NONE"], "", False), [])
+        assert self._plan(afc, self._rec("NONE", "")) == ((["NONE"], ""), [])
 
     def test_a_multi_map_keeps_its_current_tool(self):
         afc = make_printer().afc
         assert self._plan(afc, self._rec("T12, T40", "T40")) == (
-            (["T12", "T40"], "T40", True), [])
+            (["T12", "T40"], "T40"), [])
 
     def test_a_current_tool_that_was_dropped_falls_to_the_first_kept(self):
         afc = make_printer().afc
         _p1_other(afc, "lane5", ["T40"])
         assert self._plan(afc, self._rec("T3, T40", "T40")) == (
-            (["T3"], "T3", False),
+            (["T3"], "T3"),
             [("warning",
               "lane12: saved T40 is held by lane5 -- not restored")])
 
@@ -1794,672 +1712,6 @@ class TestChildCommandGetattr:
             child.no_such_attribute
 
 
-class TestResetHome:
-    """
-    AFC_RESET_MAPPING, through the chain master's afc:reset_mapping handler
-    and AFC's real AFC_spool, puts every claimed Bambu lane on its home T#.
-
-    The printer has twelve lanes on a non-Bambu unit (lane0-lane11 on
-    T0-T11) ahead of the pool: AMS bays lane12-15, lane16-19, lane20-23,
-    lane24-27 and an HT bay on lane28.
-    """
-
-    A, B, H = "AAAA", "BBBB", "HHHH"
-    #: The AMS on lane12-15 and its home T#s.
-    HOMES = {f"lane{n}": f"T{n}" for n in (12, 13, 14, 15)}
-
-    class _Box:
-        """A non-Bambu unit."""
-
-        def __init__(self, lanes: Sequence[Any]) -> None:
-            """:param lanes: its lanes"""
-            self.name = "Box"
-            self.lanes = {lane.name: lane for lane in lanes}
-
-    @classmethod
-    def _printer(cls, tmp_path: pathlib.Path,
-                 monkeypatch: pytest.MonkeyPatch, *,
-                 var: Optional[Dict[str, Any]] = None,
-                 owners: Optional[str] = None,
-                 box: Optional[Dict[int, Tuple[List[str], List[str]]]] = None,
-                 print_state: Optional[str] = None) -> afcBridgeBox:
-        """
-        chain1 with AAAA, BBBB and HHHH recorded and online, AFC's real
-        AFC_spool, and the Box unit ahead of it.
-
-        :param var: what AFC.var.unit holds
-        :param owners: the bay_owner key an earlier start left
-        :param box: Box lane number -> (its T#s, its config map:); the
-            others are on T<number> with no config map:
-        :param print_state: print_stats state
-        :return afcBridgeBox: the master, klippy:ready's handler run; its
-            logger is AFC's
-        """
-        printer = make_printer(monkeypatch=monkeypatch, fabricate=True,
-                               print_state=print_state)
-        # The roster an earlier start recorded, as a scout leaves it.
-        record_chain_state(
-            tmp_path, roster=f"boxed:{cls.A}, boxed:{cls.B}, ht:{cls.H}")
-        m = make_bridgebox(
-            tmp_path, printer=printer, roster="", pool_ams=4, pool_ht=1,
-            ams_names="Alpha, Bravo, Charlie, Delta", ht_names="Hot",
-            lane_base=12)
-        printer.connect()
-        if owners is not None:
-            m._state_set({"AFC_BridgeBox chain1": {"bay_owner": owners}})
-        if var is not None:
-            write_unit_vars(printer, var)
-        uids = [cls.A, cls.B, "", "", cls.H]
-        live_bridges()[m.serial_port] = FakeBridge(
-            uids=uids, online=[bool(u) for u in uids], htmask=1 << 4)
-        make_afc_spool(printer)
-        afc = printer.afc
-        afc.moonraker = None
-        lanes = []
-        for n in range(12):
-            maps, config = (box or {}).get(n, ([f"T{n}"], []))
-            lanes.append(_p1_other(afc, f"lane{n}", maps, config))
-        afc.units = dict(Box=cls._Box(lanes), **afc.units)
-        m._scout_ready()
-        return m
-
-    @staticmethod
-    def _lane(m: afcBridgeBox, name: str) -> Any:
-        """:return Any: the lane AFC has under that name, else the bay's"""
-        afc = m.printer.afc
-        return (afc.lanes.get(name)
-                or m.printer.lookup_object(f"AFC_lane {name}"))
-
-    @classmethod
-    def _maps(cls, m: afcBridgeBox, *names: str) -> Dict[str, List[str]]:
-        """:return dict: lane name -> its map"""
-        return {n: cls._lane(m, n).map for n in names}
-
-    @staticmethod
-    def _reset(m: afcBridgeBox) -> FakeGcmd:
-        """:return FakeGcmd: AFC_RESET_MAPPING RUNOUT=no, run"""
-        cmd = FakeGcmd({"RUNOUT": "no"})
-        m.printer.afc.spool.cmd_AFC_RESET_MAPPING(cmd)
-        return cmd
-
-    @staticmethod
-    def _quiet(m: afcBridgeBox) -> None:
-        """Forget what the setup logged and saved."""
-        m.logger.messages.clear()
-        m.printer.gcode.messages.clear()
-        drain_var_writes(m.printer)
-
-    @staticmethod
-    def _saved(m: afcBridgeBox) -> Dict[str, Any]:
-        """:return dict: the one snapshot AFC's writer was handed"""
-        (snap,) = drain_var_writes(m.printer)
-        return snap
-
-    @staticmethod
-    def _table(**extra: str) -> Dict[str, str]:
-        """
-        :param extra: T# -> lane, besides the Box's T0-T11
-        :return dict: AFC's tool table as expected
-        """
-        table = {f"T{n}": f"lane{n}" for n in range(12)}
-        table.update(extra)
-        return table
-
-    class _Moonraker:
-        """Moonraker's lane_data store, as send_lane_data writes it."""
-
-        def __init__(self) -> None:
-            """Start with nothing sent."""
-            #: (T#, lane) of every record sent, in order.
-            self.sent: List[Tuple[str, str]] = []
-            self.removed: List[Tuple[str, str]] = []
-
-        def send_lane_data(self, data: Dict[str, Any]) -> None:
-            """:param data: the lane_data record"""
-            self.sent.append((data["key"], data["value"]["lane"]))
-
-        def remove_database_entry(self, namespace: str, key: str) -> None:
-            """
-            :param namespace: the database namespace
-            :param key: the record removed
-            """
-            self.removed.append((namespace, key))
-
-    @staticmethod
-    def _change_tool(m: afcBridgeBox, cmd: str) -> bool:
-        """:return bool: ``cmd`` is registered to AFC's CHANGE_TOOL"""
-        handler = m.printer.gcode.ready_gcode_handlers.get(cmd)
-        return getattr(handler, "__func__", None) is BambuAFC.cmd_CHANGE_TOOL
-
-    @classmethod
-    def _consistent(cls, m: afcBridgeBox, macros: Sequence[str] = ()) -> None:
-        """
-        Each T# is on one live lane's map only, AFC's tool table is exactly
-        those owners, and each is AFC's CHANGE_TOOL unless it is a macro.
-
-        :param m: the chain master
-        :param macros: the T#s held by :func:`_p1_user_macro`
-        """
-        afc = m.printer.afc
-        owner: Dict[str, str] = {}
-        for lane in afc.lanes.values():
-            for cmd in lane.map or []:
-                if cmd == "NONE":
-                    continue
-                assert cmd not in owner, f"{cmd} on {owner[cmd]} and {lane.name}"
-                owner[cmd] = lane.name
-        assert afc.tool_cmds == owner
-        handlers = m.printer.gcode.ready_gcode_handlers
-        for cmd in owner:
-            if cmd in macros:
-                assert handlers[cmd] is _p1_user_macro, cmd
-            else:
-                assert cls._change_tool(m, cmd), cmd
-
-    @classmethod
-    def _claimed(cls, m: afcBridgeBox, *uids: str) -> None:
-        """
-        Claim each uid onto its bay: HHHH as an HT, the others as AMS.
-
-        :param m: the chain master
-        :param uids: the uids, in claim order
-        """
-        for uid in uids:
-            model = "ht" if uid == cls.H else "boxed"
-            assert m._claim_pool_unit(uid, model) is not None
-
-    @classmethod
-    def _box_is_numbered_1_to_1(cls, m: afcBridgeBox) -> None:
-        """The Box's lanes are on T0-T11, in lane order."""
-        names = [f"lane{n}" for n in range(12)]
-        assert cls._maps(m, *names) == {
-            f"lane{n}": [f"T{n}"] for n in range(12)}
-
-    def _homes(self) -> Dict[str, List[str]]:
-        """:return dict: the AMS on lane12-15, each on its home T#"""
-        return {ln: [t] for ln, t in self.HOMES.items()}
-
-    def test_the_ht_behind_sixteen_lanes_is_back_on_t28(
-            self, tmp_path, monkeypatch):
-        # The unit on lane16-19 is offline, and an earlier reset left the HT
-        # on T16, which its saved map brought back.
-        A, B, H = self.A, self.B, self.H
-        m = self._printer(tmp_path, monkeypatch,
-                          var={"Hot": {"lane28": {"map": "T16",
-                                                  "current_map": "T16"}}},
-                          owners=f"{A}:Alpha, {B}:Bravo, {H}:Hot")
-        self._claimed(m, A, H)
-        afc = m.printer.afc
-        ht = self._lane(m, "lane28")
-        assert ht.map == ["T16"]
-        moonraker = afc.moonraker = self._Moonraker()
-        self._quiet(m)
-        cmd = self._reset(m)
-        assert (ht.map, ht.current_map, ht._map) == (["T28"], "T28", [])
-        assert self._maps(m, *self.HOMES) == self._homes()
-        self._box_is_numbered_1_to_1(m)
-        assert afc.tool_cmds == self._table(T12="lane12", T13="lane13",
-                                            T14="lane14", T15="lane15",
-                                            T28="lane28")
-        # T16 is no lane's: gone from Klipper's commands too. T28 is
-        # registered to CHANGE_TOOL, under its own name.
-        handlers = m.printer.gcode.ready_gcode_handlers
-        assert ("T16" in handlers, "_T28" in handlers) == (False, False)
-        assert self._change_tool(m, "T28")
-        self._consistent(m)
-        # The panel gets each Bambu lane on its home T#.
-        assert moonraker.sent == [("T12", "12"), ("T13", "13"),
-                                  ("T14", "14"), ("T15", "15"),
-                                  ("T28", "28")]
-        assert moonraker.removed == []
-        # The bay held for the offline unit is left alone.
-        assert "lane16" not in afc.lanes
-        bay = m.printer.lookup_object("AFC_lane lane16")
-        assert (bay.map, bay._map) == ([], [])
-        # Saved as any reset: the HT and the AMS lanes on their home T#s.
-        snap = self._saved(m)
-        assert (snap["Hot"]["lane28"]["map"],
-                snap["Hot"]["lane28"]["current_map"]) == ("T28", "T28")
-        assert {ln: r["map"] for ln, r in snap["Alpha"].items()} == (
-            self.HOMES)
-        assert snap["Box"]["lane0"]["map"] == "T0"
-        assert m.logger.messages == [
-            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
-                      "lanes on their home T#s: lane28 T16->T28."),
-            ("info", "T16 remain, removing these mappings"),
-            ("info", "Tool mappings reset")]
-        assert (cmd.messages, m.printer.gcode.messages) == ([], [])
-
-    def test_every_bay_claimed(self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        self._claimed(m, self.A, self.B, self.H)
-        self._quiet(m)
-        self._reset(m)
-        bravo = {f"lane{n}": [f"T{n}"] for n in (16, 17, 18, 19)}
-        assert self._maps(m, "lane28", *self.HOMES, *bravo) == dict(
-            self._homes(), lane28=["T28"], **bravo)
-        self._box_is_numbered_1_to_1(m)
-        assert m.printer.afc.tool_cmds == self._table(
-            **{f"T{n}": f"lane{n}" for n in (12, 13, 14, 15, 16, 17, 18, 19,
-                                              28)})
-        self._consistent(m)
-        snap = self._saved(m)
-        assert (snap["Hot"]["lane28"]["map"],
-                snap["Bravo"]["lane16"]["map"]) == ("T28", "T16")
-        # Every lane was on its home T# already: nothing moved to report.
-        assert m.logger.messages == [("info", "Tool mappings reset")]
-
-    def test_a_released_bay_is_left_out_and_comes_back_home(
-            self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        self._claimed(m, self.A, self.B, self.H)
-        m._release_pool_unit(self.B)
-        afc = m.printer.afc
-        assert "lane16" not in afc.lanes
-        self._quiet(m)
-        self._reset(m)
-        assert self._maps(m, "lane28", *self.HOMES) == dict(
-            self._homes(), lane28=["T28"])
-        assert m.printer.lookup_object("AFC_lane lane16").map == []
-        assert "lane16" not in afc.lanes
-        assert afc.tool_cmds == self._table(T12="lane12", T13="lane13",
-                                            T14="lane14", T15="lane15",
-                                            T28="lane28")
-        self._consistent(m)
-        # Its records are held for its return, on its home T#s.
-        held = m._held["Bravo"]["lanes"]
-        assert {ln: r["map"] for ln, r in held.items()} == {
-            "lane16": "T16", "lane17": "T17", "lane18": "T18",
-            "lane19": "T19"}
-        assert self._saved(m)["Bravo"]["lane16"]["map"] == "T16"
-        assert m.logger.messages == [("info", "Tool mappings reset")]
-        self._claimed(m, self.B)
-        assert self._maps(m, "lane16", "lane28") == {"lane16": ["T16"],
-                                                     "lane28": ["T28"]}
-        assert afc.tool_cmds == self._table(
-            **{f"T{n}": f"lane{n}" for n in (12, 13, 14, 15, 16, 17, 18, 19,
-                                              28)})
-        self._consistent(m)
-
-    def test_a_remap_on_a_bambu_lane_is_undone(self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        self._claimed(m, self.A, self.H)
-        m.printer.afc.spool.cmd_SET_MAP(FakeGcmd({"LANE": "lane28",
-                                                   "MAP": "T3"}))
-        assert self._maps(m, "lane28", "lane3") == {"lane28": ["T3"],
-                                                    "lane3": ["T28"]}
-        self._quiet(m)
-        self._reset(m)
-        assert self._maps(m, "lane28", "lane3") == {"lane28": ["T28"],
-                                                    "lane3": ["T3"]}
-        assert m.printer.afc.tool_cmds == self._table(
-            T12="lane12", T13="lane13", T14="lane14", T15="lane15",
-            T28="lane28")
-        self._consistent(m)
-        assert m.logger.messages == [
-            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
-                      "lanes on their home T#s: lane28 T3->T28."),
-            ("info", "Tool mappings reset")]
-
-    @pytest.mark.parametrize("how", ["AFC_RESET_MAPPING",
-                                     "AFC_ENABLE_MULTIPLE_MAPPING ENABLE=0"])
-    def test_a_multi_mapped_bambu_lane_is_back_to_one_tool(
-            self, tmp_path, monkeypatch, how):
-        m = self._printer(tmp_path, monkeypatch)
-        self._claimed(m, self.A, self.H)
-        spool = m.printer.afc.spool
-        spool.enable_multiple_mapping = True
-        spool.cmd_SET_MAP(FakeGcmd({"LANE": "lane28", "MAP": "T2"}))
-        assert self._maps(m, "lane28", "lane2") == {"lane28": ["T28", "T2"],
-                                                    "lane2": []}
-        self._quiet(m)
-        moved = ("debug", "AFC_BridgeBox chain1: the mapping reset puts the "
-                          "Bambu lanes on their home T#s: lane28 T28+T2->T28.")
-        if how == "AFC_RESET_MAPPING":
-            self._reset(m)
-            expected = [moved, ("info", "Tool mappings reset")]
-        else:
-            spool.cmd_AFC_ENABLE_MULTIPLE_MAPPING(FakeGcmd({"ENABLE": 0}))
-            expected = [
-                ("info", "Multiple T(n) mapping per lane and virtual tools "
-                         "has been disabled"),
-                moved, ("info", "Tool mappings reset"),
-                ("info", "\n<span class=info--text>Key enable_multiple_mapping "
-                         "not found in section AFC added to AFC_auto_vars.cfg "
-                         "file</span>")]
-        lane28 = self._lane(m, "lane28")
-        assert (lane28.map, lane28.current_map) == (["T28"], "T28")
-        assert self._lane(m, "lane2").map == ["T2"]
-        self._box_is_numbered_1_to_1(m)
-        assert m.printer.afc.tool_cmds == self._table(
-            T12="lane12", T13="lane13", T14="lane14", T15="lane15",
-            T28="lane28")
-        self._consistent(m)
-        assert self._saved(m)["Hot"]["lane28"]["map"] == "T28"
-        assert m.logger.messages == expected
-
-    def test_the_reset_leaves_the_tool_with_the_config_lane(
-            self, tmp_path, monkeypatch):
-        # lane5's config gives it T28, the HT's home T#.
-        m = self._printer(tmp_path, monkeypatch, box={5: (["T28"], ["T28"])})
-        self._claimed(m, self.A, self.H)
-        self._quiet(m)
-        self._reset(m)
-        afc = m.printer.afc
-        ht = self._lane(m, "lane28")
-        # AFC numbers the HT as any lane with no map:, around lane5's T28
-        # and the AMS's T12-T15: lane0-4 on T0-T4, lane6-11 on T5-T10, the
-        # HT on T11.
-        assert (self._lane(m, "lane5").map, ht.map, ht._map) == (
-            ["T28"], ["T11"], [])
-        assert self._maps(m, *self.HOMES) == self._homes()
-        assert afc.tool_cmds == dict(
-            {f"T{n}": f"lane{n}" for n in range(5)},
-            **{f"T{n - 1}": f"lane{n}" for n in range(6, 12)},
-            T11="lane28", T12="lane12", T13="lane13", T14="lane14",
-            T15="lane15", T28="lane5")
-        self._consistent(m)
-        assert self._saved(m)["Hot"]["lane28"]["map"] == "T11"
-        left = ("AFC_BridgeBox chain1: the mapping reset numbers lane28 as "
-                "any other lane, not on its home T28: map: T28 in "
-                "[AFC_stepper lane5] keeps T28 for lane5. Set that map: "
-                "outside T12-T28 to have lane28 on T28.")
-        # The claim had moved lane5 to T29; the reset drops it.
-        assert m.logger.messages == [
-            ("warning", left),
-            ("info", "T29 remain, removing these mappings"),
-            ("info", "Tool mappings reset")]
-        # Said once a session; AFC.log after that.
-        self._quiet(m)
-        self._reset(m)
-        assert m.logger.messages == [("debug", left),
-                                     ("info", "Tool mappings reset")]
-
-    @classmethod
-    def _waiting(cls, m: afcBridgeBox) -> None:
-        """
-        lane11 is on T28 (PREP restored it there before the HT was
-        plugged), and the HT is claimed during the print, so its take of
-        T28 waits for the print to end.
-
-        :param m: the chain master, lane11 on T28
-        """
-        m.printer.set_print_state("printing")
-        cls._claimed(m, cls.A, cls.H)
-        assert m.printer.lookup_object("AFC_lane lane28").map == ["NONE"]
-        assert m._deferred_takes == {"lane28": {
-            "home": "T28", "maps": ["T28"], "current": "T28",
-            "quiet": False}}
-
-    def test_a_reset_before_the_print_ends_takes_its_place(
-            self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch, box={11: (["T28"], [])})
-        self._waiting(m)
-        self._quiet(m)
-        self._reset(m)                                 # PRINT_END
-        assert self._maps(m, "lane28", "lane11") == {"lane28": ["T28"],
-                                                     "lane11": ["T11"]}
-        assert m._deferred_takes == {}
-        # The reset's save has the map the reset gave, not the planned one.
-        assert self._saved(m)["Hot"]["lane28"]["map"] == "T28"
-        assert m.printer.afc.tool_cmds == self._table(
-            T12="lane12", T13="lane13", T14="lane14", T15="lane15",
-            T28="lane28")
-        self._consistent(m)
-        assert m.logger.messages == [
-            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
-                      "lanes on their home T#s: lane28 NONE->T28."),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset maps "
-                      "lane28, so the T#s it waited for are not taken."),
-            ("info", "Tool mappings reset")]
-        # The print ends: nothing is left to take.
-        m.printer.set_print_state("complete")
-        self._quiet(m)
-        m._take_deferred_tools()
-        assert self._maps(m, "lane28", "lane11") == {"lane28": ["T28"],
-                                                     "lane11": ["T11"]}
-        assert m.logger.messages == []
-        assert drain_var_writes(m.printer) == []
-
-    def test_a_reset_whose_save_fails_still_drops_the_wait(
-            self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch, box={11: (["T28"], [])})
-        self._waiting(m)
-        afc = m.printer.afc
-        save_vars = afc.save_vars
-
-        def full_disk() -> None:
-            """AFC's save, failing."""
-            raise RuntimeError("disk full")
-
-        afc.save_vars = full_disk
-        self._quiet(m)
-        with pytest.raises(RuntimeError, match="disk full"):
-            self._reset(m)
-        # AFC's reset mapped the lanes before its save failed, so the take
-        # would put back the map the reset replaced.
-        assert m._deferred_takes == {}
-        assert self._maps(m, "lane28", "lane11") == {"lane28": ["T28"],
-                                                     "lane11": ["T11"]}
-        assert afc.tool_cmds == self._table(T12="lane12", T13="lane13",
-                                            T14="lane14", T15="lane15",
-                                            T28="lane28")
-        # No Bambu lane's map: is touched.
-        assert {n: self._lane(m, f"lane{n}")._map
-                for n in (12, 13, 14, 15, 28)} == dict.fromkeys(
-            (12, 13, 14, 15, 28), [])
-        assert m.logger.messages == [
-            ("debug", "AFC_BridgeBox chain1: the mapping reset puts the Bambu "
-                      "lanes on their home T#s: lane28 NONE->T28."),
-            ("debug", "AFC_BridgeBox chain1: the mapping reset maps "
-                      "lane28, so the T#s it waited for are not taken.")]
-        # The next reset saves it, with nothing left to move.
-        afc.save_vars = save_vars
-        self._quiet(m)
-        self._reset(m)
-        assert self._lane(m, "lane28").map == ["T28"]
-        assert self._saved(m)["Hot"]["lane28"]["map"] == "T28"
-        assert m.logger.messages == [("info", "Tool mappings reset")]
-
-    @classmethod
-    def _two_tools(cls, tmp_path: pathlib.Path,
-                   monkeypatch: pytest.MonkeyPatch,
-                   config: List[str]) -> afcBridgeBox:
-        """
-        :param config: lane5's config map:, which it is on too
-        :return afcBridgeBox: AAAA and HHHH claimed
-        """
-        m = cls._printer(tmp_path, monkeypatch, box={5: (config, config)})
-        cls._quiet(m)
-        cls._claimed(m, cls.A, cls.H)
-        return m
-
-    @staticmethod
-    def _claim_lines(uid: str, unit: str, model: str,
-                     lanes: int, tail: str = "") -> List[Tuple[str, str]]:
-        """
-        :param uid: the uid claimed
-        :param unit: the unit it is claimed onto
-        :param model: the model it is claimed as
-        :param lanes: the unit's lane count
-        :param tail: what the CLAIMED line ends with after "no restart."
-        :return list: the claim's log, without any warning between
-        """
-        return [
-            ("debug", f"AFC bambu {unit}: chain index not resolved yet (UID "
-                      f"{uid}); holding this unit's registrations until the "
-                      "chain map arrives"),
-            ("info", f"AFC bambu {unit}: claimed UID {uid} as {model} and "
-                     "brought online live (ams_index=0)."),
-            ("info", f"AFC_BridgeBox chain1: CLAIMED {uid} as {model} onto "
-                     f"{unit} ({lanes} lanes) -- live, no restart.{tail}"),
-        ]
-
-    def test_a_home_tool_after_the_first_goes_home(self, tmp_path,
-                                                   monkeypatch):
-        # AFC's reset gives a lane with a config map: only its first T#, so
-        # only that one keeps a Bambu lane off its home T#.
-        m = self._two_tools(tmp_path, monkeypatch, ["T5", "T28"])
-        # The claim takes T28 and does not say a reset gives it back.
-        hot = self._claim_lines("HHHH", "Hot", "ht", 1)
-        assert m.logger.messages == [
-            *self._claim_lines("AAAA", "Alpha", "boxed", 4), *hot[:2],
-            ("warning", "AFC_BridgeBox chain1: T28 is the tool of Bambu lane "
-                        "lane28 (Bambu lanes lane12-lane28 are T12-T28). "
-                        "lane5 was mapped to it and is now T5."),
-            hot[2]]
-        assert m.printer.gcode.messages == []
-        self._quiet(m)
-        self._reset(m)
-        assert self._maps(m, "lane5", "lane28") == {"lane5": ["T5"],
-                                                    "lane28": ["T28"]}
-        assert m.printer.afc.tool_cmds == self._table(
-            T12="lane12", T13="lane13", T14="lane14", T15="lane15",
-            T28="lane28")
-        assert self._change_tool(m, "T28")
-        self._box_is_numbered_1_to_1(m)
-        self._consistent(m)
-        assert self._saved(m)["Hot"]["lane28"]["map"] == "T28"
-        assert m.logger.messages == [("info", "Tool mappings reset")]
-
-    def test_a_home_tool_first_in_the_map_stays_with_it(self, tmp_path,
-                                                        monkeypatch):
-        m = self._two_tools(tmp_path, monkeypatch, ["T28", "T5"])
-        hot = self._claim_lines("HHHH", "Hot", "ht", 1)
-        assert m.logger.messages == [
-            *self._claim_lines("AAAA", "Alpha", "boxed", 4), *hot[:2],
-            ("warning", "AFC_BridgeBox chain1: T28 is the tool of Bambu lane "
-                        "lane28 (Bambu lanes lane12-lane28 are T12-T28). "
-                        "lane5 was mapped to it and is now T5. Also set map: "
-                        "in [AFC_stepper lane5] outside T12-T28, or "
-                        "AFC_RESET_MAPPING puts lane5 back on T28 and lane28 "
-                        "on another T#."),
-            hot[2]]
-        assert m.printer.gcode.messages == []
-        self._quiet(m)
-        self._reset(m)
-        # lane5's map: holds T5 too, so AFC numbers past it: the HT, the
-        # seventeenth lane, is T16.
-        assert self._maps(m, "lane5", "lane28") == {"lane5": ["T28"],
-                                                    "lane28": ["T16"]}
-        assert m.printer.afc.tool_cmds == dict(
-            {f"T{n}": f"lane{n}" for n in (0, 1, 2, 3, 4, 6, 7, 8, 9, 10,
-                                           11, 12, 13, 14, 15)},
-            T16="lane28", T28="lane5")
-        self._consistent(m)
-        assert m.logger.messages == [
-            ("warning", "AFC_BridgeBox chain1: the mapping reset numbers "
-                        "lane28 as any other lane, not on its home T28: map: "
-                        "T28 in [AFC_stepper lane5] keeps T28 for lane5. Set "
-                        "that map: outside T12-T28 to have lane28 on T28."),
-            ("info", "T5 remain, removing these mappings"),
-            ("info", "Tool mappings reset")]
-
-    @pytest.mark.parametrize("force", [False, True])
-    def test_the_reset_leaves_the_lane_to_afc(self, tmp_path, monkeypatch,
-                                              force):
-        # A macro other than AFC's CHANGE_TOOL on the HT's home T#. A claim
-        # with a saved record leaves the T# to it, and AFC's reset registers
-        # a T# without renaming what holds it, so the reset leaves it to the
-        # macro too, whatever force_assign_map says.
-        A, B, H = self.A, self.B, self.H
-        m = self._printer(tmp_path, monkeypatch,
-                          var={"Hot": {"lane28": {"map": "T16",
-                                                  "current_map": "T16"}}},
-                          owners=f"{A}:Alpha, {B}:Bravo, {H}:Hot")
-        afc = m.printer.afc
-        afc.force_assign_map = force
-        handlers = m.printer.gcode.ready_gcode_handlers
-        m.printer.gcode.register_command("T28", _p1_user_macro)
-        self._quiet(m)
-        self._claimed(m, A, H)
-        ht = self._lane(m, "lane28")
-        assert ht.map == ["T16"]
-        assert handlers["T28"] is _p1_user_macro
-        # No warning: the saved record keeps the HT off T28. With force,
-        # AFC renames whatever holds each T# the claim registers first.
-        alpha = self._claim_lines("AAAA", "Alpha", "boxed", 4)
-        hot = self._claim_lines("HHHH", "Hot", "ht", 1,
-                                " Saved maps: lane28->T16.")
-        renames = {
-            cmd: [("debug", "<span class=warning--text>Existing command "
-                            f"{cmd} not found in gcode_macros</span>"),
-                  ("debug", f"PREP-renaming macro {cmd}")] if force else []
-            for cmd in ("T12", "T13", "T14", "T15", "T16")}
-        assert m.logger.messages == [
-            *alpha[:2], *renames["T12"], *renames["T13"], *renames["T14"],
-            *renames["T15"], alpha[2], *hot[:2], *renames["T16"], hot[2]]
-        assert m.printer.gcode.messages == []
-        self._quiet(m)
-        self._reset(m)
-        # AFC numbers it: the seventeenth lane, past the AMS's T12-T15.
-        assert (ht.map, ht.current_map, ht._map) == (["T16"], "T16", [])
-        assert handlers["T28"] is _p1_user_macro
-        assert afc.tool_cmds == self._table(T12="lane12", T13="lane13",
-                                            T14="lane14", T15="lane15",
-                                            T16="lane28")
-        assert self._maps(m, *self.HOMES) == self._homes()
-        self._box_is_numbered_1_to_1(m)
-        self._consistent(m)
-        assert self._saved(m)["Hot"]["lane28"]["map"] == "T16"
-        left = ("AFC_BridgeBox chain1: the mapping reset numbers lane28 as "
-                "any other lane, not on its home T28: T28 is a macro other "
-                "than AFC's CHANGE_TOOL, which AFC does not replace. Remove "
-                "or rename that macro to have lane28 on T28.")
-        assert m.logger.messages == [("warning", left),
-                                     ("info", "Tool mappings reset")]
-        # Said once a session; AFC.log after that.
-        self._quiet(m)
-        self._reset(m)
-        assert m.logger.messages == [("debug", left),
-                                     ("info", "Tool mappings reset")]
-
-    def test_a_lane_already_on_it_stays_and_the_macro_too(
-            self, tmp_path, monkeypatch):
-        # A claim with no record takes its home T# whatever holds it.
-        m = self._printer(tmp_path, monkeypatch)
-        handlers = m.printer.gcode.ready_gcode_handlers
-        m.printer.gcode.register_command("T28", _p1_user_macro)
-        self._claimed(m, self.A, self.H)
-        ht = self._lane(m, "lane28")
-        assert ht.map == ["T28"]
-        self._quiet(m)
-        self._reset(m)
-        # Left where the claim put it: numbering it elsewhere would have
-        # AFC's reset unregister T28, the user's macro, as a T# no lane has.
-        assert ht.map == ["T28"]
-        assert handlers["T28"] is _p1_user_macro
-        assert m.printer.afc.tool_cmds == self._table(
-            T12="lane12", T13="lane13", T14="lane14", T15="lane15",
-            T28="lane28")
-        self._consistent(m, macros=("T28",))
-        assert m.logger.messages == [("info", "Tool mappings reset")]
-
-    def test_afc_says_when_the_tool_it_numbers_the_lane_on_is_a_macro(
-            self, tmp_path, monkeypatch):
-        # lane5's config holds T28, and T11, where AFC's reset numbers the
-        # HT, is a macro (lane11 is on T40). The warning comes before AFC
-        # numbers the HT, and AFC's own error names the macro.
-        m = self._printer(tmp_path, monkeypatch,
-                          box={5: (["T28"], ["T28"]), 11: (["T40"], [])})
-        m.printer.gcode.register_command("T11", _p1_user_macro)
-        self._claimed(m, self.A, self.H)
-        self._quiet(m)
-        self._reset(m)
-        assert self._lane(m, "lane28").map == ["T11"]
-        assert m.printer.gcode.ready_gcode_handlers["T11"] is _p1_user_macro
-        self._consistent(m, macros=("T11",))
-        assert m.logger.messages == [
-            ("warning", "AFC_BridgeBox chain1: the mapping reset numbers "
-                        "lane28 as any other lane, not on its home T28: map: "
-                        "T28 in [AFC_stepper lane5] keeps T28 for lane5. Set "
-                        "that map: outside T12-T28 to have lane28 on T28."),
-            ("error", "Error trying to map lane lane28 to T11, please make "
-                      "sure there are no macros already setup for T11"),
-            ("info", "T29, T40 remain, removing these mappings"),
-            ("info", "Tool mappings reset")]
-
-
 class TestAfcBridgeBoxInit:
     """What a start builds from its options and its recorded state."""
 
@@ -2556,7 +1808,7 @@ class TestAfcBridgeBoxInit:
         :param need: the AMS bays pool_ams and the recorded AMS need
         :return str: the ready line for HHHH holding the AMS band at four bays
         """
-        return (f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on lane40 (T40) "
+        return (f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on lane40 "
                 f"keeps its lanes, so the AMS band stays 4 bays although pool_ams "
                 f"and the recorded AMS need only {need}. Set pool_ams: 4 to "
                 f"silence this. AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID={H} lets "
@@ -3104,41 +2356,29 @@ class TestAfcBridgeBoxInit:
         assert m._state_get(SEC, "lane_base") is None
         _bbx_quiet(m.printer)
 
-    def test_toolchanger_extruders_set_the_base(self, tmp_path):
+    @pytest.mark.parametrize("sections", [
+        ("AFC_extruder e0", "AFC_extruder e1", "AFC_extruder e2",
+         "AFC_extruder e3"),
+        ("AFC_extruder extruder",),
+    ], ids=["toolchanger", "one-extruder"])
+    def test_with_no_numbered_lane_the_base_is_one(self, tmp_path, sections):
         printer = make_printer()
-        self._declare(printer, "AFC_extruder e0", "AFC_extruder e1",
-                      "AFC_extruder e2", "AFC_extruder e3")
+        self._declare(printer, *sections)
         m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 4
+        assert (m.lane_base, m._resolved_base) == (1, 1)
+        assert _bbx_loaded(m)[1] == "AFC_lane lane1"
         _bbx_quiet(printer)
 
-    def test_a_mapped_tool_sets_the_base(self, tmp_path):
-        printer = make_printer()
-        printer.add_section("AFC_lane spool_a", {"map": "T6"})
-        printer.add_section("AFC_extruder extruder", {})
-        m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 7
-        _bbx_quiet(printer)
-
-    def test_a_single_unnumbered_extruder_keeps_the_fallback(self, tmp_path):
-        printer = make_printer()
-        self._declare(printer, "AFC_extruder extruder")
-        m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 24
-        assert m._resolved_base == 24
-        _bbx_quiet(printer)
-
-    def test_no_visible_config_falls_back_to_24(self, tmp_path):
+    def test_no_visible_config_starts_at_one(self, tmp_path):
         m = self._direct(tmp_path, self._BlindConfig, lane_base=0,
                          buffer="Bamb_1")
-        assert m.lane_base == 24
-        assert m._resolved_base == 24
+        assert (m.lane_base, m._resolved_base) == (1, 1)
         assert m._declared_lanes == set()
         assert m._later_lanes == {}
-        assert _bbx_loaded(m)[1] == "AFC_lane lane24"
+        assert _bbx_loaded(m)[1] == "AFC_lane lane1"
         _bbx_quiet(m.printer)
 
-    # the automatic lane base: the T#s AFC's PREP gives the other lanes
+    # the automatic lane base: T#s do not count
 
     @staticmethod
     def _turtle(printer: BambuPrinter, lanes: int = 4) -> BambuPrinter:
@@ -3169,57 +2409,33 @@ class TestAfcBridgeBoxInit:
             printer.add_section(f"AFC_lane ace_{n}", {"unit": f"Ace_1:{n}"})
         return printer
 
-    def test_auto_tools_past_the_last_lane_raise_the_base(self, tmp_path):
-        printer = self._ace(self._turtle(make_printer()), lanes=4)
-        m = _bbx_boot(tmp_path, printer, lane_base=0)
-        # ace_1..4 take T4..T7 at PREP, past lane3.
-        assert m.lane_base == 8
-        assert _bbx_loaded(m)[1] == "AFC_lane lane8"
-        _bbx_quiet(printer)
-
-    def test_a_gap_below_the_last_tool_is_left(self, tmp_path):
-        printer = self._turtle(make_printer())
-        printer.add_section("AFC_lane lane4",
-                            {"unit": "Turtle_1:5", "map": "T11"})
-        m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 12
-        assert _bbx_loaded(m)[1] == "AFC_lane lane12"
-        _bbx_quiet(printer)
-
-    def test_a_saved_map_counts_over_the_config_map(self, tmp_path):
+    @pytest.mark.parametrize("extra", ["auto-tools", "high-map", "saved-map",
+                                       "macro", "forced-macro"])
+    def test_no_t_number_moves_the_base(self, tmp_path, extra):
+        # A claimed lane takes the next unused T# whatever its lane number,
+        # so only lane names count.
         printer = self._turtle(make_printer(var_file=str(tmp_path / "AFC.var")))
-        write_unit_vars(printer, {"Turtle_1": {"lane3": {"map": "T9"}}})
+        if extra == "auto-tools":
+            self._ace(printer, lanes=4)                # T4-T7 at PREP
+        elif extra == "high-map":
+            printer.add_section("AFC_lane lane9", {"unit": "Turtle_1:5",
+                                                   "map": "T30"})
+        elif extra == "saved-map":
+            write_unit_vars(printer, {"Turtle_1": {"lane3": {"map": "T9"}}})
+        else:
+            printer.add_section("gcode_macro T4", {"gcode": "M117 T4"})
+            if extra == "forced-macro":
+                printer.add_section("AFC", {"force_assign_map": "True"})
         m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 10
+        assert m.lane_base == (10 if extra == "high-map" else 4)
         _bbx_quiet(printer)
 
-    def test_a_saved_none_holds_no_tool(self, tmp_path):
-        printer = self._turtle(make_printer(var_file=str(tmp_path / "AFC.var")),
-                               lanes=1)
-        printer.add_section("AFC_lane lane1", {"unit": "Turtle_1:2",
-                                               "map": "T7"})
-        write_unit_vars(printer, {"Turtle_1": {"lane1": {"map": "NONE"}}})
-        m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 2
-        _bbx_quiet(printer)
-
-    @pytest.mark.parametrize("force, base", [(None, 3), ("True", 2)])
-    def test_a_tool_macro_holds_its_tool_unless_maps_are_forced(
-            self, tmp_path, force, base):
-        printer = self._ace(self._turtle(make_printer(), lanes=1))
-        printer.add_section("gcode_macro T1", {"gcode": "M117 T1"})
-        if force:
-            printer.add_section("AFC", {"force_assign_map": force})
-        m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == base
-        _bbx_quiet(printer)
-
-    def test_an_unassigned_lane_holds_no_tool(self, tmp_path):
+    def test_an_unassigned_lane_counts_too(self, tmp_path):
         printer = self._turtle(make_printer(), lanes=1)
-        printer.add_section("AFC_lane spare", {"unit": "Turtle_1:2",
+        printer.add_section("AFC_lane lane1", {"unit": "Turtle_1:2",
                                                "unassigned": "True"})
         m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 1
+        assert m.lane_base == 2
         _bbx_quiet(printer)
 
     # the automatic lane base: a stored base other units have grown into
@@ -3231,42 +2447,38 @@ class TestAfcBridgeBoxInit:
         assert (m.lane_base, m._lane_map) == (4, {HT_UID: (4, 1)})
         m._state_set({"AFC_lane lane4": {"remember_spool": "False",
                                          "dist_hub": "800"}})
-        autov = tmp_path / "AFC_auto_vars.cfg"
-        autov.write_text(self.AUTOV_HEADER + "[AFC_lane lane4]\n"
-                                             "dist_hub : 900\n")
-        printer = self._ace(self._turtle(make_printer(var_file=var)))
-        printer.add_section("AFC_lane lane4", {"dist_hub": "900"})
+        printer = self._turtle(make_printer(var_file=var))
+        printer.add_section("AFC_lane lane4", {"unit": "Turtle_2:1"})
         write_unit_vars(printer, {
             "Bambu_AMS_HT_1": {"lane4": {"map": "T4", "spool_id": 7}},
             "Turtle_1": {"lane0": {"map": "T0", "runout_lane": "lane4"}},
             "system": {"current_load": "lane4",
                        "extruders": {"extruder": {"lane_loaded": "lane4"}}}})
-        # ace_1 takes T4 at PREP, the HT's T#.
+        # Turtle_2's lane4 is the HT's lane: the HT moves past it, its T#
+        # map as it was.
         m = _bbx_boot(tmp_path, printer, lane_base=0)
         assert (m.lane_base, m._lane_map) == (5, {HT_UID: (5, 1)})
         assert _bbx_loaded(m)[1] == "AFC_lane lane5"
         assert m._state_get(SEC, "lane_base") == "5"
         with open(var + ".unit") as fh:
             assert json.load(fh) == {
-                "Bambu_AMS_HT_1": {"lane5": {"map": "T5", "spool_id": 7}},
+                "Bambu_AMS_HT_1": {"lane5": {"map": "T4", "spool_id": 7}},
                 "Turtle_1": {"lane0": {"map": "T0", "runout_lane": "lane5"}},
                 "system": {"current_load": "lane5",
                            "extruders": {"extruder": {"lane_loaded": "lane5"}}}}
         assert m._read_state().has_section("AFC_lane lane4") is False
         assert dict(m._read_state().items("AFC_lane lane5")) == {
-            "remember_spool": "False", "dist_hub": "900"}
-        assert autov.read_text() == self.AUTOV_HEADER
-        assert isinstance(printer.lookup_object("AFC_lane lane4"),
-                          _SweptSection)
+            "remember_spool": "False", "dist_hub": "800"}
         assert m._learned_notes == [
-            (False, "Other units now hold lane numbers or T#s among this "
-                    "chain's lanes, so its lanes moved up past the highest of "
-                    "those (4): lane4 became lane5, with their saved lane "
-                    "records, T# maps and learned values.")]
+            (False, "Other units now hold lane numbers among this chain's "
+                    "lanes, so its lanes moved up past the highest of those "
+                    "(4): lane4 became lane5, with their saved lane records, "
+                    "T# maps and learned values.")]
         _bbx_quiet(printer)
         # The next start finds it past them and leaves it there.
-        m = _bbx_boot(tmp_path, self._ace(self._turtle(
-            make_printer(var_file=var))), lane_base=0)
+        printer = self._turtle(make_printer(var_file=var))
+        printer.add_section("AFC_lane lane4", {"unit": "Turtle_2:1"})
+        m = _bbx_boot(tmp_path, printer, lane_base=0)
         assert (m.lane_base, m._lane_map) == (5, {HT_UID: (5, 1)})
         assert m._learned_notes == []
         _bbx_quiet(m.printer)
@@ -3607,7 +2819,7 @@ class TestAfcBridgeBoxInit:
         assert m._layout_notes == [
             f"AFC_BridgeBox chain1: AMS {A} was recorded as Alpha, which no "
             f"ams_names entry or default name gives an AMS. It is now Red, "
-            f"and its lanes stay lane24-lane27 (T24-T27). Lane records saved "
+            f"and its lanes stay lane24-lane27. Lane records saved "
             f"under Alpha (spool, material, colour, T# map) do not carry over "
             f"to Red; a tagged spool is read again from its tag. Its learned "
             f"bowden lengths stay with the unit."]
@@ -3858,8 +3070,8 @@ class TestAfcBridgeBoxInit:
             f"{A}:24:4, {B}:28:4, {C}:32:4, {D}:36:4, {H}:40:1")
         assert _bbx_ready(m) == [
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
-                        f"keeps its name, and its lanes and T# changed: "
-                        f"lane44 (T44) -> lane40 (T40)."),
+                        f"keeps its name, and its lanes changed: "
+                        f"lane44 -> lane40."),
             ("warning", self.NO_BAY_E + "frees that bay and this AMS claims "
                                         "it live. Its record as Bambu_AMS_5 "
                                         "is dropped.")]
@@ -3885,16 +3097,16 @@ class TestAfcBridgeBoxInit:
         assert _bbx_ready(m) == [
             ("warning", f"AFC_BridgeBox chain1: AMS {E} was recorded as "
                         f"Bambu_AMS_5, past the 4 AMS bays a Bambu bus "
-                        f"addresses. It is now Bambu_AMS_4, and its lanes and "
-                        f"T# changed: lane40-lane43 (T40-T43) -> "
-                        f"lane36-lane39 (T36-T39). Lane records saved under "
+                        f"addresses. It is now Bambu_AMS_4, and its lanes "
+                        f"changed: lane40-lane43 -> "
+                        f"lane36-lane39. Lane records saved under "
                         f"Bambu_AMS_5 (spool, material, colour, T# map) do "
                         f"not carry over to Bambu_AMS_4; a tagged spool is "
                         f"read again from its tag. Its learned bowden "
                         f"lengths stay with the unit."),
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
-                        f"keeps its name, and its lanes and T# changed: "
-                        f"lane44 (T44) -> lane40 (T40).")]
+                        f"keeps its name, and its lanes changed: "
+                        f"lane44 -> lane40.")]
         m2 = _bbx_restart(tmp_path)
         assert self._layout(m2) == self.FOUR_LAYOUT
         assert m2._layout_notes == []
@@ -3914,24 +3126,24 @@ class TestAfcBridgeBoxInit:
         # from lane44 to lane40, and the band note says so.
         assert _bbx_ready(m) == [
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on "
-                        f"lane44 (T44) holds the AMS band at 4 bays although "
+                        f"lane44 holds the AMS band at 4 bays although "
                         f"pool_ams and the recorded AMS need only 1. "
-                        f"Bambu_AMS_HT_1 moves to lane40 (T40), past those 4 "
+                        f"Bambu_AMS_HT_1 moves to lane40, past those 4 "
                         f"bays. Set pool_ams: 4 to silence this. "
                         f"AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID={H} lets the "
                         f"band shrink to 1 at the next RESTART, and erases "
                         f"what it learned."),
             ("warning", f"AFC_BridgeBox chain1: AMS {A} was recorded as N5, "
                         f"past the 4 AMS bays a Bambu bus addresses. It is "
-                        f"now N1, and its lanes and T# changed: lane40-lane43 "
-                        f"(T40-T43) -> lane24-lane27 (T24-T27). Lane records "
+                        f"now N1, and its lanes changed: lane40-lane43"
+                        f" -> lane24-lane27. Lane records "
                         f"saved under N5 (spool, material, colour, T# map) do "
                         f"not carry over to N1; a tagged spool is read again "
                         f"from its tag. Its learned bowden lengths stay with "
                         f"the unit."),
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
-                        f"keeps its name, and its lanes and T# changed: "
-                        f"lane44 (T44) -> lane40 (T40).")]
+                        f"keeps its name, and its lanes changed: "
+                        f"lane44 -> lane40.")]
 
     def test_a_held_ht_recorded_short_of_the_band_is_named_as_moving(
             self, tmp_path):
@@ -3947,17 +3159,17 @@ class TestAfcBridgeBoxInit:
                                              (41, 1, "Bambu_AMS_HT_2"))
         assert _bbx_ready(m) == [
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on "
-                        f"lane40 (T40), HT {G} (Bambu_AMS_HT_2) on lane37 "
-                        f"(T37) hold the AMS band at 4 bays although pool_ams "
+                        f"lane40, HT {G} (Bambu_AMS_HT_2) on lane37"
+                        f" hold the AMS band at 4 bays although pool_ams "
                         f"and the recorded AMS need only 1. Bambu_AMS_HT_2 "
-                        f"moves to lane41 (T41), past those 4 bays. Set "
+                        f"moves to lane41, past those 4 bays. Set "
                         f"pool_ams: 4 to silence this. AFC_BRIDGEBOX_FORGET "
                         f"CHAIN=chain1 UID=<uid> for each lets the band "
                         f"shrink to 1 at the next RESTART, and erases what "
                         f"they learned."),
             ("warning", f"AFC_BridgeBox chain1: HT {G} (Bambu_AMS_HT_2) "
-                        f"keeps its name, and its lanes and T# changed: "
-                        f"lane37 (T37) -> lane41 (T41).")]
+                        f"keeps its name, and its lanes changed: "
+                        f"lane37 -> lane41.")]
 
     def test_an_ams_that_redraws_keeps_its_lanes_when_their_rank_is_free(
             self, tmp_path):
@@ -3972,7 +3184,7 @@ class TestAfcBridgeBoxInit:
             ("warning", f"AFC_BridgeBox chain1: AMS {A} was recorded as "
                         f"Alpha, which no ams_names entry or default name "
                         f"gives an AMS. It is now Bambu_AMS_3, and its lanes "
-                        f"stay lane32-lane35 (T32-T35). Lane records saved "
+                        f"stay lane32-lane35. Lane records saved "
                         f"under Alpha (spool, material, colour, T# map) do "
                         f"not carry over to Bambu_AMS_3; a tagged spool is "
                         f"read again from its tag. Its learned bowden "
@@ -3992,7 +3204,7 @@ class TestAfcBridgeBoxInit:
             ("warning", f"AFC_BridgeBox chain1: AMS {A} was recorded as "
                         f"Alpha, which no ams_names entry or default name "
                         f"gives an AMS. It is now Bambu_AMS_1, and its lanes "
-                        f"stay lane24-lane27 (T24-T27). Lane records saved "
+                        f"stay lane24-lane27. Lane records saved "
                         f"under Alpha (spool, material, colour, T# map) do "
                         f"not carry over to Bambu_AMS_1; a tagged spool is "
                         f"read again from its tag. Its learned bowden "
@@ -4085,8 +3297,8 @@ class TestAfcBridgeBoxInit:
         assert m2._lane_map[H] == (40, 1)
         assert m2._state_get(SEC, "ams_band") == "2"
         moved = [("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
-                             f"keeps its name, and its lanes and T# changed: "
-                             f"lane40 (T40) -> lane32 (T32).")]
+                             f"keeps its name, and its lanes changed: "
+                             f"lane40 -> lane32.")]
         for notes in (moved, []):
             m = _bbx_restart(tmp_path, pool_ams=2)
             assert self._layout(m)[32] == "Bambu_AMS_HT_1"
@@ -4118,13 +3330,13 @@ class TestAfcBridgeBoxInit:
         assert m._lane_map[H] == (32, 1)
         assert _bbx_ready(m) == [
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on "
-                        f"lane40 (T40) cannot keep its lanes: [AFC_lane "
+                        f"lane40 cannot keep its lanes: [AFC_lane "
                         f"lane40] already exists outside this chain. The AMS "
                         f"band is 2 bays, what pool_ams and the recorded AMS "
                         f"need, and the HT lanes follow it."),
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
-                        f"keeps its name, and its lanes and T# changed: "
-                        f"lane40 (T40) -> lane32 (T32).")]
+                        f"keeps its name, and its lanes changed: "
+                        f"lane40 -> lane32.")]
         m = _bbx_restart(tmp_path, pool_ams=2, printer=_around())
         assert self._layout(m)[32] == "Bambu_AMS_HT_1"
         assert _bbx_ready(m) == []
@@ -4177,7 +3389,7 @@ class TestAfcBridgeBoxInit:
         assert _bbx_ready(m) == [("warning", self._renamed(
             A, "Alpha", "Red", "which no ams_names entry or default name "
                                "gives an AMS",
-            "its lanes stay lane24-lane27 (T24-T27)"))]
+            "its lanes stay lane24-lane27"))]
 
     def test_a_renamed_second_entry_leaves_the_first_unit_alone(
             self, tmp_path):
@@ -4192,7 +3404,7 @@ class TestAfcBridgeBoxInit:
         assert _bbx_ready(m) == [("warning", self._renamed(
             B, "Bravo", "Charlie", "which no ams_names entry or default name "
                                    "gives an AMS",
-            "its lanes stay lane28-lane31 (T28-T31)"))]
+            "its lanes stay lane28-lane31"))]
 
     def test_adding_ams_names_renames_the_units_wearing_defaults(
             self, tmp_path):
@@ -4205,11 +3417,11 @@ class TestAfcBridgeBoxInit:
                "(ams_names replaces the first 2 default names)")
         assert _bbx_ready(m) == [
             ("warning", self._renamed(A, "Bambu_AMS_1", "Red", why,
-                                      "its lanes stay lane24-lane27 "
-                                      "(T24-T27)")),
+                                      "its lanes stay lane24-lane27"
+                                      "")),
             ("warning", self._renamed(B, "Bambu_AMS_2", "Blue", why,
-                                      "its lanes stay lane28-lane31 "
-                                      "(T28-T31)"))]
+                                      "its lanes stay lane28-lane31"
+                                      ""))]
 
     def test_a_renamed_ht_redraws_too(self, tmp_path):
         _bbx_record(tmp_path, f"boxed:{A}, ht:{H}")
@@ -4221,7 +3433,7 @@ class TestAfcBridgeBoxInit:
         assert _bbx_ready(m) == [("warning", self._renamed(
             H, "Hot", "Red", "which no ht_names entry or default name gives "
                              "an HT",
-            "its lanes stay lane28 (T28)", fam="HT"))]
+            "its lanes stay lane28", fam="HT"))]
 
     # pool_ams above the four AMS a Bambu bus addresses
 
@@ -4261,8 +3473,8 @@ class TestAfcBridgeBoxInit:
         assert _bbx_ready(m) == [
             ("warning", self.POOL6_NOTE),
             ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
-                        f"keeps its name, and its lanes and T# changed: "
-                        f"lane48 (T48) -> lane40 (T40).")]
+                        f"keeps its name, and its lanes changed: "
+                        f"lane48 -> lane40.")]
 
     # no pool, a lower AMS pruned from the roster
 
@@ -4316,9 +3528,9 @@ class TestAfcBridgeBoxInit:
 
     @pytest.mark.parametrize("roster, name, second, fam, lanes", [
         (f"boxed:{A}, boxed:{B}", "Bambu_AMS_1", "Bambu_AMS_2", "AMS",
-         "lane28-lane31 (T28-T31)"),
+         "lane28-lane31"),
         (f"ht:{G}, ht:{H}", "Bambu_AMS_HT_1", "Bambu_AMS_HT_2", "HT",
-         "lane41 (T41)"),
+         "lane41"),
     ])
     def test_of_two_uids_on_one_name_the_first_keeps_it(
             self, tmp_path, roster, name, second, fam, lanes):
@@ -4331,7 +3543,7 @@ class TestAfcBridgeBoxInit:
         assert (uids[name], uids[second]) == (first, other)
         assert _bbx_ready(m) == [("warning", self._renamed(
             other, name, second, f"which {first} also holds",
-            f"its lanes and T# are now {lanes}", fam=fam))]
+            f"its lanes are now {lanes}", fam=fam))]
 
     # name lists that give one name to two bays
 
@@ -4511,12 +3723,12 @@ class TestAfcBridgeBoxInit:
             ("warning", self._renamed(
                 A, "Hot", "Bambu_AMS_1",
                 "whose ams_names entry 1 gives way to ht_names entry 1",
-                "its lanes stay lane24-lane27 (T24-T27)")),
+                "its lanes stay lane24-lane27")),
             ("warning", self._renamed(
                 H, "Bambu_AMS_HT_1", "Hot",
                 "which no ht_names entry or default name gives an HT "
                 "(ht_names replaces the first 1 default names)",
-                "its lanes stay lane40 (T40)", fam="HT"))]
+                "its lanes stay lane40", fam="HT"))]
 
     # the console line when an AMS finds no free bay
 
@@ -4672,7 +3884,7 @@ class TestAfcBridgeBoxInit:
                      f"boxed:{C} -- recorded. A restart adds its temperature "
                      f"card."),
             ("info", f"AFC_BridgeBox chain1: saved {C} on Bambu_AMS_2 "
-                     f"(lane28-lane31, T28-T31); it comes back there after a "
+                     f"(lane28-lane31); it comes back there after a "
                      f"restart.")]
         assert m.printer.gcode.messages == self.CCCC_PROMPT + [
             ("respond_raw", "// action:prompt_end")]
@@ -4901,14 +4113,14 @@ class TestAfcBridgeBoxInit:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(assign)
         assert assign.messages == [
             ("respond_info", f"AFC_BridgeBox chain1: assigned {C} to bay "
-                             f"'Bravo' (lane28-lane31, T28-T31) -- claimed "
+                             f"'Bravo' (lane28-lane31) -- claimed "
                              f"LIVE, no restart.")]
         assert m.persist_learned("Bravo", "afc_bowden_length", 3632.0) is True
         force = FakeGcmd({"UID": C, "NAME": "Charlie", "FORCE": 1})
         m.cmd_AFC_BRIDGEBOX_ASSIGN(force)
         assert force.messages == [
             ("respond_info", f"AFC_BridgeBox chain1: assigned {C} to bay "
-                             f"'Charlie' (lane32-lane35, T32-T35) -- claimed "
+                             f"'Charlie' (lane32-lane35) -- claimed "
                              f"LIVE, no restart.")]
         # Alpha waits for the offline A; Bravo was handed nothing (C had
         # learned nothing yet); Charlie gets the length C learned on Bravo.
@@ -4965,7 +4177,7 @@ class TestAfcBridgeBoxInit:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(assign)
         assert assign.messages == [
             ("respond_info", f"AFC_BridgeBox chain1: assigned {C} to bay "
-                             f"'Bravo' (lane28-lane31, T28-T31) -- claimed "
+                             f"'Bravo' (lane28-lane31) -- claimed "
                              f"LIVE, no restart.")]
         assert m.printer.afc.logger.messages == [
             ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto Bravo "
@@ -5151,14 +4363,14 @@ class TestAfcBridgeBoxInit:
     def test_named_lane_machine_second_chain_continues_the_sequence(
             self, tmp_path):
         # A toolchanger with tools e0..e3 and no laneN anywhere: chain 1
-        # continues at T4 (lanes 4-9), chain 2 past it at 10.
+        # starts at lane1 (lanes 1-6), chain 2 past it at 7.
         printer = make_printer()
         for i in range(4):
             printer.add_section(f"AFC_extruder e{i}", {})
         m1 = _bbx_chain(tmp_path, printer, "chain1")
         m2 = _bbx_chain(tmp_path, printer, "chain2",
                         unit_prefix="Bambu_AMS_B")
-        assert (m1.lane_base, m2.lane_base) == (4, 10)
+        assert (m1.lane_base, m2.lane_base) == (1, 7)
         _bbx_quiet(printer)
 
     def test_a_first_chain_with_an_explicit_base_is_stepped_over(
@@ -5455,17 +4667,17 @@ class TestAfcBridgeBoxInit:
         assert m2._state_get("AFC_BridgeBox chain2", "lane_base") == "15"
         assert logs == [
             ("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) keeps "
-                        f"its name, and its lanes and T# changed: lane9 (T9) "
-                        f"-> lane13 (T13)."),
+                        f"its name, and its lanes changed: lane9 "
+                        f"-> lane13."),
             ("info", "AFC_BridgeBox chain2: Other units now hold lane numbers "
-                     "or T#s among this chain's lanes, so its lanes moved up "
-                     "past the highest of those (14): lane11-lane16 became "
+                     "among this chain's lanes, so its lanes moved up past "
+                     "the highest of those (14): lane11-lane16 became "
                      "lane15-lane20, with their saved lane records, T# maps "
                      "and learned values.")]
         # Back to pool_ams 1: the recorded HT keeps lane13, and chain2, now
         # past it, stays.
         kept = [("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) on "
-                            f"lane13 (T13) keeps its lanes, so the AMS band "
+                            f"lane13 keeps its lanes, so the AMS band "
                             f"stays 2 bays although pool_ams and the recorded "
                             f"AMS need only 1. Set pool_ams: 2 to silence "
                             f"this. AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID={A} "
@@ -5579,12 +4791,12 @@ class TestAfcBridgeBoxInit:
         return m1, m2, notes
 
     HT_MOVED = [
-        f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on lane40 (T40) "
+        f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on lane40 "
         f"cannot keep its lanes: [AFC_BridgeBox chain2] further down the "
         f"config builds lane40. The AMS band is 1 bays, what pool_ams and "
         f"the recorded AMS need, and the HT lanes follow it.",
         f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) keeps its name, and "
-        f"its lanes and T# changed: lane40 (T40) -> lane28 (T28)."]
+        f"its lanes changed: lane40 -> lane28."]
 
     def test_an_explicit_lane_base_over_the_ht_lane_moves_it(self, tmp_path):
         m1, m2, notes = self._held_pair(tmp_path, lane_base=36)
@@ -7071,7 +6283,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._learned_for(C) == {"afc_bowden_length": "3632.0"}
         assert assign.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Bambu_AMS_2' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert unassign.messages == [("respond_info", (
             "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bambu_AMS_2' "
@@ -7312,7 +6524,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert m._state_get(SEC, "roster") == "boxed:AAAA, boxed:CCCC"
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -7324,7 +6536,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -7351,7 +6563,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert unit.ams_model == "ams2"
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned AAAA to bay 'Bravo' "
-            "(lane28-lane31, T28-T31) -- claimed LIVE, no restart."))]
+            "(lane28-lane31) -- claimed LIVE, no restart."))]
         assert _p3_log(m) == [
             ("debug", "AFC bambu Bravo: chain index not resolved yet (UID "
                       "AAAA); holding this unit's registrations until the "
@@ -7411,7 +6623,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert m._state_get(SEC, "name_map") == "AAAA:Alpha, CCCC:Charlie"
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Charlie' "
-            "(lane32-lane35, T32-T35) -- pinned; it claims this bay when next "
+            "(lane32-lane35) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -7445,7 +6657,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert _p3_console(m) == [END]
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
         bay = _p3_bay(m, "Bravo")
@@ -7481,7 +6693,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert m._state_get(SEC, "name_map") == "AAAA:Bambu_AMS_2"
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned AAAA to bay 'Bambu_AMS_2' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -7501,7 +6713,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert m2._name_map == {A: "Bambu_AMS_1", D: "Bambu_AMS_2"}
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned DDDD to bay 'Bambu_AMS_2' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m2) == []
         assert _p3_console(m2) == [END]
@@ -7527,7 +6739,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
                 _p3_bay(m, "Charlie")["bound"]) == (C, None)
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Charlie' "
-            "(lane32-lane35, T32-T35) -- pinned; it claims this bay once PREP "
+            "(lane32-lane35) -- pinned; it claims this bay once PREP "
             "finishes."))]
         assert _p3_log(m) == [
             ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
@@ -7542,7 +6754,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert _p3_bay(m, "Charlie")["bound"] is None
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Charlie' "
-            "(lane32-lane35, T32-T35) -- pinned; PREP has not finished, run "
+            "(lane32-lane35) -- pinned; PREP has not finished, run "
             "this again once it has."))]
         assert _p3_log(m) == [
             ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
@@ -7552,26 +6764,24 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m = _p3_named(tmp_path, monkeypatch, online=(C,),
                       print_state="printing")
         afc = m.printer.afc
-        lane5 = _P3OtherLane("lane5", ["T28"])
+        lane5 = _P3OtherLane("lane5", ["T0"])
         afc.lanes["lane5"] = lane5
-        afc.tool_cmds["T28"] = "lane5"
+        afc.tool_cmds["T0"] = "lane5"
         _p3_quiet(m)
         cmd = _p3_cmd(UID=C, NAME="Bravo")
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert _p3_bay(m, "Bravo")["bound"] == C
-        assert (afc.tool_cmds["T28"], lane5.map) == ("lane5", ["T28"])
+        assert (afc.tool_cmds["T0"], lane5.map) == ("lane5", ["T0"])
+        assert _p3_lane(m, "lane28").map == ["T1"]
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
-            "(lane28-lane31, T28-T31) -- claimed LIVE, no restart."))]
+            "(lane28-lane31) -- claimed LIVE, no restart."))]
         assert _p3_log(m) == [
             ("debug", "AFC bambu Bravo: chain index not resolved yet (UID "
                       "CCCC); holding this unit's registrations until the "
                       "chain map arrives"),
             ("info", "AFC bambu Bravo: claimed UID CCCC as boxed and brought "
                      "online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: lane28 takes T28 from lane5 once "
-                     "the print ends, as the print may be using it; until "
-                     "then lane28 has no T#."),
             ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto Bravo "
                      "(4 lanes) -- live, no restart.")]
         assert _p3_console(m) == [END]
@@ -7626,7 +6836,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert _p3_bay(m, "Bambu_AMS_3")["uid"] == D
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned DDDD to bay 'Bambu_AMS_3' "
-            "(lane32-lane35, T32-T35) -- cleared lane29 from the toolhead -- "
+            "(lane32-lane35) -- cleared lane29 from the toolhead -- "
             "pinned; it claims this bay when next online."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -7641,7 +6851,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert cmd.messages == [(
             "respond_info",
             "AFC_BridgeBox chain1: assigned GGGG to bay 'Bambu_AMS_4' "
-            "(lane36-lane39, T36-T39) -- pinned; with no pool nothing claims "
+            "(lane36-lane39) -- pinned; with no pool nothing claims "
             "it, so run this again once GGGG is online and PREP has "
             "finished, and after every restart.")]
         assert _p3_log(m) == []
@@ -7693,7 +6903,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert (bay["bound"], bay["uid"]) == (None, C)
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Bambu_AMS_3' "
-            "(lane32-lane35, T32-T35) -- claimed LIVE, no restart."))]
+            "(lane32-lane35) -- claimed LIVE, no restart."))]
         assert _p3_log(m) == [
             ("debug", "AFC bambu Bambu_AMS_3: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
@@ -7810,7 +7020,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert _p3_bay(m, "Bravo")["uid"] == A
         assert cmd.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned AAAA to bay 'Bravo' "
-            "(lane28-lane31, T28-T31) -- pinned; it claims this bay when next "
+            "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == [
             ("debug", "Activating extruder lane: None"),
@@ -7843,12 +7053,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert (_p3_bay(m, "Bravo")["bound"], unit.claims) == (
             C, [(C, "boxed")])
         assert [(lane.unassigned, lane.map) for lane in lanes] == [
-            (False, ["T29"]), (False, ["T30"]), (False, ["T31"])]
-        assert afc.tool_cmds == {"T29": "lane29", "T30": "lane30",
-                                 "T31": "lane31"}
+            (False, ["T0"]), (False, ["T1"]), (False, ["T2"])]
+        assert afc.tool_cmds == {"T0": "lane29", "T1": "lane30",
+                                 "T2": "lane31"}
         assert cmd.messages == [
             ("respond_info", "AFC_BridgeBox chain1: assigned CCCC to bay "
-                             "'Bravo' (lane28-lane31, T28-T31) -- claimed "
+                             "'Bravo' (lane28-lane31) -- claimed "
                              "LIVE, no restart.")]
         assert _p3_log(m) == [
             ("warning", "AFC_BridgeBox chain1: TcmdAssign lane29 failed: "
@@ -8002,7 +7212,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
             "has been online 15s."))]
         assert assign.messages == [("respond_info", (
             "AFC_BridgeBox chain1: assigned CCCC to bay 'Alpha' "
-            "(lane24-lane27, T24-T27) -- pinned; it claims this bay when "
+            "(lane24-lane27) -- pinned; it claims this bay when "
             "next online."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END, END]
@@ -8013,7 +7223,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert again._claim_pool_unit(C, "boxed") is not None
         lane = _p3_lane(again, "lane24")
         assert (lane.spool_id, lane.material, lane.weight) == (None, None, 0.0)
-        assert lane.map == ["T24"]
+        assert lane.map == ["T0"]
 
     def test_unassign_refuses_and_force_clears_the_record(self, tmp_path,
                                                           monkeypatch):
@@ -8080,7 +7290,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
             ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_2 (4 lanes) -- live, no restart."),
             ("info", "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 "
-                     "(lane28-lane31, T28-T31); it comes back there after "
+                     "(lane28-lane31); it comes back there after "
                      "a restart.")]
 
     def test_with_a_pool_it_floats_for_the_session(self, tmp_path,
@@ -8619,7 +7829,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                               "next same-family unit claims it with no "
                               "reboot.")
     ASSIGNED = ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                                "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                                "'Bambu_AMS_4' (lane36-lane39) -- "
                                 "claimed LIVE, no restart.")
     PICKER = ("respond_info",
               "AFC_BridgeBox chain1: opened the replace picker for EEEE.")
@@ -8678,7 +7888,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == [
             ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
@@ -8709,7 +7919,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
         assert _p3_console(m) == [END, END]
@@ -8728,7 +7938,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
         assert _p3_console(m) == [END, END]
@@ -8757,7 +7967,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "pinned; it claims this bay when next online.")]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END, END]
@@ -8787,7 +7997,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "pool LIVE; the next same-family unit claims "
                              "it with no reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == [(
             "info", "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID GGGG, "
@@ -8803,10 +8013,10 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert _p3_console(m) == _p3_popup(
             "No free bay for new AMS",
             ["UID EEEE has no free bay: every AMS bay is taken.",
-             "Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned "
+             "Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned "
              "values and saved lane records, spools included, are erased).",
-             "Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 15s",
+             "Bambu_AMS_4: DDDD, lane36-lane39, offline 15s",
              "Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE CHAIN=chain1 "
              "UID=EEEE opens this again."],
             ["Replace Bambu_AMS_4|AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE "
@@ -8852,7 +8062,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
         assert _p3_console(m) == [END, END]
@@ -8965,7 +8175,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
         assert _p3_console(m) == [END, END]
@@ -9040,7 +8250,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "pinned; it claims this bay once PREP "
                              "finishes.")]
         assert _p3_log(m) == []
@@ -9174,7 +8384,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "next same-family unit claims it with no "
                              "reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
-                             "'Bambu_AMS_4' (lane36-lane39, T36-T39) -- "
+                             "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_bay(m, "Bambu_AMS_4")["bound"] == E
         assert _p3_log(m) == self.CLAIM_E
@@ -9220,10 +8430,10 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert _p3_console(m) == _p3_popup(
             "No free bay for new AMS",
             ["UID EEEE has no free bay: every AMS bay is taken.",
-             "Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned "
+             "Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned "
              "values and saved lane records, spools included, are erased).",
-             "Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 11s",
+             "Bambu_AMS_4: DDDD, lane36-lane39, offline 11s",
              "Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE CHAIN=chain1 "
              "UID=EEEE opens this again."],
             ["Replace Bambu_AMS_4|AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE "
@@ -9241,10 +8451,10 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert _p3_console(m) == _p3_popup(
             "No free bay for new AMS",
             ["UID EEEE has no free bay: every AMS bay is taken.",
-             "Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned "
+             "Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned "
              "values and saved lane records, spools included, are erased).",
-             "Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 11s -- AFC "
+             "Bambu_AMS_4: DDDD, lane36-lane39, offline 11s -- AFC "
              "records lane36 as loaded to the toolhead: plug DDDD back in and "
              "unload it, or take the filament out by hand and "
              "AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE OLD=DDDD FORCE=1 "
@@ -9266,10 +8476,10 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert _p3_console(m) == _p3_popup(
             "No free bay for new AMS",
             ["UID EEEE has no free bay: every AMS bay is taken.",
-             "Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned "
+             "Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned "
              "values and saved lane records, spools included, are erased).",
-             "Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 11s -- AFC "
+             "Bambu_AMS_4: DDDD, lane36-lane39, offline 11s -- AFC "
              "records lane37 as loaded to the toolhead: unload it "
              "(UNSET_LANE_LOADED if the filament is already out), or "
              "AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE OLD=DDDD FORCE=1 "
@@ -9296,7 +8506,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         first = make_bridgebox(tmp_path, printer=make_printer(),
                                roster=f"ht:{A}", lane_base=0, pool_ams=1,
                                pool_ht=2)
-        assert first._state_get(SEC, "lane_base") == "24"
+        assert first._state_get(SEC, "lane_base") == "1"
         first._state_set({SEC: {"roster": f"ht:{A}"},
                           "AFC_BridgeBox chain2": {"roster": f"ht:{B}"}})
         printer = make_printer(monkeypatch=monkeypatch, fabricate=True)
@@ -9305,7 +8515,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         m2 = make_bridgebox(tmp_path, "chain2", printer=printer,
                             unit_prefix="Bambu_AMS_B", **chain)
         printer.connect()
-        assert (m1.lane_base, m2._family_of_uid(B)) == (24, "ht")
+        assert (m1.lane_base, m2._family_of_uid(B)) == (1, "ht")
         refusal = _p3_refused(m1, tmp_path, "REPLACE",
                               _p3_cmd(UID=B, OLD=A))
         assert refusal == "AFC_BRIDGEBOX_REPLACE: BBBB is not on chain chain1"
@@ -9316,8 +8526,8 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             self, tmp_path, monkeypatch, saved):
         # H's bay Hot (lane32) held its spool 136 on T45, and H had learned
         # its bowden length. J, an HT with no bay, replaces H: it gets the
-        # home T32, AFC's defaults for its untagged spool and no learned
-        # value.
+        # next unused T#, AFC's defaults for its untagged spool and no
+        # learned value.
         J = "JJJJ"
         rec = _p3_rec("T45", spool_id=136, material="PLA", color="#0086D6",
                       weight=750.0)
@@ -9333,8 +8543,8 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         lane = _p3_lane(m, "lane32")
         if not boot:
             assert m._claim_pool_unit(H, "ht") is not None
-            afc.tool_cmds.pop("T32")
-            gcode.register_command("T32", None)
+            afc.tool_cmds.pop(lane.map[0])
+            gcode.register_command(lane.map[0], None)
             lane.map, lane.current_map = ["T45"], "T45"
             afc.tool_cmds["T45"] = "lane32"
             gcode.register_command("T45", afc.CHANGE_TOOL)
@@ -9359,8 +8569,8 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             3000.0, 3000.0)
         assert _p3_console(m) == [END, END]
         assert m._bay_of_uid(J)["bound"] == J
-        assert (lane.map, lane.current_map) == (["T32"], "T32")
-        assert afc.tool_cmds == {"T32": "lane32"}
+        assert (lane.map, lane.current_map) == (["T0"], "T0")
+        assert afc.tool_cmds == {"T0": "lane32"}
         assert (lane.spool_id, lane.material, lane.color, lane.weight) == (
             None, None, "", 0.0)
         assert m._learned_for(H) == {} and m._learned_for(J) == {}
@@ -9374,7 +8584,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                              "freed to the pool LIVE; the next same-family "
                              "unit claims it with no reboot."),
             ("respond_info", "AFC_BridgeBox chain1: assigned JJJJ to bay "
-                             "'Hot' (lane32, T32) -- claimed LIVE, no "
+                             "'Hot' (lane32) -- claimed LIVE, no "
                              "restart.")]
         assert _p3_log(m) == [
             ("debug", "AFC bambu Hot: chain index not resolved yet (UID "
@@ -9403,7 +8613,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                "   Hot\n")
         assert _p3_log(m) == [
             ("info", "BambuAMS Hot Prepping lanes"),
-            ("info", "lane32 tool cmd: T32 <span class=success--text>LOCKED "
+            ("info", "lane32 tool cmd: T0 <span class=success--text>LOCKED "
                      "AND LOADED</span>"),
             ("raw", box),
             ("info", "AFC bambu Hot: no tag on record for slot 0; applied "
@@ -9450,10 +8660,10 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert _p3_console(m) == _p3_popup(
             "No free bay for new AMS",
             ["UID EEEE has no free bay: every AMS bay is taken.",
-             "Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned "
+             "Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned "
              "values and saved lane records, spools included, are erased).",
-             "Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 11s -- AFC "
+             "Bambu_AMS_4: DDDD, lane36-lane39, offline 11s -- AFC "
              "records lane36 as loaded to the toolhead, and a print is "
              "active: replace it once the print ends",
              "Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE CHAIN=chain1 "
@@ -10311,7 +9521,7 @@ class TestAfcBridgeBoxScoutReady:
             ("warning", "AFC_BridgeBox chain1: AMS BBBB was recorded as "
                         "Charlie, which no ams_names entry or default name "
                         "gives an AMS. It is now Bravo, and its lanes stay "
-                        "lane28-lane31 (T28-T31). Lane records saved under "
+                        "lane28-lane31. Lane records saved under "
                         "Charlie (spool, material, colour, T# map) do not "
                         "carry over to Bravo; a tagged spool is read again "
                         "from its tag. Its learned bowden lengths stay with "
@@ -10403,14 +9613,14 @@ class TestAfcBridgeBoxCaptureBootRecords:
     #: What klippy:ready logs for the HT that :meth:`_moved` moves.
     MOVED_LOG = [
         ("warning", "AFC_BridgeBox chain1: HT HHHH (Bambu_AMS_HT_1) on "
-                    "lane40 (T40) cannot keep its lanes: "
+                    "lane40 cannot keep its lanes: "
                     "[AFC_BridgeBox chain2] further down the config "
                     "builds lane40. The AMS band is 1 bays, what "
                     "pool_ams and the recorded AMS need, and the HT "
                     "lanes follow it."),
         ("warning", "AFC_BridgeBox chain1: HT HHHH (Bambu_AMS_HT_1) "
-                    "keeps its name, and its lanes and T# changed: "
-                    "lane40 (T40) -> lane28 (T28)."),
+                    "keeps its name, and its lanes changed: "
+                    "lane40 -> lane28."),
         ("debug", "AFC_BridgeBox chain1: holding the saved lane "
                   "records of Bambu_AMS_HT_1 for their units")]
 
@@ -10501,10 +9711,11 @@ class TestAfcBridgeBoxCaptureBootRecords:
         rec = dict(_p3_rec("T40", spool_id=55, material="PLA",
                            weight=300.0), name="lane40", tool_loaded=True)
         m = self._moved(tmp_path, monkeypatch, rec)
-        # Its old home T# is not its T# now; the rest of the record is.
+        # The record, its T# map with it, is the new lane's.
         assert m._held["Bambu_AMS_HT_1"] == {"uid": H, "lanes": {"lane28": {
-            "name": "lane28", "spool_id": 55, "material": "PLA",
-            "weight": 300.0, "tool_loaded": False}}}
+            "map": "T40", "current_map": "T40", "name": "lane28",
+            "spool_id": 55, "material": "PLA", "weight": 300.0,
+            "tool_loaded": False}}}
         assert _p3_log(m) == self.MOVED_LOG
 
     def test_a_map_set_by_hand_moves_with_it(self, tmp_path, monkeypatch):
@@ -10535,108 +9746,8 @@ class TestAfcBridgeBoxMovedBayRecords:
         assert afcBridgeBox._moved_bay_records(self.BAY, saved) == {
             "lane24": {"map": "T5", "current_map": "T5",
                        "tool_loaded": False},
-            "lane27": {"tool_loaded": False}}
-
-
-class TestAfcBridgeBoxHandleResetMapping:
-    """
-    AFC_RESET_MAPPING keeps this chain's claimed lanes on their home T#,
-    through the master's afc:reset_mapping handler.
-    """
-
-    class _Box:
-        """A non-Bambu unit."""
-
-        def __init__(self, lanes: Iterable[Any]) -> None:
-            """:param lanes: its lanes"""
-            self.name = "Box"
-            self.lanes = {lane.name: lane for lane in lanes}
-
-    @classmethod
-    def _printer(cls, tmp_path: pathlib.Path,
-                 monkeypatch: pytest.MonkeyPatch) -> afcBridgeBox:
-        """
-        :return afcBridgeBox: AAAA, BBBB and HHHH rostered and online on four
-            AMS bays from lane12 and an HT bay on lane28, with AFC's real
-            AFC_spool, no Moonraker, and a non-Bambu unit first, its lane0
-            on T0
-        """
-        m = _p3_chain(tmp_path, monkeypatch,
-                      roster=f"boxed:{A}, boxed:{B}, ht:{H}", pool_ams=4,
-                      pool_ht=1, ams_names="Alpha, Bravo, Charlie, Delta",
-                      ht_names="Hot", lane_base=12, online=(A, B, H),
-                      uids=(A, B, "", "", H), htmask=1 << 4)
-        make_afc_spool(m.printer)
-        afc = m.printer.afc
-        afc.moonraker = None
-        lane0 = _P3OtherLane("lane0", ["T0"])
-        afc.units = dict(Box=cls._Box([lane0]), **afc.units)
-        afc.lanes["lane0"] = lane0
-        afc.tool_cmds["T0"] = "lane0"
-        m._scout_ready()
-        return m
-
-    @staticmethod
-    def _reset(m: afcBridgeBox) -> FakeGcmd:
-        """:return FakeGcmd: AFC_RESET_MAPPING RUNOUT=no, run"""
-        cmd = _p3_cmd(RUNOUT="no")
-        m.printer.afc.spool.cmd_AFC_RESET_MAPPING(cmd)
-        return cmd
-
-    def test_the_reset_keeps_the_claimed_lane_on_its_home_tool(
-            self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        afc = m.printer.afc
-        assert m._claim_pool_unit(H, "ht") is not None
-        lane = _p3_lane(m, "lane28")
-        _p3_quiet(m)
-        cmd = self._reset(m)
-        assert (lane.map, lane.current_map, lane._map) == (["T28"], "T28", [])
-        # AFC numbers the Box's lane around it.
-        assert afc.lanes["lane0"].map == ["T0"]
-        assert afc.tool_cmds == {"T0": "lane0", "T28": "lane28"}
-        assert cmd.messages == []
-        assert _p3_log(m) == [("info", "Tool mappings reset")]
-
-    def test_it_adds_each_claimed_lane_to_what_others_keep(
-            self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(H, "ht") is not None
-        _p3_quiet(m)
-        kept = {"lane0": "T5"}
-        m._handle_reset_mapping(kept)
-        assert kept == {"lane0": "T5", "lane28": "T28"}
-        assert _p3_log(m) == []
-
-    def test_a_plan_that_fails_leaves_the_lanes_to_afc(self, tmp_path,
-                                                       monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(H, "ht") is not None
-        lane = _p3_lane(m, "lane28")
-
-        def broken(afc: Any) -> Dict[str, Any]:
-            """The plan, failing."""
-            raise RuntimeError("plan failed")
-
-        monkeypatch.setattr(m, "_reset_home_plan", broken)
-        kept: Dict[str, str] = {}
-        m._handle_reset_mapping(kept)
-        assert kept == {}
-        _p3_quiet(m)
-        cmd = self._reset(m)
-        # AFC numbers it as any lane with no map:, after the Box's lane0,
-        # and drops T28.
-        assert (lane.map, lane.current_map) == (["T1"], "T1")
-        assert m.printer.afc.tool_cmds == {"T0": "lane0", "T1": "lane28"}
-        assert cmd.messages == []
-        assert _p3_log(m) == [("info", "T28 remain, removing these mappings"),
-                              ("info", "Tool mappings reset")]
-
-    def test_the_master_handles_each_event_once(self, tmp_path, monkeypatch):
-        m = self._printer(tmp_path, monkeypatch)
-        handlers = m.printer._event_handlers
-        assert handlers["afc:reset_mapping"] == [m._handle_reset_mapping]
-        assert handlers["afc:save_vars"] == [m._handle_save_vars]
+            "lane27": {"map": "T31", "current_map": "T31",
+                       "tool_loaded": False}}
 
 
 class TestAfcBridgeBoxFillHeldBays:
@@ -10809,9 +9920,9 @@ class TestAfcBridgeBoxFillHeldBays:
                        "weight": 412.0},
             "lane25": {"map": "T25", "current_map": "T25", "spool_id": None,
                        "material": "PETG", "color": "", "weight": 0.0},
-            "lane26": {"map": "T26", "current_map": "T26", "spool_id": None,
+            "lane26": {"map": "T0", "current_map": "T0", "spool_id": None,
                        "material": None, "color": "", "weight": 0.0},
-            "lane27": {"map": "T27", "current_map": "T27", "spool_id": None,
+            "lane27": {"map": "T1", "current_map": "T1", "spool_id": None,
                        "material": None, "color": "", "weight": 0.0}}
         assert (snap["Bravo"], snap["Charlie"], snap["Hot"]) == ({}, {}, {})
         assert m.logger.messages == []
@@ -10843,52 +9954,24 @@ class TestAfcBridgeBoxFillHeldBays:
                                          "lanes": snap["Alpha"]}}
         assert again.logger.messages == [self.HOLDING]
 
-    def test_a_lane_waiting_for_its_tool_is_saved_with_its_plan(
-            self, tmp_path, monkeypatch):
-        # Claimed during a print, lane24 waits for T24, which lane5 holds. A
-        # restart before the print ends brings it back to that plan, not to
-        # a map without T24.
-        m = self._chain(tmp_path, monkeypatch, var=self.VAR,
-                      print_state="printing")
-        self._other(m, "lane5", "T24")
+    def test_a_save_mid_claim_keeps_each_lanes_saved_map(self, tmp_path,
+                                                         monkeypatch):
+        # Each lane's TcmdAssign saves while its bay-mates wait for their
+        # turn. A restart then brings lane24 and lane25 back on their saved
+        # maps and lane26 and lane27, which saved none, on the next unused
+        # T#s, never on NONE.
+        m = self._chain(tmp_path, monkeypatch, var=self.VAR)
         _p4_quiet(m)
         assert m._claim_pool_unit(self.A, "boxed") is not None
-        lane24 = self._lane(m, "lane24")
-        assert (lane24.map, lane24.current_map) == (["NONE"], "")
-        # One save per lane's TcmdAssign, then the claim's own.
         snaps = drain_var_writes(m.printer)
-        m.printer.afc.save_vars()
-        snaps += drain_var_writes(m.printer)
-        planned = {"lane24": ("T24", "T24"), "lane25": ("T25", "T25"),
-                   "lane26": ("T26", "T26"), "lane27": ("T27", "T27")}
-        assert [self._maps(s["Alpha"]) for s in snaps] == [planned] * 6
-        assert m.logger.messages == self.CLAIMED[:2] + [
-            ("info", "AFC_BridgeBox chain1: lane24 takes T24 from lane5 once "
-                     "the print ends, as the print may be using it; until "
-                     "then lane24 has no T#.")] + self.CLAIMED[2:]
-        write_unit_vars(m.printer, snaps[-1])
-        again = self._chain(tmp_path, monkeypatch)
-        self._other(again, "lane5", "T24")
-        _p4_quiet(again)
-        assert again._claim_pool_unit(self.A, "boxed") is not None
-        # The Bambu lanes are lane24-lane36: lane5 gets the first T# past.
-        afc = again.printer.afc
-        assert {n: (lane.map, lane.current_map)
-                for n, lane in afc.lanes.items()} == {
-            "lane5": (["T37"], "T37"), "lane24": (["T24"], "T24"),
-            "lane25": (["T25"], "T25"), "lane26": (["T26"], "T26"),
-            "lane27": (["T27"], "T27")}
-        assert afc.tool_cmds == {"T24": "lane24", "T25": "lane25",
-                                 "T26": "lane26", "T27": "lane27",
-                                 "T37": "lane5"}
-        assert {cmd for cmd in afc.gcode.ready_gcode_handlers
-                if cmd[1:].isdigit()} == {"T24", "T25", "T26", "T27", "T37"}
-        assert again.logger.messages == self.CLAIMED[:2] + [
-            ("warning", "AFC_BridgeBox chain1: T24 is the tool of Bambu lane "
-                        "lane24 (Bambu lanes lane24-lane36 are T24-T36). "
-                        "lane5 was mapped to it and is now T37. To give lane5 "
-                        "another tool outside T24-T36, use SET_MAP LANE=lane5 "
-                        "MAP=<T#>.")] + self.CLAIMED[2:]
+        saved = {"lane24": ("T24", "T24"), "lane25": ("T25", "T25")}
+        assert [{ln: (rec.get("map"), rec.get("current_map"))
+                 for ln, rec in snap["Alpha"].items()} for snap in snaps] == [
+            dict(saved, lane26=(None, None), lane27=(None, None)),
+            dict(saved, lane26=(None, None), lane27=(None, None)),
+            dict(saved, lane26=("T0", "T0"), lane27=(None, None)),
+            dict(saved, lane26=("T0", "T0"), lane27=("T1", "T1")),
+            dict(saved, lane26=("T0", "T0"), lane27=("T1", "T1"))]
 
     def test_state_from_before_the_owner_key_is_kept_by_preps_save(
             self, tmp_path, monkeypatch):
@@ -12561,7 +11644,7 @@ class TestAfcBridgeBoxScoutTick:
              "live, slot kept for re-plug"),
             *self._claim_log(A_p5, "Bambu_AMS_1"),
             ("info",
-             "AFC_BridgeBox chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27, T24-T27); it "
+             "AFC_BridgeBox chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -13034,7 +12117,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:DDDD -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved DDDD on Bambu_AMS_4 (lane36-lane39, T36-T39); it "
+             "AFC_BridgeBox chain1: saved DDDD on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
             self.NEW_E,
         ]
@@ -13049,7 +12132,7 @@ class TestAfcBridgeBoxScoutTick:
              "// action:prompt_footer_button Dismiss|RESPOND TYPE=command "
              "MSG=action:prompt_end|info"),
             ("respond_raw", "// action:prompt_show"),
-            *self._offer_popup(20, bay="Bambu_AMS_3", old=C_p5, lanes="lane32-lane35 (T32-T35)"),
+            *self._offer_popup(20, bay="Bambu_AMS_3", old=C_p5, lanes="lane32-lane35"),
         ]
         again = self._restart(tmp_path, monkeypatch)
         assert self._uids(again) == {
@@ -13157,7 +12240,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             *self._claim_log(E_p5, "Bambu_AMS_4"),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39, T36-T39); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -13267,8 +12350,8 @@ class TestAfcBridgeBoxScoutTick:
                 "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE, "
                 "ht:GGGG -- recorded. A restart adds its temperature card."),
                ("info",
-                "AFC_BridgeBox chain1: saved GGGG on Bambu_AMS_HT_2 (lane41, "
-                "T41); it comes back there after a restart.")])
+                "AFC_BridgeBox chain1: saved GGGG on Bambu_AMS_HT_2 (lane41); "
+                "it comes back there after a restart.")])
 
     @pytest.mark.parametrize("pooled", [True, False], ids=["pool", "no-pool"])
     def test_with_roster_set_a_new_ams_with_every_bay_held_is_not_told_to_add_it(
@@ -13463,7 +12546,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(A_p5, "Alpha"),
             *self._claim_log(C_p5, "Bravo"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bravo (lane28-lane31, T28-T31); it comes back "
+             "AFC_BridgeBox chain1: saved CCCC on Bravo (lane28-lane31); it comes back "
              "there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bravo", "Charlie",
@@ -13577,7 +12660,7 @@ class TestAfcBridgeBoxScoutTick:
     @staticmethod
     def _offer_popup(offline: int, waiting: str = E_p5,
                      bay: str = "Bambu_AMS_4", old: str = D_p5,
-                     lanes: str = "lane36-lane39 (T36-T39)",
+                     lanes: str = "lane36-lane39",
                      kind: str = "AMS") -> List[LogLine]:
         """
         :param offline: the seconds ``old`` has been offline
@@ -13590,7 +12673,7 @@ class TestAfcBridgeBoxScoutTick:
              f"{kind} bay is taken."),
             ("respond_raw",
              "// action:prompt_text Replace a unit that is offline: the new "
-             "one takes its bay, lanes and T# now, and the old one is "
+             "one takes its bay and lanes now, and the old one is "
              "forgotten (its learned values and saved lane records, spools "
              "included, are erased)."),
             ("respond_raw",
@@ -13730,7 +12813,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE, boxed:GGGG -- "
              "recorded. A restart adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39, T36-T39); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -13822,11 +12905,11 @@ class TestAfcBridgeBoxScoutTick:
             ("respond_raw",
              "// action:prompt_text UID EEEE is recorded but has no bay: every AMS bay is taken."),
             ("respond_raw",
-             "// action:prompt_text Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned values and saved lane "
+             "// action:prompt_text Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned values and saved lane "
              "records, spools included, are erased)."),
             ("respond_raw",
-             "// action:prompt_text Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 15s"),
+             "// action:prompt_text Bambu_AMS_4: DDDD, lane36-lane39, offline 15s"),
             ("respond_raw",
              "// action:prompt_text Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE "
              "CHAIN=chain1 UID=EEEE opens this again."),
@@ -14018,7 +13101,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(E_p5, "Bambu_AMS_4"),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39, T36-T39); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [*self._offer_popup(15),
@@ -14124,7 +13207,7 @@ class TestAfcBridgeBoxScoutTick:
                                       pool_ams=1, pool_ht=1)
         self._run(master, 100, 115)
         assert self._console(master) == self._offer_popup(
-            15, waiting=G_p5, bay="Bambu_AMS_HT_1", old=H_p5, lanes="lane28 (T28)",
+            15, waiting=G_p5, bay="Bambu_AMS_HT_1", old=H_p5, lanes="lane28",
             kind="AMS HT")
         assert self._log(master) == [
             *self._claim_log(A_p5, "Bambu_AMS_1"),
@@ -14215,11 +13298,11 @@ class TestAfcBridgeBoxScoutTick:
              "taken. A Bambu bus addresses at most 4 AMS, and its saved bay Bambu_AMS_5 is not "
              "one of the 4 AMS bays."),
             ("respond_raw",
-             "// action:prompt_text Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned values and saved lane "
+             "// action:prompt_text Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned values and saved lane "
              "records, spools included, are erased)."),
             ("respond_raw",
-             "// action:prompt_text Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 15s"),
+             "// action:prompt_text Bambu_AMS_4: DDDD, lane36-lane39, offline 15s"),
             ("respond_raw",
              "// action:prompt_text Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE "
              "CHAIN=chain1 UID=EEEE opens this again."),
@@ -14304,7 +13387,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -14345,10 +13428,10 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:EEEE -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         # Both claimed before the popup showed, so CCCC is offered no bay.
@@ -14381,13 +13464,13 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
             ("info",
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_2",
@@ -14430,7 +13513,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         # The removal shows once the first popup's hold is up, by when
@@ -14459,7 +13542,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
             ("info",
              "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC offline >10s); lanes dropped "
@@ -14469,7 +13552,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
             *self._claim_log(C_p5, "Bambu_AMS_2"),
         ]
@@ -14528,7 +13611,7 @@ class TestAfcBridgeBoxScoutTick:
              "no bay yet and takes the next free one of its family."),
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(
@@ -14663,7 +13746,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._name_map[C_p5] == "Bambu_AMS_2"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         # FORGET closed the popup.
@@ -14684,7 +13767,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_3")
@@ -14706,7 +13789,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_2",
@@ -14760,10 +13843,10 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -14789,7 +13872,7 @@ class TestAfcBridgeBoxScoutTick:
              "lanes dropped live"),
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -14916,7 +13999,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:NEWW -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved NEWW on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved NEWW on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         # ZZZZ held no bay, so its removal says the bay went back to the
@@ -14945,7 +14028,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_3")
@@ -14975,7 +14058,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_3")
@@ -15030,7 +14113,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35, T32-T35); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         # Shown on the first tick, while Bambu_AMS_2 was still free.
@@ -15059,7 +14142,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:ZZZZ -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved ZZZZ on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved ZZZZ on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(Z, "Bambu_AMS_2",
@@ -15080,7 +14163,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: ht:HHHH -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved HHHH on Bambu_AMS_HT_1 (lane36, T36); it comes back "
+             "AFC_BridgeBox chain1: saved HHHH on Bambu_AMS_HT_1 (lane36); it comes back "
              "there after a restart."),
         ]
         assert self._console(master) == self._new_popup(H_p5, "Bambu_AMS_HT_1")
@@ -15109,7 +14192,7 @@ class TestAfcBridgeBoxScoutTick:
             ("info", "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded."),
         ]
         offer = self._offer_popup(16, waiting=C_p5, bay="Bambu_AMS_1", old=A_p5,
-                                  lanes="lane24-lane27 (T24-T27)")
+                                  lanes="lane24-lane27")
         assert self._console(master) == offer
         self._log(master).clear()
         master.printer.gcode.run("AFC_BRIDGEBOX_FORGET", CHAIN="chain1",
@@ -15119,7 +14202,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_1"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_1 (lane24-lane27, T24-T27); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_1 (lane24-lane27); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [*offer, *self.PROMPT_END]
@@ -15336,7 +14419,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_2",
@@ -15380,7 +14463,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31, T28-T31); it "
+             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == []
@@ -15674,7 +14757,7 @@ class TestAfcBridgeBoxScoutTick:
              "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27, T24-T27); it "
+             "AFC_BridgeBox chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(A_p5, "Bambu_AMS_1")
@@ -15995,10 +15078,10 @@ class TestAfcBridgeBoxPumpPopups:
         assert _p6_console(m) == _p6_popup(
             "No free bay for new AMS",
             ["UID EEEE has no free bay: every AMS bay is taken.",
-             "Replace a unit that is offline: the new one takes its bay, "
-             "lanes and T# now, and the old one is forgotten (its learned "
+             "Replace a unit that is offline: the new one takes its bay "
+             "and lanes now, and the old one is forgotten (its learned "
              "values and saved lane records, spools included, are erased).",
-             "Bambu_AMS_4: DDDD, lane36-lane39 (T36-T39), offline 11s",
+             "Bambu_AMS_4: DDDD, lane36-lane39, offline 11s",
              "Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE CHAIN=chain1 "
              "UID=EEEE opens this again."],
             ["Replace Bambu_AMS_4|AFC_BRIDGEBOX_REPLACE CHAIN=chain1 "
@@ -16191,8 +15274,8 @@ class TestAfcBridgeBoxReleasePoolUnit:
         rec = held["lanes"]["lane24"]
         assert (rec["spool_id"], rec["material"], rec["color"]) == (
             159, "PLA", "#0086D6")
-        assert (rec["map"], rec["current_map"]) == ("T24", "T24")
-        assert held["lanes"]["lane25"]["map"] == "T25"
+        assert (rec["map"], rec["current_map"]) == ("T0", "T0")
+        assert held["lanes"]["lane25"]["map"] == "T1"
         assert m.get_status()["held_bays"] == {"Alpha": A}
         # The lanes are dropped live and the unit is idle again; AAAA is
         # recorded on Alpha, so the bay keeps its uid for a re-plug.
@@ -16233,8 +15316,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         assert m._claim_pool_unit(A, "boxed") is not None
         assert (lane.spool_id, lane.color, lane.weight, lane.map) == (
             159, "#123456", 640.0, ["T7"])
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T7.")
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
 
     def test_the_release_save_of_a_toolhead_lane_keeps_them(
             self, tmp_path, monkeypatch):
@@ -16314,24 +15396,6 @@ class TestAfcBridgeBoxReleasePoolUnit:
         assert afc.gcode.ready_gcode_handlers["T24"] == afc.cmd_CHANGE_TOOL
         assert (lane5.map, lane5.sent) == (["T24"], [])
         _p6_consistent(m)
-        assert _p6_log(m) == [self.RELEASED]
-
-    def test_a_release_before_the_print_ends_drops_the_wait(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch, print_state="printing")
-        lane5 = _p6_other(m, "lane5", ["T24"])
-        assert m._claim_pool_unit(A, "boxed") is not None
-        assert list(m._deferred_takes) == ["lane24"]
-        m.printer.set_print_state("complete")
-        _p6_quiet(m)
-        m._release_pool_unit(A)
-        assert m._deferred_takes == {}
-        m._take_deferred_tools()
-        afc = m.printer.afc
-        assert (lane5.map, afc.tool_cmds) == (["T24"], {"T24": "lane5"})
-        # The next claim is handed the map this claim planned.
-        rec = m._held["Alpha"]["lanes"]["lane24"]
-        assert (rec["map"], rec["current_map"]) == ("T24", "T24")
         assert _p6_log(m) == [self.RELEASED]
 
     def test_release_keeps_a_saved_bay_and_frees_an_unsaved_one(
@@ -16598,12 +15662,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert unit.measure_on_insert is True
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1", model)
 
-    # ── the home tool a Bambu lane takes ─────────────────────────────────
+    # ── the next unused T# a claimed lane takes ──────────────────────────
 
     @staticmethod
-    def _home_pool(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-                   other_map: Optional[Sequence[str]] = None
-                   ) -> afcBridgeBox:
+    def _pool(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+              other_map: Optional[Sequence[str]] = None) -> afcBridgeBox:
         """
         One AMS spare on lane24-lane27 (the roster HT sits on lane28), and
         lane5, a non-Bambu lane PREP numbered, on ``other_map``.
@@ -16619,170 +15682,78 @@ class TestAfcBridgeBoxClaimPoolUnit:
         return m
 
     @staticmethod
-    def _moved(tmp: str, now: str, tail: str = "") -> LogLine:
-        """
-        :param tmp: the T# lane24's claim took from lane5
-        :param now: what lane5 is now
-        :param tail: what the warning ends with
-        :return tuple: the warning a claim taking lane24's home tool logs
-        """
-        return ("warning",
-                f"AFC_BridgeBox chain1: {tmp} is the tool of Bambu lane "
-                f"lane24 (Bambu lanes lane24-lane28 are T24-T28). lane5 was "
-                f"mapped to it and is now {now}.{tail}")
+    def _maps(master: afcBridgeBox, *names: str) -> Dict[str, List[str]]:
+        """:return dict: lane -> its map, for the lanes named"""
+        return {name: list(_p6_lane(master, name).map) for name in names}
 
-    def test_it_takes_the_tool_and_moves_the_other_lane_past_the_bambu_lanes(
-            self, tmp_path, monkeypatch):
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T24"])
+    #: The spare's lanes.
+    BAY = ("lane24", "lane25", "lane26", "lane27")
+
+    def test_each_lane_takes_the_next_unused_tool(self, tmp_path,
+                                                  monkeypatch):
+        m = self._pool(tmp_path, monkeypatch, other_map=["T0"])
         afc = m.printer.afc
         other = afc.lanes["lane5"]
         assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert afc.tool_cmds == {"T24": "lane24", "T25": "lane25",
-                                 "T26": "lane26", "T27": "lane27",
-                                 "T29": "lane5"}
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        # lane24-lane28 are the Bambu lanes: lane5 takes the first T# after.
-        assert (other.map, other.current_map) == (["T29"], "T29")
-        assert afc.gcode.ready_gcode_handlers["T29"] == afc.cmd_CHANGE_TOOL
-        assert other.sent == [["T29"]]
-        assert afc.save_vars.call_count == 5
-        claim = _p6_claim_log(self.A24, "Bambu_AMS_1")
-        assert _p6_log(m) == claim[:2] + [self._moved(
-            "T24", "T29", " To give lane5 another tool outside T24-T28, use "
-            "SET_MAP LANE=lane5 MAP=<T#>.")] + claim[2:]
+        assert afc.tool_cmds == {"T0": "lane5", "T1": "lane24",
+                                 "T2": "lane25", "T3": "lane26",
+                                 "T4": "lane27"}
+        lane24 = _p6_lane(m, "lane24")
+        assert (lane24.map, lane24.current_map) == (["T1"], "T1")
+        assert afc.gcode.ready_gcode_handlers["T1"] == afc.cmd_CHANGE_TOOL
+        assert (other.map, other.current_map, other.sent) == (["T0"], "T0",
+                                                              [])
+        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
         _p6_consistent(m)
 
-    def test_the_saved_map_brings_the_new_tool_back_after_a_restart(
-            self, tmp_path, monkeypatch):
-        # A real lane, so the var file gets what AFCLane writes for it.
-        def _boot(where: pathlib.Path, maps: List[str]
-                  ) -> Tuple[afcBridgeBox, Any]:
-            """
-            :param maps: lane5's T#s as PREP restored them
-            :return tuple: the master and lane5
-            """
-            where.mkdir()
-            m = _p6_chain(where, monkeypatch, pool_ams=1)
-            lane5 = make_afc_lane("lane5", "Box_1", 0, printer=m.printer)
-            lane5.map, lane5.current_map = list(maps), maps[0]
-            afc = m.printer.afc
-            afc.lanes["lane5"] = lane5
-            for cmd in maps:
-                afc.tool_cmds[cmd] = "lane5"
-                afc.gcode.register_command(cmd, afc.cmd_CHANGE_TOOL)
-            _p6_quiet(m)
-            return m, lane5
-        m, lane5 = _boot(tmp_path / "boot1", ["T24"])
-        saved: List[str] = []
-        real = m.printer.afc.save_vars
-
-        def _save() -> None:
-            """Record lane5's map as the var file writes it."""
-            saved.append(lane5.map_to_string())
-            real()
-        monkeypatch.setattr(m.printer.afc, "save_vars", _save)
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert saved[-1] == "T29"
-        # Next boot: PREP puts the saved map back ahead of the config one,
-        # and the claim finds T24 free.
-        m2, lane5 = _boot(tmp_path / "boot2", ["T29"])
-        assert m2._claim_pool_unit(self.A24, "boxed") is not None
-        afc2 = m2.printer.afc
-        assert (afc2.tool_cmds["T24"], afc2.tool_cmds["T29"]) == (
-            "lane24", "lane5")
-        assert lane5.map == ["T29"]
-        assert _p6_log(m2) == _p6_claim_log(self.A24, "Bambu_AMS_1")
-
-    def test_a_config_map_in_the_bambu_range_is_named(self, tmp_path,
-                                                      monkeypatch):
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T24"])
-        other = m.printer.afc.lanes["lane5"]
-        other._map = ["T24"]
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert other.map == ["T29"]
-        claim = _p6_claim_log(self.A24, "Bambu_AMS_1")
-        assert _p6_log(m) == claim[:2] + [self._moved(
-            "T24", "T29", " To give lane5 another tool outside T24-T28, use "
-            "SET_MAP LANE=lane5 MAP=<T#>. Also set map: in "
-            "[AFC_stepper lane5] outside T24-T28, or AFC_RESET_MAPPING puts "
-            "lane5 back on T24 and lane24 on another T#.")] + claim[2:]
-
-    def test_the_new_tool_skips_taken_ones(self, tmp_path, monkeypatch):
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T24"])
+    def test_the_next_tool_skips_taken_ones(self, tmp_path, monkeypatch):
+        m = self._pool(tmp_path, monkeypatch, other_map=["T0"])
         afc = m.printer.afc
-        other = afc.lanes["lane5"]
 
         def _macro(gcmd: Any) -> None:
-            """A user macro on T29."""
-        afc.gcode.register_command("T29", _macro)
-        _p6_other(m, "lane6", ["T30"], config_map=["T31"])
+            """A user macro on T1."""
+        afc.gcode.register_command("T1", _macro)
+        _p6_other(m, "lane6", ["T2"], config_map=["T3"])
         # A CHANGE_TOOL no lane uses is taken as it is, not registered again.
         unused = afc.cmd_CHANGE_TOOL
-        afc.gcode.register_command("T32", unused)
+        afc.gcode.register_command("T4", unused)
         assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert other.map == ["T32"]
-        assert afc.tool_cmds["T32"] == "lane5"
-        assert afc.gcode.ready_gcode_handlers["T32"] is unused
-        assert afc.gcode.ready_gcode_handlers["T29"] is _macro
-        claim = _p6_claim_log(self.A24, "Bambu_AMS_1")
-        assert _p6_log(m) == claim[:2] + [self._moved(
-            "T24", "T32", " To give lane5 another tool outside T24-T28, use "
-            "SET_MAP LANE=lane5 MAP=<T#>.")] + claim[2:]
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T4"], "lane25": ["T5"], "lane26": ["T6"],
+            "lane27": ["T7"]}
+        handlers = afc.gcode.ready_gcode_handlers
+        assert (handlers["T1"], handlers["T4"]) == (_macro, unused)
+        assert (afc.lanes["lane5"].map, afc.lanes["lane6"].map) == (["T0"],
+                                                                    ["T2"])
+        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
+        _p6_consistent(m)
 
-    def test_the_other_lane_keeps_its_other_tools(self, tmp_path,
-                                                  monkeypatch):
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T3", "T24"])
+    def test_a_macro_is_never_renamed_for_the_next_tool(self, tmp_path,
+                                                        monkeypatch):
+        # force_assign_map lets TcmdAssign rename a macro out of the way;
+        # the next unused T# is one no macro holds.
+        m = self._pool(tmp_path, monkeypatch)
         afc = m.printer.afc
-        other = afc.lanes["lane5"]
-        assert other.current_map == "T24"
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert (other.map, other.current_map) == (["T3"], "T3")
-        assert (afc.tool_cmds["T3"], afc.tool_cmds["T24"]) == (
-            "lane5", "lane24")
-        assert "T29" not in afc.gcode.ready_gcode_handlers
-        claim = _p6_claim_log(self.A24, "Bambu_AMS_1")
-        assert _p6_log(m) == claim[:2] + [self._moved("T24", "T3")] + claim[
-            2:]
+        afc.force_assign_map = True
 
-    def test_a_claim_over_free_tools_is_quiet(self, tmp_path, monkeypatch):
-        m = self._home_pool(tmp_path, monkeypatch)
+        def _macro(gcmd: Any) -> None:
+            """A user macro on T0."""
+        afc.gcode.register_command("T0", _macro)
         assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert m.printer.afc.tool_cmds["T24"] == "lane24"
-        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
-
-    def test_a_replug_does_not_warn_again(self, tmp_path, monkeypatch):
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T24"])
-        afc = m.printer.afc
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
-        m._release_pool_unit(self.A24)
-        _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert afc.tool_cmds["T24"] == "lane24"
-        assert afc.lanes["lane5"].map == ["T29"]
-        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
-
-    def test_a_lane_already_on_its_home_tool_is_left_alone(
-            self, tmp_path, monkeypatch):
-        # Claimed, then claimed again with no release in between: lane24 is
-        # still live and still owns T24.
-        m = self._home_pool(tmp_path, monkeypatch)
-        unit = m._claim_pool_unit(self.A24, "boxed")
-        _p6_bay(m, "Bambu_AMS_1")["bound"] = None
-        unit.pool = True
-        _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "boxed") is unit
-        assert m.printer.afc.tool_cmds["T24"] == "lane24"
-        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
+        assert afc.gcode.ready_gcode_handlers["T0"] is _macro
+        assert _p6_lane(m, "lane24").map == ["T1"]
+        assert "_T0" not in afc.gcode.ready_gcode_handlers
+        _p6_consistent(m)
 
     def test_a_failed_claim_leaves_the_other_lane_its_tool(
             self, tmp_path, monkeypatch):
         # No bridge on the port: the unit's claim() fails.
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T24"])
+        m = self._pool(tmp_path, monkeypatch, other_map=["T0"])
         del live_bridges()[m.serial_port]
         assert m._claim_pool_unit(self.A24, "boxed") is None
         afc = m.printer.afc
-        assert afc.tool_cmds == {"T24": "lane5"}
-        assert afc.lanes["lane5"].map == ["T24"]
+        assert afc.tool_cmds == {"T0": "lane5"}
+        assert afc.lanes["lane5"].map == ["T0"]
         assert _p6_bay(m, "Bambu_AMS_1")["uid"] is None
         assert _p6_log(m) == [(
             "warning",
@@ -16790,38 +15761,52 @@ class TestAfcBridgeBoxClaimPoolUnit:
             "/dev/serial/by-id/usb-chain1-if00; unit stays offline until "
             "restart.")]
 
+    def test_a_lane_already_on_its_tool_is_left_alone(self, tmp_path,
+                                                      monkeypatch):
+        # Claimed, then claimed again with no release in between: lane24 is
+        # still live and gets T0 back.
+        m = self._pool(tmp_path, monkeypatch)
+        unit = m._claim_pool_unit(self.A24, "boxed")
+        _p6_bay(m, "Bambu_AMS_1")["bound"] = None
+        unit.pool = True
+        _p6_quiet(m)
+        assert m._claim_pool_unit(self.A24, "boxed") is unit
+        assert m.printer.afc.tool_cmds["T0"] == "lane24"
+        assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
+        _p6_consistent(m)
+
     def test_a_stale_map_does_not_pop_another_lanes_tool(
             self, tmp_path, monkeypatch):
         # lane24 comes back carrying T3 in its map; T3 is lane5's.
-        m = self._home_pool(tmp_path, monkeypatch, other_map=["T3"])
+        m = self._pool(tmp_path, monkeypatch, other_map=["T3"])
         _p6_lane(m, "lane24").map = ["T3"]
         assert m._claim_pool_unit(self.A24, "boxed") is not None
         afc = m.printer.afc
         assert afc.tool_cmds["T3"] == "lane5"
         assert afc.lanes["lane5"].map == ["T3"]
-        assert afc.lanes["lane24"].map == ["T24"]
+        assert afc.lanes["lane24"].map == ["T0"]
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
 
     def test_stale_table_entries_of_the_pooled_lanes_are_cleared_first(
             self, tmp_path, monkeypatch):
         # lane24 comes back carrying T9, and AFC's tool table still names
         # lane24 for T9 and lane25 for T8; neither lane is live.
-        m = self._home_pool(tmp_path, monkeypatch)
+        m = self._pool(tmp_path, monkeypatch)
         afc = m.printer.afc
         _p6_lane(m, "lane24").map = ["T9"]
         afc.tool_cmds.update({"T9": "lane24", "T8": "lane25"})
         assert m._claim_pool_unit(self.A24, "boxed") is not None
-        assert afc.tool_cmds == {"T24": "lane24", "T25": "lane25",
-                                 "T26": "lane26", "T27": "lane27"}
+        assert afc.tool_cmds == {"T0": "lane24", "T1": "lane25",
+                                 "T2": "lane26", "T3": "lane27"}
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
 
     def test_a_save_that_fails_does_not_stop_the_claim(self, tmp_path,
                                                        monkeypatch):
-        # T24-T27 are left registered to CHANGE_TOOL, so the claim's own
-        # save is the only one, and it fails.
-        m = self._home_pool(tmp_path, monkeypatch)
+        # T0-T3 are left registered to CHANGE_TOOL, so the claim's own save
+        # is the only one, and it fails.
+        m = self._pool(tmp_path, monkeypatch)
         afc = m.printer.afc
-        for n in (24, 25, 26, 27):
+        for n in range(4):
             afc.gcode.register_command(f"T{n}", afc.cmd_CHANGE_TOOL)
         tried: List[str] = []
 
@@ -16834,6 +15819,73 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert tried == ["save"]
         assert _p6_bay(m, "Bambu_AMS_1")["bound"] == self.A24
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
+
+    # ── the T#s kept for a known unit until it is forgotten ──────────────
+
+    def test_an_unplugged_units_tools_wait_for_it(self, tmp_path,
+                                                  monkeypatch):
+        # Alpha's T0-T3 stay AAAA's while it is unplugged: CCCC, new, takes
+        # the next ones on Bravo, and AAAA comes back on its own.
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        m._release_pool_unit(A)
+        assert "T0" not in m.printer.afc.tool_cmds
+        _p6_quiet(m)
+        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert self._maps(m, "lane28", "lane31") == {"lane28": ["T4"],
+                                                     "lane31": ["T7"]}
+        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T0"], "lane25": ["T1"], "lane26": ["T2"],
+            "lane27": ["T3"]}
+        assert _p6_log(m) == (_p6_claim_log(C, "Bravo")
+                              + _p6_claim_log(A, "Alpha"))
+        _p6_consistent(m)
+
+    def test_a_restart_keeps_them_for_a_unit_not_back_yet(self, tmp_path,
+                                                          monkeypatch):
+        # lane24 and lane25 saved T0 and T1; lane26 and lane27 saved none.
+        m = _p6_named(tmp_path, monkeypatch,
+                      var={"Alpha": {"lane24": _p6_rec("T0"),
+                                     "lane25": _p6_rec("T1")}},
+                      owners=f"{A}:Alpha")
+        _p6_quiet(m)
+        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert self._maps(m, "lane28") == {"lane28": ["T2"]}
+        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T0"], "lane25": ["T1"], "lane26": ["T6"],
+            "lane27": ["T7"]}
+        assert _p6_log(m) == (_p6_claim_log(C, "Bravo")
+                              + _p6_claim_log(A, "Alpha"))
+        _p6_consistent(m)
+
+    def test_a_forgotten_units_tools_are_free_again(self, tmp_path,
+                                                    monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        m._release_pool_unit(A)
+        m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
+        assert m._reserved_tools() == set()
+        assert m._claim_pool_unit(C, "boxed") is not None
+        assert self._maps(m, "lane24") == {"lane24": ["T0"]}
+        _p6_consistent(m)
+
+    def test_a_bay_mate_never_takes_a_saved_tool(self, tmp_path,
+                                                 monkeypatch):
+        # The lanes with saved maps get theirs first, whatever their slot.
+        m = _p6_named(tmp_path, monkeypatch,
+                      var={"Alpha": {"lane25": _p6_rec("T0")}},
+                      owners=f"{A}:Alpha")
+        # As for a unit no bay is saved for: nothing reserves its T#s.
+        monkeypatch.setattr(m, "_reserved_tools", lambda: set())
+        _p6_quiet(m)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T1"], "lane25": ["T0"], "lane26": ["T2"],
+            "lane27": ["T3"]}
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
+        _p6_consistent(m)
 
     # ── a unit with no free bay of its family ────────────────────────────
 
@@ -16934,7 +15986,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert _p6_log(m2) == [(
             "warning",
             "AFC_BridgeBox chain1: HT HHHH (Bambu_AMS_HT_1) keeps its name, "
-            "and its lanes and T# changed: lane32 (T32) -> lane36 (T36).")]
+            "and its lanes changed: lane32 -> lane36.")]
 
     def test_a_bay_inside_the_ams_band_moves_nothing(self, tmp_path,
                                                      monkeypatch):
@@ -17052,7 +16104,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert handed == [{}]
         lane = _p6_lane(m, "lane24")
         assert (lane.spool_id, lane.material, lane.map) == (None, None,
-                                                           ["T24"])
+                                                           ["T0"])
         # AAAA's records stay held for it.
         assert m._held["Alpha"]["uid"] == A
         assert _p6_log(m) == _p6_claim_log(C, "Alpha")
@@ -17083,8 +16135,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             assert (lane.map, lane.current_map) == (["T7"], "T7")
             assert (lane.spool_id, lane.material) == (5, "PETG")
             assert handed == [{"lane40": rec}]
-            assert _p6_log(m) == _p6_claim_log(
-                H, "Hot", "ht", 1, " Saved maps: lane40->T7.")
+            assert _p6_log(m) == _p6_claim_log(H, "Hot", "ht", 1)
 
     # ── bay_owner: the unit each bay was last claimed onto ───────────────
 
@@ -17218,17 +16269,17 @@ class TestAfcBridgeBoxClaimPoolUnit:
 
     def test_the_claim_saves_the_lanes_when_no_tool_needed_assigning(
             self, tmp_path, monkeypatch):
-        # T24-T27 are left registered to CHANGE_TOOL, so no TcmdAssign runs
+        # T0-T3 are left registered to CHANGE_TOOL, so no TcmdAssign runs
         # and saves: the claim's own save writes the lanes.
         m = _p6_named(tmp_path, monkeypatch)
         afc = m.printer.afc
-        for n in (24, 25, 26, 27):
+        for n in range(4):
             afc.gcode.register_command(f"T{n}", afc.cmd_CHANGE_TOOL)
         seen = self._owner_at_saves(monkeypatch, m)
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert afc.tool_cmds == {"T24": "lane24", "T25": "lane25",
-                                 "T26": "lane26", "T27": "lane27"}
+        assert afc.tool_cmds == {"T0": "lane24", "T1": "lane25",
+                                 "T2": "lane26", "T3": "lane27"}
         assert seen == ["AAAA:Alpha"]
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
 
@@ -17276,7 +16327,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         handed = self._handed(monkeypatch, unit)
         assert again._claim_pool_unit(D, "boxed") is unit
         assert handed == [{}]
-        assert _p6_lane(again, "lane28").map == ["T28"]
+        assert _p6_lane(again, "lane28").map == ["T0"]
 
     # ── records held at a release, and the bay a spare goes back to ──────
 
@@ -17355,58 +16406,33 @@ class TestAfcBridgeBoxClaimPoolUnit:
     TWO = {"recorded": f"boxed:{A}, boxed:{B}", "pool_ams": 2,
            "ams_names": "Alpha, Bravo"}
 
-    @staticmethod
-    def _swapped(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-                 ) -> Tuple[afcBridgeBox, _P6OtherLane]:
-        """
-        SET_MAP left lane24 on T3 and gave its T24 to lane5.
-
-        :return tuple: the master and lane5
-        """
+    def test_a_saved_map_comes_back_and_the_rest_take_the_next_tools(
+            self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch,
                       var={"Alpha": {"lane24": _p6_rec("T3")}},
                       owners=f"{A}:Alpha")
-        lane5 = _p6_other(m, "lane5", ["T24"])
+        lane5 = _p6_other(m, "lane5", ["T0"])
         _p6_quiet(m)
-        return m, lane5
-
-    @staticmethod
-    def _maps(master: afcBridgeBox, *names: str) -> Dict[str, List[str]]:
-        """:return dict: lane -> its map, for the lanes named"""
-        return {name: list(_p6_lane(master, name).map) for name in names}
-
-    def test_a_saved_map_comes_back_and_the_home_tool_stays_put(
-            self, tmp_path, monkeypatch):
-        m, lane5 = self._swapped(tmp_path, monkeypatch)
         assert m._claim_pool_unit(A, "boxed") is not None
         lane24 = _p6_lane(m, "lane24")
-        afc = m.printer.afc
         assert (lane24.map, lane24.current_map) == (["T3"], "T3")
-        assert afc.tool_cmds == {"T3": "lane24", "T24": "lane5",
-                                 "T25": "lane25", "T26": "lane26",
-                                 "T27": "lane27"}
-        assert (lane5.map, lane5.sent) == (["T24"], [])
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T3.")
+        assert m.printer.afc.tool_cmds == {
+            "T0": "lane5", "T1": "lane25", "T2": "lane26", "T3": "lane24",
+            "T4": "lane27"}
+        assert (lane5.map, lane5.sent) == (["T0"], [])
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
-    def test_only_a_home_tool_is_taken_and_only_after_the_claim(
-            self, tmp_path, monkeypatch):
-        m, lane5 = self._swapped(tmp_path, monkeypatch)
+    def test_the_maps_are_set_only_after_the_claim(self, tmp_path,
+                                                   monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch,
+                      var={"Alpha": {"lane24": _p6_rec("T3")}},
+                      owners=f"{A}:Alpha")
         unit = _p6_unit(m, "Alpha")
-        seen: List[Tuple[str, List[str], bool]] = []
-        real = m._take_home_tool
-
-        def _spy(afc: Any, lane: Any) -> None:
-            """Record the lane, its map and the unit's pool flag."""
-            seen.append((lane.name, list(lane.map), unit.pool))
-            real(afc, lane)
-        monkeypatch.setattr(m, "_take_home_tool", _spy)
         bridge = live_bridges().pop(m.serial_port)
+        _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is None
-        assert seen == []
-        assert (lane5.map, m.printer.afc.tool_cmds) == (["T24"],
-                                                        {"T24": "lane5"})
+        assert m.printer.afc.tool_cmds == {}
         assert _p6_log(m) == [(
             "warning",
             "AFC bambu Alpha: claim found no live bridge on "
@@ -17415,80 +16441,58 @@ class TestAfcBridgeBoxClaimPoolUnit:
         live_bridges()[m.serial_port] = bridge
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is unit
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T3.")
-        # lane24 keeps its saved T3, so it takes no home tool.
-        assert seen == [("lane25", ["T25"], False), ("lane26", ["T26"], False),
-                        ("lane27", ["T27"], False)]
+        assert self._maps(m, "lane24", "lane25") == {"lane24": ["T3"],
+                                                     "lane25": ["T0"]}
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
     def test_a_swap_inside_a_unit_comes_back(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T25"),
-                                     "lane25": _p6_rec("T24")}},
+                      var={"Alpha": {"lane24": _p6_rec("T1"),
+                                     "lane25": _p6_rec("T0")}},
                       owners=f"{A}:Alpha")
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert self._maps(m, "lane24", "lane25") == {"lane24": ["T25"],
-                                                     "lane25": ["T24"]}
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T25, lane25->T24.")
+        assert self._maps(m, "lane24", "lane25") == {"lane24": ["T1"],
+                                                     "lane25": ["T0"]}
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
     @pytest.mark.parametrize("order", [(A, B), (B, A)])
     def test_a_swap_across_bays_comes_back_in_either_order(
             self, tmp_path, monkeypatch, order):
         m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T28")},
-                           "Bravo": {"lane28": _p6_rec("T24")}},
+                      var={"Alpha": {"lane24": _p6_rec("T4")},
+                           "Bravo": {"lane28": _p6_rec("T0")}},
                       owners=f"{A}:Alpha, {B}:Bravo", **self.TWO)
         _p6_quiet(m)
         for uid in order:
             assert m._claim_pool_unit(uid, "boxed") is not None
-        assert self._maps(m, "lane24", "lane28") == {"lane24": ["T28"],
-                                                     "lane28": ["T24"]}
-        bays = {A: ("Alpha", "lane24->T28"), B: ("Bravo", "lane28->T24")}
-        said: List[LogLine] = []
-        for uid in order:
-            bay, saved = bays[uid]
-            said += _p6_claim_log(uid, bay, tail=f" Saved maps: {saved}.")
-        assert _p6_log(m) == said
+        assert self._maps(m, "lane24", "lane28") == {"lane24": ["T4"],
+                                                     "lane28": ["T0"]}
+        bays = {A: "Alpha", B: "Bravo"}
+        assert _p6_log(m) == [line for uid in order
+                              for line in _p6_claim_log(uid, bays[uid])]
         _p6_consistent(m)
 
-    def test_a_saved_tool_a_claimed_lane_took_stays_with_it(
+    def test_a_saved_tool_another_lane_took_stays_with_it(
             self, tmp_path, monkeypatch):
+        # lane5 took T3 by SET_MAP while AAAA was unplugged.
         m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T28")}},
-                      owners=f"{A}:Alpha", **self.TWO)
-        assert m._claim_pool_unit(B, "boxed") is not None   # lane28 takes T28
+                      var={"Alpha": {"lane24": _p6_rec("T3")}},
+                      owners=f"{A}:Alpha")
+        _p6_other(m, "lane5", ["T3"])
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        # Both lanes are on their own home tools: AFC.log only.
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T0"], "lane25": ["T1"], "lane26": ["T2"],
+            "lane27": ["T4"]}
         claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            "debug",
-            "AFC_BridgeBox chain1: lane24: saved T28 is held by lane28 -- "
-            "not restored; lane24 is back on T24")] + claim[2:]
-        _p6_consistent(m)
-
-    def test_a_saved_tool_a_bambu_lane_holds_off_its_home_still_warns(
-            self, tmp_path, monkeypatch):
-        # lane28 holds T3 (not its home) by SET_MAP: the user has something
-        # to look at.
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T3")},
-                           "Bravo": {"lane28": _p6_rec("T3")}},
-                      owners=f"{A}:Alpha, {B}:Bravo", **self.TWO)
-        assert m._claim_pool_unit(B, "boxed") is not None
-        _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            "warning",
-            "AFC_BridgeBox chain1: lane24: saved T3 is held by lane28 -- not "
-            "restored; lane24 is back on T24")] + claim[2:]
+        assert _p6_log(m) == claim[:2] + [
+            ("warning", "AFC_BridgeBox chain1: lane24: saved T3 is held by "
+                        "lane5 -- not restored"),
+            ("warning", "AFC_BridgeBox chain1: lane24 is on T0 now")
+        ] + claim[2:]
         _p6_consistent(m)
 
     @staticmethod
@@ -17510,158 +16514,32 @@ class TestAfcBridgeBoxClaimPoolUnit:
         monkeypatch.setattr(lane, "send_lane_data", _push)
         return sent
 
-    @pytest.mark.parametrize("order", [(A, C), (C, A)])
-    def test_a_lane_on_a_sibling_home_tool_goes_back_to_its_own(
-            self, tmp_path, monkeypatch, order):
-        # lane24 was saved on T28 while Bravo was unclaimed; a unit with no
-        # record for Bravo claims it and takes its home T28.
+    def test_each_lane_pushes_the_map_it_came_back_with(self, tmp_path,
+                                                        monkeypatch):
         m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T28")}},
+                      var={"Alpha": {"lane24": _p6_rec("T5")}},
                       owners=f"{A}:Alpha")
-        lane24 = _p6_lane(m, "lane24")
-        sent = self._pushes(monkeypatch, lane24)
-        _p6_quiet(m)
-        for uid in order:
-            assert m._claim_pool_unit(uid, "boxed") is not None
-        assert _p6_bay(m, "Bravo")["bound"] == C
-        assert (lane24.map, lane24.current_map) == (["T24"], "T24")
-        assert _p6_lane(m, "lane28").map == ["T28"]
-        _p6_consistent(m)
-        # The home wins and both lanes end on their own home tools, so the
-        # move is in AFC.log only.
-        if order[0] == A:
-            bravo = _p6_claim_log(C, "Bravo")
-            assert _p6_log(m) == (
-                _p6_claim_log(A, "Alpha", tail=" Saved maps: lane24->T28.")
-                + bravo[:2]
-                + [("debug",
-                    "AFC_BridgeBox chain1: T28 is the tool of Bambu lane "
-                    "lane28. lane24 was mapped to it and is back on T24.")]
-                + bravo[2:])
-            assert sent == [["T28"], ["T24"]]
-        else:
-            alpha = _p6_claim_log(A, "Alpha")
-            assert _p6_log(m) == (
-                _p6_claim_log(C, "Bravo") + alpha[:2]
-                + [("debug",
-                    "AFC_BridgeBox chain1: lane24: saved T28 is held by "
-                    "lane28 -- not restored; lane24 is back on T24")]
-                + alpha[2:])
-            assert sent == [["T24"]]
-        m._release_pool_unit(A)
-        assert m._held["Alpha"]["lanes"]["lane24"]["map"] == "T24"
-
-    def test_a_bay_mate_on_a_lanes_home_tool_goes_back_to_its_own(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T25"),
-                                     "lane25": {"spool_id": 5}}},
-                      owners=f"{A}:Alpha")
+        sent = self._pushes(monkeypatch, _p6_lane(m, "lane24"))
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert self._maps(m, "lane24", "lane25") == {"lane24": ["T24"],
-                                                     "lane25": ["T25"]}
-        claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            "debug",
-            "AFC_BridgeBox chain1: T25 is the tool of Bambu lane lane25. "
-            "lane24 was mapped to it and is back on T24.")] + claim[2:]
-        _p6_consistent(m)
+        assert sent == [["T5"]]
 
-    def test_a_lane_whose_own_home_tool_is_held_is_still_moved_off(
-            self, tmp_path, monkeypatch):
+    def test_a_multi_map_keeps_what_is_free(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T28")}},
-                      owners=f"{A}:Alpha")
-        lane5 = _p6_other(m, "lane5", ["T24"])
-        assert m._claim_pool_unit(A, "boxed") is not None
-        _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is not None
-        assert (_p6_lane(m, "lane24").map, lane5.map) == (["T37"], ["T24"])
-        assert _p6_lane(m, "lane28").map == ["T28"]
-        _p6_consistent(m)
-        # Left on a spare, not its home tool: the user has something to do.
-        bravo = _p6_claim_log(C, "Bravo")
-        assert _p6_log(m) == bravo[:2] + [(
-            "warning",
-            "AFC_BridgeBox chain1: T28 is the tool of Bambu lane lane28 "
-            "(Bambu lanes lane24-lane36 are T24-T36). lane24 was mapped to it "
-            "and is now T37. To give lane24 another tool outside T24-T36, use "
-            "SET_MAP LANE=lane24 MAP=<T#>.")] + bravo[2:]
-
-    @pytest.mark.parametrize("order", [(A, C), (C, A)])
-    def test_a_multi_map_on_a_sibling_home_tool_keeps_its_own_quietly(
-            self, tmp_path, monkeypatch, order):
-        # SET_MAP gave lane24 T28 as well while Bravo was unclaimed. The
-        # home wins, and lane24 keeps its own T24: AFC.log only.
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T24, T28")}},
-                      owners=f"{A}:Alpha")
-        _p6_quiet(m)
-        for uid in order:
-            assert m._claim_pool_unit(uid, "boxed") is not None
-        assert self._maps(m, "lane24", "lane28") == {"lane24": ["T24"],
-                                                     "lane28": ["T28"]}
-        if order[0] == A:
-            bravo = _p6_claim_log(C, "Bravo")
-            assert _p6_log(m) == (
-                _p6_claim_log(A, "Alpha", tail=" Saved maps: lane24->T24+T28.")
-                + bravo[:2]
-                + [("debug",
-                    "AFC_BridgeBox chain1: T28 is the tool of Bambu lane "
-                    "lane28 (Bambu lanes lane24-lane36 are T24-T36). lane24 "
-                    "was mapped to it and is now T24.")]
-                + bravo[2:])
-        else:
-            alpha = _p6_claim_log(A, "Alpha")
-            assert _p6_log(m) == (
-                _p6_claim_log(C, "Bravo") + alpha[:2]
-                + [("debug",
-                    "AFC_BridgeBox chain1: lane24: saved T28 is held by "
-                    "lane28 -- not restored")]
-                + alpha[2:])
-        _p6_consistent(m)
-
-    def test_a_multi_map_on_a_config_mapped_tool_still_warns(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T24, T28")}},
-                      owners=f"{A}:Alpha")
-        assert m._claim_pool_unit(A, "boxed") is not None
-        _p6_lane(m, "lane24")._map = ["T28"]          # map: in its config
-        _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is not None
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        bravo = _p6_claim_log(C, "Bravo")
-        assert _p6_log(m) == bravo[:2] + [(
-            "warning",
-            "AFC_BridgeBox chain1: T28 is the tool of Bambu lane lane28 "
-            "(Bambu lanes lane24-lane36 are T24-T36). lane24 was mapped to it "
-            "and is now T24. Also set map: in [AFC_lane lane24] outside "
-            "T24-T36, or AFC_RESET_MAPPING puts lane24 back on T28 and lane28 "
-            "on another T#.")] + bravo[2:]
-
-    def test_the_claim_line_lists_saved_maps_one_lane_each(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane24": _p6_rec("T3, T40"),
+                      var={"Alpha": {"lane24": _p6_rec("T3, T40", "T40"),
                                      "lane25": _p6_rec("T5")}},
                       owners=f"{A}:Alpha")
-        _p6_other(m, "lane5", ["T5"])
-        _p6_other(m, "lane6", ["T25"])
+        _p6_other(m, "lane5", ["T40"])
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert self._maps(m, "lane24", "lane25") == {"lane24": ["T3", "T40"],
-                                                     "lane25": ["NONE"]}
-        claim = _p6_claim_log(A, "Alpha",
-                              tail=" Saved maps: lane24->T3+T40.")
-        assert _p6_log(m) == claim[:2] + [
-            ("warning",
-             "AFC_BridgeBox chain1: lane25: saved T5 is held by lane5 -- not "
-             "restored"),
-            ("warning",
-             "AFC_BridgeBox chain1: lane25 has no T# -- its home T25 is held "
-             "by lane6; use SET_MAP")] + claim[2:]
+        lane24 = _p6_lane(m, "lane24")
+        assert (lane24.map, lane24.current_map) == (["T3"], "T3")
+        assert self._maps(m, "lane25") == {"lane25": ["T5"]}
+        claim = _p6_claim_log(A, "Alpha")
+        assert _p6_log(m) == claim[:2] + [(
+            "warning", "AFC_BridgeBox chain1: lane24: saved T40 is held by "
+                       "lane5 -- not restored")] + claim[2:]
+        _p6_consistent(m)
 
     def test_a_map_set_while_claimed_survives_a_replug(self, tmp_path,
                                                        monkeypatch):
@@ -17669,8 +16547,8 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._claim_pool_unit(A, "boxed") is not None
         afc = m.printer.afc
         lane = _p6_lane(m, "lane25")
-        afc.tool_cmds.pop("T25")
-        afc.gcode.register_command("T25", None)
+        afc.tool_cmds.pop("T1")
+        afc.gcode.register_command("T1", None)
         lane.map, lane.current_map = ["T7"], "T7"
         afc.tool_cmds["T7"] = "lane25"
         afc.gcode.register_command("T7", afc.cmd_CHANGE_TOOL)
@@ -17678,9 +16556,8 @@ class TestAfcBridgeBoxClaimPoolUnit:
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
         assert (lane.map, lane.current_map) == (["T7"], "T7")
-        assert "T25" not in afc.tool_cmds
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane25->T7.")
+        assert "T1" not in afc.tool_cmds
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
     def test_a_removed_last_tool_stays_removed_across_a_replug(
@@ -17689,20 +16566,19 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._claim_pool_unit(A, "boxed") is not None
         afc = m.printer.afc
         lane = _p6_lane(m, "lane25")
-        # AFC_REMOVE_MAPPING MAPPING=T25, as AFC_spool does it.
-        afc.tool_cmds.pop("T25")
-        lane.map = [cmd for cmd in lane.map if cmd != "T25"]
+        # AFC_REMOVE_MAPPING MAPPING=T1, as AFC_spool does it.
+        afc.tool_cmds.pop("T1")
+        lane.map = [cmd for cmd in lane.map if cmd != "T1"]
         lane.current_map = ""
-        afc.gcode.register_command("T25", None)
+        afc.gcode.register_command("T1", None)
         m._release_pool_unit(A)
         assert m._held["Alpha"]["lanes"]["lane25"]["map"] == "NONE"
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
         assert (lane.map, lane.current_map) == (["NONE"], "")
-        assert "T25" not in afc.tool_cmds
-        assert "T25" not in afc.gcode.ready_gcode_handlers
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane25->NONE.")
+        assert "T1" not in afc.tool_cmds
+        assert "T1" not in afc.gcode.ready_gcode_handlers
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
     def test_a_removed_last_tool_stays_removed_across_a_restart(
@@ -17712,45 +16588,25 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert _p6_lane(m, "lane25").map == ["NONE"]
-        assert "T25" not in m.printer.afc.gcode.ready_gcode_handlers
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane25->NONE.")
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T0"], "lane25": ["NONE"], "lane26": ["T1"],
+            "lane27": ["T2"]}
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
     def test_a_tool_moved_to_a_bay_mate_stays_there(self, tmp_path,
                                                     monkeypatch):
-        # Multiple mapping: SET_MAP LANE=lane27 MAP=T25 left lane25 on NONE.
+        # Multiple mapping: SET_MAP LANE=lane27 MAP=T1 left lane25 on NONE.
         m = _p6_named(tmp_path, monkeypatch, var={"Alpha": {
             "lane25": _p6_rec("NONE", ""),
-            "lane27": _p6_rec("T25, T27", "T27")}}, owners=f"{A}:Alpha")
+            "lane27": _p6_rec("T1, T3", "T3")}}, owners=f"{A}:Alpha")
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert self._maps(m, "lane25", "lane27") == {
-            "lane25": ["NONE"], "lane27": ["T25", "T27"]}
-        assert m.printer.afc.tool_cmds["T25"] == "lane27"
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane25->NONE, lane27->T25+T27.")
-        _p6_consistent(m)
-
-    @pytest.mark.parametrize("order", [(A, B), (B, A)])
-    def test_a_tool_moved_to_another_bay_stays_there_in_either_order(
-            self, tmp_path, monkeypatch, order):
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Alpha": {"lane25": _p6_rec("NONE", "")},
-                           "Bravo": {"lane28": _p6_rec("T25, T28", "T28")}},
-                      owners=f"{A}:Alpha, {B}:Bravo", **self.TWO)
-        _p6_quiet(m)
-        for uid in order:
-            assert m._claim_pool_unit(uid, "boxed") is not None
-        assert self._maps(m, "lane25", "lane28") == {
-            "lane25": ["NONE"], "lane28": ["T25", "T28"]}
-        bays = {A: ("Alpha", "lane25->NONE"), B: ("Bravo", "lane28->T25+T28")}
-        said: List[LogLine] = []
-        for uid in order:
-            bay, saved = bays[uid]
-            said += _p6_claim_log(uid, bay, tail=f" Saved maps: {saved}.")
-        assert _p6_log(m) == said
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T0"], "lane25": ["NONE"], "lane26": ["T2"],
+            "lane27": ["T1", "T3"]}
+        assert m.printer.afc.tool_cmds["T1"] == "lane27"
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
     def test_a_claimed_lane_is_marked_prep_done(self, tmp_path, monkeypatch):
@@ -17765,180 +16621,80 @@ class TestAfcBridgeBoxClaimPoolUnit:
     # ── a claim during a print ───────────────────────────────────────────
 
     #: lane24 saved in the extruder, with its spool details.
-    LOADED = {"Alpha": {"lane24": _p6_rec("T24", material="PLA",
+    LOADED = {"Alpha": {"lane24": _p6_rec("T0", material="PLA",
                                           color="#FF0000", weight=412.0,
                                           tool_loaded=True)}}
 
-    def test_the_claim_leaves_a_live_tool_until_the_print_ends(
+    def test_the_claim_goes_ahead_on_the_tools_that_are_free(
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch, var=self.LOADED,
                       owners=f"{A}:Alpha", print_state="printing")
         afc = m.printer.afc
         afc.tools["extruder"].lane_loaded = "lane24"
-        lane5 = _p6_other(m, "lane5", ["T24"])
+        lane5 = _p6_other(m, "lane5", ["T0"])
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
         assert _p6_bay(m, "Alpha")["bound"] == A
         lane24 = _p6_lane(m, "lane24")
-        # The records are on the lanes and saved, the toolhead lane is
-        # restored, and the live T# stays with lane5.
+        # The records are on the lanes, the toolhead lane is restored, and
+        # the T# lane5 took stays with it.
         assert (lane24.material, lane24.color, lane24.weight) == (
             "PLA", "#FF0000", 412.0)
         assert lane24.tool_loaded is True
-        assert afc.save_vars.call_count == 5
         assert m._owners() == {"Alpha": A}
-        assert (lane24.map, lane5.map) == (["NONE"], ["T24"])
-        assert afc.tool_cmds == {"T24": "lane5", "T25": "lane25",
-                                 "T26": "lane26", "T27": "lane27"}
+        assert (lane24.map, lane5.map) == (["T1"], ["T0"])
         claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            "info",
-            "AFC_BridgeBox chain1: lane24 takes T24 from lane5 once the print "
-            "ends, as the print may be using it; until then lane24 has no "
-            "T#.")] + claim[2:]
-        assert m._deferred_takes == {"lane24": {
-            "home": "T24", "maps": ["T24"], "current": "T24",
-            "quiet": False}}
+        assert _p6_log(m) == claim[:2] + [
+            ("warning", "AFC_BridgeBox chain1: lane24: saved T0 is held by "
+                        "lane5 -- not restored"),
+            ("warning", "AFC_BridgeBox chain1: lane24 is on T1 now")
+        ] + claim[2:]
         _p6_consistent(m)
-        _p6_quiet(m)
-        m._take_deferred_tools()                   # still printing
-        assert (lane24.map, lane5.map) == (["NONE"], ["T24"])
-        assert _p6_log(m) == []
-        m.printer.set_print_state("complete")
-        saves = afc.save_vars.call_count
-        m._take_deferred_tools()
-        assert (lane24.map, lane24.current_map) == (["T24"], "T24")
-        assert (lane5.map, lane5.current_map) == (["T37"], "T37")
-        assert _p6_log(m) == [
-            ("warning",
-             "AFC_BridgeBox chain1: T24 is the tool of Bambu lane lane24 "
-             "(Bambu lanes lane24-lane36 are T24-T36). lane5 was mapped to it "
-             "and is now T37. To give lane5 another tool outside T24-T36, use "
-             "SET_MAP LANE=lane5 MAP=<T#>."),
-            ("info",
-             "AFC_BridgeBox chain1: the printer is idle, so the T#s the claim "
-             "left in use are taken: lane24 is T24.")]
-        # Two saves: lane24's T24 assignment, then the take's own.
-        assert afc.save_vars.call_count == saves + 2
-        assert m._deferred_takes == {}
-        _p6_consistent(m)
-        _p6_quiet(m)
-        m._take_deferred_tools()                   # once
-        assert _p6_log(m) == []
-
-    def test_a_spare_bay_it_adopts_is_claimed_too(self, tmp_path,
-                                                  monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch, print_state="printing")
-        _p6_other(m, "lane5", ["T28"])
-        _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
-        assert _p6_bay(m, "Bravo")["bound"] == C
-        assert _p6_lane(m, "lane28").map == ["NONE"]
-        assert list(m._deferred_takes) == ["lane28"]
-        claim = _p6_claim_log(C, "Bravo")
-        assert _p6_log(m) == claim[:2] + [(
-            "info",
-            "AFC_BridgeBox chain1: lane28 takes T28 from lane5 once the print "
-            "ends, as the print may be using it; until then lane28 has no "
-            "T#.")] + claim[2:]
 
     def test_a_macro_is_not_renamed_during_the_print(self, tmp_path,
                                                      monkeypatch):
-        # force_assign_map lets TcmdAssign rename a macro out of the way.
-        m = _p6_named(tmp_path, monkeypatch, print_state="printing")
+        # force_assign_map lets a saved map take a macro's T# while idle,
+        # never during a print.
+        m = _p6_named(tmp_path, monkeypatch, print_state="printing",
+                      var={"Alpha": {"lane24": _p6_rec("T0")}},
+                      owners=f"{A}:Alpha")
         afc = m.printer.afc
         afc.force_assign_map = True
         handlers = afc.gcode.ready_gcode_handlers
 
         def _macro(gcmd: Any) -> None:
-            """A user macro on T24."""
-        afc.gcode.register_command("T24", _macro)
+            """A user macro on T0."""
+        afc.gcode.register_command("T0", _macro)
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert handlers["T24"] is _macro
-        assert "_T24" not in handlers
-        assert _p6_lane(m, "lane24").map == ["NONE"]
-        # TcmdAssign renames out of the way the T#s no macro holds.
-        renamed = [line for n in (25, 26, 27) for line in (
-            ("debug", f"<span class=warning--text>Existing command T{n} not "
-                      "found in gcode_macros</span>"),
-            ("debug", f"PREP-renaming macro T{n}"))]
-        claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + renamed + [(
-            "info",
-            "AFC_BridgeBox chain1: lane24 takes T24 from a macro once the "
-            "print ends, as the print may be using it; until then lane24 has "
-            "no T#.")] + claim[2:]
-        m.printer.set_print_state("standby")
-        _p6_quiet(m)
-        m._take_deferred_tools()
-        assert handlers["_T24"] is _macro
-        assert handlers["T24"] == afc.cmd_CHANGE_TOOL
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        assert afc.tool_cmds["T24"] == "lane24"
-        assert _p6_log(m) == [
-            ("debug", "PREP-renaming macro T24"),
-            ("info",
-             "AFC_BridgeBox chain1: the printer is idle, so the T#s the claim "
-             "left in use are taken: lane24 is T24.")]
+        assert handlers["T0"] is _macro
+        assert "_T0" not in handlers
+        assert _p6_lane(m, "lane24").map == ["T1"]
+        warned = [line for line in _p6_log(m) if line[0] == "warning"]
+        assert warned == [
+            ("warning", "AFC_BridgeBox chain1: lane24: saved T0 is held by a "
+                        "macro -- not restored"),
+            ("warning", "AFC_BridgeBox chain1: lane24 is on T1 now")]
 
-    def test_a_running_command_on_an_idle_printer_says_so(self, tmp_path,
-                                                          monkeypatch):
+    def test_a_running_command_counts_as_a_print(self, tmp_path,
+                                                 monkeypatch):
         # No [virtual_sdcard], so no print_stats: only idle_timeout says a
         # command is running.
-        m = _p6_named(tmp_path, monkeypatch)
+        m = _p6_named(tmp_path, monkeypatch,
+                      var={"Alpha": {"lane24": _p6_rec("T0")}},
+                      owners=f"{A}:Alpha")
         del m.printer._objects["print_stats"]
-        _p6_other(m, "lane5", ["T24"])
-        idle = m.printer.lookup_object("idle_timeout")
-        idle.state = "Printing"
+        afc = m.printer.afc
+        afc.force_assign_map = True
+
+        def _macro(gcmd: Any) -> None:
+            """A user macro on T0."""
+        afc.gcode.register_command("T0", _macro)
+        m.printer.lookup_object("idle_timeout").state = "Printing"
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            "info",
-            "AFC_BridgeBox chain1: lane24 takes T24 from lane5 once the "
-            "printer is idle, as a running command may be using it; until "
-            "then lane24 has no T#.")] + claim[2:]
-        _p6_quiet(m)
-        m._take_deferred_tools()
-        assert _p6_lane(m, "lane24").map == ["NONE"]
-        assert _p6_log(m) == []
-        idle.state = "Idle"
-        m._take_deferred_tools()
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        assert _p6_log(m) == [
-            ("warning",
-             "AFC_BridgeBox chain1: T24 is the tool of Bambu lane lane24 "
-             "(Bambu lanes lane24-lane36 are T24-T36). lane5 was mapped to it "
-             "and is now T37. To give lane5 another tool outside T24-T36, use "
-             "SET_MAP LANE=lane5 MAP=<T#>."),
-            ("info",
-             "AFC_BridgeBox chain1: the printer is idle, so the T#s the claim "
-             "left in use are taken: lane24 is T24.")]
-
-    def test_a_claim_that_takes_no_live_tool_waits_for_nothing(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch, print_state="printing")
-        _p6_other(m, "lane5", ["T5"])
-        _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
-        assert _p6_lane(m, "lane24").map == ["T24"]
-        assert m._deferred_takes == {}
-        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
-
-    def test_a_saved_map_that_leaves_the_home_tool_alone_goes_ahead(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch, print_state="printing",
-                      var={"Alpha": {"lane24": _p6_rec("T3")}},
-                      owners=f"{A}:Alpha")
-        _p6_other(m, "lane5", ["T24"])
-        _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
-        assert m.printer.afc.tool_cmds["T24"] == "lane5"
-        assert _p6_lane(m, "lane24").map == ["T3"]
-        assert m._deferred_takes == {}
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T3.")
+        assert afc.gcode.ready_gcode_handlers["T0"] is _macro
+        assert _p6_lane(m, "lane24").map == ["T1"]
 
     # ── what a restart before the unit's scan priming boots on ───────────
 
@@ -18098,42 +16854,15 @@ class TestAfcBridgeBoxClaimPoolUnit:
         drain_var_writes(m.printer)
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T3, lane26->NONE.")
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
+        # lane27 saved no map: until its turn its record has none, which a
+        # restart gives the next unused T#.
         snaps = [s["Alpha"] for s in drain_var_writes(m.printer)]
-        assert [{name: rec["map"] for name, rec in snap.items()}
-                for snap in snaps] == [{
-                    "lane24": "T3", "lane25": "T25", "lane26": "NONE",
-                    "lane27": "T27"}] * 5
+        saved = {"lane24": "T3", "lane25": "T25", "lane26": "NONE"}
+        assert [{name: rec.get("map") for name, rec in snap.items()}
+                for snap in snaps] == (
+            [dict(saved, lane27=None)] * 3 + [dict(saved, lane27="T0")] * 2)
         assert m._claim_plans == {}
-
-    def test_the_claim_says_what_a_reset_does(self, tmp_path, monkeypatch):
-        # Twelve lanes of another unit on T0-T11 ahead of the pool (AMS bays
-        # lane12-lane27, the HT on lane28); lane5's config gives it T28, the
-        # HT's home T#.
-        m = _p6_chain(tmp_path, monkeypatch,
-                      recorded=f"boxed:{A}, boxed:{B}, ht:{H}", pool_ams=4,
-                      pool_ht=1, lane_base=12,
-                      ams_names="Alpha, Bravo, Charlie, Delta",
-                      ht_names="Hot")
-        for n in range(12):
-            maps = ["T28"] if n == 5 else [f"T{n}"]
-            _p6_other(m, f"lane{n}", maps, config_map=maps if n == 5 else ())
-        assert m._claim_pool_unit(A, "boxed") is not None
-        _p6_quiet(m)
-        assert m._claim_pool_unit(H, "ht") is _p6_unit(m, "Hot")
-        assert _p6_lane(m, "lane28").map == ["T28"]
-        assert m.printer.afc.lanes["lane5"].map == ["T29"]
-        claim = _p6_claim_log(H, "Hot", "ht", 1)
-        assert _p6_log(m) == claim[:2] + [(
-            "warning",
-            "AFC_BridgeBox chain1: T28 is the tool of Bambu lane lane28 "
-            "(Bambu lanes lane12-lane28 are T12-T28). lane5 was mapped to it "
-            "and is now T29. To give lane5 another tool outside T12-T28, use "
-            "SET_MAP LANE=lane5 MAP=<T#>. Also set map: in "
-            "[AFC_stepper lane5] outside T12-T28, or AFC_RESET_MAPPING puts "
-            "lane5 back on T28 and lane28 on another T#.")] + claim[2:]
-        _p6_consistent(m)
 
     # ── a bay the claim adopts and the claim does not go through ─────────
 
@@ -18225,8 +16954,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert (lane.map, lane.current_map) == (["T7"], "T7")
         assert (_p6_bay(m, "Alpha")["uid"], _p6_bay(m, "Alpha")["bound"]) == (
             A, A)
-        assert _p6_log(m) == _p6_claim_log(
-            A, "Alpha", tail=" Saved maps: lane24->T7.")
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
 
     def test_a_failed_claim_of_a_unit_without_hold_lanes_takes_nothing_back(
             self, tmp_path, monkeypatch):
@@ -18275,8 +17003,8 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
         afc = m.printer.afc
         assert sorted(afc.lanes) == ["lane24", "lane26", "lane27"]
-        assert afc.tool_cmds == {"T24": "lane24", "T26": "lane26",
-                                 "T27": "lane27"}
+        assert afc.tool_cmds == {"T0": "lane24", "T1": "lane26",
+                                 "T2": "lane27"}
         assert _p6_log(m) == _p6_claim_log(A, "Alpha", lanes=3)
 
     def test_a_lane_with_no_send_lane_data_is_still_mapped(
@@ -18288,130 +17016,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
         sent = self._pushes(monkeypatch, lane25)
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed") is not None
-        assert (lane24.map, lane24.current_map) == (["T24"], "T24")
-        assert m.printer.afc.tool_cmds["T24"] == "lane24"
+        assert (lane24.map, lane24.current_map) == (["T0"], "T0")
+        assert m.printer.afc.tool_cmds["T0"] == "lane24"
         # The lanes that have it are still pushed.
-        assert sent == [["T25"]]
+        assert sent == [["T1"]]
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
-
-
-class TestAfcBridgeBoxTakeDeferredTools:
-    """The T#s a claim during a print left in use, taken once it ends."""
-
-    #: What _take_home_tool says when lane24 takes T24 from lane5.
-    MOVED = ("warning",
-             "AFC_BridgeBox chain1: T24 is the tool of Bambu lane lane24 "
-             "(Bambu lanes lane24-lane36 are T24-T36). lane5 was mapped to it "
-             "and is now T37. To give lane5 another tool outside T24-T36, use "
-             "SET_MAP LANE=lane5 MAP=<T#>.")
-
-    @staticmethod
-    def _idle(done: str) -> str:
-        """
-        :param done: what each lane is now
-        :return str: the line the take says
-        """
-        return (f"AFC_BridgeBox chain1: the printer is idle, so the T#s the "
-                f"claim left in use are taken: {done}.")
-
-    @staticmethod
-    def _bravo_on_t24(tmp_path: pathlib.Path,
-                      monkeypatch: pytest.MonkeyPatch,
-                      maps: str) -> afcBridgeBox:
-        """
-        CCCC claimed onto Bravo, whose lane28 saved ``maps`` (holding T24,
-        lane24's home), then a print starts and AAAA claims Alpha.
-
-        :param maps: lane28's saved map
-        :return afcBridgeBox: the master, its logs cleared after the claims
-        """
-        m = _p6_named(tmp_path, monkeypatch,
-                      var={"Bravo": {"lane28": _p6_rec(maps)}},
-                      owners=f"{C}:Bravo")
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
-        assert _p6_lane(m, "lane28").map == [cmd.strip()
-                                             for cmd in maps.split(",")]
-        m.printer.set_print_state("printing")
-        _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
-        assert _p6_lane(m, "lane24").map == ["NONE"]
-        return m
-
-    def test_a_tool_the_lane_is_given_meanwhile_stays(self, tmp_path,
-                                                      monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch, print_state="printing")
-        lane5 = _p6_other(m, "lane5", ["T24"])
-        assert m._claim_pool_unit(A, "boxed") is not None
-        afc = m.printer.afc
-        lane24 = _p6_lane(m, "lane24")
-        lane24.map, lane24.current_map = ["T40"], "T40"   # SET_MAP
-        afc.tool_cmds["T40"] = "lane24"
-        afc.gcode.register_command("T40", afc.cmd_CHANGE_TOOL)
-        m.printer.set_print_state("complete")
-        _p6_quiet(m)
-        m._take_deferred_tools()
-        assert (lane24.map, lane24.current_map) == (["T24", "T40"], "T24")
-        assert lane5.map == ["T37"]
-        assert m._deferred_takes == {}
-        assert _p6_log(m) == [self.MOVED,
-                              ("info", self._idle("lane24 is T24, T40"))]
-        _p6_consistent(m)
-
-    def test_the_wait_and_the_take_go_to_afc_log_only(self, tmp_path,
-                                                      monkeypatch):
-        m = self._bravo_on_t24(tmp_path, monkeypatch, "T24")
-        lane24, lane28 = _p6_lane(m, "lane24"), _p6_lane(m, "lane28")
-        assert lane28.map == ["T24"]
-        claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            "debug",
-            "AFC_BridgeBox chain1: lane24 takes T24 from lane28 once the print "
-            "ends, as the print may be using it; until then lane24 has no "
-            "T#.")] + claim[2:]
-        assert sorted(m._deferred_takes) == ["lane24"]
-        m.printer.set_print_state("complete")
-        _p6_quiet(m)
-        m._take_deferred_tools()
-        assert (lane24.map, lane28.map) == (["T24"], ["T28"])
-        assert m._deferred_takes == {}
-        assert _p6_log(m) == [
-            ("debug",
-             "AFC_BridgeBox chain1: T24 is the tool of Bambu lane lane24. "
-             "lane28 was mapped to it and is back on T28."),
-            ("debug", self._idle("lane24 is T24"))]
-        _p6_consistent(m)
-
-    @pytest.mark.parametrize("maps,after,quiet", [
-        ("T24, T28", ["T28"], True),
-        ("T24, T28, T40", ["T28", "T40"], True),
-        ("T24, T40", ["T40"], False)])
-    def test_a_holder_mapped_to_more_t_numbers(self, tmp_path, monkeypatch,
-                                               maps, after, quiet):
-        # A holder that keeps its own home T# ends where a claim with no
-        # print running leaves it; one that keeps only another T# does not.
-        m = self._bravo_on_t24(tmp_path, monkeypatch, maps)
-        level = "debug" if quiet else "info"
-        claim = _p6_claim_log(A, "Alpha")
-        assert _p6_log(m) == claim[:2] + [(
-            level,
-            "AFC_BridgeBox chain1: lane24 takes T24 from lane28 once the print "
-            "ends, as the print may be using it; until then lane24 has no "
-            "T#.")] + claim[2:]
-        assert sorted(m._deferred_takes) == ["lane24"]
-        m.printer.set_print_state("complete")
-        _p6_quiet(m)
-        m._take_deferred_tools()
-        assert (_p6_lane(m, "lane24").map, _p6_lane(m, "lane28").map) == (
-            ["T24"], after)
-        assert m._deferred_takes == {}
-        now = ", ".join(after)
-        assert _p6_log(m) == [
-            ("debug" if quiet else "warning",
-             f"AFC_BridgeBox chain1: T24 is the tool of Bambu lane lane24 "
-             f"(Bambu lanes lane24-lane36 are T24-T36). lane28 was mapped to "
-             f"it and is now {now}."),
-            (level, self._idle("lane24 is T24"))]
-        _p6_consistent(m)
 
 
 class TestAfcBridgeBoxNoBayMessage:

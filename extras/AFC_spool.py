@@ -907,17 +907,12 @@ class AFCSpool:
 
         :param runout_opt: "no" leaves runout lanes untouched, anything else clears them
         """
-        # Lane name -> T# another module keeps for it, as a config map is kept (BridgeBox
-        # pool lanes stay on their home T#)
-        kept: dict[str, str] = {}
-        self.printer.send_event("afc:reset_mapping", kept)
         # Commands in use before the reset, used further down to spot leftovers
         previously_used_cmds = {
             cmd for lane in self.afc.lanes.values() for cmd in lane.map if cmd != "NONE"
         }
         # Gather manually assigned mappings and add to list
         manually_assigned = {cmd for lane in self.afc.lanes.values() for cmd in lane._map}
-        manually_assigned.update(kept.values())
         # Fresh T0..T(n-1) sequence for auto lanes, skipping manually assigned numbers
         total_lanes = sum(len(unit.lanes) for unit in self.afc.units.values())
         # Generate enough candidates that reserved manual numbers cannot starve
@@ -930,8 +925,6 @@ class AFCSpool:
                 # Reassigning manually assigned mapping to lane
                 if lane._map:
                     map_cmd = lane._map[0]
-                elif lane.name in kept:
-                    map_cmd = kept[lane.name]
                 else:
                     map_cmd = auto_cmds.pop(0)
 

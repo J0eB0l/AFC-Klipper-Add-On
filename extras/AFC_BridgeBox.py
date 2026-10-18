@@ -25,7 +25,7 @@
 #
 # Names are pinned per uid and a unit's lanes follow its name's rank, so
 # removing a unit never renumbers the survivors (lane names carry Spoolman
-# bindings and T# macros) and a returning unit gets its lanes back. Learned
+# bindings and saved T# maps) and a returning unit gets its lanes back. Learned
 # values (bowden lengths) are saved per uid, not per bay.
 from __future__ import annotations
 
@@ -242,18 +242,20 @@ def _tcmd_holder(afc: Any, cmd: str) -> Optional[str]:
     return owner
 
 
-def _tcmd_free(afc: Any, lname: str, cmd: str) -> bool:
+def _tcmd_free(afc: Any, lname: str, cmd: str, take_macros: bool = True) -> bool:
     """
     Whether lane ``lname`` may register ``cmd`` without taking it from
     anything.
 
     Another lane that holds it (see _tcmd_holder) keeps it. A macro other
     than CHANGE_TOOL keeps it too, unless force_assign_map lets TcmdAssign
-    rename that macro out of the way, as PREP's TcmdAssign does.
+    rename that macro out of the way, as PREP's TcmdAssign does, and
+    ``take_macros`` allows that.
 
     :param afc: the AFC object
     :param lname: the lane that wants the T#
     :param cmd: the T# command
+    :param take_macros: False keeps a macro's T# even with force_assign_map
     :return bool: True when the T# is free for this lane
     """
     holder = _tcmd_holder(afc, cmd)
@@ -262,7 +264,7 @@ def _tcmd_free(afc: Any, lname: str, cmd: str) -> bool:
     handler = _tcmd_handlers(afc).get(cmd)
     if handler is None or _tcmd_is_ours(afc, handler):
         return True
-    return bool(getattr(afc, "force_assign_map", False))
+    return take_macros and bool(getattr(afc, "force_assign_map", False))
 
 
 def _parse_map(value: Any) -> List[str]:
@@ -290,98 +292,57 @@ def _parse_map(value: Any) -> List[str]:
     return out
 
 
-def _home_tool(lname: Optional[str]) -> Optional[str]:
+def _lane_number(lname: Optional[str]) -> Optional[int]:
     """
-    The home T# of a lane, from its lane number.
+    The number a lane's name carries.
 
     :param lname: a lane name
-    :return str: T<lane number>, or None for a lane with no number
+    :return int: its lane number, or None for a lane with no number
     """
     ds = "".join(c for c in (lname or "") if c.isdigit())
-    return "T" + ds if ds else None
+    return int(ds) if ds else None
 
 
-def _plan_lane_map(afc: Any, lname: str, home: str, rec: Dict[str, Any],
+def _plan_lane_map(afc: Any, lname: str, rec: Dict[str, Any],
                    warn: Callable[[str], None],
-                   note: Optional[Callable[[str], None]] = None,
-                   bambu: Any = ()) -> Tuple[List[str], str, bool]:
+                   take_macros: bool = True) -> Tuple[List[str], str]:
     """
-    The T# map a claimed Bambu lane comes back with.
+    The saved T# map a claimed Bambu lane comes back with.
 
-    A lane with no saved record, or one with no map in it, gets its home
-    T<lane number>, taken from whichever lane holds it (see
-    _take_home_tool). A saved map is the lane's own, set by SET_MAP and the
-    other mapping commands, and comes back as any AFC lane's map does across
-    a restart. Its home T# is taken back only when the map lists it, and any
-    other T# only while no other lane, and no other macro, holds it: the
-    record can be older than the live state, so a T# another lane or macro
-    holds at the claim stays where it is and is dropped from the map with a
-    warning. A map saved as NONE (its last T# removed, or moved to another
-    lane with multiple mapping) comes back as NONE, as PREP restores an AFC
-    lane's NONE, and SET_MAP gives it a T#. A map left with nothing because
-    every saved T# is held, or saved blank, falls back to the home T# while
-    that is free, and to NONE when it is not.
-
-    A saved T# that is the home tool of the Bambu lane holding it, dropped
-    while the lane keeps or falls back to its own home tool, is the home
-    winning as it does at every claim, and needs nothing from the user: that
-    line goes to ``note`` (AFC.log) instead of ``warn``.
+    A saved map is the lane's own: the T# its first claim gave it, or what
+    SET_MAP and the other mapping commands set since. It comes back as any
+    AFC lane's map does across a restart, one T# at a time, while no other
+    lane and no other macro holds that T#. The record can be older than the
+    live state, so a T# held at the claim stays where it is and is dropped
+    from the map with a warning. Without ``take_macros`` (a claim during a
+    print) a macro keeps its T# even with force_assign_map, which would
+    rename it under the print. A map saved as NONE (its last T# removed, or
+    moved to another lane with multiple mapping) comes back as NONE, as PREP
+    restores an AFC lane's NONE, and SET_MAP gives it a T#.
 
     :param afc: the AFC object
     :param lname: the lane's name
-    :param home: its home T#, T<lane number>
     :param rec: its saved record ({} when there is none)
     :param warn: called with each warning line
-    :param note: called with each line that needs no action; None warns
-    :param bambu: the names of the Bambu lanes whose home tool is theirs
-    :return tuple: (map, current_map, take_home); take_home is True when
-        the home T# is to be taken from a lane that holds it
+    :param take_macros: whether force_assign_map may take a macro's T#
+    :return tuple: (map, current_map); the map is empty when the record
+        saved none or none of it is free, and the claim then gives the lane
+        the next unused T# (see afcBridgeBox._next_tool)
     """
-    if not rec or "map" not in rec:
-        return [home], home, True
-
-    def _who(cmd: str) -> str:
-        """
-        Name what holds a T# that is not free.
-
-        :param cmd: a T# that is not free
-        :return str: the lane holding it, or "a macro"
-        """
-        return _tcmd_holder(afc, cmd) or "a macro"
-
-    home_free = _tcmd_free(afc, lname, home)
-    saved = _parse_map(rec.get("map"))
-    if not saved and rec.get("map"):
-        return ["NONE"], "", False
+    saved = _parse_map(rec.get("map")) if rec else []
     if not saved:
-        return ([home], home, False) if home_free else (["NONE"], "", False)
+        return (["NONE"], "") if rec and rec.get("map") else ([], "")
     kept: List[str] = []
-    dropped: List[str] = []
     for cmd in saved:
-        if cmd == home or _tcmd_free(afc, lname, cmd):
+        if _tcmd_free(afc, lname, cmd, take_macros):
             kept.append(cmd)
         else:
-            dropped.append(cmd)
-    back = f"; {lname} is back on {home}" if not kept and home_free else ""
-    for cmd in dropped:
-        line = (f"{lname}: saved {cmd} is held by {_who(cmd)} -- not "
-                f"restored{back}")
-        holder = _tcmd_holder(afc, cmd)
-        if ((back or home in kept)
-            and note is not None
-            and holder in bambu
-            and _home_tool(holder) == cmd):
-            note(line)
-        else:
-            warn(line)
+            warn(f"{lname}: saved {cmd} is held by "
+                 f"{_tcmd_holder(afc, cmd) or 'a macro'} -- not restored")
     if not kept:
-        if home_free:
-            return [home], home, False
-        warn(f"{lname} has no T# -- its home {home} is held by {_who(home)}; "
-             f"use SET_MAP")
-        return ["NONE"], "", False
+        return [], ""
     current = rec.get("current_map")
-    return kept, (current if current in kept else kept[0]), home in kept
+    return kept, (current if current in kept else kept[0])
 
 
 def assign_pool_tcmd(lane: Any, afc: Any = None) -> None:
@@ -731,7 +692,7 @@ class afcBridgeBox:
         self.pool_ams = min(self._pool_ams_asked, _MAX_AMS_BAYS)
         self.pool_ht = config.getint("pool_ht", 8, minval=0)
         # Optional unit names by family and enrollment order (default Bambu_AMS_# /
-        # Bambu_AMS_HT_#). List position sets lanes and T#; learned values follow the
+        # Bambu_AMS_HT_#). List position sets the lanes; learned values follow the
         # uid. See _given_names.
         self.ams_names = [n.strip() for n in
                           (config.get("ams_names", "") or "").split(",")
@@ -929,8 +890,6 @@ class afcBridgeBox:
         self.printer.register_event_handler("klippy:ready", self._scout_ready)
         self.printer.register_event_handler("afc:save_vars",
                                             self._handle_save_vars)
-        self.printer.register_event_handler("afc:reset_mapping",
-                                            self._handle_reset_mapping)
 
     # ── pure parts, split out so tests can exercise them directly ───────────
 
@@ -1381,20 +1340,12 @@ class afcBridgeBox:
         """
         The auto lane base: stored if ever resolved, else computed.
 
-        Computed = one past the highest number anything outside this chain
-        holds (see _others_numbers): the laneN of every [AFC_lane] or
-        [AFC_stepper], declared or fabricated by a chain master above this
-        one, and every T# AFC's PREP gives the config's lanes. The pool's
-        lanes and T#s then follow every other unit's, leaving any gap below
-        that top alone.
-
-        When no numbered laneN sections exist (a machine whose toolhead lanes
-        are named, e.g. [AFC_extruder e1] map: T1, not laneN), the T# an
-        [AFC_extruder] maps and the number an [AFC_extruder eN] section
-        carries count too, so the fabricated pool continues the tool sequence
-        with lane# == T# (T1/T2/T3 in use -> base 4 -> lane4/T4). The 24 is
-        only a last resort, when the config cannot be seen at all (no
-        fileconfig) or nothing at all is numbered or mapped.
+        Computed = one past the highest laneN outside this chain (see
+        _declared_lane_numbers): every [AFC_lane] or [AFC_stepper], declared
+        or fabricated by a chain master above this one, leaving any gap
+        below that top alone, and 1 when there is none. Only lane names
+        count: a claimed lane takes the next unused T# whatever its lane
+        number (see _next_tool).
 
         A stored base is checked against the same numbers once the bays are
         laid out (see _renumber_step).
@@ -1412,117 +1363,13 @@ class afcBridgeBox:
             if base:
                 self._base_stored = True
                 return base
-        base = 24
+        base = 1
         try:
-            nums = self._others_numbers(config)
-            if not self._declared_lane_numbers(config):
-                nums |= self._extruder_tool_numbers(config)
-            if nums:
-                base = max(nums) + 1
+            base = max(self._declared_lane_numbers(config), default=0) + 1
         except Exception:
             pass
         self._resolved_base = base            # _fold_and_sweep persists it
         return base
-
-    def _others_numbers(self, config: Any) -> Set[int]:
-        """
-        The lane numbers and T#s held outside this chain.
-
-        :param config: this section's wrapper (for the merged fileconfig)
-        :return set: the laneN numbers of _declared_lane_numbers and the T#
-            numbers of _prep_tool_numbers
-        """
-        return (self._declared_lane_numbers(config)
-                | set(self._prep_tool_numbers(config)))
-
-    @staticmethod
-    def _extruder_tool_numbers(config: Any) -> Set[int]:
-        """
-        The T#s a config's extruders carry: the map: of an [AFC_extruder],
-        and the number an [AFC_extruder eN] section name ends in. A
-        toolchanger's tools are numbered by their extruder sections ([AFC_extruder
-        e0] .. e3 are T0..T3) even when no map: is written, since the T# is
-        assigned at runtime.
-
-        :param config: this section's wrapper (for the merged fileconfig)
-        :return set: the T# numbers
-        """
-        import re as _re
-        fc = getattr(config, "fileconfig", None)
-        nums: Set[int] = set()
-        for sec in (fc.sections() if fc else []):
-            if not _re.match(r"(?i)afc_extruder\s+", sec):
-                continue
-            mv = fc.get(sec, "map") if fc.has_option(sec, "map") else ""
-            nums |= {int(t) for t in _re.findall(r"[Tt](\d+)", mv or "")}
-            me = _re.match(r"(?i)afc_extruder\s+\D*(\d+)$", sec)
-            if me:
-                nums.add(int(me.group(1)))
-        return nums
-
-    def _prep_tool_numbers(self, config: Any) -> List[int]:
-        """
-        The T#s the config's own lanes hold once AFC's PREP has run.
-
-        Numbered as AFC_prep and AFC_functions.TcmdAssign number them: a lane
-        takes the map AFC.var.unit saved for it, else its map: (or cmd:). A
-        lane with neither takes the lowest T# that no lane's map: names, no
-        saved map holds, and no [gcode_macro T<n>] holds unless [AFC]
-        force_assign_map is set. A pooled lane (unassigned:) holds none, and a
-        section auto_vars alone carries is a learned value, not a lane (see
-        _learned_only). A T# command another module registers at runtime is
-        not visible here.
-
-        :param config: this section's wrapper (for the merged fileconfig)
-        :return list: the T# numbers, in no order
-        """
-        import re as _re
-        fc = getattr(config, "fileconfig", None)
-        if fc is None:
-            return []
-
-        def opt(sec: str, key: str) -> str:
-            """:return str: the option's value, empty when unset"""
-            return str(fc.get(sec, key)) if fc.has_option(sec, key) else ""
-
-        def flag(sec: str, key: str) -> bool:
-            """:return bool: whether the option reads as true"""
-            return opt(sec, key).strip().lower() in ("1", "true", "yes", "on")
-
-        def tools(raw: Any) -> List[int]:
-            """:return list: the T# numbers a map names"""
-            text = raw if isinstance(raw, str) else ",".join(map(str, raw))
-            return [int(t) for t in _re.findall(r"[Tt](\d+)", text)]
-
-        saved = self._read_var_unit(config)
-        autov = self._read_ini(self.auto_vars_file)
-        held: List[int] = []
-        taken: Set[int] = set()
-        autos = 0
-        for sec in fc.sections():
-            m = _re.match(r"(?i)afc_(?:lane|stepper)\s+(\S+)$", sec)
-            if (not m or flag(sec, "unassigned")
-                or self._learned_only(fc, autov, sec)):
-                continue
-            mine = tools(opt(sec, "map") or opt(sec, "cmd"))
-            taken.update(mine)
-            unit = opt(sec, "unit").split(":", 1)[0].strip()
-            rec = (saved.get(unit) or {}).get(m.group(1))
-            raw = rec.get("map") if isinstance(rec, dict) else None
-            if raw:
-                mine = tools(raw)             # NONE holds none, and is no auto
-            elif not mine:
-                autos += 1
-                continue
-            held += mine
-            taken.update(mine)
-        if not flag("AFC", "force_assign_map"):
-            taken |= {int(m.group(1)) for m in
-                      (_re.match(r"(?i)gcode_macro\s+T(\d+)$", sec)
-                       for sec in fc.sections()) if m}
-        free = (t for t in range(99) if t not in taken)
-        held += [t for _n, t in zip(range(autos), free)]
-        return held
 
     def _var_unit_path(self, config: Any) -> str:
         """
@@ -1563,50 +1410,23 @@ class afcBridgeBox:
         past every other unit's again.
 
         A stored base was one past the others when it was resolved. A unit
-        added since can hold a lane number or T# among this chain's lanes, and
-        a pool lane's home T# is its lane number, so two lanes would share one
-        T#. Such a chain moves up past the highest number held outside it,
-        skipping the gap below. A chain the others only sit below or above
-        stays where it is, and a lane_base: in the section is never moved.
+        added since can hold a lane number among this chain's lanes, so two
+        lanes would share one name. Such a chain moves up past the highest
+        lane number held outside it, skipping the gap below. A chain the
+        others only sit below or above stays where it is, and a lane_base: in
+        the section is never moved.
 
         :param config: this section's wrapper (for the merged fileconfig)
         :return int: the lanes to move up by, 0 for none
         """
         if not getattr(self, "_base_stored", False):
             return 0
-        mine = {int(home[1:]) for pu in self._pool_units
-                for home in map(_home_tool, pu["lanes"]) if home}
-        others = self._others_numbers(config)
+        mine = {n for pu in self._pool_units
+                for n in map(_lane_number, pu["lanes"]) if n is not None}
+        others = self._declared_lane_numbers(config)
         if not mine & others:
             return 0
         return max(others) + 1 - self.lane_base
-
-    @staticmethod
-    def _shift_tools(value: Any, step: int, nums: Set[int]) -> Any:
-        """
-        A saved map with each T# of a moved lane moved by the same step.
-
-        :param value: a map or current_map as AFC.var.unit saves it, a string
-            or a list of strings
-        :param step: the lanes moved up by
-        :param nums: the lane numbers that moved
-        :return: the value in the same shape
-        """
-        import re as _re
-
-        def one(text: str) -> str:
-            """:return str: text with each moved T# moved"""
-            return _re.sub(
-                r"\b([Tt])(\d+)\b",
-                lambda m: (f"{m.group(1)}{int(m.group(2)) + step}"
-                           if int(m.group(2)) in nums else m.group(0)),
-                text)
-
-        if isinstance(value, str):
-            return one(value)
-        if isinstance(value, list):
-            return [one(v) if isinstance(v, str) else v for v in value]
-        return value
 
     def _renumber_records(self, config: Any, step: int,
                           was: Dict[str, List[str]],
@@ -1617,22 +1437,22 @@ class afcBridgeBox:
 
         Every lane moved by the same step, so each bay keeps its rank and the
         HT band its place. In AFC.var.unit, each bay's lane records move to
-        its new lanes, and a T# in their maps that was a moved lane's moves
-        with it; a runout lane or toolhead load naming a moved lane names its
-        new one. The store's lane sections move, and so do the ones auto_vars
-        alone carries, which this start parsed under the old names: those
-        names get a stand-in unless a lane is built under them now (see
-        _stand_in). AFC.var.unit is written first and the state, with the new
-        lane_base and lane map, straight after it, so a start that fails
-        later moves nothing a second time.
+        its new lanes with their T# maps as they are; a runout lane or
+        toolhead load naming a moved lane names its new one. The store's lane
+        sections move, and so do the ones auto_vars alone carries, which this
+        start parsed under the old names: those names get a stand-in unless a
+        lane is built under them now (see _stand_in). AFC.var.unit is
+        written first and the state, with the new lane_base and lane map,
+        straight after it, so a start that fails later moves nothing a second
+        time.
 
         :param config: this section's wrapper
         :param step: the lanes moved up by
         :param was: bay name -> its lanes before the move
         :param lanes_at: the lane map before the move
         """
-        nums = {int(home[1:]) for lanes in was.values()
-                for home in map(_home_tool, lanes) if home}
+        nums = {n for lanes in was.values()
+                for n in map(_lane_number, lanes) if n is not None}
         for first, span in lanes_at.values():
             nums |= set(range(first, first + span))
         if not nums:
@@ -1652,11 +1472,6 @@ class afcBridgeBox:
                 for rec in recs.values():
                     if not isinstance(rec, dict):
                         continue
-                    if unit in bays:
-                        for key in ("map", "current_map"):
-                            if key in rec:
-                                rec[key] = self._shift_tools(rec[key], step,
-                                                             nums)
                     if rec.get("runout_lane") in ren:
                         rec["runout_lane"] = ren[rec["runout_lane"]]
             system = data.get("system")
@@ -1717,8 +1532,8 @@ class afcBridgeBox:
         old, new = ((f"lane{lo}", f"lane{lo + step}") if lo == hi else
                     (f"lane{lo}-lane{hi}", f"lane{lo + step}-lane{hi + step}"))
         self._note_learned(
-            f"Other units now hold lane numbers or T#s among this chain's "
-            f"lanes, so its lanes moved up past the highest of those "
+            f"Other units now hold lane numbers among this chain's lanes, so "
+            f"its lanes moved up past the highest of those "
             f"({self.lane_base - 1}): {old} became {new}, with their saved "
             f"lane records, T# maps and learned values.")
 
@@ -2364,16 +2179,14 @@ class afcBridgeBox:
     @staticmethod
     def _lanes_text(start: int, span: int) -> str:
         """
-        Describe a lane range with its home tools.
+        Describe a lane range.
 
         :param start: first lane number
         :param span: lane count
-        :return str: "laneN-laneM (TN-TM)", or "laneN (TN)" for one lane
+        :return str: "laneN-laneM", or "laneN" for one lane
         """
         hi = start + span - 1
-        if span == 1:
-            return f"lane{start} (T{start})"
-        return f"lane{start}-lane{hi} (T{start}-T{hi})"
+        return f"lane{start}" if span == 1 else f"lane{start}-lane{hi}"
 
     def _layout_note(self, b: Dict[str, Any]) -> Optional[str]:
         """
@@ -2394,8 +2207,8 @@ class afcBridgeBox:
             if had is None or not moved:
                 return None
             return (f"AFC_BridgeBox {self.name}: {fam} {b['uid']} "
-                    f"({b['name']}) keeps its name, and its lanes and T# "
-                    f"changed: {self._lanes_text(*had)} -> {now}.")
+                    f"({b['name']}) keeps its name, and its lanes changed: "
+                    f"{self._lanes_text(*had)} -> {now}.")
         saved, holder = b["was"]
         key = "ht_names" if b["family"] == "ht" else "ams_names"
         gave = self._given_names()[3].get((b["family"], saved))
@@ -2416,12 +2229,11 @@ class afcBridgeBox:
                 why += (f" ({key} replaces the first {len(names)} default "
                         f"names)")
         if had is not None and moved:
-            lanes = (f"its lanes and T# changed: "
-                     f"{self._lanes_text(*had)} -> {now}")
+            lanes = f"its lanes changed: {self._lanes_text(*had)} -> {now}"
         elif had is not None:
             lanes = f"its lanes stay {now}"
         else:
-            lanes = f"its lanes and T# are now {now}"
+            lanes = f"its lanes are now {now}"
         return (f"AFC_BridgeBox {self.name}: {fam} {b['uid']} was recorded "
                 f"as {saved}, {why}. It is now {b['name']}, and {lanes}. "
                 f"Lane records saved under {saved} (spool, material, colour, "
@@ -3352,13 +3164,9 @@ class afcBridgeBox:
         # with a pool configured: it does no claiming without one.
         waits = online and not claimed and not self._prep_settled()
         pooled = bool(self.pool_ams or self.pool_ht)
-        tools = (f"T{first_lane}" if span == 1
-                 else f"T{first_lane}-T{first_lane + span - 1}")
         gcmd.respond_info(
             f"AFC_BridgeBox {self.name}: assigned {uid} to bay {name!r} "
-            f"(lane{first_lane}"
-            + (f"-lane{first_lane + span - 1}" if span > 1 else "")
-            + f", {tools})"
+            f"({self._lanes_text(first_lane, span)})"
             + (f" -- cleared {', '.join(cleared)} from the toolhead"
                if cleared else "")
             + (" -- claimed LIVE, no restart." if claimed
@@ -3567,7 +3375,7 @@ class afcBridgeBox:
         Runs live: AFC_BRIDGEBOX_FORGET of the offline unit, then
         AFC_BRIDGEBOX_ASSIGN of the new one to the bay that frees. Each runs as its
         own handler (see _ChildCommand), so their refusals and console lines apply
-        unchanged. The new unit takes the bay's name, lanes and T#, pinned so a
+        unchanged. The new unit takes the bay's name and lanes, pinned so a
         restart keeps it there. FORGET erases what was saved for the old unit, so
         the new one gets none of its lane records, spools, T# maps or learned
         values.
@@ -4837,11 +4645,10 @@ class afcBridgeBox:
         outside this chain (see _band_note). Its records are saved under the
         bay's name and keyed by the lanes it had. When none of them is a
         lane the bay has now, and there are as many as the bay has lanes,
-        they go onto its lanes in lane-number order. A map that is only the
-        old lane's home T# is dropped, as the lane's home T# is its new
-        lane number's; any other saved map stays. A lane saved loaded to a
-        toolhead comes back unloaded: AFC's loaded-lane record names the old
-        lane, which the claim does not restore (see loaded_lane_moved).
+        they go onto its lanes in lane-number order, each with its saved T#
+        map. A lane saved loaded to a toolhead comes back unloaded: AFC's
+        loaded-lane record names the old lane, which the claim does not
+        restore (see loaded_lane_moved).
 
         :param pu: the pool bay
         :param saved: what AFC.var.unit holds under the bay's name
@@ -4852,26 +4659,14 @@ class afcBridgeBox:
         if (not lanes
             or len(old) != len(lanes)
             or any(ln in lanes for ln in old)
-            or not all(_home_tool(ln) for ln in old + lanes)):
+            or not all(_lane_number(ln) is not None for ln in old + lanes)):
             return {}
-
-        def num(lname: str) -> int:
-            """
-            The lane number of a lane.
-
-            :param lname: a lane name
-            :return int: its lane number
-            """
-            return int((_home_tool(lname) or "T0")[1:])
-
         out: Dict[str, Dict[str, Any]] = {}
-        for was, now in zip(sorted(old, key=num), sorted(lanes, key=num)):
+        for was, now in zip(sorted(old, key=_lane_number),
+                            sorted(lanes, key=_lane_number)):
             rec = dict(saved[was])
             if not rec:
                 continue
-            if _parse_map(rec.get("map")) == [_home_tool(was)]:
-                rec.pop("map", None)
-                rec.pop("current_map", None)
             if "name" in rec:
                 rec["name"] = now
             rec["tool_loaded"] = False
@@ -4892,171 +4687,6 @@ class afcBridgeBox:
         except Exception:
             pass
 
-    def _handle_reset_mapping(self, kept: Dict[str, str]) -> None:
-        """
-        Keep each claimed Bambu lane on its home T# through AFC's mapping
-        reset, on AFC's afc:reset_mapping.
-
-        AFC_spool._reset_mapping, which AFC_RESET_MAPPING and
-        AFC_ENABLE_MULTIPLE_MAPPING ENABLE=0 run, gives each lane with a
-        config map: that T# and numbers every other lane from T0 up in unit
-        order. A pool lane has no map: (a claim gives it its home T#, see
-        _map_claimed_lanes), so the reset would number it like any other
-        lane: an HT on lane28 behind sixteen lanes would come out T16. Each
-        lane _reset_home_plan puts home goes in ``kept``, which the reset
-        keeps as it keeps a config map:, so AFC numbers every other lane
-        around it. A plan that fails leaves the lanes to AFC's numbering.
-
-        :param kept: lane name -> the T# AFC's reset keeps for it, filled
-            in here
-        """
-        try:
-            plan = self._reset_home_plan(
-                self.printer.lookup_object("AFC", None))
-        except Exception:
-            return
-        for lane, home in plan["home"]:
-            kept[lane.name] = home
-        try:
-            self._say_reset_home(plan)
-        except Exception:
-            pass
-
-    def _bambu_span(self) -> Tuple[int, int]:
-        """
-        The range of the Bambu lanes' home T#s.
-
-        :return tuple: the first and last lane number of this chain's pool bays
-        """
-        nums = [int(d) for pu in getattr(self, "_pool_units", None) or []
-                for d in ("".join(c for c in ln if c.isdigit())
-                          for ln in pu.get("lanes") or []) if d]
-        lo = getattr(self, "lane_base", 0) or min(nums, default=0)
-        return lo, max(nums, default=lo)
-
-    def _reset_home_plan(self, afc: Any) -> Dict[str, Any]:
-        """
-        What a mapping reset (see _handle_reset_mapping) does with this
-        chain's claimed lanes.
-
-        Each claimed Bambu lane takes its home T#, as AFC gives a lane its
-        config map:, so the reset leaves it where every claim puts it, and a
-        T# it had besides (SET_MAP, a virtual tool) goes as any lane's does.
-        A home T# that is the first T# of a lane's config map:, the one AFC's
-        reset gives that lane, stays that lane's, as at any reset, and the
-        Bambu lane is numbered by AFC like any lane with no map: (said once,
-        see _say_reset_home). So is a Bambu lane whose home T# is a macro
-        other than AFC's CHANGE_TOOL: AFC's reset registers a T# without
-        renaming what holds it, so the lane would be on a T# that does not
-        select it, as a claim with a saved record leaves it (see
-        _plan_lane_map). A lane already on that T#, where a claim with no
-        record puts it, stays: numbered elsewhere, the reset would
-        unregister the T#, and the macro with it, as one no lane has. A lane
-        with no lane number, or with a map: of its own, is left to AFC too.
-
-        A T# take waiting for the print (see _map_claimed_lanes) is dropped:
-        the reset gives the lane its T#, and the take would put back the
-        map the reset replaced. Its save would too (see _planned_maps), so it
-        is dropped before AFC saves the reset.
-
-        A bay no unit is claimed onto has no lanes in AFC's units, which the
-        reset numbers, and is left as it is.
-
-        :param afc: the AFC object
-        :return dict: "afc": the AFC object; "home": [(lane, its home T#)]
-            for the lanes that take it; "left": [(lane, its home T#, the
-            lane whose map: names it, or None for a macro)] for the lanes
-            left to AFC; "maps": lane name -> its map before the reset, for
-            each of this chain's claimed lanes; "waits": lane name -> the
-            dropped take
-        """
-        plan: Dict[str, Any] = {"afc": afc, "home": [], "left": [],
-                                "maps": {}, "waits": {}}
-        if afc is None:
-            return plan
-        bambu = {ln for pu in getattr(self, "_pool_units", None) or []
-                 for ln in pu.get("lanes") or []}
-        lanes = [(lname, lane)
-                 for unit in list((getattr(afc, "units", None)
-                                   or {}).values())
-                 for lname, lane in list((getattr(unit, "lanes", None)
-                                          or {}).items())]
-        # AFC's reset gives a lane with a config map: its first T# only.
-        config: Dict[str, str] = {}
-        for lname, lane in lanes:
-            for cmd in (getattr(lane, "_map", None) or [])[:1]:
-                config.setdefault(cmd, lname)
-        handlers = _tcmd_handlers(afc)
-        pending = getattr(self, "_deferred_takes", None)
-        for lname, lane in lanes:
-            if lname not in bambu:
-                continue
-            plan["maps"][lname] = list(getattr(lane, "map", None) or [])
-            if isinstance(pending, dict) and lname in pending:
-                plan["waits"][lname] = pending.pop(lname)
-            home = _home_tool(lname)
-            if not home or getattr(lane, "_map", None):
-                continue
-            holder = config.get(home)
-            handler = handlers.get(home)
-            if holder is not None and holder != lname:
-                plan["left"].append((lane, home, holder))
-            elif (handler is not None
-                  and not _tcmd_is_ours(afc, handler)
-                  and home not in plan["maps"][lname]):
-                plan["left"].append((lane, home, None))
-            else:
-                plan["home"].append((lane, home))
-        return plan
-
-    def _say_reset_home(self, plan: Dict[str, Any]) -> None:
-        """
-        Say what a mapping reset does with this chain's lanes (see
-        _reset_home_plan).
-
-        A lane whose home T# a config map: or a macro keeps from it is said
-        on the console once per session, as a claim says it (see
-        _take_home_tool), and to AFC.log at every later reset. A lane the
-        reset puts on its home T#, and a take it drops, go to AFC.log.
-
-        :param plan: what _reset_home_plan returned
-        """
-        told: Set[Tuple[str, str, str]] = getattr(self, "_reset_told",
-                                                  None) or set()
-        self._reset_told = told
-        lo, hi = self._bambu_span()
-        afc = plan["afc"]
-        for lane, home, holder in plan["left"]:
-            msg = (f"AFC_BridgeBox {self.name}: the mapping reset numbers "
-                   f"{lane.name} as any other lane, not on its home {home}: ")
-            if holder is None:
-                msg += (f"{home} is a macro other than AFC's CHANGE_TOOL, "
-                        f"which AFC does not replace. Remove or rename that "
-                        f"macro to have {lane.name} on {home}.")
-            else:
-                other = (getattr(afc, "lanes", None) or {}).get(holder)
-                section = (getattr(other, "fullname", None)
-                           or f"AFC_lane {holder}")
-                msg += (f"map: {home} in [{section}] keeps {home} for "
-                        f"{holder}. Set that map: outside T{lo}-T{hi} to have "
-                        f"{lane.name} on {home}.")
-            key = (lane.name, home, holder or "")
-            (self.logger.debug if key in told else self.logger.warning)(msg)
-            told.add(key)
-        moved = [f"{lane.name} {'+'.join(plan['maps'][lane.name]) or 'NONE'}"
-                 f"->{home}" for lane, home in plan["home"]
-                 if plan["maps"].get(lane.name) != [home]]
-        if moved:
-            self.logger.debug(
-                f"AFC_BridgeBox {self.name}: the mapping reset puts the Bambu "
-                f"lanes on their home T#s: {', '.join(moved)}.")
-        if plan["waits"]:
-            self.logger.debug(
-                f"AFC_BridgeBox {self.name}: the mapping reset maps "
-                f"{' and '.join(plan['waits'])}, so the T#s "
-                f"{'it' if len(plan['waits']) == 1 else 'they'} waited for "
-                f"are not taken.")
-
     def _fill_held_bays(self, data: Dict[str, Any]) -> None:
         """
         Write the lane records held for each pool bay no unit is claimed
@@ -5069,10 +4699,8 @@ class afcBridgeBox:
         (see _held_for) go there instead, as its claim would save them. A bay
         a unit is claimed onto is saved from its live lanes.
 
-        A lane whose T# take waits for the print is saved with the map its
-        claim planned (see _planned_maps), from the claim's own saves on, and
-        a lane the claim has not mapped yet with the map its record gives it
-        (see _unmapped_maps).
+        A lane the claim has not mapped yet is saved with the map its record
+        gives it (see _unmapped_maps).
 
         :param data: the snapshot, unit name -> lane name -> record
         """
@@ -5084,7 +4712,6 @@ class afcBridgeBox:
             if data[name]:
                 if isinstance(data[name], dict):
                     self._unmapped_maps(data[name])
-                    self._planned_maps(data[name])
                 continue
             if pu.get("bound"):
                 continue
@@ -5101,46 +4728,26 @@ class afcBridgeBox:
         A claim registers its lanes, then maps them one at a time (see
         _map_claimed_lanes), and each map's TcmdAssign saves: every save
         before a lane's turn has it on no T#. A restart before the last of
-        them is written would restore that NONE as the lane's saved map.
-        The map saved instead is the one its held record carries, else its
-        home T#, which is what a restart plans from (see _plan_lane_map).
+        them is written would restore that NONE as the lane's saved map. The
+        record saves instead the map its held record carries, and no map at
+        all for a lane with none, which a restart then gives the next unused
+        T# (see _plan_lane_map).
 
         :param recs: lane name -> record as save_vars writes it, changed in
             place
         """
         plans = getattr(self, "_claim_plans", None) or {}
         for lname, rec in recs.items():
-            plan = plans.get(lname)
-            if plan is None or not isinstance(rec, dict):
+            if lname not in plans or not isinstance(rec, dict):
                 continue
             if _parse_map(rec.get("map")):
                 continue
-            rec["map"], rec["current_map"] = plan
-
-    def _planned_maps(self, recs: Dict[str, Any]) -> None:
-        """
-        Give the record of each lane whose T# take waits for the print (see
-        _map_claimed_lanes) the map its claim planned, with any T# the lane
-        was given since, in place of the map it has until then: a restart or
-        a release before the print ends brings the lane back to that plan,
-        not to a map without the T#s it waits for.
-
-        :param recs: lane name -> record as save_vars writes it, changed in
-            place
-        """
-        pending = getattr(self, "_deferred_takes", None) or {}
-        for lname, rec in recs.items():
-            entry = pending.get(lname)
-            if entry is None or not isinstance(rec, dict):
-                continue
-            maps = [m for m in entry["maps"] if m != "NONE"]
-            maps += [m for m in _parse_map(rec.get("map")) if m not in maps]
-            maps.sort(key=lambda m: (len(m), m))
-            rec["map"] = ", ".join(maps) or "NONE"
-            current = rec.get("current_map")
-            rec["current_map"] = (entry["current"] if entry["current"] in maps
-                                  else current if current in maps
-                                  else maps[0] if maps else "")
+            plan = plans[lname]
+            if plan is None:
+                rec.pop("map", None)
+                rec.pop("current_map", None)
+            else:
+                rec["map"], rec["current_map"] = plan
 
     def _held_for(self, uid: str, bay: str) -> Dict[str, Dict[str, Any]]:
         """
@@ -5632,12 +5239,6 @@ class afcBridgeBox:
             self._watch_next = self.hotplug_poll
             entries = self._refine_models(snap, online_idx, entries, sec)
             self._save_held_ids(bridge)
-            try:
-                self._take_deferred_tools()
-            except Exception as ex:
-                self.logger.debug(
-                    f"AFC_BridgeBox {self.name}: deferred T# take failed: "
-                    f"{ex}")
             self._prune_missing(bridge, uids, entries, eventtime, sec,
                                 online_idx)
             # Re-read what the record now says (refine and prune both may
@@ -6144,8 +5745,8 @@ class afcBridgeBox:
             title = f"No free bay for new {what}"
             head = f"UID {uid} has no free bay: every {what} bay is taken."
         lines = [head,
-                 "Replace a unit that is offline: the new one takes its bay, "
-                 "lanes and T# now, and the old one is forgotten (its learned "
+                 "Replace a unit that is offline: the new one takes its bay "
+                 "and lanes now, and the old one is forgotten (its learned "
                  "values and saved lane records, spools included, are "
                  "erased)."]
         for pu, old, loaded in rows:
@@ -6670,12 +6271,10 @@ class afcBridgeBox:
             self._persist_pin(uid, first, span, name, model or (
                 "ht" if pu["family"] == "ht" else "boxed"))
             pu["uid"] = uid
-            last = first + span - 1
-            where = (f"lane{first}, T{first}" if span == 1
-                     else f"lane{first}-lane{last}, T{first}-T{last}")
             self.logger.info(
-                f"AFC_BridgeBox {self.name}: saved {uid} on {name} ({where}); "
-                f"it comes back there after a restart.")
+                f"AFC_BridgeBox {self.name}: saved {uid} on {name} "
+                f"({self._lanes_text(first, span)}); it comes back there "
+                f"after a restart.")
 
     def _release_pool_unit(self, uid: str, why: Optional[str] = None) -> None:
         """
@@ -6711,10 +6310,6 @@ class afcBridgeBox:
             # Taken while the lanes are still registered and mapped, and
             # before a toolhead record is cleared from them.
             recs = self._bay_records(pu)
-            # A T# a claim during a print left in use is not taken for a lane
-            # that is gone.
-            for lname in pu["lanes"]:
-                (getattr(self, "_deferred_takes", None) or {}).pop(lname, None)
             cleared = []
             for lname in pu["lanes"]:
                 lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
@@ -6778,8 +6373,7 @@ class afcBridgeBox:
         put the records it was handed on the lanes (see
         AFC_BambuAMS._apply_held_lanes), so a lane's own record is its
         newest, even before scan priming, and carries what was set on it
-        since. A lane whose T# take waits for the print is held with the map
-        its claim planned (see _planned_maps).
+        since.
 
         :param pu: the pool bay being released
         :return dict: lane name -> record
@@ -6795,7 +6389,6 @@ class afcBridgeBox:
                 continue
             if isinstance(rec, dict) and rec:
                 recs[lname] = rec
-        self._planned_maps(recs)
         return recs
 
     def _last_bay(self, uid: str,
@@ -6866,10 +6459,9 @@ class afcBridgeBox:
 
         Nothing is claimed before PREP has run (see _prep_settled). The unit
         is handed the lane records held for it on this bay (see _held_for),
-        which its lanes take at the claim, before the save below, and each
-        lane's T# map comes from its record (see _map_claimed_lanes). During
-        a print the claim takes no T# another live lane or a macro holds: the
-        lane waits for it until the print ends (see _take_deferred_tools).
+        which its lanes take at the claim, before the save below. Each lane
+        gets the T# map its record saved, else the next unused T# (see
+        _map_claimed_lanes).
 
         :param uid: the new physical AMS's UID
         :param model: its generation tag (ht/ams1/ams2/boxed)
@@ -6946,9 +6538,6 @@ class afcBridgeBox:
             for m, owner in list(afc.tool_cmds.items()):
                 if owner == lname:
                     afc.tool_cmds.pop(m, None)
-            ds = "".join(c for c in lname if c.isdigit())
-            if ds and afc.tool_cmds.get("T" + ds) not in live:
-                afc.tool_cmds.pop("T" + ds, None)
             lane.map = []
             lane._map = []
             lane.current_map = ""
@@ -6997,8 +6586,8 @@ class afcBridgeBox:
         # must not hold this unit's lanes under a bay recorded as another's.
         self._set_bay_owner(chosen["name"], uid)
         try:
-            remapped = self._map_claimed_lanes(
-                afc, activated, held, hold_tools=self._is_printing())
+            self._map_claimed_lanes(afc, activated, held,
+                                    take_macros=not self._is_printing())
         finally:
             self._claim_plans = {}
         # Each lane's data goes to Moonraker under the T# the map gave it, as
@@ -7022,13 +6611,12 @@ class afcBridgeBox:
         self._apply_learned(unit, uid, model)
         self.logger.info(
             f"AFC_BridgeBox {self.name}: CLAIMED {uid} as {model} onto "
-            f"{chosen['name']} ({len(activated)} lanes) -- live, no restart."
-            + (f" Saved maps: {', '.join(remapped)}." if remapped else ""))
+            f"{chosen['name']} ({len(activated)} lanes) -- live, no restart.")
         return unit
 
     @staticmethod
     def _claim_map_plans(lanes: List[Any], held: Dict[str, Dict[str, Any]]
-                         ) -> Dict[str, Tuple[str, str]]:
+                         ) -> Dict[str, Optional[Tuple[str, str]]]:
         """
         The map each lane a claim registers comes back with at a restart
         before the claim maps it (see _unmapped_maps).
@@ -7036,128 +6624,21 @@ class afcBridgeBox:
         :param lanes: the lanes the claim activated
         :param held: lane name -> record handed to this claim
         :return dict: lane name -> (map, current_map) as save_vars writes
-            them: the record's saved map, else the lane's home T#; none for
-            a lane whose record saved NONE, which is what it comes back with
+            them, the record's saved map; None for a lane with no saved map,
+            which gets the next unused T# then; none for a lane whose record
+            saved NONE, which is what it comes back with
         """
-        plans: Dict[str, Tuple[str, str]] = {}
+        plans: Dict[str, Optional[Tuple[str, str]]] = {}
         for lane in lanes:
             rec = held.get(lane.name) or {}
             saved = _parse_map(rec.get("map"))
-            home = _home_tool(lane.name)
             if saved:
                 cur = rec.get("current_map")
                 plans[lane.name] = (", ".join(saved),
                                     cur if cur in saved else saved[0])
-            elif home and not rec.get("map"):
-                plans[lane.name] = (home, home)
+            elif not rec.get("map"):
+                plans[lane.name] = None
         return plans
-
-    @staticmethod
-    def _tool_in_use(afc: Any, lname: str, cmd: str) -> Optional[str]:
-        """
-        What a claimed lane would take ``cmd`` from: another live lane that
-        holds it (see _tcmd_holder), or a macro other than AFC's CHANGE_TOOL,
-        which TcmdAssign renames out of the way when force_assign_map or a
-        config map lets it.
-
-        :param afc: the AFC object
-        :param lname: the lane that wants the T#
-        :param cmd: the T# command
-        :return str: the holding lane's name, "a macro", or None when nothing
-            holds it
-        """
-        holder = _tcmd_holder(afc, cmd)
-        if holder is not None and holder != lname:
-            return holder
-        handler = _tcmd_handlers(afc).get(cmd)
-        if handler is not None and not _tcmd_is_ours(afc, handler):
-            return "a macro"
-        return None
-
-    def _print_wait(self) -> str:
-        """
-        What a T# a claim leaves in use waits for, as the console says it.
-
-        :return str: "the print ends" while print_stats reports a print, else
-                     "the printer is idle"
-        """
-        try:
-            obj = self.printer.lookup_object("print_stats", None)
-            now = self.printer.get_reactor().monotonic()
-            if (obj is not None
-                and obj.get_status(now).get("state") in ("printing", "paused")):
-                return "the print ends"
-        except Exception:
-            pass
-        return "the printer is idle"
-
-    def _take_deferred_tools(self) -> None:
-        """
-        Give each lane a claim during a print left off a T# in use the map
-        its claim planned (see _map_claimed_lanes), once no print is running.
-
-        The home tool is taken as at any claim (_rehome_holder,
-        _take_home_tool); a saved T# another lane took meanwhile is left
-        with it, and a T# the lane was given meanwhile stays. A lane released
-        since is skipped, and a lane a mapping reset has numbered since (a
-        PRINT_END's AFC_RESET_MAPPING, see _reset_home_plan) has no take
-        left. Runs from the chain watch; a no-op while printing.
-        The line saying so goes to AFC.log only when every wait was a Bambu
-        lane's home T# held by another Bambu lane, which ends on its own
-        (see _say_deferred_tools).
-        """
-        pending = getattr(self, "_deferred_takes", None)
-        if not pending or self._is_printing():
-            return
-        afc = self.printer.lookup_object("AFC", None)
-        if afc is None:
-            return
-        done: List[str] = []
-        quiet = True
-        for lname, entry in list(pending.items()):
-            del pending[lname]
-            lane = (getattr(afc, "lanes", None) or {}).get(lname)
-            if lane is None:
-                continue
-            home = entry["home"]
-            holder = _tcmd_holder(afc, home)
-            quiet = (quiet
-                     and bool(entry.get("quiet"))
-                     and (holder in (None, lname)
-                          or self._bambu_home_move(afc, lname, home, holder)))
-            now = [m for m in (getattr(lane, "map", None) or [])
-                   if m != "NONE"]
-            target = [m for m in entry["maps"]
-                      if m == home or m in now or _tcmd_free(afc, lname, m)]
-            target += [m for m in now if m not in target]
-            if not target:
-                continue
-            current = next((c for c in (entry["current"],
-                                        getattr(lane, "current_map", ""))
-                            if c in target), target[0])
-            if home in target:
-                lane.map, lane.current_map = [home], home
-                self._rehome_holder(afc, lname, home)
-                self._take_home_tool(afc, lane)
-            lane.map, lane.current_map = target, current
-            try:
-                assign_pool_tcmd(lane, afc)
-            except Exception as ex:
-                self.logger.warning(
-                    f"AFC_BridgeBox {self.name}: TcmdAssign {lname} failed: "
-                    f"{ex}")
-            push = getattr(lane, "send_lane_data", None)
-            if callable(push):
-                try: push()
-                except Exception: pass
-            done.append(f"{lname} is {', '.join(target)}")
-        if not done:
-            return
-        try: afc.save_vars()
-        except Exception: pass
-        (self.logger.debug if quiet else self.logger.info)(
-            f"AFC_BridgeBox {self.name}: the printer is idle, so the T#s the "
-            f"claim left in use are taken: {'; '.join(done)}.")
 
     def _restart_roster(self) -> List[Tuple[str, str]]:
         """
@@ -7365,32 +6846,19 @@ class afcBridgeBox:
 
     def _map_claimed_lanes(self, afc: Any, lanes: List[Any],
                            held: Dict[str, Dict[str, Any]],
-                           hold_tools: bool = False) -> List[str]:
+                           take_macros: bool = True) -> None:
         """
         Give each lane a claim activated its T# map, and register it.
 
-        A numbered lane gets the map its held record saved (see
-        _plan_lane_map), else its home tool T<lane number> (lane12 -> T12),
-        so T# equals lane# whatever order units claim in. A home tool the
-        plan takes is moved off a lane that holds it: a claimed Bambu lane
-        goes back to its own home tool when it can (see _rehome_holder), and
-        any other lane is moved as _take_home_tool says. A lane with no
-        number is left with an empty map, which TcmdAssign fills with the
-        lowest free T#. Lanes are mapped one at a time, so a lane sees the
-        T# its bay-mates already took.
-
-        With ``hold_tools`` (a claim during a print) a planned T# another
-        live lane or a macro holds (see _tool_in_use) is not taken: the print
-        may be using it. The lane keeps the rest of its plan, or no T#, until
-        the print ends, when _take_deferred_tools gives it the whole plan;
-        one console line says which T#s wait.
+        A lane gets the map its held record saved, as far as nothing else
+        holds it now (see _plan_lane_map). The lanes left with none then take
+        the next unused T# each (see _next_tool), in slot order, as AFC
+        numbers a lane of its own, so no lane takes a T# a bay-mate saved.
 
         :param afc: the AFC object
         :param lanes: the lanes the claim activated, in slot order
         :param held: lane name -> record handed to this claim
-        :param hold_tools: take no T# that is in use
-        :return list: "laneN->T#" (a lane's T#s joined by +) for each lane
-            restored onto a saved map other than its home tool
+        :param take_macros: False during a print (see _plan_lane_map)
         """
         def _warn(msg: str) -> None:
             """
@@ -7400,60 +6868,15 @@ class afcBridgeBox:
             """
             self.logger.warning(f"AFC_BridgeBox {self.name}: {msg}")
 
-        def _note(msg: str) -> None:
+        def _assign(lane: Any, maps: List[str], current: str) -> None:
             """
-            Log a line about one lane's map that needs no action.
+            Set one lane's map and register its T#s.
 
-            :param msg: the line
+            :param lane: the lane
+            :param maps: its map
+            :param current: its current_map
             """
-            self.logger.debug(f"AFC_BridgeBox {self.name}: {msg}")
-
-        bambu = {ln for pu in getattr(self, "_pool_units", None) or []
-                 for ln in pu.get("lanes") or []}
-        restored: List[Tuple[Any, List[str]]] = []
-        waits: List[Tuple[str, List[Tuple[str, str]], List[str]]] = []
-        for lane in lanes:
-            ds = "".join(c for c in lane.name if c.isdigit())
-            if ds:
-                home = "T" + ds
-                rec = held.get(lane.name) or {}
-                maps, current, take_home = _plan_lane_map(
-                    afc, lane.name, home, rec, _warn, _note, bambu)
-                busy = []
-                for m in (maps if hold_tools else []):
-                    who = (None if m == "NONE"
-                           else self._tool_in_use(afc, lane.name, m))
-                    if who is not None:
-                        busy.append((m, who))
-                deferred = getattr(self, "_deferred_takes", None)
-                if deferred is None:
-                    deferred = self._deferred_takes = {}
-                deferred.pop(lane.name, None)
-                if busy:
-                    deferred[lane.name] = {
-                        "home": home, "maps": list(maps), "current": current,
-                        "quiet": all(self._bambu_home_move(afc, lane.name,
-                                                           m, who)
-                                     for m, who in busy)}
-                    taken = {m for m, _who in busy}
-                    maps = [m for m in maps if m not in taken] or ["NONE"]
-                    current = (current if current in maps
-                               else next((m for m in maps if m != "NONE"), ""))
-                    take_home = take_home and home in maps
-                    waits.append((lane.name, busy, maps))
-                # The takeover moves every T# on the lane's map, and only
-                # the home tool is ever taken.
-                lane.map, lane._map, lane.current_map = [home], [], home
-                if take_home:
-                    self._rehome_holder(afc, lane.name, home)
-                    self._take_home_tool(afc, lane)
-                lane.map, lane.current_map = maps, current
-                # NONE in place of a saved T# has had its warning.
-                if (not busy
-                    and maps != [home]
-                    and not (maps == ["NONE"]
-                             and _parse_map(rec.get("map")))):
-                    restored.append((lane, maps))
+            lane.map, lane._map, lane.current_map = maps, [], current
             try:
                 assign_pool_tcmd(lane, afc)
             except Exception as ex:
@@ -7461,232 +6884,81 @@ class afcBridgeBox:
                     f"AFC_BridgeBox {self.name}: TcmdAssign {lane.name} "
                     f"failed: {ex}")
             (getattr(self, "_claim_plans", None) or {}).pop(lane.name, None)
-        if waits:
-            self._say_deferred_tools(waits)
-        # A bay-mate mapped later can move a lane off what it restored; that
-        # move has its own warning.
-        return [f"{lane.name}->{'+'.join(maps)}" for lane, maps in restored
-                if list(lane.map) == maps]
 
-    def _say_deferred_tools(
-            self, waits: List[Tuple[str, List[Tuple[str, str]], List[str]]]
-    ) -> None:
+        unmapped = []
+        for lane in lanes:
+            rec = held.get(lane.name) or {}
+            maps, current = _plan_lane_map(afc, lane.name, rec, _warn,
+                                           take_macros)
+            if maps:
+                _assign(lane, maps, current)
+            else:
+                unmapped.append((lane, bool(_parse_map(rec.get("map")))))
+        for lane, dropped in unmapped:
+            cmd = self._next_tool(afc)
+            if dropped or not cmd:
+                # Its saved T#s were all held: say what it has instead.
+                _warn(f"{lane.name} is on {cmd} now" if cmd else
+                      f"{lane.name} has no T# -- T0-T98 are all held; use "
+                      "SET_MAP")
+            _assign(lane, [cmd] if cmd else ["NONE"], cmd or "")
+
+    def _reserved_tools(self) -> Set[str]:
         """
-        Say which T#s a claim during a print leaves where they are, and what
-        each lane has until then (see _map_claimed_lanes).
+        The T#s saved for known units that are not claimed now.
 
-        The home T# of a Bambu lane taken from another Bambu lane that ends
-        on its own is where every claim puts both lanes, so that wait goes
-        to AFC.log only, as the same move does at a claim with no print
-        running (see _bambu_home_move); a line with any other wait is said
-        on the console.
+        A bay saved for a recorded unit (see _bay_held) holds that unit's
+        lane records while it is unplugged or not back yet (see _held_for),
+        and with them the T# map each lane comes back with. Those T#s stay
+        the unit's until it is forgotten, unassigned or moved, so no other
+        claim is given them. Every chain's bays count.
 
-        :param waits: (lane, [(T#, what holds it)], its map until then)
+        :return set: the T# names
         """
-        count = sum(len(busy) for _ln, busy, _maps in waits)
-        takes = " and ".join(
-            f"{ln} takes " + " and ".join(f"{m} from {who}" for m, who in busy)
-            for ln, busy, _maps in waits)
-        bare = [ln for ln, _busy, maps in waits if maps == ["NONE"]]
-        until = []
-        if bare:
-            until.append(f"{' and '.join(bare)} "
-                         f"{'has' if len(bare) == 1 else 'have'} no T#")
-        until += [f"{ln} is {', '.join(maps)}" for ln, _busy, maps in waits
-                  if maps != ["NONE"]]
-        when = self._print_wait()
-        why = ("the print may be using" if when == "the print ends"
-               else "a running command may be using")
-        pending = getattr(self, "_deferred_takes", None) or {}
-        quiet = all((pending.get(ln) or {}).get("quiet")
-                    for ln, _busy, _maps in waits)
-        (self.logger.debug if quiet else self.logger.info)(
-            f"AFC_BridgeBox {self.name}: {takes} once {when}, as {why} "
-            f"{'it' if count == 1 else 'them'}; until then "
-            f"{', and '.join(until)}.")
-
-    def _bambu_home_move(self, afc: Any, lname: str, cmd: str,
-                         who: Optional[str]) -> bool:
-        """
-        Whether taking ``cmd`` from ``who`` is a Bambu lane's home T# going
-        back to it from another Bambu lane that ends on its own, as a claim
-        with no print running leaves both: ``who`` keeps its own home T#
-        besides ``cmd`` (_take_home_tool), or has no other T# and its home
-        T# is free (_rehome_holder).
-
-        :param afc: the AFC object
-        :param lname: the Bambu lane taking ``cmd``
-        :param cmd: the T# it takes
-        :param who: what holds it, a lane's name or "a macro"
-        :return bool: True when both lanes end on their own home T#s
-        """
-        if not who or cmd != _home_tool(lname):
-            return False
-        if not any(who in (pu.get("lanes") or [])
-                   for pu in getattr(self, "_pool_units", None) or []):
-            return False
-        other = (getattr(afc, "lanes", None) or {}).get(who)
-        own = _home_tool(who)
-        if other is None or not own:
-            return False
-        rest = [m for m in (getattr(other, "map", None) or [])
-                if m not in (cmd, "NONE")]
-        if rest:
-            return own in rest
-        return _tcmd_free(afc, who, own)
-
-    def _rehome_holder(self, afc: Any, lname: str, cmd: str) -> None:
-        """
-        Put a claimed Bambu lane that holds ``cmd``, another Bambu lane's
-        home tool, back on its own home tool before that lane takes ``cmd``.
-
-        Such a lane was mapped to ``cmd`` (by its saved map, or SET_MAP)
-        while the lane ``cmd`` belongs to was unclaimed. Only a lane with no
-        other T# and a free home tool (see _tcmd_free) is moved: one with
-        other T#s keeps them (see _take_home_tool), and one whose home tool
-        is held is left to _take_home_tool's spare T#. Both lanes end on
-        their own home tools, so the move is logged to AFC.log only.
-
-        :param afc: the AFC object
-        :param lname: the Bambu lane taking ``cmd``, its home tool
-        :param cmd: that home tool
-        """
-        holder = _tcmd_holder(afc, cmd)
-        if holder is None or holder == lname:
-            return
-        # A pool bay's lanes are in afc.lanes only while it is claimed.
-        if not any(holder in (pu.get("lanes") or [])
-                   for pu in getattr(self, "_pool_units", None) or []):
-            return
-        other = afc.lanes[holder]
-        ds = "".join(c for c in holder if c.isdigit())
-        if (not ds
-            or [m for m in (getattr(other, "map", None) or [])
-                if m not in (cmd, "NONE")]):
-            return
-        own = "T" + ds
-        if not _tcmd_free(afc, holder, own):
-            return
-        afc.tool_cmds.pop(cmd, None)
-        other.map, other.current_map = [own], own
+        out: Set[str] = set()
         try:
-            assign_pool_tcmd(other, afc)
-        except Exception as ex:
-            self.logger.warning(
-                f"AFC_BridgeBox {self.name}: TcmdAssign {holder} failed: {ex}")
-        push = getattr(other, "send_lane_data", None)
-        if callable(push):
-            try: push()
-            except Exception: pass
-        self.logger.debug(
-            f"AFC_BridgeBox {self.name}: {cmd} is the tool of Bambu lane "
-            f"{lname}. {holder} was mapped to it and is back on {own}.")
+            chains = [obj for _name, obj
+                      in self.printer.lookup_objects(self._BASE_SECTION)
+                      if isinstance(obj, afcBridgeBox)]
+        except Exception:
+            chains = []
+        for chain in chains or [self]:
+            held = getattr(chain, "_held", None) or {}
+            for pu in getattr(chain, "_pool_units", None) or []:
+                entry = held.get(pu.get("name")) or {}
+                if (pu.get("bound") is not None
+                    or not chain._bay_held(pu)
+                    or _norm_uid(entry.get("uid")) != _norm_uid(pu.get("uid"))):
+                    continue
+                for rec in (entry.get("lanes") or {}).values():
+                    if isinstance(rec, dict):
+                        out.update(_parse_map(rec.get("map")))
+        return out
 
-    def _take_home_tool(self, afc: Any, lane: Any) -> None:
+    def _next_tool(self, afc: Any) -> Optional[str]:
         """
-        Move a claimed lane's home tool off another lane that holds it.
+        The next unused T#, for a claimed lane with no saved map.
 
-        A Bambu lane whose claim takes its home T<lane number> (no saved
-        map, or a saved map that lists it; see _plan_lane_map) takes it
-        whatever order units claim in. PREP numbers lanes before any claim
-        registers, so it can hand a lane added elsewhere a T# inside the
-        Bambu range (or config maps one there). The claim still takes that
-        T# and drops it from the other lane's map, so AFC's lanes and tool
-        table agree. A lane left with no T# gets the lowest free one past
-        the Bambu range: the var file saves an empty map as NONE and PREP
-        restores that ahead of the config `map:`, so an emptied lane would
-        stay without a tool across restarts. The var file keeps the new T#,
-        so the next boot has no conflict. The move is a console warning,
-        except for a Bambu lane left on its own home tool, which is where
-        its claim puts it: that goes to AFC.log.
+        The lowest T# no lane holds or names in its config map:, no macro
+        other than AFC's CHANGE_TOOL holds, and no known unit has saved (see
+        _reserved_tools). A CHANGE_TOOL left on a T# no lane holds is free
+        to take. Unlike PREP's TcmdAssign it never renames a macro, even
+        with force_assign_map: a claim can come during a print.
 
         :param afc: the AFC object
-        :param lane: a Bambu lane this claim activated, already mapped home
+        :return str: the T# name, or None when none of T0-T98 is free
         """
-        live = getattr(afc, "lanes", None) or {}
-        for home in [m for m in (getattr(lane, "map", None) or [])
-                     if m != "NONE"]:
-            owner = afc.tool_cmds.get(home)
-            other = live.get(owner) if owner != lane.name else None
-            if other is None:
-                continue
-            lo, hi = self._bambu_span()
-            afc.tool_cmds.pop(home, None)
-            other.map = [m for m in (getattr(other, "map", None) or [])
-                         if m != home]
-            spare = None
-            if not [m for m in other.map if m != "NONE"]:
-                spare = self._spare_tool(afc, hi)
-                if spare is not None:
-                    handlers = getattr(getattr(afc, "gcode", None),
-                                       "ready_gcode_handlers", None) or {}
-                    if handlers.get(spare) is None:
-                        afc.function.register_tool_macro(other.name, spare)
-                    afc.tool_cmds[spare] = other.name
-                    other.map = [spare]
-            if getattr(other, "current_map", "") == home or spare:
-                other.current_map = next(
-                    (m for m in other.map if m != "NONE"), "")
-            for push in (getattr(other, "send_lane_data", None),
-                         getattr(afc, "save_vars", None)):
-                if callable(push):
-                    try: push()
-                    except Exception: pass
-            span = f"T{lo}-T{hi}"
-            now = ", ".join(m for m in other.map if m != "NONE")
-            msg = (f"AFC_BridgeBox {self.name}: {home} is the tool of Bambu "
-                   f"lane {lane.name} (Bambu lanes lane{lo}-lane{hi} are "
-                   f"{span}). {owner} was mapped to it and is now "
-                   f"{now or 'without a T#'}.")
-            if spare:
-                msg += (f" To give {owner} another tool outside {span}, use "
-                        f"SET_MAP LANE={owner} MAP=<T#>.")
-            # AFC's reset gives a lane only the first T# of its map:.
-            in_config = (getattr(other, "_map", None) or [])[:1] == [home]
-            if in_config:
-                section = (getattr(other, "fullname", None)
-                           or f"AFC_lane {owner}")
-                msg += (f" Also set map: in [{section}] outside {span}, or "
-                        f"AFC_RESET_MAPPING puts {owner} back on {home} and "
-                        f"{lane.name} on another T#.")
-            # A Bambu lane that keeps its own home tool ends where every
-            # claim puts it, as this lane does: nothing for the user to do.
-            bambu = any(owner in (pu.get("lanes") or [])
-                        for pu in getattr(self, "_pool_units", None) or [])
-            quiet = (bambu
-                     and not spare
-                     and not in_config
-                     and _home_tool(owner) in other.map)
-            (self.logger.debug if quiet else self.logger.warning)(msg)
-
-    @staticmethod
-    def _spare_tool(afc: Any, above: int) -> Optional[str]:
-        """
-        The lowest T# past ``above`` that no lane uses and no macro holds.
-
-        Skips what TcmdAssign skips: tools in AFC's lookup table, tools any
-        lane maps or its config maps, and names a macro other than AFC's
-        CHANGE_TOOL already registered. A CHANGE_TOOL left on a T# no lane
-        uses is free to take.
-
-        :param afc: the AFC object
-        :param above: the last Bambu lane number
-        :return str: the T# name, or None when none is free
-        """
-        handlers = getattr(getattr(afc, "gcode", None),
-                           "ready_gcode_handlers", None) or {}
-        change_tool = getattr(afc, "cmd_CHANGE_TOOL", None)
-        ours = getattr(change_tool, "__func__", change_tool)
-        taken = set(afc.tool_cmds)
+        handlers = _tcmd_handlers(afc)
+        taken = self._reserved_tools()
         for ln in (getattr(afc, "lanes", None) or {}).values():
             taken.update(getattr(ln, "map", None) or [])
             taken.update(getattr(ln, "_map", None) or [])
-        for n in range(above + 1, above + 100):
+        for n in range(99):
             cmd = f"T{n}"
-            held = handlers.get(cmd)
-            if (cmd in taken
-                or (held is not None
-                    and getattr(held, "__func__", held) is not ours)):
+            if cmd in taken or _tcmd_holder(afc, cmd) is not None:
+                continue
+            handler = handlers.get(cmd)
+            if handler is not None and not _tcmd_is_ours(afc, handler):
                 continue
             return cmd
         return None

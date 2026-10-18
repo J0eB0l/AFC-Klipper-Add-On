@@ -5073,7 +5073,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         :return list: the PREP block of Hot's claim
         """
         return cls._held_prep(("lane32", material), name="Hot", bays=1,
-                              cmd="T32")
+                              cmd="T0")
 
     RESTORED_136 = ("info", "AFC bambu Hot: restored the saved record of the "
                             "untagged spool on lane32 (spool 136)")
@@ -5095,7 +5095,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         # The master hands back what the unit's save wrote.
         assert self._held_of(unit) == {
             "spool_id": 136, "material": "PLA", "color": "#0086D6",
-            "weight": 750.0, "map": "T32"}
+            "weight": 750.0, "map": "T0"}
         # On the lane from the claim, before scan priming.
         assert (lane.spool_id, lane.material) == (136, "PLA")
         fetched = [("set_spoolID", (lane, 136), {"save_vars": False})]
@@ -5135,7 +5135,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         master.cmd_AFC_BRIDGEBOX_ASSIGN(assign)
         assert assign.messages == [(
             "respond_info", "AFC_BridgeBox chain1: assigned JJJJ to bay 'Hot' "
-                            "(lane32, T32) -- claimed LIVE, no restart.")]
+                            "(lane32) -- claimed LIVE, no restart.")]
         assert unit.unit_uid == self.OTHER_UID
         assert unit._held_lanes == {}
         assert unit.logger.messages == self._claimed_lines(self.OTHER_UID)
@@ -5157,7 +5157,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         master._claim_pool_unit(self.HOT_UID, "ht")
         assert self._held_of(unit) == {
             "spool_id": None, "material": "", "color": "#0086D6",
-            "weight": 750.0, "map": "T32"}
+            "weight": 750.0, "map": "T0"}
         # A record naming no spool and no material is not put on the lane.
         assert (lane.spool_id, lane.material) == (None, None)
         unit.logger.messages.clear()
@@ -5167,7 +5167,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert unit.afc.spool.calls == []
         assert unit._restored_bays == set()
         assert unit._defaulted_bays == {0}               # a spool: defaults
-        assert lane.map == ["T32"]
+        assert lane.map == ["T0"]
         assert unit.logger.messages == [
             *self._replug_prep(None), self._defaulted(0, "lane32", "Hot"),
             self.HOT_REARMED]
@@ -5626,7 +5626,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
                              ("lane26", "ABS"), empty=["lane27"],
                              name="Alpha", cmds={
                                  "lane24": "T24", "lane25": "T25",
-                                 "lane26": "T26", "lane27": "T27"})]
+                                 "lane26": "T26", "lane27": "T0"})]
         printer.afc.save_vars()
         saved = drain_var_writes(printer)[-1]["Alpha"]
         assert saved["lane24"]["spool_id"] == 159

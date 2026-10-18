@@ -1162,24 +1162,6 @@ class TestResetAFCMapping:
         # The manually assigned T0 should be applied
         assert spool.afc.tool_cmds.get("T0") == "lane1"
 
-    def test_reset_keeps_the_tool_a_listener_keeps_for_a_lane(self):
-        """A lane in afc:reset_mapping's kept dict keeps that T#, as a config
-        map does, and the auto numbering skips it."""
-        spool = _make_spool()
-        lane1 = self._make_lane_for_reset("lane1", "T0")
-        lane2 = self._make_lane_for_reset("lane2", "T1")
-        spool.afc.lanes = {"lane1": lane1, "lane2": lane2}
-        unit = MagicMock()
-        unit.lanes = {"lane1": lane1, "lane2": lane2}
-        spool.afc.units = {"unit1": unit}
-        spool.printer.register_event_handler(
-            "afc:reset_mapping", lambda kept: kept.update(lane1="T1"))
-        spool.cmd_AFC_RESET_MAPPING(self._make_reset_gcmd())
-        assert (lane1.current_map, lane2.current_map) == ("T1", "T0")
-        assert spool.afc.tool_cmds.get("T0") == "lane2"
-        assert spool.afc.tool_cmds.get("T1") == "lane1"
-        assert lane1._map == []
-
     def test_reset_renumbers_sequentially_after_unit_removed(self):
         """Simulates a unit having been removed: the 2 remaining lanes still
         carry their old (now-gapped) T4/T5 numbers from when more lanes

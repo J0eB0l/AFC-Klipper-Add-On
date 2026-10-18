@@ -559,7 +559,7 @@ unit_additional_menu_row_OpenAMS() {
 bridgebox_ask_pool() {
   # Sets how many AMS and AMS HT bays the chain builds (pool_ams, pool_ht).
   local ams ht
-  echo "Count the most units this chain will run: raising the AMS count later moves every AMS HT lane and T#."
+  echo "Count the most units this chain will run: raising the AMS count later moves every AMS HT lane."
   read -p "How many AMS or AMS 2 Pro units on this chain? (0-4, Enter keeps ${bridgebox_pool_ams}): " ams
   read -p "How many AMS HT units on this chain? (0-8, Enter keeps ${bridgebox_pool_ht}): " ht
   ams="${ams:-$bridgebox_pool_ams}"

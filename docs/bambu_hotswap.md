@@ -62,9 +62,10 @@ in the state file.
   stayed online continuously for `enroll_grace` (default 15 s). The claim does
   not wait for this: its lanes appear at once.
 - Once a unit is recorded and has been online for `enroll_grace`, the bay it
-  is on is saved for it: its name, lanes and `T#`. The console says:
+  is on is saved for it: its name and lanes, and the `T#` map each lane has.
+  The console says:
 
-  `AFC_BridgeBox <chain>: saved <UID> on <bay> (lane24-lane27, T24-T27); it comes back there after a restart.`
+  `AFC_BridgeBox <chain>: saved <UID> on <bay> (lane24-lane27); it comes back there after a restart.`
 
   From then on the bay is reserved for it (see [Reserved
   bays](#reserved-bays)), and a restart brings it back on the same bay.
@@ -95,14 +96,14 @@ in the state file.
 
 ## Lane layout
 
-Lanes are laid out in fixed bands, so a unit's lanes and `T#` do not move when
-other units come and go:
+Lanes are laid out in fixed bands, so a unit's lanes do not move when other
+units come and go:
 
 - AMS rank *r* (0 to 3) takes lanes `lane_base + 4r` to `lane_base + 4r + 3`.
 - The AMS band is `pool_ams` bays wide, or as wide as the highest recorded AMS
   bay needs, and never more than four bays. It does not shrink under recorded
   HT lanes that sit within four AMS bays: when a lower `pool_ams` would narrow
-  it, the HTs stay on their recorded lanes and `T#`. If a hand-written
+  it, the HTs stay on their recorded lanes. If a hand-written
   section, a chain above, or a chain further down the config whose
   `lane_base` is set or saved already uses one of those HT lanes, the band is
   only as wide as `pool_ams` and the recorded AMS need, the HT lanes move to
@@ -110,7 +111,9 @@ other units come and go:
   `[AFC_BridgeBox chain2] further down the config builds lane28`.
 - HT rank *r* takes the lane *r* places past the end of the AMS band, so the HT
   band starts at `lane_base + 16` at most.
-- Each lane's home tool is `T<lane#>`.
+
+`T#` commands are not part of the layout: a claimed lane takes its saved `T#`
+map or the next unused `T#` (see [T# commands](#t-commands)).
 
 A unit's rank is the position of its name in `ams_names` / `ht_names`, or in
 the default names past the end of the list. With no lists set, `Bambu_AMS_1`
@@ -119,38 +122,35 @@ never affects the layout, and `pool_ht` moves no lanes.
 
 With `lane_base` 12 and the default pools:
 
-| Bay | Lanes | Tools |
-|-----|-------|-------|
-| `Bambu_AMS_1` (AMS rank 0) | lane12-15 | `T12`-`T15` |
-| `Bambu_AMS_2` (AMS rank 1) | lane16-19 | `T16`-`T19` |
-| `Bambu_AMS_3` (AMS rank 2) | lane20-23 | `T20`-`T23` |
-| `Bambu_AMS_4` (AMS rank 3) | lane24-27 | `T24`-`T27` |
-| `Bambu_AMS_HT_1` (HT rank 0) | lane28 | `T28` |
-| `Bambu_AMS_HT_2` (HT rank 1) | lane29 | `T29` |
-| ... up to `Bambu_AMS_HT_8` | lane35 | `T35` |
+| Bay | Lanes |
+|-----|-------|
+| `Bambu_AMS_1` (AMS rank 0) | lane12-15 |
+| `Bambu_AMS_2` (AMS rank 1) | lane16-19 |
+| `Bambu_AMS_3` (AMS rank 2) | lane20-23 |
+| `Bambu_AMS_4` (AMS rank 3) | lane24-27 |
+| `Bambu_AMS_HT_1` (HT rank 0) | lane28 |
+| `Bambu_AMS_HT_2` (HT rank 1) | lane29 |
+| ... up to `Bambu_AMS_HT_8` | lane35 |
 
 The HT band starts at lane28 whether one AMS is plugged in or four. On a new
 install, `pool_ams: 2` starts it at lane20.
 
-`lane_base` defaults to 0, which means automatic: one past the highest number
-any other unit holds, so the Bambu lanes and `T#` come after every other
-unit's. That counts the `laneN` of each `[AFC_lane]` / `[AFC_stepper]` section
-in the config or built by a chain above this one, and the `T#` AFC's PREP
-gives each of the config's lanes: the map saved in `AFC.var.unit`, else its
-`map:`, else the lowest `T#` still free. A gap below the highest number is
-left alone: with lanes on `T0`-`T3` and one more on `T11`, the Bambu lanes
-start at lane12. With no `laneN` sections, the `T#` an `[AFC_extruder]` maps
-and the number in an `[AFC_extruder eN]` name count too. With nothing
-numbered at all, the base is 24.
+`lane_base` defaults to 0, which means automatic: one past the highest lane
+number any other unit holds, so the Bambu lanes come after every other unit's.
+That counts the `laneN` of each `[AFC_lane]` / `[AFC_stepper]` section in the
+config or built by a chain above this one. A gap below the highest number is
+left alone: with lane0-lane3 and one more on lane11, the Bambu lanes start at
+lane12. `T#` numbers do not count, and with no `laneN` section at all the base
+is 1.
 
 Once resolved, the base is locked in the state file, so adding lanes
 elsewhere later does not move the Bambu lanes, unless another unit then holds
-a lane number or `T#` among them. At the next start the chain's lanes then
-move up past the highest number held outside it, and each lane keeps its
-saved record, `T#` map and learned values. The startup log names the lanes
-that moved; update macros keyed to their old lanes or `T#`. A `lane_base` set
-in the section never moves. Changing it moves every Bambu lane and `T#`, and
-the moved lanes start without their saved details (see below).
+a lane number among them. At the next start the chain's lanes then move up
+past the highest lane number held outside it, and each lane keeps its saved
+record, `T#` map and learned values. The startup log names the lanes that
+moved; update macros keyed to their old lane names. A `lane_base` set in the
+section never moves. Changing it moves every Bambu lane, and the moved lanes
+start without their saved details (see below).
 
 Set `pool_ams` to the most AMS you will run on this chain. A Bambu bus
 addresses at most 4 AMS, so `pool_ams` above 4 is treated as 4 and the startup
@@ -163,11 +163,11 @@ log says so. Keep `pool_ht` at 8 or below, the most HT a Bambu bus takes.
   with a pool, gives the `pool_ams` value that silences it.
 - Raising `pool_ams`, or recording an AMS that needs a bay past the AMS band,
   widens the band. When the wider band reaches the HT lanes, every HT's lanes
-  and `T#` move up to start past it, 4 lanes for each AMS bay it gains. The
+  move up to start past it, 4 lanes for each AMS bay it gains. The
   startup log lists each unit whose lanes moved.
 - An HT whose recorded lanes sit past four AMS bays, such as one recorded
   while `pool_ams` was set above 4, moves down at startup, so the HT band
-  starts at `lane_base + 16`. Its lanes and `T#` change, and the startup log
+  starts at `lane_base + 16`. Its lanes change, and the startup log
   lists each one. Update macros and Spoolman bindings keyed to its old lanes.
 
 Lanes whose numbers change at startup start without their saved details, even
@@ -190,7 +190,7 @@ starts after each of them:
   `unit_prefix`**: the saved name is no longer one the family is given, so the
   unit draws a free name at startup. An AMS keeps its lanes when the name for
   that lane position is free; otherwise it takes the lowest free name. An HT
-  always takes the lowest free HT name, so its lanes and `T#` can change.
+  always takes the lowest free HT name, so its lanes can change.
 - **An AMS saved past the fourth bay** (such as `Bambu_AMS_5`, or the fifth
   `ams_names` entry) draws a free name inside the four AMS bays. If all four
   are held by other recorded AMS, it waits with no bay (see [No free bay:
@@ -198,7 +198,7 @@ starts after each of them:
   and lanes are dropped. When a bay frees, it takes that bay, with none of its
   old lane details.
 - **Reordering** `ams_names` / `ht_names` entries: units keep their names and
-  move to the lanes and `T#` of their new positions.
+  move to the lanes of their new positions.
 - **Deleting a UID from the roster** without `AFC_BRIDGEBOX_FORGET`: with a
   pool, its name holds no bay. A spare wears that name, and the next unit saved
   on that bay takes the name over. Without a pool the name stays reserved for
@@ -211,7 +211,7 @@ starts after each of them:
   lanes.
 
 At startup the console names each recorded unit whose name or lanes changed,
-with its old and new lanes and `T#`. Such a unit keeps its learned bowden
+with its old and new lanes. Such a unit keeps its learned bowden
 lengths, which follow the unit, and its lanes start without their saved
 details (see [Spools across a release](#spools-across-a-release)). A lane
 that AFC records as loaded to a toolhead and that this layout gives to another
@@ -318,8 +318,7 @@ model section take effect at the next restart.
 
 What stays with a bay and what follows the unit:
 
-- The bay's name, lanes and home `T#` stay with the bay, and so do macros
-  keyed to them.
+- The bay's name and lanes stay with the bay, and so do macros keyed to them.
 - A lane's saved details come back only to the unit that was on the bay (see
   [Spools across a release](#spools-across-a-release)).
 - Learned bowden lengths follow the unit's UID to whatever bay it claims (see
@@ -327,7 +326,7 @@ What stays with a bay and what follows the unit:
 
 `AFC_BRIDGEBOX_FORGET` and `AFC_BRIDGEBOX_UNASSIGN` both release a unit's name.
 No command renames a unit and keeps its lanes: `AFC_BRIDGEBOX_ASSIGN` moves a
-unit to a different bay, with that bay's lanes, `T#` and name.
+unit to a different bay, with that bay's lanes and name.
 
 ### Learned values
 
@@ -433,70 +432,54 @@ command does not start this wait.
 
 ### T# commands
 
-A claimed lane gets its saved `T#` map when the same unit comes back to the
-same bay, and its home `T<lane#>` otherwise. `SET_MAP`, `AFC_SWAP_MAPPING`,
-`AFC_ADD_MAPPING` and `AFC_REMOVE_MAPPING` on Bambu lanes are saved like any
-AFC lane's map. The map comes back when the same unit returns to the same bay,
-across a restart or an `auto_drop` re-plug, and it is lost with the rest of
-the lane's details (see [Spools across a
-release](#spools-across-a-release)).
+`T#` commands are not tied to lane numbers. A claimed lane gets its saved `T#`
+map when the same unit comes back to the same bay, and otherwise the next
+unused `T#`, as AFC numbers a lane of its own:
 
-- A lane remapped away from its home `T#` does not take it back at a claim;
-  the lane that received it keeps it.
+- The next unused `T#` is the lowest one that no lane holds or names in its
+  config `map:`, no macro other than AFC's tool change holds, and no known unit
+  has saved. With other lanes on `T0`-`T3`, a new AMS gets `T4`-`T7`, whatever
+  its lane numbers. It never renames a macro, even with `force_assign_map`.
+- A known unit's saved `T#`s stay its own while it is unplugged, or not back
+  yet after a restart: no other claim is given them. They are freed when the
+  unit is forgotten with `AFC_BRIDGEBOX_FORGET`, unassigned with
+  `AFC_BRIDGEBOX_UNASSIGN` or moved with `AFC_BRIDGEBOX_ASSIGN`, and the next
+  claim can take them.
+- `SET_MAP`, `AFC_SWAP_MAPPING`, `AFC_ADD_MAPPING` and `AFC_REMOVE_MAPPING` on
+  Bambu lanes are saved like any AFC lane's map. The map comes back when the
+  same unit returns to the same bay, across a restart or an `auto_drop`
+  re-plug, and it is lost with the rest of the lane's details (see [Spools
+  across a release](#spools-across-a-release)).
 - A lane saved with no `T#` (its last `T#` removed with `AFC_REMOVE_MAPPING`,
   or taken by another lane's `SET_MAP` with multiple mapping on) comes back
   with none. `AFC_ADD_MAPPING` gives it one again, or `SET_MAP` takes one from
   another lane.
 - A saved `T#` that another lane or a macro holds at the claim stays where it
   is and is dropped from the map, with a warning. A lane left with nothing
-  goes back to its home `T#` while that is free, and to no `T#` when it is not,
-  with a warning to use `SET_MAP`. A lane left with no `T#` this way stays
-  without one at later claims until you give it one.
-- When a lane takes its home `T#` from another lane, a warning names both:
-  - a claimed Bambu lane that holds it as its only `T#` goes back to its own
-    home `T#` when that is free;
-  - any other lane, such as a lane PREP numbered into the Bambu range, loses
-    that `T#`. A lane left with no other `T#` gets the lowest free one past the
-    Bambu lanes, which works at once and is saved; the warning says how to
-    pick another tool with `SET_MAP`. If the lane's config section sets `map:`
-    to the taken `T#`, the warning also says to change it there, or
-    `AFC_RESET_MAPPING` puts the lane back on it.
-- The home `T#` wins between Bambu lanes with no warning: when both lanes are
-  Bambu lanes and each keeps its own home `T#`, the dropped or moved `T#` goes
-  to AFC.log only.
-- During a print a claim takes no `T#` that another lane or a macro holds
-  (see [The print gate](#the-print-gate)).
-- The `CLAIMED` console line lists each lane restored onto a saved map other
-  than its home `T#`, such as `Saved maps: lane25->NONE.` for a lane saved
-  with none.
+  takes the next unused `T#`, and a second warning names it:
+
+  `AFC_BridgeBox <chain>: lane24: saved T3 is held by lane5 -- not restored`
+
+  `AFC_BridgeBox <chain>: lane24 is on T0 now`
+- During a print a claim takes no `T#` from a macro, even with
+  `force_assign_map` (see [The print gate](#the-print-gate)).
 
 `AFC_RESET_MAPPING`, and `AFC_ENABLE_MULTIPLE_MAPPING ENABLE=0`, which runs
-it, put every claimed Bambu lane back on `T<lane#>` and number the other lanes
-from `T0` as usual. The result is saved. Two cases leave a Bambu lane to AFC's
-usual numbering, with a console warning once per Klipper session and AFC.log
-lines after that:
-
-- Another lane's config section has `map: T<lane#>` as its first `T#`. Set
-  that `map:` outside the Bambu lanes.
-- `T<lane#>` is a macro other than AFC's tool change, which AFC does not
-  replace. Remove or rename that macro.
-
-A reset changes only claimed lanes. A bay held for an unplugged unit keeps its
-saved map, which comes back with the unit; a later reset puts it home.
+it, number the claimed Bambu lanes with every other lane, as AFC numbers any
+lane. The result is saved. A bay held for an unplugged unit keeps its saved
+map; a `T#` of it that the reset gave another lane is dropped when the unit
+comes back, as above.
 
 `SET_MAP LANE=<lane> MAP=T<n>` swaps `T#`s with the lane that holds `T<n>`,
 and refuses a `T#` no lane holds. With multiple mapping on, it moves the `T#`
 instead, and the lane that held it is left without it.
 
-Keep other lanes' maps and your own `T#` macros outside the Bambu lanes: a
-Bambu lane cannot have a `T<lane#>` that one of them holds.
-
 ### Reserved bays
 
 A bay is reserved for a unit that is saved on it (see [Known
 units](#known-units-the-roster)). While the unit is unplugged, no other unit
-claims that bay, and a re-plug takes back the same lanes, name and `T#` with no
-popup.
+claims that bay, and a re-plug takes back the same lanes, name and `T#` map
+with no popup.
 
 A unit that is not saved on its bay holds it only while it is claimed. When
 `auto_drop` releases it, the bay goes back to the free pool. A re-plug takes a
@@ -585,8 +568,8 @@ insert, which moves filament. The console says the slot
 `came up with a spool and no record of it -- scanning it as a fresh insert`.
 The usual insert rules apply, so nothing is scanned during a print.
 
-The saved details are gone, and the lanes start clean (home `T#`, then tags or
-AFC defaults), when:
+The saved details are gone, and the lanes start clean (the next unused `T#`,
+then tags or AFC defaults), when:
 
 - a different unit claims the bay;
 - the unit claims another bay, such as one it is moved to with
@@ -635,7 +618,7 @@ one and marks the offline ones; otherwise, on a chain with a pool and no
   restart, or with `AFC_BRIDGEBOX_ASSIGN` while it is online.
 - **An HT, or an AMS while fewer than four AMS bays are built.** Once the unit
   is recorded, a restart builds it a bay. An AMS bay past the AMS band moves
-  every HT's lanes and `T#` up by 4, and their saved lane details do not follow
+  every HT's lanes up by 4, and their saved lane details do not follow
   (see [Lane layout](#lane-layout)). Raise `pool_ams` or `pool_ht` to keep
   spare bays for units plugged in live. An offline holder is named with the
   same FORGET and REPLACE commands.
@@ -645,7 +628,8 @@ one and marks the offline ones; otherwise, on a chain with a pool and no
 **Replace.** On a chain with a pool and no `roster:` option, a waiting unit can
 take the bay of a unit that is offline. `AFC_BRIDGEBOX_REPLACE` forgets the old
 unit and assigns the new one to its bay in one step. The new unit takes the
-bay's name, lanes and home `T#`, saved across restarts. It gets none of the old
+bay's name and lanes, saved across restarts, and the next unused `T#`s. It
+gets none of the old
 unit's lane details, spools, `T#` maps or learned values, which the forget
 erases.
 
@@ -666,8 +650,8 @@ It is offered once per wait, and again after the unit is unplugged and plugged
 back in. It never appears with a `roster:` option or without a pool; for a
 print, see [The print gate](#the-print-gate).
 
-The popup lists each offline-held bay: its name, the old UID, its lanes and
-`T#`, and how long the unit has been offline, with a **Replace `<bay>`** button
+The popup lists each offline-held bay: its name, the old UID, its lanes, and
+how long the unit has been offline, with a **Replace `<bay>`** button
 (up to 8). A bay with a lane in the toolhead has no button, and its row says
 how to clear the record (see [Commands](#commands)); during a print it says to
 replace it once the print ends instead, with no `FORCE=1`, which would also
@@ -687,19 +671,11 @@ busy running G-code, so a long macro, homing or a heat-and-wait counts too.
   the next tick.
 - **Claim is not gated.** A unit plugged in during a print is claimed at once,
   with its saved details, and adding lanes and `T#` does not disturb the
-  print. The claim takes no `T#` that another lane or a macro holds, since the
-  print may be using it. The lane keeps the rest of its map, or has no `T#`,
-  and the console says once:
-
-  `AFC_BridgeBox <chain>: lane16 takes T16 from lane28 once the print ends, as the print may be using it; until then lane16 has no T#.`
-
-  When only `idle_timeout` reports `Printing`, it says `once the printer is
-  idle, as a running command may be using it`. Once the printer is idle the
-  lane takes those `T#` as at any claim (see [T# commands](#t-commands)), and
-  the console says
-  `the printer is idle, so the T#s the claim left in use are taken: lane16 is T16.`
-  A restart before then keeps that plan. The bridge saves its record of the
-  new unit when the print ends rather than mid-print.
+  print: a claim only ever takes a `T#` nothing else holds (see [T#
+  commands](#t-commands)). During a print it takes none from a macro either,
+  even with `force_assign_map`, since the print may be calling it. The bridge
+  saves its record of the new unit when the print ends rather than
+  mid-print.
 - **Popups.** The New AMS popup is not shown for a unit claimed during a print;
   open the bay picker afterwards with `AFC_BRIDGEBOX_ASSIGN UID=<uid>`. The No
   free bay popup waits for the print to end.
@@ -961,9 +937,6 @@ module. `activate_from_pool`, `deactivate_to_pool`, `assign_pool_tcmd`,
   `pin_tool_start: buffer`. `AFC_BridgeBox` takes it out of standalone mode
   once a claim gives it lanes.
 - `AFC_prep.py`: skips pool units.
-- `AFC_spool.py`: the mapping reset sends `afc:reset_mapping`, and the chain
-  master names there each claimed Bambu lane's home `T#`, which the reset
-  keeps as it keeps a config `map:`.
 - `afc_dryer.py`: keeps pool units out of the live panel.
 
 A re-claim avoids a duplicate `T#` because release unregisters the lane's `T#`
@@ -982,7 +955,7 @@ Set on the `[AFC_BridgeBox <name>]` section:
 | `ams_names` | empty | Comma list naming the AMS bays, lowest lanes first. Only the first four entries are used. |
 | `ht_names` | empty | Comma list naming the HT bays, lowest lanes first. |
 | `unit_prefix` | `Bambu_AMS` (`Bambu_AMS_<chain name>` on a later chain) | Default bay names `<prefix>_N` and `<prefix>_HT_N`. |
-| `lane_base` | `0` | First Bambu lane. 0 resolves it past every other unit's lanes and `T#` and locks it in the state file (see [Lane layout](#lane-layout)). |
+| `lane_base` | `0` | First Bambu lane. 0 resolves it past every other unit's lanes and locks it in the state file (see [Lane layout](#lane-layout)). |
 | `roster` | empty | `model:uid` list of known units, for example `ht:0123456789ABCDEF00003331`. The model is `ams1`, `ams2`, `ht`, `boxed` or `lite`. When set, it overrides the recorded roster. |
 | `state_file` | the file holding this section | Where the roster, names, lane map, bay owners, `lane_base` and learned values are kept, as `#~#` lines. Falls back to `~/printer_data/config/AFC/AFC_BridgeBox.cfg`. |
 | `auto_vars_file` | `~/printer_data/config/AFC/AFC_auto_vars.cfg` | AFC's file of learned values. The chain reads bowden lengths saved there under a bay name at startup (see [Learned values](#learned-values)), and `AFC_BRIDGEBOX_FORGET` erases what is stored there under the unit's name and lanes. |
