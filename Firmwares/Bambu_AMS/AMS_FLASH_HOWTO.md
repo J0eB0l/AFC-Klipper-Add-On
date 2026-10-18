@@ -6,7 +6,7 @@ no BOOTSEL, no cable to the AMS. There is one command per model:
 | model | command | artifact file |
 |---|---|---|
 | AMS 2 Pro | `AFC_BAMBU_AMS_UPDATE` | `ams2_artifact.json` |
-| AMS 1 | `AFC_BAMBU_AMS1_UPDATE` | `ams1_artifact.json` |
+| AMS 1 | `AFC_BAMBU_AMS_ONE_UPDATE` | `ams1_artifact.json` |
 | AMS HT | `AFC_BAMBU_HT_UPDATE` | `ht_artifact.json` |
 
 Each command only ever sends its own model's file, and refuses before erasing
@@ -138,7 +138,7 @@ model's refuses while that unit is waiting.
 | `IMG HASH ERROR` | The unit accepted every block and rejected the image, so the artifact is wrong for this unit. It stops instead of erasing again. Get the right artifact and run `MODE=go` again. |
 | `need exactly one AMS on the bus` | Unplug the other units and retry. The bus count includes units Klipper has no section for. |
 | `is configured as ams_model ...` | The connected unit is not the model this command is for. Use the right command, or fix `ams_model:` if the config is wrong. |
-| `does not answer as an AMS 2` | The unit is an AMS 1. Use `AFC_BAMBU_AMS1_UPDATE`. |
+| `does not answer as an AMS 2` | The unit is an AMS 1. Use `AFC_BAMBU_AMS_ONE_UPDATE`. |
 | `answers as an AMS 2` | The unit is an AMS 2. Use `AFC_BAMBU_AMS_UPDATE`. |
 | `enrolled at ... index` | The unit is not at the address the image is for, because another unit enrolled on the bridge before it. Power the bridge off and on with only this unit connected, restart Klipper, and retry. |
 | `sitting in its bootloader` | Another unit on the bus is waiting in its bootloader. Unplug it, or finish its own update first. |
@@ -173,8 +173,8 @@ The two that exist ship in this folder, `Firmwares/Bambu_AMS/`.
   updated to v05.00.22.19 from this file.
 - **AMS 1:** like the AMS 2, it has to come from a capture of an AMS 1 being
   updated. None has been captured yet, so no AMS 1 has been updated this way.
-  Until one exists, `AFC_BAMBU_AMS1_UPDATE` stops at the artifact check and
-  touches nothing.
+  Until one exists, `AFC_BAMBU_AMS_ONE_UPDATE` stops at the artifact check
+  and touches nothing.
 
 ## Detaching
 

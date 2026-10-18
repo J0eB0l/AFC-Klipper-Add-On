@@ -6,9 +6,9 @@ Drop this file, `ams_flash.cfg` (the gcode_shell_command + macros) and the
 artifact for your model into your Klipper config directory, then run from the
 console, one command per model:
 
-    AFC_BAMBU_AMS_UPDATE    MODE=check|preflight|go   # AMS 2 Pro  ams2_artifact.json
-    AFC_BAMBU_AMS1_UPDATE   MODE=check|preflight|go   # AMS 1      ams1_artifact.json
-    AFC_BAMBU_HT_UPDATE     MODE=check|preflight|go   # AMS HT     ht_artifact.json
+    AFC_BAMBU_AMS_UPDATE      MODE=check|preflight|go   # AMS 2 Pro  ams2_artifact.json
+    AFC_BAMBU_AMS_ONE_UPDATE  MODE=check|preflight|go   # AMS 1      ams1_artifact.json
+    AFC_BAMBU_HT_UPDATE       MODE=check|preflight|go   # AMS HT     ht_artifact.json
 
 MODE defaults to preflight (probes, no erase); check is read-only; go erases.
 Nothing here imports from the bridge repo -- only the Python standard library --

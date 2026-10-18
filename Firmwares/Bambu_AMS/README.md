@@ -18,9 +18,9 @@ reported at step [2] and nothing is touched.
 
 ## One command per model
 
-    AFC_BAMBU_AMS_UPDATE    ->  ams2_artifact.json   (AMS 2 Pro)
-    AFC_BAMBU_AMS1_UPDATE   ->  ams1_artifact.json   (AMS 1)
-    AFC_BAMBU_HT_UPDATE     ->  ht_artifact.json     (AMS HT)
+    AFC_BAMBU_AMS_UPDATE      ->  ams2_artifact.json   (AMS 2 Pro)
+    AFC_BAMBU_AMS_ONE_UPDATE  ->  ams1_artifact.json   (AMS 1)
+    AFC_BAMBU_HT_UPDATE       ->  ht_artifact.json     (AMS HT)
 
 Each takes `MODE=check` (read-only), no `MODE` (preflight: probes, no erase),
 or `MODE=go` (erases and rewrites), an optional `LABEL=` for the log, and
