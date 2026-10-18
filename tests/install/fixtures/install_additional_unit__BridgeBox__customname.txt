@@ -112,8 +112,10 @@ pool_ht: 8
 # T#s do not follow lane numbers. A claimed lane takes the next unused T#,
 # as AFC numbers any lane: beside a unit on T0-T3, the first AMS gets T4-T7.
 # A unit with a saved bay keeps its T#s while it is unplugged and across
-# restarts, until AFC_BRIDGEBOX_FORGET retires it. SET_MAP and AFC's other
-# mapping commands change them like any lane's, and the change is saved.
+# restarts, until AFC_BRIDGEBOX_FORGET retires it. The next start then packs
+# the other Bambu T#s down into the freed ones, in order; lane numbers and
+# names stay. SET_MAP and AFC's other mapping commands change T#s like any
+# lane's, and the change is saved.
 #
 # lane_base 0 (the default) picks the base at the first start: one past the
 # highest laneN in your other [AFC_lane] / [AFC_stepper] sections, else 1.

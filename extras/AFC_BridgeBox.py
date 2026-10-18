@@ -303,6 +303,24 @@ def _lane_number(lname: Optional[str]) -> Optional[int]:
     return int(ds) if ds else None
 
 
+def _pack_tools(tools: Set[str], taken: Set[str]) -> Dict[str, str]:
+    """
+    Where each T# moves when a set of them packs down.
+
+    In T# order, each takes the lowest of T0-T98 that is not taken and not
+    given to one before it, so their order is kept and none moves up. A
+    command that is not T followed by a number stays where it is.
+
+    :param tools: the T#s to pack, none of them taken
+    :param taken: the T#s that stay where they are
+    :return dict: old T# -> new T#, for the ones that move
+    """
+    nums = sorted(int(t[1:]) for t in tools
+                  if t[:1] == "T" and t[1:].isdigit())
+    free = (f"T{n}" for n in range(99) if f"T{n}" not in taken)
+    return {f"T{n}": new for n, new in zip(nums, free) if f"T{n}" != new}
+
+
 def _plan_lane_map(afc: Any, lname: str, rec: Dict[str, Any],
                    warn: Callable[[str], None],
                    take_macros: bool = True) -> Tuple[List[str], str]:
@@ -2761,12 +2779,19 @@ class afcBridgeBox:
             freed_live = bool(self.pool_ams or self.pool_ht)
         # Its saved lane records go too, so a re-plug starts clean.
         held = getattr(self, "_held", None) or {}
-        had_records = any(_norm_uid(e.get("uid")) == uid
-                          for e in held.values())
+        dropped = [e for e in held.values() if _norm_uid(e.get("uid")) == uid]
+        had_records = bool(dropped)
         self._bay_owner = {b: u for b, u in self._owners().items()
                            if u != uid}
         self._held = {b: e for b, e in held.items()
                       if _norm_uid(e.get("uid")) != uid}
+        # The other Bambu T#s pack down into its T#s at the next start (see
+        # _pack_after_forget).
+        if any(_parse_map(rec.get("map"))
+               for entry in dropped
+               for rec in (entry.get("lanes") or {}).values()
+               if isinstance(rec, dict)):
+            self._state_set({sec: {self._PACK_KEY: 1}})
         # Saved now, so AFC.var.unit does not keep them until some later save
         # (see _fill_held_bays). Before PREP nothing is written, and the next
         # start holds them for no unit: bay_owner no longer names this one.
@@ -4882,6 +4907,12 @@ class afcBridgeBox:
                 self._persist_bay_owner()
             except Exception:
                 pass
+        # A forget's T#s pack down once PREP has run, with no unit claimed
+        # (see _pack_after_forget).
+        try:
+            self._pack_after_forget()
+        except Exception:
+            pass
         # Its own guard: a fault in this warning must not stop the claims
         # and releases below. Each distinct failure is logged once.
         try:
@@ -6475,6 +6506,11 @@ class afcBridgeBox:
             return None
         if not self._prep_settled():
             return None
+        # Before the first claim of a start: a forget's T#s pack down first.
+        try:
+            self._pack_after_forget()
+        except Exception:
+            pass
         pools = getattr(self, "_pool_units", [])
         if any(pu.get("bound") == uid for pu in pools):
             return None                       # already live on a pool unit
@@ -6934,6 +6970,82 @@ class afcBridgeBox:
                     if isinstance(rec, dict):
                         out.update(_parse_map(rec.get("map")))
         return out
+
+    #: The state key a forget sets so that the next start packs the Bambu
+    #: T#s down (see _pack_after_forget).
+    _PACK_KEY = "pack_tools"
+
+    def _pack_after_forget(self) -> None:
+        """
+        Pack the Bambu T#s down into the ones a forget freed, once a start.
+
+        AFC_BRIDGEBOX_FORGET sets pack_tools in its chain's state block when
+        the unit it forgets had saved T#s. The first claim or chain watch
+        tick after PREP has run at the next start, before any unit is
+        claimed, moves the T#s saved in every chain's held lane records down
+        into the lowest ones that no other lane holds or names in its config
+        map: and no other macro holds (see _pack_tools). Each unit then
+        comes back on its new T#s. Lane numbers and bay names stay as they
+        are, and a T# that something else holds is left for the claim to
+        drop (see _plan_lane_map). AFC.var.unit is saved with the new maps
+        and the key is cleared. A start that finds a unit claimed already
+        leaves the key for the next start.
+        """
+        if getattr(self, "_pack_checked", False):
+            return
+        afc = self.printer.lookup_object("AFC", None)
+        if afc is None or not getattr(afc, "prep_done", False):
+            return
+        try:
+            chains = [obj for _name, obj
+                      in self.printer.lookup_objects(self._BASE_SECTION)
+                      if isinstance(obj, afcBridgeBox)]
+        except Exception:
+            chains = []
+        chains = chains or [self]
+        for chain in chains:
+            chain._pack_checked = True
+        flagged = [chain for chain in chains
+                   if chain._state_get(f"{self._BASE_SECTION} {chain.name}",
+                                       self._PACK_KEY)]
+        if not flagged or any(pu.get("bound") for chain in chains
+                              for pu in getattr(chain, "_pool_units", None)
+                              or []):
+            return
+        recs = [rec for chain in chains
+                for entry in (getattr(chain, "_held", None) or {}).values()
+                for rec in (entry.get("lanes") or {}).values()
+                if isinstance(rec, dict)]
+        taken = {cmd for cmd, handler in _tcmd_handlers(afc).items()
+                 if not _tcmd_is_ours(afc, handler)}
+        for lane in (getattr(afc, "lanes", None) or {}).values():
+            taken.update(getattr(lane, "map", None) or [])
+            taken.update(getattr(lane, "_map", None) or [])
+        tools = {cmd for rec in recs for cmd in _parse_map(rec.get("map"))}
+        moves = _pack_tools(tools - taken, taken)
+        for rec in recs:
+            maps = _parse_map(rec.get("map"))
+            if not any(cmd in moves for cmd in maps):
+                continue
+            maps = [moves.get(cmd, cmd) for cmd in maps]
+            rec["map"] = (maps if isinstance(rec["map"], (list, tuple))
+                          else ", ".join(maps))
+            cur = moves.get(rec.get("current_map"), rec.get("current_map"))
+            rec["current_map"] = cur if cur in maps else maps[0]
+        if moves:
+            try:
+                afc.save_vars()
+            except Exception:
+                pass
+            self.logger.info(
+                f"AFC_BridgeBox {self.name}: a unit was forgotten, so the "
+                f"Bambu T#s pack down: "
+                + ", ".join(f"{old} -> {new}" for old, new in moves.items()))
+        for chain in flagged:
+            sec = f"{self._BASE_SECTION} {chain.name}"
+            cp = chain._read_state()
+            if cp.has_section(sec) and cp.remove_option(sec, self._PACK_KEY):
+                chain._write_state(cp)
 
     def _next_tool(self, afc: Any) -> Optional[str]:
         """

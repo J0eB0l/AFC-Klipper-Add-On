@@ -445,6 +445,17 @@ unused `T#`, as AFC numbers a lane of its own:
   unit is forgotten with `AFC_BRIDGEBOX_FORGET`, unassigned with
   `AFC_BRIDGEBOX_UNASSIGN` or moved with `AFC_BRIDGEBOX_ASSIGN`, and the next
   claim can take them.
+- The start after a forget packs the Bambu `T#`s down into the ones it freed.
+  Before any unit is claimed, every saved Bambu `T#` moves to the lowest one
+  that no other lane holds or names in its config `map:` and no other macro
+  holds, keeping their order, so none moves up. Lane numbers and bay names stay
+  as they are, and each unit comes back on its new `T#`s. With other lanes on
+  `T0`-`T3`, forgetting the AMS on `T4`-`T7` moves an HT on `T8` to `T4`. The
+  log names each move:
+
+  `AFC_BridgeBox <chain>: a unit was forgotten, so the Bambu T#s pack down: T8 -> T4`
+
+  Only a forget does this: an unassign, a move or an unplug packs nothing.
 - `SET_MAP`, `AFC_SWAP_MAPPING`, `AFC_ADD_MAPPING` and `AFC_REMOVE_MAPPING` on
   Bambu lanes are saved like any AFC lane's map. The map comes back when the
   same unit returns to the same bay, across a restart or an `auto_drop`

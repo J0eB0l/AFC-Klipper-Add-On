@@ -20,6 +20,7 @@ from extras.AFC_BambuAMS_bridge import BambuBridge, TcpPort
 from extras.AFC_BridgeBox import (
     _ChildCommand,
     _norm_model,
+    _pack_tools,
     _parse_map,
     _plan_lane_map,
     _SLOTS_BY_MODEL,
@@ -1301,6 +1302,20 @@ class TestParseMap:
         assert _parse_map(["T3", "NONE"]) == ["T3"]
         assert _parse_map(("T7", " T8 ")) == ["T7", "T8"]
         assert _parse_map(None) == []
+
+
+class TestPackTools:
+    """Where each T# moves when a set of them packs down."""
+
+    def test_they_pack_down_in_order_past_the_taken_ones(self):
+        assert _pack_tools({"T9", "T2", "T6"}, {"T0", "T1", "T3"}) == {
+            "T6": "T4", "T9": "T5"}
+
+    def test_none_moves_with_no_gap_below_them(self):
+        assert _pack_tools({"T4", "T5"}, {"T0", "T1", "T2", "T3"}) == {}
+
+    def test_a_command_that_is_not_a_numbered_t_stays(self):
+        assert _pack_tools({"TX", "T8"}, set()) == {"T8": "T0"}
 
 
 class TestPlanLaneMap:
@@ -15886,6 +15901,143 @@ class TestAfcBridgeBoxClaimPoolUnit:
             "lane27": ["T3"]}
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
+
+    # ── the T#s packing down at the start after a forget ─────────────────
+
+    #: The line the pack logs when Alpha's T4-T7 move to T1-T4.
+    PACKED = ("info",
+              "AFC_BridgeBox chain1: a unit was forgotten, so the Bambu T#s "
+              "pack down: T4 -> T1, T5 -> T2, T6 -> T3, T7 -> T4")
+
+    @classmethod
+    def _packing(cls, tmp_path: pathlib.Path,
+                 monkeypatch: pytest.MonkeyPatch,
+                 pack: bool = True) -> afcBridgeBox:
+        """
+        AAAA saved on Alpha with T4-T7 and lane5 on T0, at the start after
+        a unit on T1-T3 was forgotten.
+
+        :param pack: whether the forget left pack_tools set
+        :return afcBridgeBox: the master
+        """
+        var = {"Alpha": {ln: _p6_rec(f"T{n}")
+                         for n, ln in enumerate(cls.BAY, 4)}}
+        m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha",
+                      state={"pack_tools": "1"} if pack else None)
+        _p6_other(m, "lane5", ["T0"])
+        _p6_quiet(m)
+        return m
+
+    def test_a_forget_sets_the_pack_for_the_next_start(self, tmp_path,
+                                                       monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        m._release_pool_unit(A)
+        assert m._state_get(SEC, "pack_tools") is None
+        m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
+        assert m._state_get(SEC, "pack_tools") == "1"
+
+    def test_a_forget_of_a_unit_with_no_saved_tools_sets_none(
+            self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
+        assert m._state_get(SEC, "pack_tools") is None
+
+    def test_the_next_start_packs_the_saved_tools_down(self, tmp_path,
+                                                       monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T1"], "lane25": ["T2"], "lane26": ["T3"],
+            "lane27": ["T4"]}
+        assert _p6_lane(m, "lane24").current_map == "T1"
+        assert m.printer.afc.lanes["lane5"].map == ["T0"]
+        assert m._state_get(SEC, "pack_tools") is None
+        assert _p6_log(m) == [self.PACKED] + _p6_claim_log(A, "Alpha")
+        _p6_consistent(m)
+
+    def test_without_a_forget_the_saved_tools_stay(self, tmp_path,
+                                                   monkeypatch):
+        m = self._packing(tmp_path, monkeypatch, pack=False)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T4"], "lane25": ["T5"], "lane26": ["T6"],
+            "lane27": ["T7"]}
+        assert _p6_log(m) == _p6_claim_log(A, "Alpha")
+
+    def test_a_held_bay_is_saved_and_kept_on_its_new_tools(self, tmp_path,
+                                                           monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        drain_var_writes(m.printer)
+        m._pack_after_forget()
+        assert m._reserved_tools() == {"T1", "T2", "T3", "T4"}
+        saved = drain_var_writes(m.printer)[-1]["Alpha"]
+        assert {ln: (rec["map"], rec["current_map"])
+                for ln, rec in saved.items()} == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"),
+            "lane26": ("T3", "T3"), "lane27": ("T4", "T4")}
+        assert m._state_get(SEC, "pack_tools") is None
+        assert _p6_log(m) == [self.PACKED]
+
+    def test_tools_held_by_anything_else_stay_put(self, tmp_path,
+                                                  monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        afc = m.printer.afc
+
+        def _macro(gcmd: Any) -> None:
+            """A user macro on T1."""
+        afc.gcode.register_command("T1", _macro)
+        _p6_other(m, "lane6", ["T9"], config_map=["T3"])
+        assert m._claim_pool_unit(A, "boxed") is not None
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T2"], "lane25": ["T4"], "lane26": ["T5"],
+            "lane27": ["T6"]}
+        assert afc.gcode.ready_gcode_handlers["T1"] is _macro
+        assert _p6_log(m) == [(
+            "info",
+            "AFC_BridgeBox chain1: a unit was forgotten, so the Bambu T#s "
+            "pack down: T4 -> T2, T5 -> T4, T6 -> T5, T7 -> T6")] + \
+            _p6_claim_log(A, "Alpha")
+        _p6_consistent(m)
+
+    def test_the_chain_watch_packs_with_no_unit_plugged_in(self, tmp_path,
+                                                           monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        _p6_tick(m, 101, 101)
+        assert m._reserved_tools() == {"T1", "T2", "T3", "T4"}
+        assert _p6_log(m) == [self.PACKED]
+
+    def test_the_pack_waits_for_prep(self, tmp_path, monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        m.printer.afc.prep_done = False
+        m._pack_after_forget()
+        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
+        assert m._state_get(SEC, "pack_tools") == "1"
+        m.printer.afc.prep_done = True
+        m._pack_after_forget()
+        assert m._reserved_tools() == {"T1", "T2", "T3", "T4"}
+        assert _p6_log(m) == [self.PACKED]
+
+    def test_a_claimed_unit_leaves_the_pack_for_the_next_start(
+            self, tmp_path, monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        _p6_bay(m, "Bravo")["bound"] = C
+        m._pack_after_forget()
+        _p6_bay(m, "Bravo")["bound"] = None
+        m._pack_after_forget()
+        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
+        assert m._state_get(SEC, "pack_tools") == "1"
+        assert _p6_log(m) == []
+
+    def test_a_forget_later_in_the_start_packs_at_the_next_one(
+            self, tmp_path, monkeypatch):
+        m = self._packing(tmp_path, monkeypatch, pack=False)
+        m._pack_after_forget()
+        m._state_set({SEC: {"pack_tools": 1}})
+        m._pack_after_forget()
+        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
+        assert m._state_get(SEC, "pack_tools") == "1"
+        assert _p6_log(m) == []
 
     # ── a unit with no free bay of its family ────────────────────────────
 
