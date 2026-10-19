@@ -600,6 +600,21 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         else:
             self.logger.info(f"ACE2 RFID bound to {getattr(self.ace2, 'name', self.ace2)}")
             self._register_writers()
+            self._register_rescan()
+
+    def _register_rescan(self) -> None:
+        """
+        Offer ACE_RFID_RESCAN on the bound unit, which AFC_ACE leaves off for
+        now; a unit that registers its own keeps it.
+        """
+        try:
+            self.gcode.register_mux_command(
+                "ACE_RFID_RESCAN", "UNIT", getattr(self.ace2, "name", None),
+                self.cmd_ACE_RFID_RESCAN,
+                desc="Read a lane's spool tag again and apply it to the lane "
+                     "(turns the spool past the reader)")
+        except self.printer.config_error:
+            pass
 
     @property
     def skip_factory_autostage(self) -> bool:
@@ -1971,6 +1986,22 @@ class AFC_ACE2_RFID(AFCUnitRFID):
     #: how far either way it looks (mm of filament).
     RESCAN_SEEK_STEP_MM = 5.0
     RESCAN_SEEK_SPAN_MM = 30.0
+
+    def cmd_ACE_RFID_RESCAN(self, gcmd: "GCodeCommand") -> None:
+        """
+        Read a lane's spool tag again and apply it to the lane (rescan_lane).
+
+        Usage
+        -------
+        `ACE_RFID_RESCAN UNIT=<unit> LANE=<lane> [DIST=<mm>] [SPEED=<mm/s>]`
+
+        Example
+        -------
+        ```
+        ACE_RFID_RESCAN UNIT=Ace2_1 LANE=lane2
+        ```
+        """
+        self.rescan_lane(gcmd.get("LANE"), gcmd)
 
     def rescan_lane(self, lane_name: str, gcmd: "GCodeCommand") -> None:
         """
