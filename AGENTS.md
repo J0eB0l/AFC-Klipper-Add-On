@@ -6,7 +6,8 @@
    content right after the opening parenthesis.
 
    ```python
-   if (self.enable and has_stepper
+   if (self.enable
+       and has_stepper
        and not getattr(self, "_correction_running", False)):
    ```
 - **Match existing formatting** as closely as possible — follow the
