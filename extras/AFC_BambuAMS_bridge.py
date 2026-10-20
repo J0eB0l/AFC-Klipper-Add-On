@@ -1144,11 +1144,14 @@ class WifiLink:
         forgotten and the link reopens on USB; without it, the address is
         kept for a board set up again on the same one. A network in the
         config is sent again. A wipe by AFC_BRIDGEBOX_RESET_WIFI is left to
-        that command.
+        that command. The board sends the frame on WiFi and USB alike, so
+        the copy the USB link reads next is skipped.
 
         :param obj: the wifi frame
         """
-        if obj.get("by") != "button" or self._bridge is None:
+        if (obj.get("by") != "button"
+                or self._bridge is None
+                or self._said == "cleared"):
             return
         usb_in = bool(self.usb_path) and os.path.exists(self.usb_path)
         addr = self.addr

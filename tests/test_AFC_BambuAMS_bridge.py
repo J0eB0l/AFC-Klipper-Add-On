@@ -6386,6 +6386,21 @@ class TestWifiLinkCleared:
         assert bridge._serial is not None
         assert saved == []
 
+    def test_the_usb_copy_of_a_wipe_is_skipped(self, monkeypatch, tmp_path):
+        link, bridge, saved = wifi_bridge(monkeypatch, tmp_path,
+                                          addr=WIFI_ADDR)
+        link.on_wifi = True
+        link._cleared(self.BUTTON)
+        link.on_wifi = False
+        link.addr = WIFI_ADDR
+        link._cleared(self.BUTTON)
+        bridge.reactor.run_callbacks()
+        assert link.addr == WIFI_ADDR
+        assert bridge.logger.messages == wifi_said(
+            ("info", "the BridgeBox's BOOT button cleared its WiFi and key; "
+                     "the link is on USB until its WiFi is set up again"))
+        assert saved == [""]
+
     def test_with_no_bridge_it_is_ignored(self):
         link = WifiLink(WIFI_KEY, lambda a: None, WIFI_LABEL,
                         usb_path="/dev/ttyACM9", addr=WIFI_ADDR)
