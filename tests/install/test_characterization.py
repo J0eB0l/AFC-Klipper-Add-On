@@ -257,13 +257,88 @@ try:
                              f"bridgebox_address={address}"]
         assert message in lines[2]
 
+    BRIDGEBOX_S3 = "usb-Espressif_USB_JTAG_serial_debug_unit_68:EE:8F:DA:01:38-if00"
+    BRIDGEBOX_PICO = "usb-Raspberry_Pi_Pico_C1DD3A4F368F7DA2-if00"
+
+    @pytest.mark.parametrize("answers,start,serial,message", [
+        ("\\n", "auto", "auto", "USB serial port: auto"),
+        ("a\\n", "/dev/ttyACM0", "auto", "USB serial port: auto"),
+        ("1\\n", "auto", "<BYID>/" + BRIDGEBOX_S3,
+         "USB serial port: <BYID>/" + BRIDGEBOX_S3),
+        ("2\\n", "auto", "<BYID>/" + BRIDGEBOX_PICO,
+         "USB serial port: <BYID>/" + BRIDGEBOX_PICO),
+        ("/dev/serial/by-id/usb-mine-if00\\n", "auto",
+         "/dev/serial/by-id/usb-mine-if00",
+         "USB serial port: /dev/serial/by-id/usb-mine-if00"),
+        ("3\\n", "auto", "auto",
+         "Enter A, a number from the list, or a /dev/serial/by-id path."),
+        ("/dev/my port\\n", "auto", "auto",
+         "Enter A, a number from the list, or a /dev/serial/by-id path."),
+    ])
+    def test_bridgebox_ask_serial(tmp_path, answers, start, serial, message):
+        # Two BridgeBoxes and another device on USB: only the BridgeBoxes
+        # are listed, S3 first.
+        for name in (BRIDGEBOX_PICO, BRIDGEBOX_S3, "usb-Klipper_rp2040-if00"):
+            (tmp_path / name).write_text("")
+        out = run_case("bridgebox_ask_serial", {
+            "answers": answers, "bridgebox_serial": start,
+            "bridgebox_byid_dir": str(tmp_path)}).replace(str(tmp_path), "<BYID>")
+        lines = out.splitlines()
+        assert lines[:4] == [
+            "A. auto: Klipper finds the BridgeBox on USB by itself.",
+            f"1. <BYID>/{BRIDGEBOX_S3}",
+            f"2. <BYID>/{BRIDGEBOX_PICO}",
+            f"bridgebox_serial={serial}"]
+        assert lines[4].startswith("message=") and message in lines[4]
+
+    def test_bridgebox_ask_serial_with_no_bridgebox_plugged_in(tmp_path):
+        out = run_case("bridgebox_ask_serial", {
+            "answers": "1\\n", "bridgebox_byid_dir": str(tmp_path)})
+        assert out.splitlines()[:2] == [
+            "A. auto: Klipper finds the BridgeBox on USB by itself.",
+            "bridgebox_serial=auto"]
+
+    @pytest.mark.parametrize("mode", ["copy_unit_files", "install_additional_unit"])
+    @pytest.mark.parametrize("serial,written", [
+        ("auto", "serial_port: auto"),
+        ("/dev/serial/by-id/usb-mine-if00",
+         "serial_port: /dev/serial/by-id/usb-mine-if00"),
+    ])
+    def test_bridgebox_chain_gets_the_serial_port(mode, serial, written):
+        actual = run_case(mode, {
+            "installation_type": "BridgeBox",
+            "boxturtle_name": "chain2",
+            "bridgebox_serial": serial,
+        }).splitlines()
+        assert [ln for ln in actual if ln.startswith("serial_port:")] == [written]
+
+    @pytest.mark.parametrize("connection,rows", [
+        ("usb", ["W. Connection : USB ", "S. USB serial port : auto "]),
+        ("wifi", ["W. Connection : WiFi at 192.168.1.50 "]),
+    ])
+    def test_bridgebox_menu_shows_the_serial_port_unless_wifi_only(
+            connection, rows):
+        out = run_case("install_menu_options", {
+            "installation_type": "BridgeBox",
+            "bridgebox_connection": connection,
+            "bridgebox_address": "192.168.1.50",
+        }).splitlines()
+        assert out[2:] == rows
+
+    def test_wifi_only_keeps_its_address_over_a_named_port():
+        actual = run_case("copy_unit_files", {
+            "installation_type": "BridgeBox",
+            "bridgebox_connection": "wifi",
+            "bridgebox_address": "192.168.1.50",
+            "bridgebox_serial": "/dev/serial/by-id/usb-mine-if00",
+        }).splitlines()
+        assert [ln for ln in actual if ln.startswith("serial_port:")] == [
+            "serial_port: tcp://192.168.1.50:8888"]
+
     @pytest.mark.parametrize("mode", ["copy_unit_files", "install_additional_unit"])
     @pytest.mark.parametrize("connection,address,serial,wifi", [
-        ("usb", "", "serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_"
-                    "serial_debug_unit_XXXXXXXXXXXX-if00", "#connection: wifi"),
-        ("usb_wifi", "", "serial_port: /dev/serial/by-id/usb-Espressif_USB_"
-                         "JTAG_serial_debug_unit_XXXXXXXXXXXX-if00",
-         "connection: wifi"),
+        ("usb", "", "serial_port: auto", "#connection: wifi"),
+        ("usb_wifi", "", "serial_port: auto", "connection: wifi"),
         ("wifi", "192.168.1.50", "serial_port: tcp://192.168.1.50:8888",
          "#connection: wifi"),
         ("wifi", "bridge.lan:9000", "serial_port: tcp://bridge.lan:9000",

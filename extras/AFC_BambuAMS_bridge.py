@@ -33,6 +33,7 @@
 # parsing). Import-safe and drivable with a fake serial port; AFC_BambuAMS.py
 # imports BambuBridge and TcpPort from here.
 from __future__ import annotations
+import glob
 import hashlib
 import hmac
 import json
@@ -954,6 +955,93 @@ _WIFI_LINKS: Dict[str, "WifiLink"] = {}
 #: The firmware's WiFi link state for "joined, with an address" (cyw43's).
 _WIFI_LINK_UP = 3
 
+# The board finder of each chain on serial_port: auto that has not saved a
+# board, by its ``auto:<chain>`` key, which stands in for the port this run
+# (see usb_port).
+_AUTO_FINDERS: Dict[str, Callable[[bool], Optional[str]]] = {}
+
+#: The names a BridgeBox board has under /dev/serial/by-id: the S3's own USB
+#: serial, and the Pico's.
+BRIDGE_USB_GLOBS = (
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_*-if00",
+    "/dev/serial/by-id/usb-Raspberry_Pi_Pico_*-if00",
+)
+
+#: Reads of 0.1 s a probe waits for a board's info frame.
+PROBE_READS = 15
+
+
+def usb_port(spec: str) -> str:
+    """
+    The device to open for a USB serial_port.
+
+    A chain on serial_port: auto with no saved board is registered under its
+    ``auto:<chain>`` key, and its finder picks the board. Looking opens
+    ports, which can take seconds, so it never happens on the reactor (the
+    main thread): the first open from start() fails there and the reader
+    thread looks.
+
+    :param spec: the serial_port, or a chain's auto key
+    :return str: the device path
+    :raises OSError: while an auto chain has no board
+    """
+    finder = _AUTO_FINDERS.get(spec)
+    if finder is None:
+        return spec
+    path = finder(threading.current_thread() is not threading.main_thread())
+    if path is None:
+        error_str = "no BridgeBox found on USB yet (serial_port: auto)"
+        raise OSError(error_str)
+    return path
+
+
+def bridge_candidates() -> List[str]:
+    """
+    The USB serial devices named like a BridgeBox board.
+
+    :return List[str]: their /dev/serial/by-id paths, sorted
+    """
+    return sorted(p for pattern in BRIDGE_USB_GLOBS
+                  for p in glob.glob(pattern))
+
+
+def probe_bridge(path: str) -> Optional[dict]:
+    """
+    Ask a USB serial device whether it is a BridgeBox. Never raises.
+
+    :param path: the device to ask
+    :return Optional[dict]: the board's info frame, or None when nothing
+      answered as a bridge
+    """
+    try:
+        import serial
+        port = serial.Serial(path, 115200, timeout=0.1, write_timeout=0.5)
+    except Exception:
+        return None
+    try:
+        # A board streams status all the time: drop what queued before the
+        # ask, and read whatever came each tenth of a second.
+        port.reset_input_buffer()
+        port.write(b'{"cmd":"info"}\n')
+        buf = b""
+        for _ in range(PROBE_READS):
+            buf += port.read(4096)
+            *lines, buf = buf.split(b"\n")
+            for raw in lines:
+                obj = parse_bridge_line(raw.decode("utf-8", "replace"))
+                if (obj is not None
+                        and obj.get("evt") == "info"
+                        and obj.get("proto") == "bambubus-1"):
+                    return obj
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            port.close()
+        except Exception:
+            pass
+
 
 class WifiLink:
     """
@@ -1074,7 +1162,10 @@ class WifiLink:
                 self._say("wifi", f"BridgeBox connected over WiFi at "
                                   f"{self.addr}")
                 return link
-        elif not self.addr and not usb_in:
+        elif (not self.addr
+                and not usb_in
+                and self.usb_path not in _AUTO_FINDERS):
+            # A chain on serial_port: auto still looking says so itself.
             self._say("no-addr", "connection: wifi needs the BridgeBox on "
                                  "this printer's USB once, to learn its WiFi "
                                  "address", warning=True)

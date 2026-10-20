@@ -4,7 +4,7 @@
 
 - AFC-Klipper-Add-On python extensions installed to <WORKDIR>/klipper/klippy/extras/
 
-- Set extruder, and serial_port unless you chose WiFi only, in the <WORKDIR>/AFC/AFC_BridgeBox.cfg file.
+- Set extruder in the <WORKDIR>/AFC/AFC_BridgeBox.cfg file.
   
 - Ensure you add the correct serial information to the <WORKDIR>/AFC/mcu/TurtleNeckv2.cfg file
   

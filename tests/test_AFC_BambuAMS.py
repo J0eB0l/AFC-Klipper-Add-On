@@ -27095,3 +27095,33 @@ class TestAfcBambuAMSFinishFrames:
             {"cmd": "raw", "hex": "3DC50CC8030007000002514C"},   # mode 07
             {"cmd": "raw", "hex": "3DC50CC8030007007F023654"}]   # finish
         assert unit.logger.messages == []
+
+
+class TestBridgeMayBeLate:
+    @pytest.mark.parametrize("port,late", [
+        ("/dev/serial/by-id/usb-pico", False),
+        (" TCP://bridge.local:3333", True),
+        ("auto:chain1", True),
+        ("auto:chain2", False),             # no chain looking under it
+        (None, False),
+    ])
+    def test_a_network_bridge_or_a_board_being_looked_for(self, monkeypatch,
+                                                          port, late):
+        monkeypatch.setattr(bambu_bridge_mod, "_AUTO_FINDERS",
+                            {"auto:chain1": lambda probe: None})
+        unit = _p4_unit(monkeypatch, values={"serial_port": port})
+        assert unit._bridge_may_be_late() is late
+
+
+class TestOpenSerial:
+    def test_a_usb_port_opens_the_board_its_chain_found(self, monkeypatch):
+        opened: List[tuple] = []
+        serial = ModuleType("serial")
+        serial.Serial = lambda *a, **k: opened.append((a, k))  # type: ignore
+        monkeypatch.setitem(sys.modules, "serial", serial)
+        monkeypatch.setattr(bambu_bridge_mod, "_AUTO_FINDERS",
+                            {"auto:chain1": lambda probe: "/dev/ttyACM3"})
+        unit = _p4_unit(monkeypatch, values={"serial_port": "auto:chain1"})
+        unit._open_serial()
+        assert opened == [(("/dev/ttyACM3", 115200),
+                           {"timeout": 0.1, "write_timeout": 0.5})]

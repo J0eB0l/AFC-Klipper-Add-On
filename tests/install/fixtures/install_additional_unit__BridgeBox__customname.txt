@@ -17,8 +17,8 @@
 # Before the first boot:
 #   1. Copy this file to AFC/AFC_BridgeBox.cfg in your Klipper config
 #      folder, where AFC's [include AFC/*.cfg] loads it.
-#   2. Set serial_port and extruder below. That extruder needs a toolhead
-#      sensor (see the extruder note).
+#   2. Set extruder below. That extruder needs a toolhead sensor (see the
+#      extruder note).
 #   3. Settle pool_ams, the bay names and lane_base now: changing them
 #      later can move lanes, and moved lanes lose their saved details.
 # After boot:
@@ -55,9 +55,13 @@
 # How Klipper reaches the BridgeBox. Klipper makes the link key and stores
 # it on the BridgeBox by itself; there is no key to type.
 #
-# USB (default): the BridgeBox's USB port. Find it with:
+# USB (default): auto finds the BridgeBox on USB and saves which one it
+# took, so the chain keeps that board. A second chain on auto takes a
+# BridgeBox no other chain uses. To move the chain to a replacement board,
+# run AFC_BRIDGEBOX_FORGET_BOARD and RESTART. To name the port yourself
+# instead, find it with:
 #   ls /dev/serial/by-id/
-serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_XXXXXXXXXXXX-if00
+serial_port: auto
 
 # Move to WiFi with the cable still in: uncomment connection: wifi and run
 # FIRMWARE_RESTART. Then join the BridgeBox's bb-bridge-XXXX hotspot from a
@@ -74,8 +78,8 @@ serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_XXXXXXXX
 
 # WiFi with no cable at all: join the hotspot, choose your network, and the
 # page shows the address the BridgeBox got. Put that address here in place
-# of the USB serial_port line; Klipper stores the link key on the first
-# connect. Give the BridgeBox a fixed DHCP lease so it doesn't move.
+# of serial_port: auto; Klipper stores the link key on the first connect.
+# Give the BridgeBox a fixed DHCP lease so it doesn't move.
 #serial_port: tcp://BRIDGE_ADDRESS:8888
 
 # Moving the BridgeBox to another printer or network: run
@@ -88,8 +92,9 @@ serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_XXXXXXXX
 # filament, so it needs one (or pin_tool_start: buffer, see buffer_type
 # below). A second BridgeBox makes a second chain: add another
 # [AFC_BridgeBox <name>] below this one, with its own serial_port and an
-# extruder. Its units are named Bambu_AMS_<name>_1 and so on by themselves;
-# leave ams_names and ht_names out of it, or give it names of its own.
+# extruder (serial_port: auto takes the BridgeBox no other chain uses). Its
+# units are named Bambu_AMS_<name>_1 and so on by themselves; leave
+# ams_names and ht_names out of it, or give it names of its own.
 extruder: extruder
 
 # ---- Pool ----

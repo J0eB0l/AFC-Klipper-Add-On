@@ -75,6 +75,9 @@ bridgebox_pool_ht=8
 # address its setup page showed
 bridgebox_connection=usb
 bridgebox_address=""
+# BridgeBox: the USB serial_port it is written with: auto, or a port named
+# by its /dev/serial/by-id path for anyone auto does not work for
+bridgebox_serial=auto
 
 # Moonraker Config
 moonraker_update_config="""

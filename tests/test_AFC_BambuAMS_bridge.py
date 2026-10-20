@@ -8,8 +8,10 @@ import logging.handlers
 from pathlib import Path
 import queue
 import socket
+import sys
 import threading
 import time
+import types
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
@@ -29,10 +31,13 @@ from extras.AFC_BambuAMS_bridge import (
     _STEP,
     attach_wifi,
     BambuBridge,
+    bridge_candidates,
     LinkKeyError,
     parse_bridge_line,
+    probe_bridge,
     TcpPort,
     split_tcp_key,
+    usb_port,
     WifiLink,
 )
 from tests.bambu_helpers import (
@@ -6253,6 +6258,18 @@ class TestWifiLinkOpen:
         assert connects == []
         assert bridge.logger.messages == []
 
+    def test_a_chain_still_looking_for_its_board_opens_usb_quietly(
+            self, monkeypatch, tmp_path):
+        # serial_port: auto with no board yet: the chain's finder says what
+        # it found, so the link does not claim the cable is out.
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None)
+        link.usb_path = "auto:chain1"
+        monkeypatch.setattr(bridge_mod, "_AUTO_FINDERS",
+                            {"auto:chain1": lambda probe: None})
+        assert isinstance(link.open(), FakeSerial)
+        assert link.on_wifi is False
+        assert bridge.logger.messages == []
+
 
 class TestWifiLinkTcpFailed:
     def test_a_key_mismatch_says_to_reset_the_board(self, monkeypatch,
@@ -6807,6 +6824,149 @@ class TestWifiLinkKeyStored:
         assert saved == []                            # on the reactor
         bridge.reactor.run_callbacks()
         assert saved == [WIFI_ADDR]
+
+
+class TestUsbPort:
+    @staticmethod
+    def _finder(monkeypatch: pytest.MonkeyPatch,
+                found: Optional[str]) -> List[bool]:
+        """
+        Register a finder for auto:chain1.
+
+        :param found: what it finds
+        :return list: the probe flag of each call
+        """
+        calls: List[bool] = []
+
+        def finder(probe: bool) -> Optional[str]:
+            """:return Optional[str]: ``found``"""
+            calls.append(probe)
+            return found
+
+        monkeypatch.setattr(bridge_mod, "_AUTO_FINDERS",
+                            {"auto:chain1": finder})
+        return calls
+
+    def test_a_port_is_its_own_device(self, monkeypatch):
+        calls = self._finder(monkeypatch, "/dev/ttyACM1")
+        assert usb_port("/dev/serial/by-id/usb-x-if00") == (
+            "/dev/serial/by-id/usb-x-if00")
+        assert calls == []
+
+    def test_the_reactor_never_looks(self, monkeypatch):
+        # Tests run on the main thread, as Klipper's reactor does.
+        calls = self._finder(monkeypatch, "/dev/ttyACM1")
+        assert usb_port("auto:chain1") == "/dev/ttyACM1"
+        assert calls == [False]
+
+    def test_another_thread_looks(self, monkeypatch):
+        calls = self._finder(monkeypatch, "/dev/ttyACM1")
+        got: List[str] = []
+        worker = threading.Thread(
+            target=lambda: got.append(usb_port("auto:chain1")))
+        worker.start()
+        worker.join()
+        assert (got, calls) == (["/dev/ttyACM1"], [True])
+
+    def test_no_board_yet_raises(self, monkeypatch):
+        self._finder(monkeypatch, None)
+        with pytest.raises(OSError) as err:
+            usb_port("auto:chain1")
+        assert str(err.value) == (
+            "no BridgeBox found on USB yet (serial_port: auto)")
+
+
+class TestBridgeCandidates:
+    def test_both_board_names_are_listed_sorted(self, monkeypatch):
+        found = {bridge_mod.BRIDGE_USB_GLOBS[0]: ["/dev/serial/by-id/usb-E2"],
+                 bridge_mod.BRIDGE_USB_GLOBS[1]: ["/dev/serial/by-id/usb-A1",
+                                                  "/dev/serial/by-id/usb-Z9"]}
+        monkeypatch.setattr(bridge_mod.glob, "glob", found.__getitem__)
+        assert bridge_candidates() == ["/dev/serial/by-id/usb-A1",
+                                       "/dev/serial/by-id/usb-E2",
+                                       "/dev/serial/by-id/usb-Z9"]
+
+    def test_none_plugged_in(self, monkeypatch):
+        monkeypatch.setattr(bridge_mod.glob, "glob", lambda pattern: [])
+        assert bridge_candidates() == []
+
+
+class TestProbeBridge:
+    INFO = {"evt": "info", "up": 5, "fw": "AFC-2.87", "proto": "bambubus-1",
+            "ip": "192.168.4.55"}
+
+    @staticmethod
+    def _serial(monkeypatch: pytest.MonkeyPatch, port: Any = None,
+                error: Optional[BaseException] = None) -> List[tuple]:
+        """
+        Answer serial.Serial with ``port``, or raise ``error``.
+
+        :return list: the arguments of each open
+        """
+        opened: List[tuple] = []
+
+        def _open(*args: Any, **kwargs: Any) -> Any:
+            """:return Any: ``port``"""
+            opened.append((args, kwargs))
+            if error is not None:
+                raise error
+            return port
+
+        fake = types.ModuleType("serial")
+        fake.Serial = _open                                # type: ignore
+        monkeypatch.setitem(sys.modules, "serial", fake)
+        return opened
+
+    def test_a_bridge_answers_with_its_info(self, monkeypatch):
+        # The frame comes in two reads, after a status line.
+        line = (json.dumps(self.INFO) + "\n").encode()
+        port = FakeSerial([b'{"evt":"status","units":0}\n' + line[:9],
+                           line[9:]])
+        # What queued before the ask is dropped before it is sent.
+        dropped: List[int] = []
+        port.reset_input_buffer = lambda: dropped.append(len(port.written))
+        opened = self._serial(monkeypatch, port)
+        assert probe_bridge("/dev/ttyACM3") == self.INFO
+        assert opened == [(("/dev/ttyACM3", 115200),
+                           {"timeout": 0.1, "write_timeout": 0.5})]
+        assert (dropped, port.written) == ([0], [b'{"cmd":"info"}\n'])
+        assert port.closed is True
+
+    @pytest.mark.parametrize("line", [
+        b'{"evt":"info","proto":"other"}\n',
+        b'{"evt":"status","proto":"bambubus-1"}\n',
+        b"not json\n",
+        b'{"evt":"info","proto":"bambubus-1"}',          # never finished
+    ])
+    def test_anything_else_is_not_a_bridge(self, monkeypatch, line):
+        port = FakeSerial([line])
+        self._serial(monkeypatch, port)
+        assert probe_bridge("/dev/ttyACM3") is None
+        assert port.closed is True
+
+    def test_it_waits_only_its_reads(self, monkeypatch):
+        late = (json.dumps(self.INFO) + "\n").encode()
+        port = FakeSerial([b""] * bridge_mod.PROBE_READS + [late])
+        self._serial(monkeypatch, port)
+        assert probe_bridge("/dev/ttyACM3") is None
+        assert port.lines == [late]
+
+    def test_a_port_that_will_not_open_is_not_a_bridge(self, monkeypatch):
+        self._serial(monkeypatch, error=OSError("busy"))
+        assert probe_bridge("/dev/ttyACM3") is None
+
+    def test_a_port_that_fails_is_not_a_bridge_and_is_closed(self,
+                                                             monkeypatch):
+        port = FakeSerial(fail_write=OSError("gone"))
+        self._serial(monkeypatch, port)
+        assert probe_bridge("/dev/ttyACM3") is None
+        assert port.closed is True
+
+    def test_a_close_that_fails_is_ignored(self, monkeypatch):
+        port = FakeSerial([(json.dumps(self.INFO) + "\n").encode()])
+        port.close = lambda: (_ for _ in ()).throw(OSError("gone"))
+        self._serial(monkeypatch, port)
+        assert probe_bridge("/dev/ttyACM3") == self.INFO
 
 
 class TestAttachWifi:

@@ -124,6 +124,10 @@ additional_system_menu() {
         if [ "$installation_type" == "BridgeBox" ]; then
           bridgebox_ask_connection
         fi ;;
+      S)
+        if [ "$installation_type" == "BridgeBox" ] && [ "$bridgebox_connection" != "wifi" ]; then
+          bridgebox_ask_serial
+        fi ;;
       Q) exit_afc_install ;;
       M) main_menu ;;
       I)

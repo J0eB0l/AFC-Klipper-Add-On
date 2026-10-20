@@ -19,6 +19,9 @@
 #                                  pool counts and $message
 # MODE=bridgebox_ask_connection -> answer bridgebox_ask_connection() with $answers and
 #                                  dump the connection, the address and $message
+# MODE=bridgebox_ask_serial   -> answer bridgebox_ask_serial() with $answers (ports listed
+#                                  from $bridgebox_byid_dir) and dump its list, the serial
+#                                  port and $message
 # MODE=install_menu_options   -> run unit_print_install_menu_options() (install_menu.sh's
 #                                  type-specific option rows) and dump its stdout
 # MODE=additional_menu_row    -> run unit_print_additional_menu_row() (additional_system_menu.sh's
@@ -129,6 +132,11 @@ case "${MODE:-}" in
     bridgebox_ask_connection < <(printf '%b' "$answers") > /dev/null
     printf 'bridgebox_connection=%s\n' "$bridgebox_connection"
     printf 'bridgebox_address=%s\n' "$bridgebox_address"
+    printf 'message=%s\n' "$message"
+    ;;
+  bridgebox_ask_serial)
+    bridgebox_ask_serial < <(printf '%b' "$answers")
+    printf 'bridgebox_serial=%s\n' "$bridgebox_serial"
     printf 'message=%s\n' "$message"
     ;;
   install_menu_options)

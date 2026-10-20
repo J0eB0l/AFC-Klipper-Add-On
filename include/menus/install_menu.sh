@@ -180,6 +180,12 @@ install_menu() {
         else
           message="Invalid selection"
         fi ;;
+      S)
+        if [ "$installation_type" == "BridgeBox" ] && [ "$bridgebox_connection" != "wifi" ]; then
+          bridgebox_ask_serial
+        else
+          message="Invalid selection"
+        fi ;;
       I) install_afc ;;
       M) main_menu ;;
       Q) exit_afc_install ;;

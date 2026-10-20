@@ -35,6 +35,8 @@ import json
 import math
 import os
 import secrets
+import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from extras.AFC_BambuAMS import (DRY_TEMP_HARD_MAX, _AMS_MODELS,
@@ -601,6 +603,11 @@ class _SweptSection:
     """
 
 
+# One chain on serial_port: auto looks for a board at a time, so two cannot
+# take the same one.
+_AUTO_LOCK = threading.Lock()
+
+
 class afcBridgeBox:
     """
     The chain master: parses the roster and fabricates unit sections.
@@ -628,6 +635,18 @@ class afcBridgeBox:
         self.state_file = (os.path.expanduser(sf) if sf
                            else (self._locate_own_file()
                                  or os.path.expanduser(self._DEFAULT_STATE)))
+        # serial_port: auto takes the board this chain saved, else the first
+        # free one found on USB (see _find_board).
+        self._auto = str(self.serial_port).strip().lower() == "auto"
+        self._auto_board: Optional[str] = None
+        # port -> when a port that did not answer as a BridgeBox is asked again
+        self._auto_probed: Dict[str, float] = {}
+        self._auto_said = False
+        # Set by AFC_BRIDGEBOX_FORGET_BOARD: nothing is saved for the old board
+        # until the restart.
+        self._board_forgotten = False
+        if self._auto:
+            self._resolve_auto_port()
         # usb, or wifi: a USB serial_port moves to WiFi once the board has
         # joined a network (see _register_wifi).
         self.connection = config.getchoice("connection",
@@ -2576,6 +2595,11 @@ class afcBridgeBox:
             "another printer or network; it restarts with its setup hotspot: "
             "AFC_BRIDGEBOX_RESET_WIFI [CHAIN=<chain>]")
         self._register_mux(
+            "AFC_BRIDGEBOX_FORGET_BOARD", self.cmd_AFC_BRIDGEBOX_FORGET_BOARD,
+            "Forget the BridgeBox a chain on serial_port: auto saved, for a "
+            "replacement board; the next start takes the next free one: "
+            "AFC_BRIDGEBOX_FORGET_BOARD [CHAIN=<chain>]")
+        self._register_mux(
             "AFC_BRIDGEBOX_REPLACE", self.cmd_AFC_BRIDGEBOX_REPLACE,
             "Forget an offline unit and put a new unit on its bay, live: "
             "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> "
@@ -2641,6 +2665,35 @@ class afcBridgeBox:
             f"AFC_BridgeBox {self.name}: the BridgeBox's WiFi and link key "
             f"are wiped and it is restarting with its bb-bridge setup "
             f"hotspot. Set up its WiFi again from a phone." + then)
+
+    def cmd_AFC_BRIDGEBOX_FORGET_BOARD(self, gcmd: Any) -> None:
+        """
+        Forget the BridgeBox a chain on serial_port: auto saved, and its WiFi
+        address, for a replacement board.
+
+        The next start takes the next free BridgeBox found on USB; until then
+        the chain keeps the board it has, and saves nothing for it.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_FORGET_BOARD [CHAIN=<chain>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_FORGET_BOARD CHAIN=chain1
+        ```
+        """
+        if not self._auto:
+            error_str = (f"AFC_BRIDGEBOX_FORGET_BOARD: {self.name} uses "
+                         f"serial_port: {self.serial_port}, not auto")
+            raise gcmd.error(error_str)
+        self._board_forgotten = True
+        self._state_set({f"{self._BASE_SECTION} {self.name}":
+                         {"usb_port": "", "wifi_addr": ""}})
+        gcmd.respond_info(
+            f"AFC_BridgeBox {self.name}: forgot its BridgeBox. RESTART, and "
+            f"the chain takes the next free BridgeBox it finds on USB.")
 
     def cmd_AFC_BRIDGEBOX_FORGET(self, gcmd: Any) -> None:
         """
@@ -4973,12 +5026,129 @@ class afcBridgeBox:
             raise config.error(error_str)
         return value
 
+    def _resolve_auto_port(self) -> None:
+        """
+        Turn serial_port: auto into the board this chain saved.
+
+        Without a saved board, the chain's ``auto:<name>`` key stands in for
+        the port this run, for the bridge and the units alike, and its finder
+        looks for a board once Klipper is up (see usb_port).
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        key = f"auto:{self.name}"
+        _bridge_mod._AUTO_FINDERS.pop(key, None)
+        saved = self._state_get(f"{self._BASE_SECTION} {self.name}",
+                                "usb_port")
+        if saved:
+            self.serial_port = saved
+            return
+        self.serial_port = key
+        _bridge_mod._AUTO_FINDERS[key] = self._find_board
+
+    #: Seconds before a port that did not answer as a BridgeBox is asked again.
+    AUTO_REPROBE_S = 60.0
+
+    def _find_board(self, probe: bool) -> Optional[str]:
+        """
+        The board of this chain on serial_port: auto, found and claimed.
+
+        The first free port on USB that answers as a BridgeBox is claimed and
+        saved, so the chain keeps it from then on. A port is free when no
+        config section names it and no other chain uses it; a board another
+        chain reaches over WiFi is not free either. A port that did not
+        answer is asked again after AUTO_REPROBE_S. Runs on the bridge's
+        reader thread.
+
+        :param probe: whether ports may be opened to look
+        :return Optional[str]: the board's port, or None
+        """
+        if self._auto_board is not None or not probe:
+            return self._auto_board
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        with _AUTO_LOCK:
+            ports, hosts = self._ports_in_use()
+            now = time.monotonic()
+            for path in _bridge_mod.bridge_candidates():
+                if (path in ports
+                        or os.path.realpath(path) in ports
+                        or now < self._auto_probed.get(path, 0.0)):
+                    continue
+                info = _bridge_mod.probe_bridge(path)
+                if info is None or info.get("ip") in hosts:
+                    self._auto_probed[path] = now + self.AUTO_REPROBE_S
+                    continue
+                self._claim_board(path)
+                return path
+        if not self._auto_said:
+            self._auto_said = True
+            self.logger.info(
+                f"AFC_BridgeBox {self.name}: serial_port: auto found no free "
+                f"BridgeBox on USB yet. Plug one in and it is picked up by "
+                f"itself.")
+        return None
+
+    def _claim_board(self, path: str) -> None:
+        """
+        Take the board found for serial_port: auto, and save it.
+
+        :param path: the board's /dev/serial/by-id port
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        self._auto_board = path
+        link = _bridge_mod._WIFI_LINKS.get(str(self.serial_port))
+        if link is not None:
+            link.usb_path = path
+        sec = f"{self._BASE_SECTION} {self.name}"
+        self.printer.get_reactor().register_async_callback(
+            lambda et: self._state_set({sec: {"usb_port": path}}))
+        self.logger.info(
+            f"AFC_BridgeBox {self.name}: serial_port: auto took the BridgeBox "
+            f"on {path} and keeps it from now on")
+
+    def _ports_in_use(self) -> Tuple[Set[str], Set[str]]:
+        """
+        What a chain on serial_port: auto leaves alone.
+
+        Every port a config section names, other modules' devices included,
+        every other chain's board, and the hosts of the boards chains reach
+        over WiFi by a tcp:// serial_port.
+
+        :return tuple: the ports, as written and resolved, and the hosts
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        values: List[str] = []
+        try:
+            raw = self.printer.lookup_object("configfile").get_status(
+                None)["config"]
+            values = [str(v) for opts in raw.values() for v in opts.values()]
+        except Exception:
+            pass
+        try:
+            for _name, obj in self.printer.lookup_objects(self._BASE_SECTION):
+                if obj is not self and isinstance(obj, afcBridgeBox):
+                    values += [str(p) for p in (obj.serial_port, obj._auto_board)
+                               if p]
+        except Exception:
+            pass
+        ports = {v for v in values if v.startswith("/dev/")}
+        ports |= {os.path.realpath(p) for p in ports}
+        hosts: Set[str] = set()
+        for v in values:
+            if v.lower().startswith("tcp://"):
+                try:
+                    hosts.add(_bridge_mod.TcpPort.parse(v)[0])
+                except ValueError:
+                    pass
+        return ports, hosts
+
     def _save_wifi_addr(self, addr: str) -> None:
         """
         Save the WiFi address the board reported, for the next start.
 
         :param addr: the board's ``tcp://host:port``
         """
+        if self._board_forgotten:
+            return
         self._state_set({f"{self._BASE_SECTION} {self.name}":
                          {"wifi_addr": addr}})
 
@@ -5008,8 +5178,8 @@ class afcBridgeBox:
                     return TcpPort(host, port, timeout=0.1, write_timeout=0.5,
                                    key=self.tcp_key)
                 import serial
-                return serial.Serial(self.serial_port, 115200,
-                                     timeout=0.1, write_timeout=0.5)
+                return serial.Serial(_bridge_mod.usb_port(self.serial_port),
+                                     115200, timeout=0.1, write_timeout=0.5)
 
             bridge = BambuBridge(_open, self.printer.get_reactor(),
                                  self.logger)
@@ -5017,9 +5187,11 @@ class afcBridgeBox:
                 bridge.store_key = self.tcp_key
             _bridge_mod.attach_wifi(self.serial_port, bridge)
             _bridge_mod._BRIDGES[self.serial_port] = bridge
-            # A network bridge that is not up yet keeps retrying rather than
-            # failing the scout, as it does for the units.
-            bridge.start(defer_open=is_tcp)
+            # A network bridge that is not up yet, or a board serial_port: auto
+            # has not found, keeps retrying rather than failing the scout, as
+            # it does for the units.
+            bridge.start(defer_open=is_tcp
+                         or self.serial_port in _bridge_mod._AUTO_FINDERS)
         self._bridge = bridge
         return bridge
 

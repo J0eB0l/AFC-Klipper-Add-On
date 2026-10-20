@@ -285,7 +285,8 @@ Every bay gets a name of its own:
 
 The startup log names each bay named either way.
 
-A second `[AFC_BridgeBox]` chain needs its own `serial_port`. Its unit names
+A second `[AFC_BridgeBox]` chain needs its own `serial_port`; with `auto` it
+takes the BridgeBox no other chain uses. Its unit names
 default to `Bambu_AMS_<chain name>_N` and `Bambu_AMS_<chain name>_HT_N`, and
 its buffer to `Bambu_AMS_<chain name>_Buffer`, so they do not collide with the
 first chain's; that prefix is saved in the state file, so the chain keeps its
@@ -889,6 +890,11 @@ known until then.
   print and while the bridge is not connected; holding the board's BOOT button
   for 10 seconds does the same wipe without Klipper.
 
+- `AFC_BRIDGEBOX_FORGET_BOARD` forgets the board a chain on `serial_port: auto`
+  saved, and its WiFi address, for a replacement board. After a RESTART the
+  chain takes the next free BridgeBox it finds on USB; until then it keeps the
+  board it has and saves nothing for it.
+
 The `AFC_BridgeBox <chain>` status object reports:
 
 - `waiting_for_bay`: units on the chain with no bay;
@@ -968,6 +974,7 @@ Set on the `[AFC_BridgeBox <name>]` section:
 
 | Option | Default | Effect |
 |--------|---------|--------|
+| `serial_port` | required | The BridgeBox's USB port, a `tcp://host:port` address, or `auto`. `auto` takes the first BridgeBox on USB that answers and that neither another chain nor any other config section uses, and saves it as `usb_port` in the state file, so the chain keeps that board. Without a saved board the chain looks once Klipper is up and picks up a board plugged in later. `AFC_BRIDGEBOX_FORGET_BOARD` moves it to a replacement board. |
 | `pool_ams` | `4` | Total four-lane AMS bays, recorded units included. At most 4; a higher value is treated as 4. It is the smallest AMS band width: the band also covers every recorded AMS's bay (never more than four), does not shrink under recorded HT lanes within the four bays, and the HT band starts after it (see [Lane layout](#lane-layout)). |
 | `pool_ht` | `8` | Total one-lane HT bays, recorded units included. |
 | `ams_names` | empty | Comma list naming the AMS bays, lowest lanes first. Only the first four entries are used. |

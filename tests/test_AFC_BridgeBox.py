@@ -2696,6 +2696,10 @@ class TestAfcBridgeBoxInit:
             "Pop the bay manager: every pool bay, its occupant, an Unassign "
             "button for each occupied bay, and a Replace button for a unit "
             "waiting for a bay -- AFC_BRIDGEBOX_BAYS [CHAIN=<chain>]"),
+        "AFC_BRIDGEBOX_FORGET_BOARD": (
+            "Forget the BridgeBox a chain on serial_port: auto saved, for a "
+            "replacement board; the next start takes the next free one: "
+            "AFC_BRIDGEBOX_FORGET_BOARD [CHAIN=<chain>]"),
         "AFC_BRIDGEBOX_REPLACE": (
             "Forget an offline unit and put a new unit on its bay, live: "
             "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> OLD=<old uid "
@@ -2724,7 +2728,9 @@ class TestAfcBridgeBoxInit:
                     "AFC_BRIDGEBOX_BAYS": m.cmd_AFC_BRIDGEBOX_BAYS,
                     "AFC_BRIDGEBOX_REPLACE": m.cmd_AFC_BRIDGEBOX_REPLACE,
                     "AFC_BRIDGEBOX_RESET_WIFI":
-                        m.cmd_AFC_BRIDGEBOX_RESET_WIFI}
+                        m.cmd_AFC_BRIDGEBOX_RESET_WIFI,
+                    "AFC_BRIDGEBOX_FORGET_BOARD":
+                        m.cmd_AFC_BRIDGEBOX_FORGET_BOARD}
         assert self._bridgebox_mux(m.printer) == {
             cmd: ("CHAIN", {"chain1": fn, None: fn})
             for cmd, fn in handlers.items()}
@@ -10289,6 +10295,26 @@ class TestAfcBridgeBoxEnsureBridge:
             ((port, 115200), {"timeout": 0.1, "write_timeout": 0.5})]
         assert m.logger.messages == []
 
+    def test_a_chain_looking_for_its_board_waits_and_opens_the_one_found(
+            self, tmp_path, monkeypatch):
+        # serial_port: auto with no saved board: the bridge sits on the
+        # chain's stand-in key, retries, and opens the board once found.
+        monkeypatch.setattr(bridge_mod, "_AUTO_FINDERS", {})
+        monkeypatch.setattr(self._Port, "opened", [])
+        serial = types.ModuleType("serial")
+        serial.Serial = self._Port                        # type: ignore
+        monkeypatch.setitem(sys.modules, "serial", serial)
+        m = self._scout(tmp_path, monkeypatch, "auto")
+        bridge = m._ensure_bridge()
+        assert live_bridges() == {"auto:chain1": bridge}
+        assert bridge.starts == [True]
+        with pytest.raises(OSError):
+            bridge.opener()                   # the reactor never looks
+        m._auto_board = "/dev/ttyACM3"
+        bridge.opener()
+        assert self._Port.opened == [
+            (("/dev/ttyACM3", 115200), {"timeout": 0.1, "write_timeout": 0.5})]
+
     def test_a_bridge_a_unit_already_opened_is_shared(self, tmp_path,
                                                       monkeypatch):
         port = "tcp://bridge.local:3333"
@@ -17764,6 +17790,14 @@ class TestAfcBridgeBoxSaveWifiAddr:
         bridge_mod._WIFI_LINKS[WIFI_USB]._save(WIFI_TCP)
         assert m._state_get(SEC, "wifi_addr") == WIFI_TCP
 
+    def test_nothing_is_saved_for_a_forgotten_board(self, tmp_path,
+                                                    monkeypatch):
+        # Its old board may still be on the link until the restart.
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        m._board_forgotten = True
+        m._save_wifi_addr(WIFI_TCP)
+        assert m._state_get(SEC, "wifi_addr") is None
+
 
 class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
     WIPE = [{"cmd": "wifi", "clear": 1}, {"cmd": "reset"}]
@@ -17875,3 +17909,304 @@ class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
         m.cmd_AFC_BRIDGEBOX_RESET_WIFI(cmd)
         assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": ""}
         assert cmd.messages == [("respond_info", self.SAID)]
+
+
+# ── serial_port: auto: the board a chain finds on USB and keeps ──────────────
+
+AUTO_BOARD = ("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_"
+              "68:EE:8F:DA:01:38-if00")
+AUTO_PICO = "/dev/serial/by-id/usb-Raspberry_Pi_Pico_C1DD3A4F368F7DA2-if00"
+AUTO_INFO = {"evt": "info", "proto": "bambubus-1", "ip": "0.0.0.0"}
+AUTO_TOOK = ("info", f"AFC_BridgeBox chain1: serial_port: auto took the "
+                     f"BridgeBox on {AUTO_BOARD} and keeps it from now on")
+AUTO_NONE = ("info", "AFC_BridgeBox chain1: serial_port: auto found no free "
+                     "BridgeBox on USB yet. Plug one in and it is picked up "
+                     "by itself.")
+
+
+def _auto_master(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+                 **options: Any) -> afcBridgeBox:
+    """
+    A scouting chain master on serial_port: auto, with its own finder and
+    WiFi link tables.
+
+    :param options: the master's further options
+    :return afcBridgeBox: the master
+    """
+    monkeypatch.setattr(bridge_mod, "_AUTO_FINDERS", {})
+    return _wifi_master(tmp_path, monkeypatch, serial_port="auto", **options)
+
+
+def _auto_usb(monkeypatch: pytest.MonkeyPatch, master: afcBridgeBox,
+              boards: Dict[str, Optional[dict]],
+              ports: Sequence[str] = (),
+              hosts: Sequence[str] = ()) -> List[str]:
+    """
+    Put ``boards`` on USB: each port and what it answers a probe with.
+
+    The module clock reads the printer's reactor, and the ports and hosts in
+    use are given.
+
+    :param ports: the ports in use
+    :param hosts: the hosts of the boards chains reach over WiFi
+    :return list: the ports probed, in order
+    """
+    probed: List[str] = []
+
+    def _probe(path: str) -> Optional[dict]:
+        """:return Optional[dict]: the board's answer"""
+        probed.append(path)
+        return boards[path]
+
+    reactor = master.printer.reactor
+    monkeypatch.setattr(bb_module, "time", types.SimpleNamespace(
+        monotonic=lambda: reactor.now))
+    monkeypatch.setattr(bridge_mod, "bridge_candidates", lambda: list(boards))
+    monkeypatch.setattr(bridge_mod, "probe_bridge", _probe)
+    monkeypatch.setattr(master, "_ports_in_use",
+                        lambda: (set(ports), set(hosts)))
+    return probed
+
+
+class TestAfcBridgeBoxInitAuto:
+    def test_auto_with_no_saved_board_stands_in_with_its_key(self, tmp_path,
+                                                             monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        assert (m._auto, m.serial_port) == (True, "auto:chain1")
+        assert bridge_mod._AUTO_FINDERS == {"auto:chain1": m._find_board}
+        assert (m._auto_board, m._auto_probed, m._auto_said,
+                m._board_forgotten) == (None, {}, False, False)
+
+    def test_auto_is_read_in_any_case(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge_mod, "_AUTO_FINDERS", {})
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=" Auto ")
+        assert (m._auto, m.serial_port) == (True, "auto:chain1")
+
+    def test_a_named_port_is_not_auto(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge_mod, "_AUTO_FINDERS", {})
+        m = _wifi_master(tmp_path, monkeypatch)
+        assert (m._auto, m.serial_port) == (False, WIFI_USB)
+        assert bridge_mod._AUTO_FINDERS == {}
+
+    def test_connection_wifi_keys_its_link_on_the_stand_in(self, tmp_path,
+                                                           monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch, connection="wifi")
+        link = bridge_mod._WIFI_LINKS["auto:chain1"]
+        assert (link.usb_path, link.addr) == ("auto:chain1", None)
+        assert m.serial_port == "auto:chain1"
+
+
+class TestAfcBridgeBoxResolveAutoPort:
+    def test_a_saved_board_is_the_port(self, tmp_path, monkeypatch):
+        record_chain_state(tmp_path, usb_port=AUTO_BOARD)
+        m = _auto_master(tmp_path, monkeypatch)
+        assert m.serial_port == AUTO_BOARD
+        assert bridge_mod._AUTO_FINDERS == {}
+
+    def test_a_finder_left_from_the_last_start_is_dropped(self, tmp_path,
+                                                          monkeypatch):
+        record_chain_state(tmp_path, usb_port=AUTO_BOARD)
+        m = _auto_master(tmp_path, monkeypatch)
+        bridge_mod._AUTO_FINDERS["auto:chain1"] = lambda probe: None
+        m._resolve_auto_port()
+        assert m.serial_port == AUTO_BOARD
+        assert bridge_mod._AUTO_FINDERS == {}
+
+    def test_a_forgotten_board_is_looked_for_again(self, tmp_path,
+                                                   monkeypatch):
+        record_chain_state(tmp_path, usb_port="")
+        m = _auto_master(tmp_path, monkeypatch)
+        assert m.serial_port == "auto:chain1"
+        assert bridge_mod._AUTO_FINDERS == {"auto:chain1": m._find_board}
+
+
+class TestAfcBridgeBoxFindBoard:
+    def test_a_claimed_board_is_given_without_looking(self, tmp_path,
+                                                      monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        probed = _auto_usb(monkeypatch, m, {AUTO_BOARD: AUTO_INFO})
+        m._auto_board = AUTO_PICO
+        assert m._find_board(True) == AUTO_PICO
+        assert probed == []
+
+    def test_the_reactor_gets_none_without_looking(self, tmp_path,
+                                                   monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        probed = _auto_usb(monkeypatch, m, {AUTO_BOARD: AUTO_INFO})
+        assert m._find_board(False) is None
+        assert probed == []
+        assert m.logger.messages == []
+
+    def test_the_first_free_board_that_answers_is_claimed(self, tmp_path,
+                                                          monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        probed = _auto_usb(monkeypatch, m, {AUTO_PICO: None,
+                                            AUTO_BOARD: AUTO_INFO})
+        assert m._find_board(True) == AUTO_BOARD
+        assert probed == [AUTO_PICO, AUTO_BOARD]
+        assert m._auto_board == AUTO_BOARD
+        assert m._auto_probed == {AUTO_PICO: m.printer.reactor.now + 60.0}
+        assert m.logger.messages == [AUTO_TOOK]
+
+    def test_ports_in_use_are_never_opened(self, tmp_path, monkeypatch):
+        # One named as written, one by the tty its link resolves to.
+        m = _auto_master(tmp_path, monkeypatch)
+        probed = _auto_usb(monkeypatch, m, {AUTO_PICO: AUTO_INFO,
+                                            AUTO_BOARD: AUTO_INFO},
+                           ports=[AUTO_PICO, "/dev/ttyACM3"])
+        monkeypatch.setattr(bb_module.os.path, "realpath",
+                            {AUTO_PICO: "/dev/ttyACM2",
+                             AUTO_BOARD: "/dev/ttyACM3"}.__getitem__)
+        assert m._find_board(True) is None
+        assert probed == []
+        assert m.logger.messages == [AUTO_NONE]
+
+    def test_a_board_another_chain_reaches_over_wifi_is_left(self, tmp_path,
+                                                             monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        info = dict(AUTO_INFO, ip="192.168.4.73")
+        probed = _auto_usb(monkeypatch, m, {AUTO_BOARD: info},
+                           hosts=["192.168.4.73"])
+        assert m._find_board(True) is None
+        assert probed == [AUTO_BOARD]
+        assert m._auto_probed == {AUTO_BOARD: m.printer.reactor.now + 60.0}
+        assert m._auto_board is None
+
+    def test_a_port_that_did_not_answer_is_asked_again_after_a_minute(
+            self, tmp_path, monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        boards: Dict[str, Optional[dict]] = {AUTO_BOARD: None}
+        probed = _auto_usb(monkeypatch, m, boards)
+        assert m._find_board(True) is None
+        m.printer.reactor.advance(59.0)
+        assert m._find_board(True) is None
+        assert probed == [AUTO_BOARD]
+        boards[AUTO_BOARD] = AUTO_INFO
+        m.printer.reactor.advance(1.0)
+        assert m._find_board(True) == AUTO_BOARD
+        assert probed == [AUTO_BOARD] * 2
+
+    def test_finding_nothing_is_said_once(self, tmp_path, monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        _auto_usb(monkeypatch, m, {})
+        assert m._find_board(True) is None
+        assert m._find_board(True) is None
+        assert m._auto_said is True
+        assert m.logger.messages == [AUTO_NONE]
+
+
+class TestAfcBridgeBoxClaimBoard:
+    def test_the_board_is_kept_said_and_saved_on_the_reactor(self, tmp_path,
+                                                             monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        m._claim_board(AUTO_BOARD)
+        assert m._auto_board == AUTO_BOARD
+        assert m.logger.messages == [AUTO_TOOK]
+        assert m._state_get(SEC, "usb_port") is None
+        m.printer.reactor.run_callbacks()
+        assert m._state_get(SEC, "usb_port") == AUTO_BOARD
+
+    def test_the_wifi_link_moves_onto_the_board(self, tmp_path, monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch, connection="wifi")
+        m._claim_board(AUTO_BOARD)
+        assert bridge_mod._WIFI_LINKS["auto:chain1"].usb_path == AUTO_BOARD
+
+
+class TestAfcBridgeBoxPortsInUse:
+    class _Configfile:
+        """Klipper's configfile object: the raw config, by section."""
+
+        def __init__(self, raw: Dict[str, Dict[str, str]]) -> None:
+            """:param raw: each section's options as written"""
+            self.raw = raw
+
+        def get_status(self, eventtime: Any) -> Dict[str, Any]:
+            """:return dict: the status, with the raw config"""
+            return {"config": self.raw}
+
+    @staticmethod
+    def _chain(printer: Any, name: str, port: str,
+               board: Optional[str] = None) -> afcBridgeBox:
+        """
+        Register another chain master on ``port``, having claimed ``board``.
+
+        :return afcBridgeBox: the chain
+        """
+        chain = afcBridgeBox.__new__(afcBridgeBox)
+        chain.serial_port, chain._auto_board = port, board
+        printer.add_object(f"AFC_BridgeBox {name}", chain)
+        return chain
+
+    def test_every_port_and_tcp_host_the_config_names(self, tmp_path,
+                                                      monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        monkeypatch.setitem(m.printer._objects, "configfile", self._Configfile({
+            "mcu": {"serial": "/dev/serial/by-id/usb-Klipper-if00"},
+            "AFC_BridgeBox chain2": {"serial_port": "tcp://192.168.4.73:8888"},
+            "AFC_BridgeBox chain3": {"serial_port": "tcp://"},
+            "AFC_BridgeBox chain1": {"serial_port": "auto", "pool_ams": "1"}}))
+        assert m._ports_in_use() == ({"/dev/serial/by-id/usb-Klipper-if00"},
+                                     {"192.168.4.73"})
+
+    def test_a_port_is_also_known_by_its_tty(self, tmp_path, monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        monkeypatch.setitem(m.printer._objects, "configfile", self._Configfile(
+            {"AFC_BoxTurtle_rfid t": {"serial": AUTO_PICO}}))
+        monkeypatch.setattr(bb_module.os.path, "realpath",
+                            {AUTO_PICO: "/dev/ttyACM2"}.__getitem__)
+        assert m._ports_in_use() == ({AUTO_PICO, "/dev/ttyACM2"}, set())
+
+    def test_other_chains_boards_count_and_its_own_does_not(self, tmp_path,
+                                                            monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        m._auto_board = "/dev/serial/by-id/usb-mine-if00"
+        self._chain(m.printer, "chain2", AUTO_PICO)
+        self._chain(m.printer, "chain3", "auto:chain3", AUTO_BOARD)
+        m.printer.add_object("AFC_BridgeBox chain1 Bambu_AMS_1", object())
+        assert m._ports_in_use() == ({AUTO_PICO, AUTO_BOARD}, set())
+
+    def test_a_printer_that_cannot_list_its_objects_still_has_the_config(
+            self, tmp_path, monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        monkeypatch.setitem(m.printer._objects, "configfile", self._Configfile(
+            {"mcu": {"serial": "/dev/ttyAMA0"}}))
+
+        def _refuse(module: str) -> list:
+            """Raise, as a printer that cannot list them."""
+            raise RuntimeError(module)
+
+        monkeypatch.setattr(m.printer, "lookup_objects", _refuse)
+        assert m._ports_in_use() == ({"/dev/ttyAMA0"}, set())
+
+    def test_without_a_configfile_only_the_chains_count(self, tmp_path,
+                                                        monkeypatch):
+        m = _auto_master(tmp_path, monkeypatch)
+        self._chain(m.printer, "chain2", "tcp://bridge.lan:9000")
+        assert m._ports_in_use() == (set(), {"bridge.lan"})
+
+
+class TestAfcBridgeBoxCmdAFCBridgeboxForgetBoard:
+    def test_a_named_port_is_refused(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        with pytest.raises(Exception) as err:
+            m.cmd_AFC_BRIDGEBOX_FORGET_BOARD(_p3_cmd())
+        assert str(err.value) == (
+            f"AFC_BRIDGEBOX_FORGET_BOARD: chain1 uses serial_port: "
+            f"{WIFI_USB}, not auto")
+        assert m._board_forgotten is False
+
+    def test_the_board_and_its_address_are_forgotten(self, tmp_path,
+                                                     monkeypatch):
+        record_chain_state(tmp_path, usb_port=AUTO_BOARD, wifi_key="cd" * 16,
+                           wifi_addr=WIFI_TCP)
+        m = _auto_master(tmp_path, monkeypatch, connection="wifi")
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_FORGET_BOARD(cmd)
+        assert {k: m._state_get(SEC, k)
+                for k in ("usb_port", "wifi_addr", "wifi_key")} == {
+            "usb_port": "", "wifi_addr": "", "wifi_key": "cd" * 16}
+        assert m._board_forgotten is True
+        assert cmd.messages == [(
+            "respond_info", "AFC_BridgeBox chain1: forgot its BridgeBox. "
+                            "RESTART, and the chain takes the next free "
+                            "BridgeBox it finds on USB.")]

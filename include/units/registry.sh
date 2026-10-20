@@ -617,6 +617,44 @@ bridgebox_ask_connection() {
   message="Connection: $(bridgebox_connection_label)"
 }
 
+bridgebox_ask_serial() {
+  # Sets the USB serial_port the chain is written with (bridgebox_serial):
+  # auto, or a port named by its /dev/serial/by-id path. Lists the ports
+  # named like a BridgeBox.
+  local byid="${bridgebox_byid_dir:-/dev/serial/by-id}" choice i p
+  local -a ports=()
+  for p in "$byid"/usb-Espressif_USB_JTAG_serial_debug_unit_*-if00 \
+           "$byid"/usb-Raspberry_Pi_Pico_*-if00; do
+    [ -e "$p" ] && ports+=("$p")
+  done
+  echo "A. auto: Klipper finds the BridgeBox on USB by itself."
+  for i in "${!ports[@]}"; do
+    echo "$((i + 1)). ${ports[$i]}"
+  done
+  read -p "USB serial port for this BridgeBox (A, a number, or a /dev/serial/by-id path; Enter keeps ${bridgebox_serial}): " choice
+  case "$choice" in
+    "") ;;
+    A|a) bridgebox_serial="auto" ;;
+    *)
+      if [[ "$choice" =~ ^/dev/[A-Za-z0-9._:/+-]+$ ]]; then
+        bridgebox_serial="$choice"
+      elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#ports[@]}" ]; then
+        bridgebox_serial="${ports[$((choice - 1))]}"
+      else
+        message="${RED}Enter A, a number from the list, or a /dev/serial/by-id path.${RESET}"
+        return
+      fi
+      ;;
+  esac
+  message="USB serial port: ${bridgebox_serial}"
+}
+
+bridgebox_write_serial() {
+  # A named USB port in place of serial_port: auto (WiFi only has already
+  # replaced it with its address).
+  sed -i "s|^serial_port: auto$|serial_port: ${bridgebox_serial}|" "$1"
+}
+
 bridgebox_write_connection() {
   local addr="$bridgebox_address"
   case "$bridgebox_connection" in
@@ -626,13 +664,16 @@ bridgebox_write_connection() {
       if [[ "$addr" != *:* ]]; then
         addr="${addr}:8888"
       fi
-      sed -i "s|^serial_port: /dev/serial/by-id/.*|serial_port: tcp://${addr}|" "$1" ;;
+      sed -i "s|^serial_port: auto$|serial_port: tcp://${addr}|" "$1" ;;
   esac
 }
 
 unit_install_menu_options_BridgeBox() {
   printf "P. Units on this chain : %s AMS, %s AMS HT \n" "$bridgebox_pool_ams" "$bridgebox_pool_ht"
   printf "W. Connection : %s \n" "$(bridgebox_connection_label)"
+  if [ "$bridgebox_connection" != "wifi" ]; then
+    printf "S. USB serial port : %s \n" "$bridgebox_serial"
+  fi
 }
 
 unit_copy_files_BridgeBox() {
@@ -641,6 +682,7 @@ unit_copy_files_BridgeBox() {
   sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_BridgeBox.cfg"
   bridgebox_write_pool "${afc_config_dir}/AFC_BridgeBox.cfg"
   bridgebox_write_connection "${afc_config_dir}/AFC_BridgeBox.cfg"
+  bridgebox_write_serial "${afc_config_dir}/AFC_BridgeBox.cfg"
 }
 
 unit_install_additional_BridgeBox() {
@@ -652,11 +694,12 @@ unit_install_additional_BridgeBox() {
   sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   bridgebox_write_pool "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   bridgebox_write_connection "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  bridgebox_write_serial "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
 }
 
 unit_message_BridgeBox() {
   message+="""
-- Set extruder, and serial_port unless you chose WiFi only, in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
+- Set extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
   """
 }
 

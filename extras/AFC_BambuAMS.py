@@ -5159,7 +5159,7 @@ class afcBambuAMS(afcUnit):
             # or timers; _on_status ignores it until claim() runs the online.
             if fresh:
                 try:
-                    bridge.start(defer_open=self._bridge_is_tcp())
+                    bridge.start(defer_open=self._bridge_may_be_late())
                     if self.variant != "auto":
                         bridge.send({"cmd": "variant", "set": self.variant})
                     bridge.send({"cmd": "status"})
@@ -5219,7 +5219,7 @@ class afcBambuAMS(afcUnit):
                 f"(ams_index={self.ams_index})")
             return
         try:
-            bridge.start(defer_open=self._bridge_is_tcp())
+            bridge.start(defer_open=self._bridge_may_be_late())
             # Pin the device variant if configured; 'auto' lets the firmware
             # detect AMS vs lite by probing both bus addresses.
             if self.variant != "auto":
@@ -6056,16 +6056,18 @@ class afcBambuAMS(afcUnit):
         self.select_lane(lane)       # mode-09 -> mode:4 (last mode change)
         self.set_feed_assist(lane, True)  # hold mode:4 via AP2 sync
 
-    def _bridge_is_tcp(self) -> bool:
+    def _bridge_may_be_late(self) -> bool:
         """
-        Whether this unit's bridge is reached over the network.
+        Whether this unit's bridge may come up after Klipper does.
 
         Decides whether a first connect that fails is a fault or just a bridge
-        that is not up yet (see BambuBridge.start(defer_open=...)).
+        that is not up yet (see BambuBridge.start(defer_open=...)): one reached
+        over the network, or one a chain on serial_port: auto has not found.
 
-        :return bool: True when serial_port names a tcp:// endpoint
+        :return bool: True for a tcp:// endpoint or a chain's auto key
         """
-        return str(self.serial_port or "").strip().lower().startswith("tcp://")
+        return (str(self.serial_port or "").strip().lower().startswith("tcp://")
+                or self.serial_port in _bridge_mod._AUTO_FINDERS)
 
     def _open_serial(self) -> Any:
         """
@@ -6097,7 +6099,7 @@ class afcBambuAMS(afcUnit):
         # write_timeout is required: every send() runs on the reactor, and a
         # Pico busy on the AMS bus stops draining its CDC. A blocked write
         # would stall the reactor long enough to shut the MCUs down.
-        return serial.Serial(self.serial_port, self.baud,
+        return serial.Serial(_bridge_mod.usb_port(self.serial_port), self.baud,
                              timeout=0.1, write_timeout=0.5)
 
     def _make_logo(self, error: bool) -> str:
