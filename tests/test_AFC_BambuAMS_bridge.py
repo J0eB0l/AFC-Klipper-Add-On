@@ -6318,6 +6318,8 @@ class TestWifiLinkOnFrame:
                             lambda obj: calls.append(("key", obj)))
         monkeypatch.setattr(link, "_usb_wifi_state",
                             lambda obj: calls.append(("state", obj)))
+        monkeypatch.setattr(link, "_cleared",
+                            lambda obj: calls.append(("cleared", obj)))
         return calls
 
     def test_a_linkkey_reply_goes_to_the_key_handler(self, monkeypatch,
@@ -6333,8 +6335,25 @@ class TestWifiLinkOnFrame:
         calls = self._record(monkeypatch, link)
         link.on_frame({"evt": "wifi", "link": 3})
         link.on_frame({"evt": "info", "link": "wifi"})
+        link.on_frame({"evt": "wifi", "cleared": 0})
         assert calls == [("state", {"evt": "wifi", "link": 3}),
-                         ("state", {"evt": "info", "link": "wifi"})]
+                         ("state", {"evt": "info", "link": "wifi"}),
+                         ("state", {"evt": "wifi", "cleared": 0})]
+
+    @pytest.mark.parametrize("usb, on_wifi", [
+        (True, False),
+        (True, True),
+        (None, True),
+    ])
+    def test_a_wipe_goes_to_the_wipe_handler(self, monkeypatch, tmp_path,
+                                             usb, on_wifi):
+        link, _bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=usb,
+                                            addr=WIFI_ADDR)
+        calls = self._record(monkeypatch, link)
+        link.on_wifi = on_wifi
+        frame = {"evt": "wifi", "cleared": 1, "by": "button"}
+        link.on_frame(frame)
+        assert calls == [("cleared", frame)]
 
     def test_state_frames_on_wifi_are_ignored(self, monkeypatch, tmp_path):
         link, _bridge, _saved = wifi_bridge(monkeypatch, tmp_path)
@@ -6350,6 +6369,79 @@ class TestWifiLinkOnFrame:
         calls = self._record(monkeypatch, link)
         link.on_frame({"evt": "wifi", "link": 3})
         assert calls == []
+
+
+class TestWifiLinkCleared:
+    BUTTON = {"evt": "wifi", "cleared": 1, "by": "button"}
+
+    def test_a_wipe_by_the_command_is_left_to_it(self, monkeypatch,
+                                                 tmp_path):
+        link, bridge, saved = wifi_bridge(monkeypatch, tmp_path,
+                                          addr=WIFI_ADDR)
+        link.on_wifi = True
+        link._cleared({"evt": "wifi", "cleared": 1})
+        bridge.reactor.run_callbacks()
+        assert link.addr == WIFI_ADDR
+        assert bridge.logger.messages == []
+        assert bridge._serial is not None
+        assert saved == []
+
+    def test_with_no_bridge_it_is_ignored(self):
+        link = WifiLink(WIFI_KEY, lambda a: None, WIFI_LABEL,
+                        usb_path="/dev/ttyACM9", addr=WIFI_ADDR)
+        link._cleared(self.BUTTON)
+        assert link.addr == WIFI_ADDR
+
+    def test_on_wifi_with_usb_in_it_forgets_and_reopens_on_usb(
+            self, monkeypatch, tmp_path):
+        link, bridge, saved = wifi_bridge(monkeypatch, tmp_path,
+                                          addr=WIFI_ADDR, ssid="Shop")
+        link.on_wifi = True
+        link._creds_sent = True
+        old = bridge._serial
+        link._cleared(self.BUTTON)
+        assert (link.key, link.addr, link._creds_sent) == (
+            WIFI_KEY, None, False)
+        assert bridge.logger.messages == wifi_said(
+            ("info", "the BridgeBox's BOOT button cleared its WiFi and key; "
+                     "the link is on USB until its WiFi is set up again"))
+        assert bridge._serial is None
+        assert old.closed is True
+        assert saved == []                            # on the reactor
+        bridge.reactor.run_callbacks()
+        assert saved == [""]
+
+    def test_on_usb_it_says_so_and_keeps_the_port(self, monkeypatch,
+                                                  tmp_path):
+        link, bridge, saved = wifi_bridge(monkeypatch, tmp_path)
+        link._cleared(self.BUTTON)
+        bridge.reactor.run_callbacks()
+        assert link.addr is None
+        assert bridge.logger.messages == wifi_said(
+            ("info", "the BridgeBox's BOOT button cleared its WiFi and key; "
+                     "the link is on USB until its WiFi is set up again"))
+        assert bridge._serial is not None
+        assert saved == []
+
+    @pytest.mark.parametrize("usb", [False, None])
+    def test_without_usb_the_address_is_kept(self, monkeypatch, tmp_path,
+                                             usb):
+        link, bridge, saved = wifi_bridge(monkeypatch, tmp_path, usb=usb,
+                                          addr=WIFI_ADDR)
+        link.on_wifi = True
+        link._failed_addr, link._retry_at = WIFI_ADDR, 160.0
+        old = bridge._serial
+        link._cleared(self.BUTTON)
+        bridge.reactor.run_callbacks()
+        assert link.addr == WIFI_ADDR
+        assert (link._failed_addr, link._retry_at) == (None, 0.0)
+        assert bridge.logger.messages == wifi_said(
+            ("warning", "the BridgeBox's BOOT button cleared its WiFi and "
+                        "key. Set it up again from its bb-bridge hotspot; "
+                        "Klipper keeps trying to reach it."))
+        assert bridge._serial is None
+        assert old.closed is True
+        assert saved == []
 
 
 class TestWifiLinkUsbWifiState:
@@ -6766,3 +6858,18 @@ class TestBambuBridgeHandleLineWifi:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line(json.dumps({"evt": "linkkey", "saved": 1}))
         assert bridge.wifi is None
+
+    @pytest.mark.parametrize("frame, said", [
+        ({"evt": "wifi", "cleared": 1, "by": "button"},
+         "AFC bambu bridge: bridge WiFi wiped, cleared=1 by=button"),
+        ({"evt": "wifi", "cleared": 0},
+         "AFC bambu bridge: bridge WiFi wiped, cleared=0 by=command"),
+        ({"evt": "wifi", "link": 3, "ip": "192.168.4.80", "assoc": 1,
+          "tries": 2},
+         "AFC bambu bridge: pico wifi link=3 ip=192.168.4.80 assoc=1 "
+         "tries=2"),
+    ])
+    def test_wifi_frames_are_logged(self, monkeypatch, frame, said):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.handle_line(json.dumps(frame))
+        assert bridge.logger.messages == [("info", said)]

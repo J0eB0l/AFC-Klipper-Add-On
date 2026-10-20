@@ -1123,14 +1123,51 @@ class WifiLink:
 
     def on_frame(self, obj: dict) -> None:
         """
-        Follow a USB board's WiFi state, and the replies to the key writes.
+        Follow a USB board's WiFi state, the replies to the key writes, and
+        a board wiped by its BOOT button.
 
         :param obj: an info, wifi or linkkey frame
         """
         if obj.get("evt") == "linkkey":
             self._key_stored(obj)
+        elif obj.get("cleared") == 1:
+            self._cleared(obj)
         elif not self.on_wifi and self.usb_path:
             self._usb_wifi_state(obj)
+
+    def _cleared(self, obj: dict) -> None:
+        """
+        Start over when the board's BOOT button wiped its WiFi and key.
+
+        The board restarts with its setup hotspot, so a TCP link is dropped
+        now, not once it goes quiet. With the USB cable in, the address is
+        forgotten and the link reopens on USB; without it, the address is
+        kept for a board set up again on the same one. A network in the
+        config is sent again. A wipe by AFC_BRIDGEBOX_RESET_WIFI is left to
+        that command.
+
+        :param obj: the wifi frame
+        """
+        if obj.get("by") != "button" or self._bridge is None:
+            return
+        usb_in = bool(self.usb_path) and os.path.exists(self.usb_path)
+        addr = self.addr
+        self.forget(self.key)
+        if usb_in:
+            if addr:
+                self._bridge.reactor.register_async_callback(
+                    lambda et: self._save(""))
+            self._say("cleared", "the BridgeBox's BOOT button cleared its "
+                                 "WiFi and key; the link is on USB until its "
+                                 "WiFi is set up again")
+        else:
+            self.addr = addr
+            self._say("cleared", "the BridgeBox's BOOT button cleared its "
+                                 "WiFi and key. Set it up again from its "
+                                 "bb-bridge hotspot; Klipper keeps trying to "
+                                 "reach it.", warning=True)
+        if self.on_wifi:
+            self._bridge._drop_port()  # the reader reopens through open()
 
     def _usb_wifi_state(self, obj: dict) -> None:
         """
@@ -3369,10 +3406,15 @@ class BambuBridge:
             # A BB_WIFI board reporting its radio, logged when it changes:
             # tells a wrong password from a board that never booted.
             try:
-                self.logger.info(
-                    f"AFC bambu {self.name}: pico wifi link={obj.get('link')} "
-                    f"ip={obj.get('ip')} assoc={obj.get('assoc')} "
-                    f"tries={obj.get('tries')}")
+                if "cleared" in obj:
+                    msg = (f"AFC bambu {self.name}: bridge WiFi wiped, "
+                           f"cleared={obj.get('cleared')} "
+                           f"by={obj.get('by', 'command')}")
+                else:
+                    msg = (f"AFC bambu {self.name}: pico wifi "
+                           f"link={obj.get('link')} ip={obj.get('ip')} "
+                           f"assoc={obj.get('assoc')} tries={obj.get('tries')}")
+                self.logger.info(msg)
             except Exception:
                 pass
         elif obj.get("evt") == "cali":
