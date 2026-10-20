@@ -3603,6 +3603,9 @@ class BambuBridge:
     #: Silence this long on an open link means the far end is gone: drop it and
     #: reconnect (see _check_quiet).
     QUIET_DROP_S = 30.0
+    #: Silence this long on a TCP link after a reset was asked for means the
+    #: board is rebooting (see _drop_if_silent).
+    RESET_QUIET_S = 2.0
 
     def _check_quiet(self) -> None:
         """
@@ -3672,6 +3675,10 @@ class BambuBridge:
         transport-agnostic one: the firmware streams status continuously, so
         QUIET_DROP_S of nothing on an open link means the far end is gone.
 
+        A reset asked for over TCP is let go after RESET_QUIET_S instead. On
+        USB the reset drops the port and the read fails, but a board on WiFi
+        reboots without a FIN, so the link would sit for QUIET_DROP_S.
+
         Skipped during a firmware transfer: the board is legitimately silent
         while it receives an image, and dropping the link mid-flash would
         abort it.
@@ -3683,7 +3690,18 @@ class BambuBridge:
         since = self._last_frame_t
         if self._connected_t is not None:
             since = self._connected_t if since is None else max(since, self._connected_t)
-        if since is None or (time.monotonic() - since) < self.QUIET_DROP_S:
+        if since is None:
+            return False
+        quiet_for = time.monotonic() - since
+        if (self._expect_reset
+                and isinstance(self._serial, TcpPort)
+                and quiet_for >= self.RESET_QUIET_S):
+            self._expect_reset = False
+            self.logger.info(
+                "AFC bambu: bridge resetting as asked; reconnecting")
+            self._drop_port()
+            return True
+        if quiet_for < self.QUIET_DROP_S:
             return False
         self.logger.warning(
             f"AFC bambu: bridge silent for {self.QUIET_DROP_S:.0f}s on an open "

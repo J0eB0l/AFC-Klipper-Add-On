@@ -4930,6 +4930,50 @@ class TestBambuBridgeDropIfSilent:
         assert bridge._drop_if_silent() is True
         assert bridge.logger.messages == [self.DROP_LOG]
 
+    def test_a_reset_over_wifi_is_let_go_after_a_short_silence(
+            self, monkeypatch):
+        # A board on WiFi reboots without a FIN, so no read fails: waiting
+        # QUIET_DROP_S kept AFC_BRIDGEBOX_RESET_WIFI's USB fallback 30 s out.
+        bridge = make_bambu_bridge(monkeypatch)
+        sock = FakeSocket()
+        bridge._serial = tcp_port_on(sock)
+        bridge._expect_reset = True               # {"cmd":"reset"} was sent
+        self._spoke(bridge)
+        bridge.reactor.advance(1.9)
+        assert bridge._drop_if_silent() is False
+        assert bridge.logger.messages == []
+        bridge.reactor.advance(0.1)
+        assert bridge._drop_if_silent() is True
+        assert (bridge._serial, sock.closed) == (None, True)
+        assert bridge._expect_reset is False
+        assert bridge.logger.messages == [
+            ("info", "AFC bambu: bridge resetting as asked; reconnecting")]
+
+    def test_a_reset_over_usb_is_left_to_the_read_that_fails(
+            self, monkeypatch):
+        # USB drops the port on a reset, and the reader says so itself.
+        bridge = make_bambu_bridge(monkeypatch)
+        port = bridge._serial
+        bridge._expect_reset = True
+        self._spoke(bridge)
+        bridge.reactor.advance(5.0)
+        assert bridge._drop_if_silent() is False
+        assert (bridge._serial, port.closed) == (port, False)
+        assert bridge._expect_reset is True
+        assert bridge.logger.messages == []
+
+    def test_a_quiet_wifi_link_with_no_reset_keeps_the_long_wait(
+            self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        sock = FakeSocket()
+        port = tcp_port_on(sock)
+        bridge._serial = port
+        self._spoke(bridge)
+        bridge.reactor.advance(5.0)
+        assert bridge._drop_if_silent() is False
+        assert (bridge._serial, sock.closed) == (port, False)
+        assert bridge.logger.messages == []
+
 
 class TestBambuBridgeSilentFor:
     @staticmethod
