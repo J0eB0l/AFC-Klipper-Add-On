@@ -1806,6 +1806,127 @@ class TestBambuBridgeNoteDryRefusal:
         assert bambu_bridge.logger.messages == []
 
 
+class TestBambuBridgeNoteUartdiag:
+    LABEL = "AFC_BridgeBox chain1"
+
+    @staticmethod
+    def report(why: str, edges: Any = 5000, frames: int = 100) -> dict:
+        return {"evt": "uartdiag", "why": why, "edges": edges, "frames": frames}
+
+    @staticmethod
+    def logged(obj: dict) -> LogLine:
+        return ("debug", f"AFC bambu: bridge uartdiag {obj}")
+
+    def test_a_report_without_counts_is_only_logged(self, bambu_bridge):
+        obj = self.report("still", edges="?")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge.logger.file_only == [self.logged(obj)[1]]
+        assert bambu_bridge._diag_prev is None
+        assert bambu_bridge._bus_said is None
+
+    def test_frames_with_nothing_said_says_nothing(self, bambu_bridge):
+        obj = self.report("frames")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._diag_prev == ("frames", 5000, 100)
+        assert bambu_bridge._bus_said is None
+
+    def test_frames_after_a_verdict_says_the_bus_is_back(self, bambu_bridge):
+        bambu_bridge._bus_said = "no_signal"
+        obj = self.report("frames", frames=103)
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [
+            self.logged(obj),
+            ("info", "AFC bambu: the AMS bus is talking again")]
+        assert bambu_bridge._bus_said is None
+
+    def test_the_chain_label_names_it(self, bambu_bridge):
+        bambu_bridge.wifi = types.SimpleNamespace(label=self.LABEL)
+        bambu_bridge._bus_said = "deaf"
+        obj = self.report("frames")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [
+            self.logged(obj),
+            ("info", f"{self.LABEL}: the AMS bus is talking again")]
+
+    @pytest.mark.parametrize("why", ["silent", "base"])
+    def test_only_still_gives_a_verdict(self, bambu_bridge, why):
+        bambu_bridge._diag_prev = ("silent", 5000, 100)
+        obj = self.report(why)
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._diag_prev == (why, 5000, 100)
+        assert bambu_bridge._bus_said is None
+
+    def test_still_with_no_earlier_report_gives_none(self, bambu_bridge):
+        obj = self.report("still")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._diag_prev == ("still", 5000, 100)
+        assert bambu_bridge._bus_said is None
+
+    def test_still_after_a_base_report_gives_none(self, bambu_bridge):
+        bambu_bridge._diag_prev = ("base", 5000, 100)
+        obj = self.report("still")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._bus_said is None
+
+    def test_a_board_without_the_edge_counter_gives_none(self, bambu_bridge):
+        bambu_bridge._diag_prev = ("silent", -1, 100)
+        obj = self.report("still", edges=-1)
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._bus_said is None
+
+    def test_frames_that_moved_give_none(self, bambu_bridge):
+        bambu_bridge._diag_prev = ("silent", 5000, 99)
+        obj = self.report("still")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._bus_said is None
+
+    @pytest.mark.parametrize("prev_why", ["silent", "still"])
+    def test_edges_standing_still_is_no_signal(self, bambu_bridge, prev_why):
+        bambu_bridge._diag_prev = (prev_why, 5000, 100)
+        obj = self.report("still")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [
+            self.logged(obj),
+            ("warning", "AFC bambu: no signal on the AMS bus. Check the bus "
+                        "cable to the BridgeBox and that the AMS has power.")]
+        assert bambu_bridge._bus_said == "no_signal"
+        assert bambu_bridge._diag_prev == ("still", 5000, 100)
+
+    def test_edges_moving_without_frames_asks_for_rst(self, bambu_bridge):
+        bambu_bridge.wifi = types.SimpleNamespace(label=self.LABEL)
+        bambu_bridge._diag_prev = ("silent", 4000, 100)
+        obj = self.report("still")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [
+            self.logged(obj),
+            ("warning", f"{self.LABEL}: the BridgeBox hears the AMS bus but "
+                        f"no message gets through. Press RST on the "
+                        f"BridgeBox; it reconnects by itself.")]
+        assert bambu_bridge._bus_said == "deaf"
+
+    def test_the_same_verdict_is_said_once(self, bambu_bridge):
+        bambu_bridge._diag_prev = ("still", 5000, 100)
+        bambu_bridge._bus_said = "no_signal"
+        obj = self.report("still")
+        bambu_bridge._note_uartdiag(obj)
+        assert bambu_bridge.logger.messages == [self.logged(obj)]
+        assert bambu_bridge._bus_said == "no_signal"
+
+    def test_a_new_verdict_replaces_the_old(self, bambu_bridge):
+        bambu_bridge._diag_prev = ("still", 4000, 100)
+        bambu_bridge._bus_said = "no_signal"
+        bambu_bridge._note_uartdiag(self.report("still"))
+        assert bambu_bridge._bus_said == "deaf"
+        assert bambu_bridge.logger.messages[-1][0] == "warning"
+
+
 class TestBambuBridgeNoteDryCfg:
     LINE = "[AMS_CHMB]rotate:1, 0, pw_lim:100, cool_down:0, 0, dur:480, tmpr:55"
 
@@ -3801,6 +3922,38 @@ class TestBambuBridgeHandleLine:
         bridge.handle_line('{"evt":"error","msg":"bus down"}')
         assert bridge.logger.messages == [
             ("warning", "AFC bambu: bridge error: bus down")]
+
+    def test_unknown_command_right_after_connect_stays_in_the_file(
+            self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.reactor.now += BambuBridge.STALE_ERROR_S - 0.5
+        bridge.handle_line('{"evt":"error","msg":"unknown command"}')
+        line = ("AFC bambu: bridge error 0.50s after connect, from a line "
+                "sent before it (ignored): unknown command")
+        assert bridge.logger.messages == [("debug", line)]
+        assert bridge.logger.file_only == [line]
+
+    def test_unknown_command_later_warns(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.reactor.now += BambuBridge.STALE_ERROR_S
+        bridge.handle_line('{"evt":"error","msg":"unknown command"}')
+        assert bridge.logger.messages == [
+            ("warning", "AFC bambu: bridge error: unknown command")]
+
+    def test_unknown_command_never_connected_warns(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch, connected=False)
+        bridge.handle_line('{"evt":"error","msg":"unknown command"}')
+        assert bridge.logger.messages == [
+            ("warning", "AFC bambu: bridge error: unknown command")]
+
+    def test_uartdiag_is_read(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.handle_line('{"evt":"uartdiag","why":"base","edges":7,'
+                           '"frames":3}')
+        assert bridge._diag_prev == ("base", 7, 3)
+        assert bridge.logger.messages == [
+            ("debug", "AFC bambu: bridge uartdiag {'evt': 'uartdiag', "
+                      "'why': 'base', 'edges': 7, 'frames': 3}")]
 
     def test_ack_is_logged(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)

@@ -1403,6 +1403,10 @@ class BambuBridge:
     # AFC.log only, so a retry storm cannot stall the reactor.
     NARRATION_CONSOLE_MAX_PER_S = 12
 
+    # An "unknown command" this soon after a link opens answers a line from
+    # before it.
+    STALE_ERROR_S = 1.0
+
     def __init__(self, serial_factory: Callable[[], Any], reactor: Any,
                  logger: Any) -> None:
         """
@@ -1429,6 +1433,10 @@ class BambuBridge:
         # message identifies the unit.
         self.name = "bridge"
         self._listeners: List[Callable[[dict], None]] = []
+        # The last uartdiag report's edge and frame counts, and which bus
+        # state the console was last told (see _note_uartdiag).
+        self._diag_prev: Optional[Tuple[str, int, int]] = None
+        self._bus_said: Optional[str] = None
         self._serial: Optional[Any] = None
         self._thread: Optional[threading.Thread] = None
         self._run = False
@@ -3003,7 +3011,25 @@ class BambuBridge:
                 self._last_raw_reply = str(
                     obj.get("hex") or obj.get("rx") or "")
         elif obj.get("evt") == "error":
-            self.logger.warning(f"AFC bambu: bridge error: {obj.get('msg')}")
+            # The board answers a line it already had queued, or one the tty
+            # echoed back before the port went raw, the moment a USB port
+            # opens. "unknown command" then answers nothing this connection
+            # sent (every command sent is one the firmware knows); other
+            # errors can answer the linkkey sent on connect, so they stay.
+            since = (time.monotonic() - self._connected_t
+                     if self._connected_t is not None else None)
+            if (obj.get("msg") == "unknown command"
+                and since is not None
+                and since < self.STALE_ERROR_S):
+                self.logger.debug(
+                    f"AFC bambu: bridge error {since:.2f}s after connect, "
+                    f"from a line sent before it (ignored): {obj.get('msg')}",
+                    only_debug=True)
+            else:
+                self.logger.warning(
+                    f"AFC bambu: bridge error: {obj.get('msg')}")
+        elif obj.get("evt") == "uartdiag":
+            self._note_uartdiag(obj)
         elif obj.get("evt") == "fw":
             # Firmware transfer, one line per stage. AFC_BAMBU_FLASH waits on
             # each answer; the CRC answer is the only receipt for a raw stream.
@@ -3733,6 +3759,55 @@ class BambuBridge:
         self.logger.warning(
             f"AFC bambu: bridge has been {what} for {quiet_for:.0f}s"
             f"{'; commands are being dropped' if self._serial is None else ''}")
+
+    def _note_uartdiag(self, obj: dict) -> None:
+        """
+        Read the diag firmware's bus report and tell the console what a
+        silent bus means, once per change.
+
+        The board counts falling edges on its RX pad apart from the UART, so
+        two reports in a row tell the cases apart: edges standing still is
+        nothing on the wire (a bus cable out, or no unit powered), edges
+        moving with no frame passing is the receiver stuck (the board needs
+        its RST). "frames" ends either. The first verdict comes with the
+        first "still", a minute into the silence.
+
+        :param obj: the {"evt":"uartdiag",...} report
+        """
+        self.logger.debug(f"AFC bambu: bridge uartdiag {obj}", only_debug=True)
+        why = str(obj.get("why") or "")
+        try:
+            now = (why, int(obj.get("edges")), int(obj.get("frames")))
+        except (TypeError, ValueError):
+            return
+        prev, self._diag_prev = self._diag_prev, now
+        label = self.wifi.label if self.wifi is not None else "AFC bambu"
+        if why == "frames":
+            if self._bus_said is not None:
+                self._bus_said = None
+                self.logger.info(f"{label}: the AMS bus is talking again")
+            return
+        # Judged across two reports of one silence, 60 s apart; a "base"
+        # report before it counts the traffic the units sent until then.
+        if (why != "still"
+            or prev is None
+            or prev[0] not in ("silent", "still")
+            or now[1] < 0
+            or now[2] != prev[2]):
+            return
+        state = "no_signal" if now[1] == prev[1] else "deaf"
+        if state == self._bus_said:
+            return
+        self._bus_said = state
+        if state == "no_signal":
+            self.logger.warning(
+                f"{label}: no signal on the AMS bus. Check the bus cable to "
+                f"the BridgeBox and that the AMS has power.")
+        else:
+            self.logger.warning(
+                f"{label}: the BridgeBox hears the AMS bus but no message "
+                f"gets through. Press RST on the BridgeBox; it reconnects by "
+                f"itself.")
 
     def _mark_connected(self) -> None:
         """
