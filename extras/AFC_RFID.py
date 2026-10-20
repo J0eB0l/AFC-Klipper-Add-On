@@ -237,7 +237,8 @@ class SpoolmanClient:
         Link a tag to a spool natively, unless something else already holds it.
 
         A tag held by another spool or a filament is reported and left there:
-        moving it is the user's call, in Spoolman.
+        moving it is the user's call, in Spoolman. A UID that is not hex (some
+        readers report a serial) is skipped, since Spoolman refuses it.
 
         :param spool_id: Spoolman spool id
         :param spool: that spool's record, to skip a tag it already carries
@@ -248,6 +249,7 @@ class SpoolmanClient:
         norm = _norm_uid(uid)
         if (not norm
             or not self.native_tags
+            or not _HEX_UID.fullmatch(norm)
             or norm in _spool_tag_uids(spool or {})):
             return False
         holder = self.tag_holder(norm)
@@ -839,6 +841,8 @@ def _norm_uid(uid: Any) -> str:
 # Spool UID extra-field key, captured from the client class at import so this
 # doesn't depend on the global SpoolmanClient name at call time.
 _CARD_UIDS_FIELD = SpoolmanClient.SPOOL_EXTRA_CARD_UIDS
+#: What Spoolman accepts as a tag UID once separators are stripped.
+_HEX_UID = re.compile(r"[0-9A-F]+")
 _TRAY_UID_FIELD = SpoolmanClient.SPOOL_EXTRA_TRAY_UID
 
 

@@ -476,6 +476,14 @@ class TestSpoolmanClientEnsureTagLinked:
         assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "") is False
         assert moonraker.calls == []
 
+    def test_a_non_hex_uid_does_nothing(self):
+        # A reader's serial in card_uids, which Spoolman answers with a 400.
+        client, moonraker = self._client(dict(self._FREE))
+        assert client.ensure_tag_linked(112, {"id": 112, "tags": []},
+                                        "S0395MB251230046650C3") is False
+        assert moonraker.calls == []
+        assert moonraker.logger.messages == []
+
     def test_an_older_server_does_nothing(self):
         client, moonraker = self._client(dict(self._FREE), native=False)
         assert client.ensure_tag_linked(5, {"id": 5}, "CCDD") is False
