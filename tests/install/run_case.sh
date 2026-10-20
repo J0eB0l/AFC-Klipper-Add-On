@@ -76,6 +76,12 @@ klipper_dir="$WORKDIR/klipper"
 afc_config_dir="$WORKDIR/AFC"
 afc_file="$afc_config_dir/AFC.cfg"
 
+# An existing install's config, as $seed_cfg holds it (any mode).
+if [ -n "${seed_cfg:-}" ]; then
+  mkdir -p "$afc_config_dir"
+  printf '%b' "$seed_cfg" > "$afc_config_dir/AFC_seed.cfg"
+fi
+
 dump_config_dir() {
   echo "=== FILES ==="
   find "$afc_config_dir" -type f | sed "s#^$afc_config_dir/##" | sort | while read -r rel; do

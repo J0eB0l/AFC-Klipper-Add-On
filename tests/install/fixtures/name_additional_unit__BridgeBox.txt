@@ -1,3 +1,3 @@
 === VARS ===
-boxturtle_name=chain2
+boxturtle_name=chain1
 turtle_renamed=True

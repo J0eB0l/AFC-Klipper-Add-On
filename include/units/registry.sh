@@ -87,7 +87,7 @@ declare -A UNIT_ADDITIONAL_DEFAULT_NAME=(
   ["Claymore"]="Claymore_1"
   ["QuattroBox"]="QuattroBox_1"
   ["OpenAMS"]="AMS_1"
-  ["BridgeBox"]="chain2"
+  ["BridgeBox"]="chain1"
   ["ViViD"]="Vivid_1"
   ["EMU"]="EMU_1"
 )
@@ -99,7 +99,14 @@ unit_key_for_type() {
 }
 
 unit_additional_default_name() {
-  # Echoes the default unit name for the "add additional unit" prompt.
+  # Echoes the default unit name for the "add additional unit" prompt. A
+  # type with a unit_default_name_<key> adapter picks its own.
+  local fn
+  fn="unit_default_name_$(unit_key_for_type "$1")"
+  if declare -F "$fn" > /dev/null; then
+    "$fn"
+    return
+  fi
   printf '%s' "${UNIT_ADDITIONAL_DEFAULT_NAME[$1]:-Unit_1}"
 }
 
@@ -723,9 +730,19 @@ unit_message_BridgeBox() {
   """
 }
 
+unit_default_name_BridgeBox() {
+  # The first chainN no [AFC_BridgeBox chainN] section in the AFC config
+  # uses: chain1 when the system has other units but no BridgeBox yet.
+  local n=1
+  while grep -qs "^\[AFC_BridgeBox chain${n}\]" "${afc_config_dir}"/*.cfg; do
+    n=$((n + 1))
+  done
+  printf 'chain%s' "$n"
+}
+
 unit_additional_menu_row_BridgeBox() {
   if [ "$turtle_renamed" != "True" ]; then
-    boxturtle_name="chain2"
+    boxturtle_name="$(unit_default_name_BridgeBox)"
   fi
   printf "1. BridgeBox Chain Name: %s \n" "$boxturtle_name"
   unit_install_menu_options_BridgeBox

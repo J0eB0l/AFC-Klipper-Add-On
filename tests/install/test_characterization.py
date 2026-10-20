@@ -344,6 +344,27 @@ try:
         assert lines[0] == f"bridgebox_extruder={extruder}"
         assert lines[1].startswith("message=") and message in lines[1]
 
+    @pytest.mark.parametrize("seed,name", [
+        ("", "chain1"),
+        ("# [AFC_BridgeBox chain1]\\nserial_port: auto\\n", "chain1"),
+        ("[AFC_BridgeBox chain1]\\nserial_port: auto\\n", "chain2"),
+        ("[AFC_BridgeBox chain1]\\n[AFC_BridgeBox chain2]\\n", "chain3"),
+        ("[AFC_BridgeBox chain2]\\n", "chain1"),
+    ])
+    def test_a_bridgebox_chain_is_named_after_the_chains_there(seed, name):
+        # An OpenAMS install with no BridgeBox gets chain1, not chain2.
+        out = run_case("additional_menu_row", {
+            "installation_type": "BridgeBox", "turtle_renamed": "False",
+            "seed_cfg": seed}).splitlines()
+        assert out[1] == f"1. BridgeBox Chain Name: {name} "
+        assert out[-1] == f"boxturtle_name={name}"
+
+    def test_the_bridgebox_name_prompt_offers_the_next_chain():
+        out = run_case("name_additional_unit", {
+            "installation_type": "BridgeBox",
+            "seed_cfg": "[AFC_BridgeBox chain1]\\n"}).splitlines()
+        assert "boxturtle_name=chain2" in out
+
     def test_bridgebox_ask_extruder_enter_keeps_a_name_already_set():
         lines = run_case("bridgebox_ask_extruder", {
             "answers": "\\n", "bridgebox_extruder": "extruder2"}).splitlines()

@@ -1,8 +1,8 @@
 === OUTPUT ===
-1. BridgeBox Chain Name: chain2 
+1. BridgeBox Chain Name: chain1 
 P. Units on this chain : 4 AMS, 8 AMS HT 
 W. Connection : USB 
 S. USB serial port : auto 
 X. Extruder : extruder 
 === VARS ===
-boxturtle_name=chain2
+boxturtle_name=chain1
