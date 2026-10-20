@@ -23922,19 +23922,14 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
     FAULT_SAID = ("info", "AFC bambu Bambu_AMS_1: lane1 -- the AMS reported "
                           "a fault during the load; still feeding, the unit "
                           "runs its own recovery while the request continues")
-    ONE_RETRY = ("info", "AFC bambu Bambu_AMS_1: lane1 -- the AMS declared a "
-                         "fault, so this gets ONE re-home retry rather than "
-                         "2; a unit that ignores the first will ignore the "
-                         "second.")
+    NO_RETRY = ("info", "AFC bambu Bambu_AMS_1: lane1 -- the AMS declared a "
+                        "fault after its own retries, so there is no re-home "
+                        "retry; reporting the failure now.")
     GAVE_UP = ("warning", f"AFC bambu Bambu_AMS_1: lane1 -- the AMS says it "
                           f"has STOPPED retrying, so this load stops asking. "
                           f"Clear the path at the unit. {_P6_RETRY}.")
-    #: What a load whose unit declares a fault logs: one retry, not two.
-    DECLARED_LOGS = [
-        KICKED, FAULT_SAID, ONE_RETRY,
-        ("info", "AFC bambu Bambu_AMS_1: load of lane1 stalled; re-homing "
-                 "AMS and retrying (recover 1/1)"),
-        KICKED]
+    #: What a load whose unit declares a fault logs: no re-home retry.
+    DECLARED_LOGS = [KICKED, FAULT_SAID, NO_RETRY]
     STAGED = ("left it staged -- the AMS keeps retrying; clear the path "
               "manually if it can't finish")
     TIMEOUT_SAID = "[AMS_LED]TIMEOUT error 0"
@@ -24267,33 +24262,49 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.logger.messages == [self.SKIP_PRIME, self.KICKED,
                                         self.ARRIVED]
 
-    # a declared fault: one retry, and the unit's words in the failure
+    # a declared fault: no re-home retry, and the unit's words in the failure
 
-    def test_a_declared_fault_gets_one_rehome(self, monkeypatch):
+    def test_a_declared_fault_gets_no_rehome(self, monkeypatch):
+        # The unit ran its own retries before it declared the fault.
         unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID)
         assert unit._unit_load_lane(lane) is False
-        assert unit._bridge.sent == (
-            [self.SELECT, self.PRIME] + self.WINDOW
-            + [self.STOP, self.REHOME] + self.WINDOW)
+        assert unit._bridge.sent == [self.SELECT, self.PRIME] + self.WINDOW
         assert unit.afc.afcDeltaTime.messages == []
-        assert unit.logger.messages == [
-            self.KICKED, self.FAULT_SAID, self.ONE_RETRY, self._recover(1, 1),
-            self.KICKED]
+        assert unit.logger.messages == self.DECLARED_LOGS
 
-    def test_a_declared_fault_with_one_retry_configured_is_not_cut(
+    def test_a_declared_fault_with_one_retry_configured_gets_none_either(
             self, monkeypatch):
-        # Already one retry: nothing to cut, and nothing said about it.
         unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
                                values={"load_recover_attempts": 1})
         assert unit._unit_load_lane(lane) is False
-        assert unit._bridge.sent == (
-            [self.SELECT, self.PRIME] + self.WINDOW
-            + [self.STOP, self.REHOME] + self.WINDOW)
+        assert unit._bridge.sent == [self.SELECT, self.PRIME] + self.WINDOW
         assert unit.afc.afcDeltaTime.messages == []
-        assert unit.logger.messages == [
-            self.KICKED, self.FAULT_SAID, self._recover(1, 1), self.KICKED]
+        assert unit.logger.messages == self.DECLARED_LOGS
         assert unit.afc.error.messages == [
             ("handle_lane_failure", self._declared(self.TIMEOUT_SAID))]
+
+    def test_a_declared_fault_with_no_retry_configured_says_nothing_more(
+            self, monkeypatch):
+        # Nothing to cut, and nothing said about it.
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
+                               values={"load_recover_attempts": 0})
+        assert unit._unit_load_lane(lane) is False
+        assert unit._bridge.sent == [self.SELECT, self.PRIME] + self.WINDOW
+        assert unit.afc.afcDeltaTime.messages == []
+        assert unit.logger.messages == [self.KICKED, self.FAULT_SAID]
+        assert unit.afc.error.messages == [
+            ("handle_lane_failure", self._declared(self.TIMEOUT_SAID))]
+
+    def test_a_declared_fault_on_a_load_that_arrives_says_nothing_more(
+            self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
+                               sensor=[False, False, True])
+        assert unit._unit_load_lane(lane) is True
+        assert unit._bridge.sent == (
+            [self.SELECT, self.PRIME, self.BULK] + self.ARRIVAL)
+        assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
+        assert unit.logger.messages == [self.KICKED, self.FAULT_SAID,
+                                        self.ARRIVED]
 
     def test_a_declared_fault_names_the_retry_command(self, monkeypatch):
         unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID)

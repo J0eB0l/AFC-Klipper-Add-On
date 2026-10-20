@@ -1355,8 +1355,9 @@ class afcBambuAMS(afcUnit):
         # reporting. Off by default: reeling back fights the AMS's own retries.
         self.reel_back_on_load_fail = config.getboolean(
             "reel_back_on_load_fail", False)
-        # When the AMS stalls after its own retries (state:7), run the
-        # printer's "Retry" (a 0F/0E re-home, then re-feed) this many times. 0
+        # When a load stalls without the AMS declaring a fault, run the
+        # printer's "Retry" (a 0F/0E re-home, then re-feed) this many times. A
+        # declared fault gets none: the AMS already ran its own retries. 0
         # fails straight to handle_lane_failure.
         self.load_recover_attempts = config.getint(
             "load_recover_attempts", 2, minval=0)
@@ -12315,16 +12316,19 @@ class afcBambuAMS(afcUnit):
                     traceback=traceback.format_exc())
         self.feed(cur_lane, feed_dist)
         loaded = self._feed_until_sensor(cur_lane, timeout)
-        # Printer "Retry": re-home the stalled unit (0F/0E) and feed again. One
-        # retry only at a unit that declared a fault.
+        # Printer "Retry": re-home the stalled unit (0F/0E) and feed again. A
+        # unit that declared a fault already ran its own retries, so it gets
+        # none and the failure is reported now, like a stock printer waiting
+        # for Retry (AFC_BAMBU_FAULT_RELOAD).
         attempts = self.load_recover_attempts
-        if self._declared_fault_text and attempts > 1:
-            attempts = 1
+        if (self._declared_fault_text
+                and attempts > 0
+                and not loaded):
+            attempts = 0
             self.logger.info(
                 f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
-                f"fault, so this gets ONE re-home retry rather than "
-                f"{self.load_recover_attempts}; a unit that ignores the first "
-                f"will ignore the second.")
+                f"fault after its own retries, so there is no re-home retry; "
+                f"reporting the failure now.")
         # No retry for a unit that is not listening (dropped its tray
         # selection); checked every round, scoped to _load_t0.
         def _not_listening() -> str:
