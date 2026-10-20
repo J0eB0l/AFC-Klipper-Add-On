@@ -6891,6 +6891,10 @@ class TestBridgeCandidates:
         assert bridge_candidates() == []
 
 
+#: A probe's ask, after the newline that ends any half line in the board.
+ASK_INFO = b'\n{"cmd":"info"}\n'
+
+
 class TestProbeBridge:
     INFO = {"evt": "info", "up": 5, "fw": "AFC-2.87", "proto": "bambubus-1",
             "ip": "192.168.4.55"}
@@ -6929,8 +6933,15 @@ class TestProbeBridge:
         assert probe_bridge("/dev/ttyACM3") == self.INFO
         assert opened == [(("/dev/ttyACM3", 115200),
                            {"timeout": 0.1, "write_timeout": 0.5})]
-        assert (dropped, port.written) == ([0], [b'{"cmd":"info"}\n'])
+        assert (dropped, port.written) == ([0], [ASK_INFO])
         assert port.closed is True
+
+    def test_an_ask_the_board_missed_is_sent_again(self, monkeypatch):
+        late = (json.dumps(self.INFO) + "\n").encode()
+        port = FakeSerial([b""] * bridge_mod.PROBE_ASK_EVERY + [late])
+        self._serial(monkeypatch, port)
+        assert probe_bridge("/dev/ttyACM3") == self.INFO
+        assert port.written == [ASK_INFO] * 2
 
     @pytest.mark.parametrize("line", [
         b'{"evt":"info","proto":"other"}\n',
@@ -6950,6 +6961,7 @@ class TestProbeBridge:
         self._serial(monkeypatch, port)
         assert probe_bridge("/dev/ttyACM3") is None
         assert port.lines == [late]
+        assert port.written == [ASK_INFO] * 3
 
     def test_a_port_that_will_not_open_is_not_a_bridge(self, monkeypatch):
         self._serial(monkeypatch, error=OSError("busy"))

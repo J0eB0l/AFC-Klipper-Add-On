@@ -970,6 +970,9 @@ BRIDGE_USB_GLOBS = (
 #: Reads of 0.1 s a probe waits for a board's info frame.
 PROBE_READS = 15
 
+#: Reads between a probe's asks: an ask the board missed is sent again.
+PROBE_ASK_EVERY = 5
+
 
 def usb_port(spec: str) -> str:
     """
@@ -1020,11 +1023,14 @@ def probe_bridge(path: str) -> Optional[dict]:
         return None
     try:
         # A board streams status all the time: drop what queued before the
-        # ask, and read whatever came each tenth of a second.
+        # ask, and read whatever came each tenth of a second. The leading
+        # newline ends any half line the last program on the port left in
+        # the board, which would swallow the ask.
         port.reset_input_buffer()
-        port.write(b'{"cmd":"info"}\n')
         buf = b""
-        for _ in range(PROBE_READS):
+        for i in range(PROBE_READS):
+            if i % PROBE_ASK_EVERY == 0:
+                port.write(b'\n{"cmd":"info"}\n')
             buf += port.read(4096)
             *lines, buf = buf.split(b"\n")
             for raw in lines:

@@ -5046,7 +5046,7 @@ class afcBridgeBox:
         _bridge_mod._AUTO_FINDERS[key] = self._find_board
 
     #: Seconds before a port that did not answer as a BridgeBox is asked again.
-    AUTO_REPROBE_S = 60.0
+    AUTO_REPROBE_S = 10.0
 
     def _find_board(self, probe: bool) -> Optional[str]:
         """

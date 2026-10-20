@@ -18045,7 +18045,7 @@ class TestAfcBridgeBoxFindBoard:
         assert m._find_board(True) == AUTO_BOARD
         assert probed == [AUTO_PICO, AUTO_BOARD]
         assert m._auto_board == AUTO_BOARD
-        assert m._auto_probed == {AUTO_PICO: m.printer.reactor.now + 60.0}
+        assert m._auto_probed == {AUTO_PICO: m.printer.reactor.now + 10.0}
         assert m.logger.messages == [AUTO_TOOK]
 
     def test_ports_in_use_are_never_opened(self, tmp_path, monkeypatch):
@@ -18069,16 +18069,16 @@ class TestAfcBridgeBoxFindBoard:
                            hosts=["192.168.4.73"])
         assert m._find_board(True) is None
         assert probed == [AUTO_BOARD]
-        assert m._auto_probed == {AUTO_BOARD: m.printer.reactor.now + 60.0}
+        assert m._auto_probed == {AUTO_BOARD: m.printer.reactor.now + 10.0}
         assert m._auto_board is None
 
-    def test_a_port_that_did_not_answer_is_asked_again_after_a_minute(
+    def test_a_port_that_did_not_answer_is_asked_again_after_10_s(
             self, tmp_path, monkeypatch):
         m = _auto_master(tmp_path, monkeypatch)
         boards: Dict[str, Optional[dict]] = {AUTO_BOARD: None}
         probed = _auto_usb(monkeypatch, m, boards)
         assert m._find_board(True) is None
-        m.printer.reactor.advance(59.0)
+        m.printer.reactor.advance(9.0)
         assert m._find_board(True) is None
         assert probed == [AUTO_BOARD]
         boards[AUTO_BOARD] = AUTO_INFO
