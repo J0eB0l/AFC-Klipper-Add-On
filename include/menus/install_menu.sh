@@ -186,6 +186,12 @@ install_menu() {
         else
           message="Invalid selection"
         fi ;;
+      X)
+        if [ "$installation_type" == "BridgeBox" ]; then
+          bridgebox_ask_extruder
+        else
+          message="Invalid selection"
+        fi ;;
       I) install_afc ;;
       M) main_menu ;;
       Q) exit_afc_install ;;

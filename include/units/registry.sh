@@ -655,6 +655,23 @@ bridgebox_write_serial() {
   sed -i "s|^serial_port: auto$|serial_port: ${bridgebox_serial}|" "$1"
 }
 
+bridgebox_ask_extruder() {
+  # Sets the [AFC_extruder] the chain feeds (bridgebox_extruder).
+  local name
+  read -p "Extruder this chain feeds (for example extruder or extruder1; Enter keeps ${bridgebox_extruder}): " name
+  name="${name:-$bridgebox_extruder}"
+  if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    message="${RED}Enter the extruder's name as its [AFC_extruder] section names it, with no spaces.${RESET}"
+    return
+  fi
+  bridgebox_extruder="$name"
+  message="Extruder: ${bridgebox_extruder}"
+}
+
+bridgebox_write_extruder() {
+  sed -i "s/^extruder: extruder$/extruder: ${bridgebox_extruder}/" "$1"
+}
+
 bridgebox_write_connection() {
   local addr="$bridgebox_address"
   case "$bridgebox_connection" in
@@ -674,6 +691,7 @@ unit_install_menu_options_BridgeBox() {
   if [ "$bridgebox_connection" != "wifi" ]; then
     printf "S. USB serial port : %s \n" "$bridgebox_serial"
   fi
+  printf "X. Extruder : %s \n" "$bridgebox_extruder"
 }
 
 unit_copy_files_BridgeBox() {
@@ -683,6 +701,7 @@ unit_copy_files_BridgeBox() {
   bridgebox_write_pool "${afc_config_dir}/AFC_BridgeBox.cfg"
   bridgebox_write_connection "${afc_config_dir}/AFC_BridgeBox.cfg"
   bridgebox_write_serial "${afc_config_dir}/AFC_BridgeBox.cfg"
+  bridgebox_write_extruder "${afc_config_dir}/AFC_BridgeBox.cfg"
 }
 
 unit_install_additional_BridgeBox() {
@@ -695,11 +714,12 @@ unit_install_additional_BridgeBox() {
   bridgebox_write_pool "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   bridgebox_write_connection "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   bridgebox_write_serial "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  bridgebox_write_extruder "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
 }
 
 unit_message_BridgeBox() {
   message+="""
-- Set extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
+- This chain feeds [AFC_extruder ${bridgebox_extruder}]. Check that your AFC config has that section.
   """
 }
 

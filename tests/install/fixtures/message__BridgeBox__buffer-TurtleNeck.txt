@@ -4,7 +4,7 @@
 
 - AFC-Klipper-Add-On python extensions installed to <WORKDIR>/klipper/klippy/extras/
 
-- Set extruder in the <WORKDIR>/AFC/AFC_BridgeBox.cfg file.
+- This chain feeds [AFC_extruder extruder]. Check that your AFC config has that section.
   
 You may now quit the script or return to the main menu.
 

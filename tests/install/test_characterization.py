@@ -313,8 +313,10 @@ try:
         assert [ln for ln in actual if ln.startswith("serial_port:")] == [written]
 
     @pytest.mark.parametrize("connection,rows", [
-        ("usb", ["W. Connection : USB ", "S. USB serial port : auto "]),
-        ("wifi", ["W. Connection : WiFi at 192.168.1.50 "]),
+        ("usb", ["W. Connection : USB ", "S. USB serial port : auto ",
+                 "X. Extruder : extruder "]),
+        ("wifi", ["W. Connection : WiFi at 192.168.1.50 ",
+                  "X. Extruder : extruder "]),
     ])
     def test_bridgebox_menu_shows_the_serial_port_unless_wifi_only(
             connection, rows):
@@ -324,6 +326,48 @@ try:
             "bridgebox_address": "192.168.1.50",
         }).splitlines()
         assert out[2:] == rows
+
+    @pytest.mark.parametrize("answers,extruder,message", [
+        ("\\n", "extruder", "Extruder: extruder"),
+        ("extruder1\\n", "extruder1", "Extruder: extruder1"),
+        ("T_2-left\\n", "T_2-left", "Extruder: T_2-left"),
+        ("my extruder\\n", "extruder",
+         "Enter the extruder's name as its [AFC_extruder] section names it,"
+         " with no spaces."),
+        ("[extruder1]\\n", "extruder",
+         "Enter the extruder's name as its [AFC_extruder] section names it,"
+         " with no spaces."),
+    ])
+    def test_bridgebox_ask_extruder(answers, extruder, message):
+        lines = run_case("bridgebox_ask_extruder",
+                         {"answers": answers}).splitlines()
+        assert lines[0] == f"bridgebox_extruder={extruder}"
+        assert lines[1].startswith("message=") and message in lines[1]
+
+    def test_bridgebox_ask_extruder_enter_keeps_a_name_already_set():
+        lines = run_case("bridgebox_ask_extruder", {
+            "answers": "\\n", "bridgebox_extruder": "extruder2"}).splitlines()
+        assert lines == ["bridgebox_extruder=extruder2",
+                         "message=Extruder: extruder2"]
+
+    @pytest.mark.parametrize("mode", ["copy_unit_files", "install_additional_unit"])
+    @pytest.mark.parametrize("extruder", ["extruder", "extruder1"])
+    def test_bridgebox_chain_gets_the_extruder(mode, extruder):
+        actual = run_case(mode, {
+            "installation_type": "BridgeBox",
+            "boxturtle_name": "chain2",
+            "bridgebox_extruder": extruder,
+        }).splitlines()
+        assert [ln for ln in actual if ln.startswith("extruder:")] == [
+            f"extruder: {extruder}"]
+
+    def test_bridgebox_message_names_the_extruder():
+        actual = run_case("message", {
+            "installation_type": "BridgeBox",
+            "bridgebox_extruder": "extruder1",
+        })
+        assert ("- This chain feeds [AFC_extruder extruder1]. Check that your"
+                " AFC config has that section.") in actual
 
     def test_wifi_only_keeps_its_address_over_a_named_port():
         actual = run_case("copy_unit_files", {

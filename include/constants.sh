@@ -78,6 +78,8 @@ bridgebox_address=""
 # BridgeBox: the USB serial_port it is written with: auto, or a port named
 # by its /dev/serial/by-id path for anyone auto does not work for
 bridgebox_serial=auto
+# BridgeBox: the [AFC_extruder] the chain feeds
+bridgebox_extruder=extruder
 
 # Moonraker Config
 moonraker_update_config="""
