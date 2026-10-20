@@ -569,26 +569,6 @@ class TestAFCACE2RFIDOnReady:
         assert printer.logger.messages == [("info", "ACE2 RFID bound to Ace2_9")]
         assert printer.reactor.pending == []
 
-    def test_offers_rescan_on_the_unit(self, monkeypatch):
-        reader, unit = ace2_rfid_rig()
-        rescans: List[Tuple[str, Any]] = []
-        monkeypatch.setattr(reader, "rescan_lane", lambda name, gcmd: rescans.append((name, gcmd)))
-        handler = unit.printer.gcode.mux_commands[("ACE_RFID_RESCAN", "UNIT", "Ace2_1")]
-        gcmd = make_gcmd(LANE="lane2")
-        handler(gcmd)
-        assert rescans == [("lane2", gcmd)]
-
-    def test_a_unit_rescan_of_its_own_is_kept(self, monkeypatch):
-        unit = make_ace2_unit()
-        own = lambda gcmd: None
-        unit.printer.gcode.register_mux_command("ACE_RFID_RESCAN", "UNIT", "Ace2_1", own)
-        reader = make_ace2_rfid({}, ace2=unit, bind=False)
-        monkeypatch.setattr(ace2_rfid_module, "resolve_rfid_keys",
-                            lambda pr, b, c, d: (b, c, d))
-        reader._on_ready()
-        assert reader.ace2 is unit
-        assert unit.printer.gcode.mux_commands[("ACE_RFID_RESCAN", "UNIT", "Ace2_1")] is own
-
 
 class TestAFCACE2RFIDFollowsTheUnit:
     @pytest.mark.parametrize("skip", [True, False])

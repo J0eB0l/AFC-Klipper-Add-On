@@ -1164,6 +1164,37 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.gcode.run_script_from_command(
             "G1 E%f F%f" % (extrusion_length, extrusion_speed_per_min))
 
+    #: A calibration the firmware has not answered, with the encoder still
+    #: for this long, is cancelled (seconds).
+    CALIBRATION_STALL_S = 30.0
+
+    def _wait_for_calibration(self, what: str) -> bool:
+        """
+        Wait for the firmware to finish a calibration. A firmware that stops
+        feeding without answering would hold the G-code queue forever, so the
+        calibration is cancelled once the encoder has not moved for
+        CALIBRATION_STALL_S.
+
+        :param what: what is being calibrated, for the log
+        :return bool: True if the firmware answered, False if it was cancelled
+        """
+        last_clicks = self.encoder_clicks
+        last_move = self.reactor.monotonic()
+        while self.action_status is not None:
+            now = self.reactor.monotonic()
+            if self.encoder_clicks != last_clicks:
+                last_clicks = self.encoder_clicks
+                last_move = now
+            if now - last_move > self.CALIBRATION_STALL_S:
+                self.logger.error(
+                    f"OAMS[{self.oams_idx}]: {what} calibration got no answer and "
+                    f"the encoder has not moved for {self.CALIBRATION_STALL_S:.0f}s, "
+                    f"cancelling it")
+                self.abort_current_action(OAMSOpCode.ERROR_UNSPECIFIED)
+                return False
+            self.reactor.pause(now + 0.5)
+        return True
+
     cmd_OAMS_CALIBRATE_HUB_HES_help = "Calibrate the range of a single hub HES"
     def cmd_OAMS_CALIBRATE_HUB_HES(self, gcmd: GCodeCommand) -> None:
         """
@@ -1189,8 +1220,10 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.action_status = OAMSStatus.CALIBRATING
 
         self.oams_calibrate_hub_hes_cmd.send([spool_idx])
-        while self.action_status is not None:
-            self.reactor.pause(self.reactor.monotonic() + 0.5)
+        if not self._wait_for_calibration("HES %d" % spool_idx):
+            raise gcmd.error(
+                "Calibration of HES %d stopped: the OpenAMS stopped moving "
+                "without an answer" % spool_idx)
         if self.action_status_code == OAMSOpCode.SUCCESS:
             value = self.u32_to_float(self.action_status_value)
             gcmd.respond_info("Calibrated HES %d to %f threshold" % (spool_idx, value))
@@ -1226,8 +1259,11 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             raise gcmd.error("SPOOL index is required")
 
         self.oams_calibrate_ptfe_length_cmd.send([spool])
-        while self.action_status is not None:
-            self.reactor.pause(self.reactor.monotonic() + 0.5)
+        if not self._wait_for_calibration("PTFE length"):
+            raise gcmd.error(
+                "Calibration of PTFE length stopped: the OpenAMS stopped "
+                "moving without an answer. Check where the filament stopped "
+                "short of the toolhead")
         if self.action_status_code == OAMSOpCode.SUCCESS:
             ptfe_val = "%d" % self.action_status_value
             gcmd.respond_info("Calibrated PTFE length to %s" % ptfe_val)

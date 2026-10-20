@@ -325,6 +325,174 @@ class TestSisterTags:
         assert all("01d0ec0f" not in ex for ex in coord.read_excludes)
 
 
+class FakeSpoolman:
+    """Spoolman client stand-in: get_spool answers from ``spools`` or raises."""
+
+    def __init__(self, spools=None, raises=None):
+        self.spools = spools or {}
+        self.raises = raises
+        self.asked = []
+
+    def get_spool(self, spool_id):
+        self.asked.append(spool_id)
+        if self.raises is not None:
+            raise self.raises
+        return self.spools.get(spool_id)
+
+
+#: The sister bay's spool tag at rest, then gone 4 polls and back: the
+#: lane6/lane7 case, where the blink made it look like it moved with lane6.
+BLINKING_SISTER = [["b6dc5feb"], ["b6dc5feb"], [], [], [], [], ["b6dc5feb"]]
+
+
+def _sister_rig(monkeypatch, fields, reads=None, spoolman=None, prep=True,
+                spool_id=None, rfid_slot=0):
+    """
+    Two bays on one reader: lane1 is scanned, lane2 holds the sister spool.
+
+    :param monkeypatch: pytest monkeypatch
+    :param fields: reader fields, as FakeCoordinator takes them
+    :param reads: the coordinator's last-read records, None for none at all
+    :param spoolman: Spoolman client to hand out, None for none
+    :param prep: whether lane2 still holds its spool
+    :param spool_id: lane2's spool id
+    :param rfid_slot: the reader slot lane2 maps to
+    :return tuple: (ams, coord)
+    """
+    import extras.AFC_RFID as afc_rfid
+    monkeypatch.setattr(afc_rfid, "_cached_spoolman_client", lambda afc: spoolman)
+    coord = FakeCoordinator(fields=fields, full_reads=[TAG])
+    coord.slot_map["lane2"] = rfid_slot
+    if reads is not None:
+        coord.last_reads_status = lambda: reads
+    ams, coord = _build_unit(coord=coord)
+    sister = FakeLane("lane2")
+    sister.prep_state = prep
+    sister.spool_id = spool_id
+    ams.lanes["lane1"].prep_state = True
+    ams.lanes["lane2"] = sister
+    ams._spool_map["lane2"] = 1
+    return ams, coord
+
+
+class TestSisterBayTagNeverTaken:
+    def test_a_read_sister_tag_that_blinks_is_passed_over(self, monkeypatch):
+        ams, coord = _sister_rig(monkeypatch, BLINKING_SISTER,
+                                 reads={"lane2": {"uid": "B6:DC:5F:EB"}})
+
+        assert ams._do_rfid_scan(ams.lanes["lane1"]) is False
+        assert coord.applied == []
+        assert ("debug", "OAMS: RFID scan lane1: passing over the sister bay's "
+                         "tag(s) B6DC5FEB") in ams.logger.messages
+
+    def test_the_sister_spools_spoolman_tag_is_passed_over(self, monkeypatch):
+        spoolman = FakeSpoolman({118: {"tags": [{"uid": "B6DC5FEB"}]}})
+        ams, coord = _sister_rig(monkeypatch, BLINKING_SISTER, spoolman=spoolman,
+                                 spool_id=118)
+
+        assert ams._do_rfid_scan(ams.lanes["lane1"]) is False
+        assert spoolman.asked == [118]
+        assert coord.applied == []
+
+    def test_a_sister_tag_arriving_mid_feed_is_excluded_from_the_read(self, monkeypatch):
+        ams, coord = _sister_rig(
+            monkeypatch, [[], ["b6dc5feb"], ["b6dc5feb", "aabb"]],
+            reads={"lane2": {"uid": "b6dc5feb"}})
+
+        assert ams._do_rfid_scan(ams.lanes["lane1"]) is True
+        assert coord.applied == [(ams.lanes["lane1"], TAG)]
+        assert coord.read_excludes == [{"b6dc5feb"}]
+
+    def test_an_empty_sister_bay_holds_nothing(self, monkeypatch):
+        # The spool moved from lane2 to lane1: lane2's old read must not block it.
+        ams, coord = _sister_rig(monkeypatch, BLINKING_SISTER, prep=False,
+                                 reads={"lane2": {"uid": "B6DC5FEB"}})
+
+        assert ams._do_rfid_scan(ams.lanes["lane1"]) is True
+        assert coord.applied == [(ams.lanes["lane1"], TAG)]
+
+
+class TestRfidSisterUids:
+    def test_record_and_spoolman_tags_are_merged(self, monkeypatch):
+        spoolman = FakeSpoolman({7: {"tags": [{"uid": "aa:bb"}],
+                                     "extra": {"card_uids": '"CC11"'}}})
+        ams, coord = _sister_rig(monkeypatch, [[]], spoolman=spoolman, spool_id="7",
+                                 reads={"lane2": {"uid": "de-ad"}})
+
+        held = ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0)
+
+        assert held == {"DEAD", "AABB", "CC11"}
+        assert spoolman.asked == [7]
+        assert ams.logger.messages == [
+            ("debug", "OAMS: RFID scan lane1: passing over the sister bay's "
+                      "tag(s) AABB, CC11, DEAD")]
+
+    def test_a_lane_on_another_reader_holds_nothing(self, monkeypatch):
+        spoolman = FakeSpoolman({7: {"tags": [{"uid": "AABB"}]}})
+        ams, coord = _sister_rig(monkeypatch, [[]], spoolman=spoolman, spool_id=7,
+                                 rfid_slot=2, reads={"lane2": {"uid": "DEAD"}})
+
+        assert ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0) == set()
+        assert spoolman.asked == []
+        assert ams.logger.messages == []
+
+    def test_no_record_no_spool_holds_nothing(self, monkeypatch):
+        spoolman = FakeSpoolman()
+        ams, coord = _sister_rig(monkeypatch, [[]], spoolman=spoolman,
+                                 reads={"lane2": {"uid": ""}})
+
+        assert ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0) == set()
+        assert spoolman.asked == []
+        assert ams.logger.messages == []
+
+    def test_an_unknown_spool_holds_nothing(self, monkeypatch):
+        spoolman = FakeSpoolman()
+        ams, coord = _sister_rig(monkeypatch, [[]], spoolman=spoolman, spool_id=9)
+
+        assert ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0) == set()
+        assert spoolman.asked == [9]
+        assert ams.logger.messages == []
+
+    def test_a_spoolman_failure_keeps_the_read_record(self, monkeypatch):
+        spoolman = FakeSpoolman(raises=RuntimeError("down"))
+        ams, coord = _sister_rig(monkeypatch, [[]], spoolman=spoolman, spool_id=9,
+                                 reads={"lane2": {"uid": "DEAD"}})
+
+        assert ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0) == {"DEAD"}
+        assert ams.logger.messages == [
+            ("debug", "OAMS: RFID scan lane1: spool 9 of lane2 not read from "
+                      "Spoolman: down"),
+            ("debug", "OAMS: RFID scan lane1: passing over the sister bay's tag(s) DEAD")]
+
+    def test_no_spoolman_client_uses_the_read_record(self, monkeypatch):
+        ams, coord = _sister_rig(monkeypatch, [[]], spool_id=9,
+                                 reads={"lane2": {"uid": "DEAD"}})
+
+        assert ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0) == {"DEAD"}
+
+    def test_failing_lookups_hold_nothing(self, monkeypatch):
+        import extras.AFC_RFID as afc_rfid
+
+        def no_client(afc):
+            raise RuntimeError("no moonraker")
+        ams, coord = _sister_rig(monkeypatch, [[]], spool_id=9)
+        monkeypatch.setattr(afc_rfid, "_cached_spoolman_client", no_client)
+
+        def no_reads():
+            raise RuntimeError("no reads")
+        coord.last_reads_status = no_reads
+
+        assert ams._rfid_sister_uids(coord, ams.lanes["lane1"], 0) == set()
+        assert ams.logger.messages == []
+
+
+class TestNormRfidUid:
+    @pytest.mark.parametrize("raw,norm", [
+        ("b6:dc:5f:eb", "B6DC5FEB"), ("B6-DC 5F_EB", "B6DC5FEB"), (None, ""), ("", "")])
+    def test_normalizes(self, raw, norm):
+        assert afcAMS._norm_rfid_uid(raw) == norm
+
+
 class TestUnreadableReposition:
     def _run(self):
         # Detect succeeds; the stationary reads at the stop position all fail

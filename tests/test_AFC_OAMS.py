@@ -1596,6 +1596,20 @@ class TestCalibrateHubHesCommand:
         assert oams.hub_hes_on[0] == pytest.approx(0.4, rel=1e-4)
 
 
+    def test_stall_raises(self):
+        oams = _make_oams()
+        oams._wait_for_calibration = MagicMock(return_value=False)
+        gcmd = _make_gcmd({"SPOOL": 2})
+
+        with pytest.raises(Exception):
+            oams.cmd_OAMS_CALIBRATE_HUB_HES(gcmd)
+
+        oams._wait_for_calibration.assert_called_once_with("HES 2")
+        gcmd.error.assert_called_once_with(
+            "Calibration of HES 2 stopped: the OpenAMS stopped moving without an answer")
+        oams.afc.function.ConfigRewrite.assert_not_called()
+
+
 class TestCalibratePtfeLengthCommand:
     def test_missing_spool_raises(self):
         oams = _make_oams()
@@ -1636,6 +1650,20 @@ class TestCalibratePtfeLengthCommand:
 
         gcmd.error.assert_called_once_with("Calibration of PTFE length failed")
 
+    def test_stall_raises(self):
+        oams = _make_oams()
+        oams._wait_for_calibration = MagicMock(return_value=False)
+        gcmd = _make_gcmd({"SPOOL": 0})
+
+        with pytest.raises(Exception):
+            oams.cmd_OAMS_CALIBRATE_PTFE_LENGTH(gcmd)
+
+        oams._wait_for_calibration.assert_called_once_with("PTFE length")
+        gcmd.error.assert_called_once_with(
+            "Calibration of PTFE length stopped: the OpenAMS stopped moving without an "
+            "answer. Check where the filament stopped short of the toolhead")
+        oams.afc.function.ConfigRewrite.assert_not_called()
+
     def test_wait_loop_pauses_until_action_completes(self):
         oams = _make_oams()
         oams.action_status_code = OAMSOpCode.SUCCESS
@@ -1646,6 +1674,63 @@ class TestCalibratePtfeLengthCommand:
         oams.cmd_OAMS_CALIBRATE_PTFE_LENGTH(gcmd)
 
         oams.reactor.pause.assert_called_once()
+
+
+class TestWaitForCalibration:
+    @staticmethod
+    def _clock(oams, clicks=None, answer_at=None):
+        """
+        Make reactor.pause move the clock to its target, feeding encoder
+        readings and answering the calibration when the clock reaches answer_at.
+
+        :param oams: unit under test
+        :param clicks: encoder readings taken one per pause, the last repeating
+        :param answer_at: clock time the firmware answers, None never
+        """
+        readings = list(clicks or [])
+
+        def pause(until):
+            oams.reactor._monotonic = until
+            if readings:
+                oams.encoder_clicks = readings.pop(0) if len(readings) > 1 else readings[0]
+            if answer_at is not None and until >= answer_at:
+                oams.action_status = None
+        oams.reactor.pause = MagicMock(side_effect=pause)
+
+    def test_answered_calibration_returns_true(self):
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.CALIBRATING
+        self._clock(oams, answer_at=101.0)
+
+        assert oams._wait_for_calibration("PTFE length") is True
+        assert oams.reactor.pause.call_count == 2
+        oams.oams_load_spool_cancel_cmd.send.assert_not_called()
+        assert oams.logger.messages == []
+
+    def test_a_moving_encoder_keeps_waiting(self):
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.CALIBRATING
+        # Feeding for 40s, longer than the stall window, then answering.
+        self._clock(oams, clicks=list(range(1, 82)), answer_at=140.0)
+
+        assert oams._wait_for_calibration("PTFE length") is True
+        oams.oams_load_spool_cancel_cmd.send.assert_not_called()
+        assert oams.logger.messages == []
+
+    def test_a_still_encoder_without_an_answer_cancels(self):
+        oams = _make_oams(oams_idx=1)
+        oams.action_status = OAMSStatus.CALIBRATING
+        oams.encoder_clicks = 2042
+        self._clock(oams)
+
+        assert oams._wait_for_calibration("PTFE length") is False
+        oams.oams_load_spool_cancel_cmd.send.assert_called_once_with()
+        assert oams.action_status is None
+        assert oams.action_status_code == OAMSOpCode.ERROR_UNSPECIFIED
+        assert oams.logger.messages[0] == (
+            "error", "OAMS[1]: PTFE length calibration got no answer and the encoder "
+                     "has not moved for 30s, cancelling it")
+        assert oams.logger.messages[-1] == ("info", "OAMS[1]: Abort complete")
 
 
 # ── load_spool ────────────────────────────────────────────────────────────────

@@ -824,14 +824,13 @@ class TestAfcACEDeferredAceConnect:
             unit._deferred_ace_connect(unit.printer.reactor.monotonic())
 
     #: A first-try connect to four empty slots.
-    # Uncomment below once RFID and spoolman creation support is added
     CONNECTED = [
         ("info", "ACE Ace_1: connected, mode=combined, port=/dev/ttyACM0, slots=4"),
-        # ("debug", "ACE Ace_1: RFID enabled"),
-        # ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
-        # ("debug", "ACE Ace_1: slot 1 get_filament_info -> {}"),
-        # ("debug", "ACE Ace_1: slot 2 get_filament_info -> {}"),
-        # ("debug", "ACE Ace_1: slot 3 get_filament_info -> {}"),
+        ("debug", "ACE Ace_1: RFID enabled"),
+        ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
+        ("debug", "ACE Ace_1: slot 1 get_filament_info -> {}"),
+        ("debug", "ACE Ace_1: slot 2 get_filament_info -> {}"),
+        ("debug", "ACE Ace_1: slot 3 get_filament_info -> {}"),
     ]
     #: Logged once the startup retries give up.
     WATCHING = ("info", "ACE Ace_1: will keep looking for it every 15s")
@@ -871,13 +870,11 @@ class TestAfcACEDeferredAceConnect:
         assert link is not old_link
         assert link.connected is True
         assert link.lifecycle == ["connect"]
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert link.commands == [("enable_rfid", {}), ("get_status", {}), ("get_status", {}),
-        #                          ("get_filament_info", {"index": 0}),
-        #                          ("get_filament_info", {"index": 1}),
-        #                          ("get_filament_info", {"index": 2}),
-        #                          ("get_filament_info", {"index": 3})]
-        assert link.commands == [("get_status", {}), ("get_status", {})]
+        assert link.commands == [("enable_rfid", {}), ("get_status", {}), ("get_status", {}),
+                                 ("get_filament_info", {"index": 0}),
+                                 ("get_filament_info", {"index": 1}),
+                                 ("get_filament_info", {"index": 2}),
+                                 ("get_filament_info", {"index": 3})]
         assert unit._cached_hw_status == {"status": "ready", "slots": [
             {"index": 0, "status": "empty"}, {"index": 1, "status": "ready"},
             {"index": 2, "status": "empty"}, {"index": 3, "status": "empty"}]}
@@ -887,6 +884,19 @@ class TestAfcACEDeferredAceConnect:
         assert link.status_callback == unit._on_hw_status_callback
         assert link.reconnect_callback == unit._on_ace_reconnect
         assert unit.logger.messages == self.CONNECTED
+
+    def test_enable_rfid_failure_is_not_fatal(self):
+        unit = ace_p1_unit("lane1")
+        unit.printer.connections.on_connect = (
+            lambda conn: conn.set_reply("enable_rfid", RuntimeError("no reader")))
+
+        self._connect(unit)
+
+        assert unit._ace.connected is True
+        assert unit.logger.messages == [
+            self.CONNECTED[0],
+            ("warning", "ACE Ace_1: enable_rfid failed (non-fatal): no reader"),
+        ] + self.CONNECTED[2:]
 
     def test_all_attempts_fail_logs_error(self):
         unit = ace_p1_unit("lane1")
@@ -1292,8 +1302,7 @@ class TestAfcACEGetStatus:
         :param first: the leading slots' entries, the rest are empty
         :return list: four ace_slots entries
         """
-        # Uncomment "rfid" below once RFID and spoolman creation support is added
-        empty = {"status": "", "sku": "", "material": "", "uid": "",
+        empty = {"status": "", "rfid": None, "sku": "", "material": "", "uid": "",
                  "color": [0, 0, 0], "buffer": ""}
         slots = [dict(empty, **entry) for entry in first]
         slots += [dict(empty) for _ in range(4 - len(slots))]
@@ -2032,9 +2041,7 @@ class TestAfcACEOnFilamentInsert:
 
         assert unit.afc.spool.clear_values.calls == [((lane,), {})]
         assert unit.afc.spool.set_spoolID.calls == [((lane, 5), {})]
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit._slot_inventory[0]["raw"] == {}
-        assert unit._slot_inventory[0] == {}
+        assert unit._slot_inventory[0]["raw"] == {}
         assert wire.moves() == [("feed_filament", {"index": 0, "length": 60.0, "speed": 100.0})]
         assert lane.loaded_to_hub is True
         # Once here, once from prep_post_load's staging.
@@ -2044,11 +2051,8 @@ class TestAfcACEOnFilamentInsert:
             "afc:lane_inserted"]
         assert unit.printer.events[2:] == [("afc_ace:post_insert", (lane,)),
                                            ("afc:lane_inserted", (lane,))]
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit.logger.messages == [
-        #     ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
-        #     ("info", "ACE prep_post_load: lane0 staged at hub (dist_hub=60mm)")]
         assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
             ("info", "ACE prep_post_load: lane0 staged at hub (dist_hub=60mm)")]
 
     def test_spool_not_restored_without_a_staged_id_or_remember_spool(self):
@@ -2062,9 +2066,7 @@ class TestAfcACEOnFilamentInsert:
 
         assert unit.afc.spool.set_spoolID.calls == []
         assert lane._afc_staged_spool_id is None
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
-        assert unit.logger.messages == []
+        assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
     def test_a_staged_spool_is_restored_without_remember_spool(self):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
@@ -2078,9 +2080,7 @@ class TestAfcACEOnFilamentInsert:
 
         assert unit.afc.spool.set_spoolID.calls == [((lane, 5), {})]
         assert lane._afc_staged_spool_id is None
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
-        assert unit.logger.messages == []
+        assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
     def test_spool_not_restored_when_lane_had_no_spool_id(self):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
@@ -2093,9 +2093,7 @@ class TestAfcACEOnFilamentInsert:
 
         assert unit.afc.spool.set_spoolID.calls == []
         assert lane._afc_staged_spool_id is None
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
-        assert unit.logger.messages == []
+        assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
     def test_spool_not_restored_when_lane_keeps_its_spool_id(self):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
@@ -2110,9 +2108,37 @@ class TestAfcACEOnFilamentInsert:
         assert unit.afc.spool.clear_values.calls == [((lane,), {})]
         assert unit.afc.spool.set_spoolID.calls == []
         assert lane.spool_id == 5
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
-        assert unit.logger.messages == []
+        assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
+
+    def test_applies_the_tag_material(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_filament_info", {"type": "PETG", "rfid": 2})
+
+        unit.on_filament_insert(lane)
+
+        assert unit._slot_inventory[0]["material"] == "PETG"
+        assert lane.material == "PETG"
+        assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'type': 'PETG', 'rfid': 2}"),
+            ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='PETG' rfid=2 "
+                     "nozzle=None-NoneC")]
+
+    def test_tag_not_applied_without_the_rfid_helper(self, monkeypatch):
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_filament_info", {"type": "PETG", "rfid": 2})
+
+        unit.on_filament_insert(lane)
+
+        # The tag is still cached; only applying it to the lane needs AFC_RFID.
+        assert unit._slot_inventory[0]["material"] == "PETG"
+        assert lane.material is None
+        assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'type': 'PETG', 'rfid': 2}"),
+            ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='PETG' rfid=2 "
+                     "nozzle=None-NoneC")]
 
     def test_prep_post_load_error_logged(self):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True))
@@ -2138,11 +2164,8 @@ class TestAfcACEOnFilamentInsert:
 
         assert unit.printer.events == [("afc_ace:post_insert", (lane,)),
                                        ("afc:lane_inserted", (lane,))]
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit.logger.messages == [
-        #     ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
-        #     ("error", "ACE on_filament_insert: post_insert event error for lane0: reader down")]
         assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
             ("error", "ACE on_filament_insert: post_insert event error for lane0: reader down")]
 
 
@@ -2156,9 +2179,7 @@ class TestAfcACEOnFilamentRemove:
 
         unit.on_filament_remove(lane)
 
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert unit._slot_inventory[1] == {"material": "", "color": [0, 0, 0]}
-        assert unit._slot_inventory[1] == {"material": "PLA", "color": [1, 2, 3], "uid": "U1"}
+        assert unit._slot_inventory[1] == {"material": "", "color": [0, 0, 0]}
         assert lane.loaded_to_hub is False
         assert lane._load_state is False
         assert unit._hub_load_suppressed == set()
@@ -4116,229 +4137,227 @@ class TestAfcACECmdACEFeedInfo:
             "  slot 1: 0 / 50 / 60 / 1.200"]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACECmdACERFIDDump:
-    # def test_not_connected(self):
-        # unit = ace_p1_unit("lane0")
-        # unit._ace.connected = False
-        # gcmd = make_gcmd()
+class TestAfcACECmdACERFIDDump:
+    def test_not_connected(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace.connected = False
+        gcmd = make_gcmd()
 
-        # unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_ACE_RFID_DUMP(gcmd)
 
-        # assert gcmd.responses == ["ACE not connected"]
-        # assert unit._ace.commands == []
+        assert gcmd.responses == ["ACE not connected"]
+        assert unit._ace.commands == []
 
-    # def test_slot_from_lane_and_raw_present(self):
-        # unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
-        # unit._ace.set_reply("get_filament_info", {"sku": "S1", "raw": {"1": "x"}})
-        # gcmd = make_gcmd(LANE="lane2")
+    def test_slot_from_lane_and_raw_present(self):
+        unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
+        unit._ace.set_reply("get_filament_info", {"sku": "S1", "raw": {"1": "x"}})
+        gcmd = make_gcmd(LANE="lane2")
 
-        # unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_ACE_RFID_DUMP(gcmd)
 
-        # assert unit._ace.commands == [("get_filament_info", {"index": 2})]
-        # assert gcmd.responses == [
-            # "ACE RFID slot 2:\n  parsed: {'sku': 'S1'}\n"
-            # "  raw protobuf fields (field#: value): {'1': 'x'}"]
-        # assert unit.logger.messages == []
+        assert unit._ace.commands == [("get_filament_info", {"index": 2})]
+        assert gcmd.responses == [
+            "ACE RFID slot 2:\n  parsed: {'sku': 'S1'}\n"
+            "  raw protobuf fields (field#: value): {'1': 'x'}"]
+        assert unit.logger.messages == []
 
-    # def test_default_slot_zero_no_raw(self):
-        # unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
-        # unit._ace.set_reply("get_filament_info", {"sku": ""})
-        # gcmd = make_gcmd()
+    def test_default_slot_zero_no_raw(self):
+        unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
+        unit._ace.set_reply("get_filament_info", {"sku": ""})
+        gcmd = make_gcmd()
 
-        # unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_ACE_RFID_DUMP(gcmd)
 
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0})]
-        # assert gcmd.responses == [
-            # "ACE RFID slot 0:\n  parsed: {'sku': ''}\n"
-            # "  (no raw field map, V1 ACE Pro or empty read)"]
-        # assert unit.logger.messages == []
+        assert unit._ace.commands == [("get_filament_info", {"index": 0})]
+        assert gcmd.responses == [
+            "ACE RFID slot 0:\n  parsed: {'sku': ''}\n"
+            "  (no raw field map, V1 ACE Pro or empty read)"]
+        assert unit.logger.messages == []
 
-    # def test_unknown_lane_reads_slot_zero(self):
-        # unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
-        # gcmd = make_gcmd(LANE="ghost")
+    def test_unknown_lane_reads_slot_zero(self):
+        unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
+        gcmd = make_gcmd(LANE="ghost")
 
-        # unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_ACE_RFID_DUMP(gcmd)
 
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0})]
-        # assert gcmd.responses == [
-            # "ACE RFID slot 0:\n  parsed: {}\n  (no raw field map, V1 ACE Pro or empty read)"]
-        # # Slot 0 without asking _get_slot, which would warn about the unknown lane.
-        # assert unit.logger.messages == []
+        assert unit._ace.commands == [("get_filament_info", {"index": 0})]
+        assert gcmd.responses == [
+            "ACE RFID slot 0:\n  parsed: {}\n  (no raw field map, V1 ACE Pro or empty read)"]
+        # Slot 0 without asking _get_slot, which would warn about the unknown lane.
+        assert unit.logger.messages == []
 
-    # def test_error(self):
-        # unit = ace_p1_unit("lane0")
-        # unit._ace.set_reply("get_filament_info", RuntimeError("z"))
-        # gcmd = make_gcmd(SLOT=1)
+    def test_error(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace.set_reply("get_filament_info", RuntimeError("z"))
+        gcmd = make_gcmd(SLOT=1)
 
-        # unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_ACE_RFID_DUMP(gcmd)
 
-        # assert unit._ace.commands == [("get_filament_info", {"index": 1})]
-        # assert gcmd.responses == ["Error reading ACE RFID slot 1: z"]
-
+        assert unit._ace.commands == [("get_filament_info", {"index": 1})]
+        assert gcmd.responses == ["Error reading ACE RFID slot 1: z"]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACECmdACERFIDRescan:
-    # class _Rfid:
-        # """[AFC_ACE2_rfid] stand-in: the unit it is bound to, and its rescans."""
 
-        # def __init__(self, ace2: Any) -> None:
-            # """
-            # :param ace2: the bound unit
-            # """
-            # self.ace2 = ace2
-            # self.rescan_lane = Recorder()
+class TestAfcACECmdACERFIDRescan:
+    class _Rfid:
+        """[AFC_ACE2_rfid] stand-in: the unit it is bound to, and its rescans."""
 
-    # #: A recognized PETG tag (rfid 2).
-    # PETG = {"rfid": 2, "type": "PETG", "brand": "Anycubic", "color": [255, 0, 0],
-            # "extruder_temp": {"min": 230, "max": 250},
-            # "hotbed_temp": {"min": 70, "max": 80}}
-    # PETG_LOGS = [
-        # ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 2, 'type': 'PETG', "
-                  # "'brand': 'Anycubic', 'color': [255, 0, 0], 'extruder_temp': "
-                  # "{'min': 230, 'max': 250}, 'hotbed_temp': {'min': 70, 'max': 80}}"),
-        # ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='Anycubic' type='PETG' rfid=2 "
-                 # "nozzle=230-250C")]
+        def __init__(self, ace2: Any) -> None:
+            """
+            :param ace2: the bound unit
+            """
+            self.ace2 = ace2
+            self.rescan_lane = Recorder()
 
-    # @staticmethod
-    # def _unit(*replies: Dict[str, Any]) -> Tuple[afcACE, Any]:
-        # """
-        # :param replies: the slot's get_filament_info replies, the last repeating
-        # :return tuple: a V1 unit and lane1 (slot 0, in the toolhead, showing white PLA)
-        # """
-        # unit = ace_p1_unit(LaneSpec("lane1", slot=0, prep=True, load=True, tool_loaded=True),
-                           # LaneSpec("lane2", slot=1))
-        # lane = unit.lanes["lane1"]
-        # lane.material, lane.color = "PLA", "#FFFFFF"
-        # lane.extruder_temp, lane.bed_temp = 210.0, 60.0
-        # unit._ace.set_reply("get_filament_info", *replies)
-        # return unit, lane
+    #: A recognized PETG tag (rfid 2).
+    PETG = {"rfid": 2, "type": "PETG", "brand": "Anycubic", "color": [255, 0, 0],
+            "extruder_temp": {"min": 230, "max": 250},
+            "hotbed_temp": {"min": 70, "max": 80}}
+    PETG_LOGS = [
+        ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 2, 'type': 'PETG', "
+                  "'brand': 'Anycubic', 'color': [255, 0, 0], 'extruder_temp': "
+                  "{'min': 230, 'max': 250}, 'hotbed_temp': {'min': 70, 'max': 80}}"),
+        ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='Anycubic' type='PETG' rfid=2 "
+                 "nozzle=230-250C")]
 
-    # def test_v1_recognized_tag_replaces_the_lane_values_in_place(self):
-        # unit, lane = self._unit(self.PETG)
-        # gcmd = make_gcmd(LANE="lane1")
+    @staticmethod
+    def _unit(*replies: Dict[str, Any]) -> Tuple[afcACE, Any]:
+        """
+        :param replies: the slot's get_filament_info replies, the last repeating
+        :return tuple: a V1 unit and lane1 (slot 0, in the toolhead, showing white PLA)
+        """
+        unit = ace_p1_unit(LaneSpec("lane1", slot=0, prep=True, load=True, tool_loaded=True),
+                           LaneSpec("lane2", slot=1))
+        lane = unit.lanes["lane1"]
+        lane.material, lane.color = "PLA", "#FFFFFF"
+        lane.extruder_temp, lane.bed_temp = 210.0, 60.0
+        unit._ace.set_reply("get_filament_info", *replies)
+        return unit, lane
 
-        # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_v1_recognized_tag_replaces_the_lane_values_in_place(self):
+        unit, lane = self._unit(self.PETG)
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert (lane.material, lane.color) == ("PETG", "#ff0000")
-        # # The middle of each tag range.
-        # assert (lane.extruder_temp, lane.bed_temp) == (240.0, 75.0)
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0})]
-        # assert unit.afc.save_vars.call_count == 1
-        # assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
-        # assert unit.logger.messages == self.PETG_LOGS
+        unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # def test_v1_waits_out_recognizing(self):
-        # unit, lane = self._unit({"rfid": 3}, {"rfid": 3}, self.PETG)
-        # gcmd = make_gcmd(LANE="lane1")
+        assert (lane.material, lane.color) == ("PETG", "#ff0000")
+        # The middle of each tag range.
+        assert (lane.extruder_temp, lane.bed_temp) == (240.0, 75.0)
+        assert unit._ace.commands == [("get_filament_info", {"index": 0})]
+        assert unit.afc.save_vars.call_count == 1
+        assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
+        assert unit.logger.messages == self.PETG_LOGS
 
-        # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_v1_waits_out_recognizing(self):
+        unit, lane = self._unit({"rfid": 3}, {"rfid": 3}, self.PETG)
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0})] * 3
-        # # Two half-second waits.
-        # assert unit.reactor.now == 101.0
-        # assert lane.material == "PETG"
-        # assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
-        # assert unit.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 3}"),
-            # ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='' rfid=3 "
-                     # "nozzle=None-NoneC")] + self.PETG_LOGS
+        unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # @pytest.mark.parametrize("reply,state,reads,logs", [
-        # ({"rfid": 0}, "no tag found", 1,
-         # [("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 0}")]),
-        # ({"rfid": 1}, "tag not recognized", 1,
-         # [("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 1}")]),
-        # # Read every half second until the 5s recognize window closes; only the
-        # # first read is new, so only it is logged.
-        # ({"rfid": 3}, "still recognizing", 11,
-         # [("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 3}"),
-          # ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='' rfid=3 "
-                   # "nozzle=None-NoneC")]),
-        # ({}, "no tag read", 1, [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")])])
-    # def test_v1_no_read_leaves_the_lane_alone(self, reply: Dict[str, Any], state: str,
-                                              # reads: int, logs: List[Tuple[str, str]]):
-        # unit, lane = self._unit(reply)
-        # gcmd = make_gcmd(LANE="lane1")
+        assert unit._ace.commands == [("get_filament_info", {"index": 0})] * 3
+        # Two half-second waits.
+        assert unit.reactor.now == 101.0
+        assert lane.material == "PETG"
+        assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
+        assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 3}"),
+            ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='' rfid=3 "
+                     "nozzle=None-NoneC")] + self.PETG_LOGS
 
-        # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    @pytest.mark.parametrize("reply,state,reads,logs", [
+        ({"rfid": 0}, "no tag found", 1,
+         [("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 0}")]),
+        ({"rfid": 1}, "tag not recognized", 1,
+         [("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 1}")]),
+        # Read every half second until the 5s recognize window closes; only the
+        # first read is new, so only it is logged.
+        ({"rfid": 3}, "still recognizing", 11,
+         [("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 3}"),
+          ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='' rfid=3 "
+                   "nozzle=None-NoneC")]),
+        ({}, "no tag read", 1, [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")])])
+    def test_v1_no_read_leaves_the_lane_alone(self, reply: Dict[str, Any], state: str,
+                                              reads: int, logs: List[Tuple[str, str]]):
+        unit, lane = self._unit(reply)
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert (lane.material, lane.color) == ("PLA", "#FFFFFF")
-        # assert (lane.extruder_temp, lane.bed_temp) == (210.0, 60.0)
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0})] * reads
-        # assert gcmd.responses == [f"ACE Ace_1: {state} on lane1 (slot 0)"]
-        # assert unit.afc.save_vars.calls == []
-        # assert unit.logger.messages == logs
+        unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # def test_a_lane_of_another_unit_is_refused(self):
-        # unit, lane = self._unit({"rfid": 0})
-        # gcmd = make_gcmd(LANE="lane9")
+        assert (lane.material, lane.color) == ("PLA", "#FFFFFF")
+        assert (lane.extruder_temp, lane.bed_temp) == (210.0, 60.0)
+        assert unit._ace.commands == [("get_filament_info", {"index": 0})] * reads
+        assert gcmd.responses == [f"ACE Ace_1: {state} on lane1 (slot 0)"]
+        assert unit.afc.save_vars.calls == []
+        assert unit.logger.messages == logs
 
-        # with pytest.raises(gcmd.error) as refused:
-            # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_a_lane_of_another_unit_is_refused(self):
+        unit, lane = self._unit({"rfid": 0})
+        gcmd = make_gcmd(LANE="lane9")
 
-        # assert str(refused.value) == "lane9 is not a lane of Ace_1"
-        # assert unit._ace.commands == []
-        # assert gcmd.responses == []
-        # assert unit.logger.messages == []
+        with pytest.raises(gcmd.error) as refused:
+            unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # def test_v1_not_connected_is_refused(self):
-        # unit, lane = self._unit({"rfid": 0})
-        # unit._ace.connected = False
-        # gcmd = make_gcmd(LANE="lane1")
+        assert str(refused.value) == "lane9 is not a lane of Ace_1"
+        assert unit._ace.commands == []
+        assert gcmd.responses == []
+        assert unit.logger.messages == []
 
-        # with pytest.raises(gcmd.error) as refused:
-            # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_v1_not_connected_is_refused(self):
+        unit, lane = self._unit({"rfid": 0})
+        unit._ace.connected = False
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert str(refused.value) == "ACE not connected"
-        # assert lane.material == "PLA"
-        # assert unit._ace.commands == []
-        # assert gcmd.responses == []
-        # assert unit.logger.messages == []
+        with pytest.raises(gcmd.error) as refused:
+            unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # def test_ace2_hands_the_rescan_to_its_rfid_module(self):
-        # unit = make_ace2_unit(lanes=[LaneSpec("lane1", slot=0, prep=True, load=True)])
-        # rfid = self._Rfid(unit)
-        # unit.printer.objects["AFC_ACE2_rfid"] = rfid
-        # gcmd = make_gcmd(LANE="lane1")
+        assert str(refused.value) == "ACE not connected"
+        assert lane.material == "PLA"
+        assert unit._ace.commands == []
+        assert gcmd.responses == []
+        assert unit.logger.messages == []
 
-        # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_ace2_hands_the_rescan_to_its_rfid_module(self):
+        unit = make_ace2_unit(lanes=[LaneSpec("lane1", slot=0, prep=True, load=True)])
+        rfid = self._Rfid(unit)
+        unit.printer.objects["AFC_ACE2_rfid"] = rfid
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert rfid.rescan_lane.calls == [(("lane1", gcmd), {})]
-        # # No firmware read on an ACE 2.
-        # assert unit._ace.commands == []
-        # assert gcmd.responses == []
-        # assert unit.logger.messages == []
+        unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # def test_ace2_without_its_rfid_module_is_refused(self):
-        # unit = make_ace2_unit(lanes=[LaneSpec("lane1", slot=0, prep=True, load=True)])
-        # gcmd = make_gcmd(LANE="lane1")
+        assert rfid.rescan_lane.calls == [(("lane1", gcmd), {})]
+        # No firmware read on an ACE 2.
+        assert unit._ace.commands == []
+        assert gcmd.responses == []
+        assert unit.logger.messages == []
 
-        # with pytest.raises(gcmd.error) as refused:
-            # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_ace2_without_its_rfid_module_is_refused(self):
+        unit = make_ace2_unit(lanes=[LaneSpec("lane1", slot=0, prep=True, load=True)])
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert str(refused.value) == (
-            # "ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
-        # assert unit._ace.commands == []
-        # assert gcmd.responses == []
-        # assert unit.logger.messages == []
+        with pytest.raises(gcmd.error) as refused:
+            unit.cmd_ACE_RFID_RESCAN(gcmd)
 
-    # def test_ace2_with_a_module_bound_elsewhere_is_refused(self):
-        # unit = make_ace2_unit(lanes=[LaneSpec("lane1", slot=0, prep=True, load=True)])
-        # rfid = self._Rfid(object())
-        # unit.printer.objects["AFC_ACE2_rfid"] = rfid
-        # gcmd = make_gcmd(LANE="lane1")
+        assert str(refused.value) == (
+            "ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
+        assert unit._ace.commands == []
+        assert gcmd.responses == []
+        assert unit.logger.messages == []
 
-        # with pytest.raises(gcmd.error) as refused:
-            # unit.cmd_ACE_RFID_RESCAN(gcmd)
+    def test_ace2_with_a_module_bound_elsewhere_is_refused(self):
+        unit = make_ace2_unit(lanes=[LaneSpec("lane1", slot=0, prep=True, load=True)])
+        rfid = self._Rfid(object())
+        unit.printer.objects["AFC_ACE2_rfid"] = rfid
+        gcmd = make_gcmd(LANE="lane1")
 
-        # assert str(refused.value) == (
-            # "ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
-        # assert rfid.rescan_lane.calls == []
-        # assert unit._ace.commands == []
-        # assert gcmd.responses == []
-        # assert unit.logger.messages == []
+        with pytest.raises(gcmd.error) as refused:
+            unit.cmd_ACE_RFID_RESCAN(gcmd)
+
+        assert str(refused.value) == (
+            "ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
+        assert rfid.rescan_lane.calls == []
+        assert unit._ace.commands == []
+        assert gcmd.responses == []
+        assert unit.logger.messages == []
 
 
 
@@ -4692,22 +4711,21 @@ class TestAfcACECmdACESensorState:
 
 
 class TestAfcACEPickTestSlot:
-    # Uncomment below once RFID and spoolman creation support is added
-    # def test_returns_first_recognized_slot(self):
-    #     # rfid 1 is an unrecognized tag, so slot 0 is skipped.
-    #     unit = ace_p2_unit(inventory={0: {"rfid": 1}, 2: {"rfid": 2}, 3: {"rfid": 3}})
-    #
-    #     assert unit._pick_test_slot() == 2
-    #
-    # def test_returns_recognizing_slot(self):
-    #     unit = ace_p2_unit(inventory={3: {"rfid": 3}})
-    #
-    #     assert unit._pick_test_slot() == 3
-    #
-    # def test_returns_slot_with_sku(self):
-    #     unit = ace_p2_unit(inventory={1: {"sku": "S1"}})
-    #
-    #     assert unit._pick_test_slot() == 1
+    def test_returns_first_recognized_slot(self):
+        # rfid 1 is an unrecognized tag, so slot 0 is skipped.
+        unit = ace_p2_unit(inventory={0: {"rfid": 1}, 2: {"rfid": 2}, 3: {"rfid": 3}})
+
+        assert unit._pick_test_slot() == 2
+
+    def test_returns_recognizing_slot(self):
+        unit = ace_p2_unit(inventory={3: {"rfid": 3}})
+
+        assert unit._pick_test_slot() == 3
+
+    def test_returns_slot_with_sku(self):
+        unit = ace_p2_unit(inventory={1: {"sku": "S1"}})
+
+        assert unit._pick_test_slot() == 1
 
     def test_returns_first_ready_slot(self):
         unit = ace_p2_unit(inventory={0: {"status": "empty"}, 2: {"status": "ready"},
@@ -6803,298 +6821,308 @@ class TestAfcACECalibrateHubInner:
             ("error", "ACE hub calibrate: feed failed: FORBIDDEN")]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACESyncInventory:
-    # def test_v1_sync_inventory_reads_every_slot(self):
-        # unit = ace_p2_unit()
-        # unit._ace.set_reply("get_filament_info", lambda params: {"index": params["index"]})
-
-        # unit._sync_inventory()
-
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0}),
-                                      # ("get_filament_info", {"index": 1}),
-                                      # ("get_filament_info", {"index": 2}),
-                                      # ("get_filament_info", {"index": 3})]
-        # assert [inv["raw"] for inv in unit._slot_inventory] == [
-            # {"index": 0}, {"index": 1}, {"index": 2}, {"index": 3}]
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'index': 0}"),
-            # ("debug", "ACE Ace_1: slot 1 get_filament_info -> {'index': 1}"),
-            # ("debug", "ACE Ace_1: slot 2 get_filament_info -> {'index': 2}"),
-            # ("debug", "ACE Ace_1: slot 3 get_filament_info -> {'index': 3}")]
-
-    # def test_v1_sync_inventory_stores_payload(self):
-        # unit = ace_p2_unit()
-        # tagged = {"index": 0, "sku": "HPL19-107", "type": "PLA"}
-        # unit._ace.set_reply("get_filament_info", lambda params: (
-            # tagged if params["index"] == 0 else "junk"))
-
-        # unit._sync_inventory()
-
-        # assert unit._slot_inventory[0]["sku"] == "HPL19-107"
-        # assert unit._slot_inventory[0]["material"] == "PLA"
-        # # A non-dict reply is not stored.
-        # assert unit._slot_inventory[1:] == [{}, {}, {}]
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 get_filament_info -> "
-                      # "{'index': 0, 'sku': 'HPL19-107', 'type': 'PLA'}"),
-            # ("info", "ACE Ace_1: slot 0 RFID read, sku='HPL19-107' brand='' type='PLA' "
-                     # "rfid=None nozzle=None-NoneC")]
-
-    # def test_failed_slot_query_is_logged_and_the_sweep_goes_on(self):
-        # unit = ace_p2_unit()
-        # unit._ace.set_reply("get_filament_info", lambda params: (
-            # RuntimeError("boom") if params["index"] == 1 else "junk"))
-
-        # unit._sync_inventory()
-
-        # assert len(unit._ace.commands) == 4
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 1 inventory query failed: boom")]
-
-    # def test_v1_sync_inventory_skips_when_disconnected(self):
-        # unit = ace_p2_unit()
-        # unit._ace.connected = False
-
-        # unit._sync_inventory()
-
-        # assert unit._ace.commands == []
-        # assert unit._slot_inventory == [{}, {}, {}, {}]
-        # assert unit.printer.logger.messages == []
-
-    # def test_v1_sync_inventory_skips_when_no_conn(self):
-        # unit = ace_p2_unit(connection=None)
-
-        # unit._sync_inventory()
-
-        # assert unit._slot_inventory == [{}, {}, {}, {}]
-        # assert unit.printer.logger.messages == []
-
-    # def test_v2_sync_inventory_skips_firmware_even_when_connected(self):
-        # # The ACE 2 reads tags host-side, so the firmware sweep never runs.
-        # unit = make_ace2_unit()
-        # unit._ace.set_reply("get_filament_info", {"index": 0, "sku": "HPL19-107"})
-
-        # unit._sync_inventory()
-
-        # assert unit._ace.commands == []
-        # assert unit._slot_inventory[0] == {}
-        # assert unit.printer.logger.messages == []
-
-
-
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACEStoreSlotRfid:
-    # def test_full_payload_derives_temps_and_logs_read(self):
-        # unit = ace_p2_unit()
-        # info = {"sku": "HPL-1", "brand": "AC", "type": "PLA", "rfid": 2,
-                # "color": [1, 2, 3], "diameter": 1.75,
-                # "extruder_temp": {"min": 200, "max": 220},
-                # "hotbed_temp": {"min": 50, "max": 60}}
-
-        # unit._store_slot_rfid(0, info)
-
-        # assert unit._slot_inventory[0] == {
-            # "raw": info, "material": "PLA", "color": [1, 2, 3], "sku": "HPL-1",
-            # "brand": "AC", "diameter": 1.75, "total_weight": 0, "current_weight": 0,
-            # "rfid": 2, "source": None,
-            # "extruder_temp_min": 200, "extruder_temp_max": 220, "extruder_temp": 210,
-            # "bed_temp_min": 50, "bed_temp_max": 60, "bed_temp": 55}
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'sku': 'HPL-1', "
-                      # "'brand': 'AC', 'type': 'PLA', 'rfid': 2, 'color': [1, 2, 3], "
-                      # "'diameter': 1.75, 'extruder_temp': {'min': 200, 'max': 220}, "
-                      # "'hotbed_temp': {'min': 50, 'max': 60}}"),
-            # ("info", "ACE Ace_1: slot 0 RFID read, sku='HPL-1' brand='AC' type='PLA' "
-                     # "rfid=2 nozzle=200-220C")]
+class TestAfcACESyncInventory:
+    def test_v1_sync_inventory_reads_every_slot(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_filament_info", lambda params: {"index": params["index"]})
+
+        unit._sync_inventory()
+
+        assert unit._ace.commands == [("get_filament_info", {"index": 0}),
+                                      ("get_filament_info", {"index": 1}),
+                                      ("get_filament_info", {"index": 2}),
+                                      ("get_filament_info", {"index": 3})]
+        assert [inv["raw"] for inv in unit._slot_inventory] == [
+            {"index": 0}, {"index": 1}, {"index": 2}, {"index": 3}]
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'index': 0}"),
+            ("debug", "ACE Ace_1: slot 1 get_filament_info -> {'index': 1}"),
+            ("debug", "ACE Ace_1: slot 2 get_filament_info -> {'index': 2}"),
+            ("debug", "ACE Ace_1: slot 3 get_filament_info -> {'index': 3}")]
+
+    def test_v1_sync_inventory_stores_payload(self):
+        unit = ace_p2_unit()
+        tagged = {"index": 0, "sku": "HPL19-107", "type": "PLA"}
+        unit._ace.set_reply("get_filament_info", lambda params: (
+            tagged if params["index"] == 0 else "junk"))
+
+        unit._sync_inventory()
+
+        assert unit._slot_inventory[0]["sku"] == "HPL19-107"
+        assert unit._slot_inventory[0]["material"] == "PLA"
+        # A non-dict reply is not stored.
+        assert unit._slot_inventory[1:] == [{}, {}, {}]
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> "
+                      "{'index': 0, 'sku': 'HPL19-107', 'type': 'PLA'}"),
+            ("info", "ACE Ace_1: slot 0 RFID read, sku='HPL19-107' brand='' type='PLA' "
+                     "rfid=None nozzle=None-NoneC")]
+
+    def test_failed_slot_query_is_logged_and_the_sweep_goes_on(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_filament_info", lambda params: (
+            RuntimeError("boom") if params["index"] == 1 else "junk"))
+
+        unit._sync_inventory()
+
+        assert len(unit._ace.commands) == 4
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 1 inventory query failed: boom")]
+
+    def test_v1_sync_inventory_skips_when_disconnected(self):
+        unit = ace_p2_unit()
+        unit._ace.connected = False
+
+        unit._sync_inventory()
+
+        assert unit._ace.commands == []
+        assert unit._slot_inventory == [{}, {}, {}, {}]
+        assert unit.printer.logger.messages == []
+
+    def test_v1_sync_inventory_skips_when_no_conn(self):
+        unit = ace_p2_unit(connection=None)
+
+        unit._sync_inventory()
+
+        assert unit._slot_inventory == [{}, {}, {}, {}]
+        assert unit.printer.logger.messages == []
+
+    def test_v2_sync_inventory_skips_firmware_even_when_connected(self):
+        # The ACE 2 reads tags host-side, so the firmware sweep never runs.
+        unit = make_ace2_unit()
+        unit._ace.set_reply("get_filament_info", {"index": 0, "sku": "HPL19-107"})
+
+        unit._sync_inventory()
+
+        assert unit._ace.commands == []
+        assert unit._slot_inventory[0] == {}
+        assert unit.printer.logger.messages == []
+
+
+
+class TestAfcACEStoreSlotRfid:
+    def test_full_payload_derives_temps_and_logs_read(self):
+        unit = ace_p2_unit()
+        info = {"sku": "HPL-1", "brand": "AC", "type": "PLA", "rfid": 2,
+                "color": [1, 2, 3], "diameter": 1.75,
+                "extruder_temp": {"min": 200, "max": 220},
+                "hotbed_temp": {"min": 50, "max": 60}}
+
+        unit._store_slot_rfid(0, info)
 
-    # def test_max_only_temps_and_no_change_no_log(self):
-        # # A recognized tag that reads the same as last time logs nothing.
-        # unit = ace_p2_unit()
-        # info = {"material": "PETG", "sku": "S", "rfid": 2, "total": 1000, "current": 600,
-                # "extruder_temp": {"max": 240}, "hotbed_temp": {"max": 70}}
-        # unit._slot_inventory[0]["raw"] = dict(info)
+        assert unit._slot_inventory[0] == {
+            "raw": info, "material": "PLA", "color": [1, 2, 3], "sku": "HPL-1",
+            "brand": "AC", "diameter": 1.75, "total_weight": 0, "current_weight": 0,
+            "rfid": 2, "source": None,
+            "extruder_temp_min": 200, "extruder_temp_max": 220, "extruder_temp": 210,
+            "bed_temp_min": 50, "bed_temp_max": 60, "bed_temp": 55}
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'sku': 'HPL-1', "
+                      "'brand': 'AC', 'type': 'PLA', 'rfid': 2, 'color': [1, 2, 3], "
+                      "'diameter': 1.75, 'extruder_temp': {'min': 200, 'max': 220}, "
+                      "'hotbed_temp': {'min': 50, 'max': 60}}"),
+            ("info", "ACE Ace_1: slot 0 RFID read, sku='HPL-1' brand='AC' type='PLA' "
+                     "rfid=2 nozzle=200-220C")]
 
-        # unit._store_slot_rfid(0, info)
+    def test_max_only_temps_and_no_change_no_log(self):
+        # A recognized tag that reads the same as last time logs nothing.
+        unit = ace_p2_unit()
+        info = {"material": "PETG", "sku": "S", "rfid": 2, "total": 1000, "current": 600,
+                "extruder_temp": {"max": 240}, "hotbed_temp": {"max": 70}}
+        unit._slot_inventory[0]["raw"] = dict(info)
 
-        # inv = unit._slot_inventory[0]
-        # assert (inv["material"], inv["total_weight"], inv["current_weight"]) == (
-            # "PETG", 1000, 600)
-        # assert (inv["extruder_temp_min"], inv["extruder_temp"]) == (None, 240)
-        # assert (inv["bed_temp_min"], inv["bed_temp"]) == (None, 70)
-        # assert unit.printer.logger.messages == []
+        unit._store_slot_rfid(0, info)
 
-    # def test_non_dict_temps_yield_none(self):
-        # unit = ace_p2_unit()
+        inv = unit._slot_inventory[0]
+        assert (inv["material"], inv["total_weight"], inv["current_weight"]) == (
+            "PETG", 1000, 600)
+        assert (inv["extruder_temp_min"], inv["extruder_temp"]) == (None, 240)
+        assert (inv["bed_temp_min"], inv["bed_temp"]) == (None, 70)
+        assert unit.printer.logger.messages == []
 
-        # unit._store_slot_rfid(0, {"extruder_temp": "bad", "hotbed_temp": 5})
+    def test_non_dict_temps_yield_none(self):
+        unit = ace_p2_unit()
 
-        # inv = unit._slot_inventory[0]
-        # assert (inv["extruder_temp"], inv["extruder_temp_min"], inv["extruder_temp_max"]) == (
-            # None, None, None)
-        # assert (inv["bed_temp"], inv["bed_temp_min"], inv["bed_temp_max"]) == (None, None, None)
-        # assert (inv["material"], inv["color"], inv["diameter"]) == ("", [0, 0, 0], 1.75)
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 get_filament_info -> "
-                      # "{'extruder_temp': 'bad', 'hotbed_temp': 5}")]
+        unit._store_slot_rfid(0, {"extruder_temp": "bad", "hotbed_temp": 5})
 
-    # def test_min_without_max_temp_is_none(self):
-        # unit = ace_p2_unit()
+        inv = unit._slot_inventory[0]
+        assert (inv["extruder_temp"], inv["extruder_temp_min"], inv["extruder_temp_max"]) == (
+            None, None, None)
+        assert (inv["bed_temp"], inv["bed_temp_min"], inv["bed_temp_max"]) == (None, None, None)
+        assert (inv["material"], inv["color"], inv["diameter"]) == ("", [0, 0, 0], 1.75)
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> "
+                      "{'extruder_temp': 'bad', 'hotbed_temp': 5}")]
 
-        # unit._store_slot_rfid(0, {"extruder_temp": {"min": 200}, "hotbed_temp": {"min": 50}})
+    def test_min_without_max_temp_is_none(self):
+        unit = ace_p2_unit()
 
-        # inv = unit._slot_inventory[0]
-        # assert (inv["extruder_temp_min"], inv["extruder_temp"]) == (200, None)
-        # assert (inv["bed_temp_min"], inv["bed_temp"]) == (50, None)
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 get_filament_info -> "
-                      # "{'extruder_temp': {'min': 200}, 'hotbed_temp': {'min': 50}}")]
+        unit._store_slot_rfid(0, {"extruder_temp": {"min": 200}, "hotbed_temp": {"min": 50}})
 
-    # def test_unrecognized_tag_change_logs_debug_only(self):
-        # unit = ace_p2_unit()
+        inv = unit._slot_inventory[0]
+        assert (inv["extruder_temp_min"], inv["extruder_temp"]) == (200, None)
+        assert (inv["bed_temp_min"], inv["bed_temp"]) == (50, None)
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 get_filament_info -> "
+                      "{'extruder_temp': {'min': 200}, 'hotbed_temp': {'min': 50}}")]
 
-        # unit._store_slot_rfid(1, {"rfid": 1})
+    def test_unrecognized_tag_change_logs_debug_only(self):
+        unit = ace_p2_unit()
 
-        # assert unit._slot_inventory[1]["rfid"] == 1
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 1 get_filament_info -> {'rfid': 1}")]
+        unit._store_slot_rfid(1, {"rfid": 1})
 
-    # def test_recognizing_tag_without_sku_logs_read(self):
-        # unit = ace_p2_unit()
+        assert unit._slot_inventory[1]["rfid"] == 1
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 1 get_filament_info -> {'rfid': 1}")]
 
-        # unit._store_slot_rfid(2, {"rfid": 3, "brand": "B"})
+    def test_recognizing_tag_without_sku_logs_read(self):
+        unit = ace_p2_unit()
 
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 2 get_filament_info -> {'rfid': 3, 'brand': 'B'}"),
-            # ("info", "ACE Ace_1: slot 2 RFID read, sku='' brand='B' type='' rfid=3 "
-                     # "nozzle=None-NoneC")]
+        unit._store_slot_rfid(2, {"rfid": 3, "brand": "B"})
 
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 2 get_filament_info -> {'rfid': 3, 'brand': 'B'}"),
+            ("info", "ACE Ace_1: slot 2 RFID read, sku='' brand='B' type='' rfid=3 "
+                     "nozzle=None-NoneC")]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACERefreshSlotInventory:
-    # def test_disconnected_noop(self):
-        # unit = ace_p2_unit(connection=None)
 
-        # unit._refresh_slot_inventory(0)
+class TestAfcACERefreshSlotInventory:
+    def test_disconnected_noop(self):
+        unit = ace_p2_unit(connection=None)
 
-        # assert unit._slot_inventory == [{}, {}, {}, {}]
-        # assert unit.printer.logger.messages == []
+        unit._refresh_slot_inventory(0)
 
-    # def test_down_link_noop(self):
-        # unit = ace_p2_unit()
-        # unit._ace.connected = False
+        assert unit._slot_inventory == [{}, {}, {}, {}]
+        assert unit.printer.logger.messages == []
 
-        # unit._refresh_slot_inventory(0)
+    def test_down_link_noop(self):
+        unit = ace_p2_unit()
+        unit._ace.connected = False
 
-        # assert unit._ace.commands == []
-        # assert unit.printer.logger.messages == []
+        unit._refresh_slot_inventory(0)
 
-    # def test_out_of_range_noop(self):
-        # unit = ace_p2_unit()
+        assert unit._ace.commands == []
+        assert unit.printer.logger.messages == []
 
-        # unit._refresh_slot_inventory(9)
-        # unit._refresh_slot_inventory(-1)
+    def test_out_of_range_noop(self):
+        unit = ace_p2_unit()
 
-        # assert unit._ace.commands == []
-        # assert unit._slot_inventory == [{}, {}, {}, {}]
-        # assert unit.printer.logger.messages == []
+        unit._refresh_slot_inventory(9)
+        unit._refresh_slot_inventory(-1)
 
-    # def test_success_stores(self):
-        # unit = ace_p2_unit()
-        # unit._ace.set_reply("get_filament_info", {"sku": "S1"})
+        assert unit._ace.commands == []
+        assert unit._slot_inventory == [{}, {}, {}, {}]
+        assert unit.printer.logger.messages == []
 
-        # unit._refresh_slot_inventory(2)
+    def test_success_stores(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_filament_info", {"sku": "S1"})
 
-        # assert unit._ace.commands == [("get_filament_info", {"index": 2})]
-        # assert unit._slot_inventory[2]["sku"] == "S1"
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 2 get_filament_info -> {'sku': 'S1'}"),
-            # ("info", "ACE Ace_1: slot 2 RFID read, sku='S1' brand='' type='' rfid=None "
-                     # "nozzle=None-NoneC")]
+        unit._refresh_slot_inventory(2)
 
-    # def test_non_dict_reply_not_stored(self):
-        # unit = ace_p2_unit()
-        # unit._ace.set_reply("get_filament_info", None)
+        assert unit._ace.commands == [("get_filament_info", {"index": 2})]
+        assert unit._slot_inventory[2]["sku"] == "S1"
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 2 get_filament_info -> {'sku': 'S1'}"),
+            ("info", "ACE Ace_1: slot 2 RFID read, sku='S1' brand='' type='' rfid=None "
+                     "nozzle=None-NoneC")]
 
-        # unit._refresh_slot_inventory(2)
+    def test_non_dict_reply_not_stored(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_filament_info", None)
 
-        # assert unit._slot_inventory[2] == {}
-        # assert unit.printer.logger.messages == []
+        unit._refresh_slot_inventory(2)
 
-    # def test_exception_logged_debug(self):
-        # unit = ace_p2_unit()
-        # unit._ace.set_reply("get_filament_info", RuntimeError("boom"))
+        assert unit._slot_inventory[2] == {}
+        assert unit.printer.logger.messages == []
 
-        # unit._refresh_slot_inventory(0)
+    def test_exception_logged_debug(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_filament_info", RuntimeError("boom"))
 
-        # assert unit._slot_inventory[0] == {}
-        # assert unit.printer.logger.messages == [
-            # ("debug", "ACE Ace_1: slot 0 RFID refresh failed: boom")]
+        unit._refresh_slot_inventory(0)
 
+        assert unit._slot_inventory[0] == {}
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace_1: slot 0 RFID refresh failed: boom")]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACEClearSlotInventory:
-    # def test_clears_fields_and_drops_uid(self):
-        # unit = ace_p2_unit(inventory={1: {"material": "PLA", "color": [1, 2, 3], "uid": "AA",
-                                          # "sku": "S"}})
 
-        # unit._clear_slot_inventory(1)
+class TestAfcACEClearSlotInventory:
+    def test_clears_fields_and_drops_uid(self):
+        unit = ace_p2_unit(inventory={1: {"material": "PLA", "color": [1, 2, 3], "uid": "AA",
+                                          "sku": "S"}})
 
-        # # Only the identity fields go; the rest of the cache stays.
-        # assert unit._slot_inventory[1] == {"material": "", "color": [0, 0, 0], "sku": "S"}
-        # assert unit.printer.logger.messages == []
+        unit._clear_slot_inventory(1)
 
-    # def test_out_of_range_noop(self):
-        # unit = ace_p2_unit(inventory={0: {"material": "PLA"}, 3: {"material": "ABS"}})
+        # Only the identity fields go; the rest of the cache stays.
+        assert unit._slot_inventory[1] == {"material": "", "color": [0, 0, 0], "sku": "S"}
+        assert unit.printer.logger.messages == []
 
-        # unit._clear_slot_inventory(99)
-        # unit._clear_slot_inventory(-1)
+    def test_out_of_range_noop(self):
+        unit = ace_p2_unit(inventory={0: {"material": "PLA"}, 3: {"material": "ABS"}})
 
-        # # -1 would otherwise wrap to the last slot.
-        # assert unit._slot_inventory == [{"material": "PLA"}, {}, {}, {"material": "ABS"}]
-        # assert unit.printer.logger.messages == []
+        unit._clear_slot_inventory(99)
+        unit._clear_slot_inventory(-1)
 
+        # -1 would otherwise wrap to the last slot.
+        assert unit._slot_inventory == [{"material": "PLA"}, {}, {}, {"material": "ABS"}]
+        assert unit.printer.logger.messages == []
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACEReaderSiblingSlot:
-    # def test_base_ace_has_no_shared_reader_sibling(self):
-        # unit = ace_p2_unit(inventory={0: {"sku": "X"}, 1: {"sku": "X"}})
 
-        # assert [unit._reader_sibling_slot(slot) for slot in range(4)] == [None] * 4
-        # # A per-slot reader is never shared, so the same tag twice is not ambiguous.
-        # assert unit._shared_rfid_ambiguous(0) is False
+class TestAfcACEReaderSiblingSlot:
+    def test_base_ace_has_no_shared_reader_sibling(self):
+        unit = ace_p2_unit(inventory={0: {"sku": "X"}, 1: {"sku": "X"}})
 
+        assert [unit._reader_sibling_slot(slot) for slot in range(4)] == [None] * 4
+        # A per-slot reader is never shared, so the same tag twice is not ambiguous.
+        assert unit._shared_rfid_ambiguous(0) is False
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACESharedRfidAmbiguous:
-    # def test_ace2_ambiguous_when_sibling_reports_same_sku(self):
-        # # Slot 1 read slot 0's tag through the reader they share.
-        # unit = make_ace2_unit(inventory={0: {"sku": "HPL19-107"}, 1: {"sku": " HPL19-107 "}})
 
-        # assert unit._shared_rfid_ambiguous(1) is True
-        # assert unit._shared_rfid_ambiguous(0) is True
+class TestAfcACESharedRfidAmbiguous:
+    @staticmethod
+    def _paired_unit(inventory: Dict[int, Dict[str, Any]]) -> afcACE:
+        """
+        :param inventory: slot inventory to seed
+        :return afcACE: a unit whose readers each cover a slot pair (0/1, 2/3)
+        """
+        unit = ace_p2_unit(inventory=inventory)
+        unit._reader_sibling_slot = lambda slot: slot ^ 1
+        return unit
 
-    # def test_ace2_ambiguous_when_sibling_reports_same_uid(self):
-        # unit = make_ace2_unit(inventory={2: {"sku": "", "uid": "deadbeef"},
-                                         # 3: {"sku": "", "uid": "deadbeef"}})
+    def test_ambiguous_when_sibling_reports_same_sku(self):
+        # Slot 1 read slot 0's tag through the reader they share.
+        unit = self._paired_unit({0: {"sku": "HPL19-107"}, 1: {"sku": " HPL19-107 "}})
 
-        # assert unit._shared_rfid_ambiguous(2) is True
+        assert unit._shared_rfid_ambiguous(1) is True
+        assert unit._shared_rfid_ambiguous(0) is True
 
-    # def test_ace2_not_ambiguous_when_sibling_differs(self):
-        # unit = make_ace2_unit(inventory={2: {"sku": "BAMBU-A", "uid": "aa"},
-                                         # 3: {"sku": "BAMBU-B", "uid": "bb"}})
+    def test_ambiguous_when_sibling_reports_same_uid(self):
+        unit = self._paired_unit({2: {"sku": "", "uid": "deadbeef"},
+                                  3: {"sku": "", "uid": "deadbeef"}})
 
-        # assert unit._shared_rfid_ambiguous(2) is False
-        # assert unit._shared_rfid_ambiguous(3) is False
+        assert unit._shared_rfid_ambiguous(2) is True
 
-    # def test_ace2_not_ambiguous_when_sibling_empty(self):
-        # unit = make_ace2_unit(inventory={0: {"sku": "HPL19-107", "uid": "aa"}})
+    def test_not_ambiguous_when_sibling_differs(self):
+        unit = self._paired_unit({2: {"sku": "BAMBU-A", "uid": "aa"},
+                                  3: {"sku": "BAMBU-B", "uid": "bb"}})
 
-        # assert unit._shared_rfid_ambiguous(0) is False
+        assert unit._shared_rfid_ambiguous(2) is False
+        assert unit._shared_rfid_ambiguous(3) is False
+
+    def test_not_ambiguous_when_sibling_empty(self):
+        unit = self._paired_unit({0: {"sku": "HPL19-107", "uid": "aa"}})
+
+        assert unit._shared_rfid_ambiguous(0) is False
+
+    def test_not_ambiguous_when_sibling_out_of_range(self):
+        unit = ace_p2_unit(inventory={3: {"sku": "S"}})
+        unit._reader_sibling_slot = lambda slot: slot + 1
+
+        assert unit._shared_rfid_ambiguous(3) is False
 
 
 
@@ -7125,8 +7153,18 @@ class TestAfcACESyncSlotLoadedState:
         unit._sync_slot_loaded_state()
 
         assert lane.prep_state is True
-        # Uncomment below once RFID and spoolman creation support is added
-        # assert lane.material == "PETG"
+        assert lane.material == "PETG"
+        assert unit.printer.logger.messages == []
+
+    def test_ready_slot_values_need_the_rfid_helper(self, monkeypatch):
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
+        unit = ace_p2_unit("lane1", inventory={0: {"status": "ready", "material": "PETG"}})
+        lane = unit.lanes["lane1"]
+
+        unit._sync_slot_loaded_state()
+
+        assert lane.prep_state is True
+        assert lane.material is None
         assert unit.printer.logger.messages == []
 
     def test_empty_slot_clears_hub_state(self):
@@ -7143,58 +7181,69 @@ class TestAfcACESyncSlotLoadedState:
         assert lane._load_state is False
         assert unit.printer.logger.messages == []
 
-    # Uncomment below once RFID and spoolman creation support is added
-    # def test_ambiguous_shared_read_is_not_applied(self):
-        # unit = make_ace2_unit(lanes=["lane1", "lane2"], inventory={
-            # 0: {"status": "ready", "sku": "S", "material": "PLA"},
-            # 1: {"status": "ready", "sku": "S", "material": "PLA"}})
+    def test_ambiguous_shared_read_is_not_applied(self):
+        unit = ace_p2_unit("lane1", "lane2", inventory={
+            0: {"status": "ready", "sku": "S", "material": "PLA"},
+            1: {"status": "ready", "sku": "S", "material": "PLA"}})
+        unit._reader_sibling_slot = lambda slot: slot ^ 1
 
-        # unit._sync_slot_loaded_state()
+        unit._sync_slot_loaded_state()
 
-        # assert [unit.lanes[n].prep_state for n in ("lane1", "lane2")] == [True, True]
-        # assert [unit.lanes[n].material for n in ("lane1", "lane2")] == [None, None]
-        # assert unit.printer.logger.messages == [
-            # ("info", "ACE Ace2_1: slot 0 RFID read is ambiguous (shared reader sibling "
-                     # "reports the same tag), not applying to lane1 at startup"),
-            # ("info", "ACE Ace2_1: slot 1 RFID read is ambiguous (shared reader sibling "
-                     # "reports the same tag), not applying to lane2 at startup")]
+        assert [unit.lanes[n].prep_state for n in ("lane1", "lane2")] == [True, True]
+        assert [unit.lanes[n].material for n in ("lane1", "lane2")] == [None, None]
+        assert unit.printer.logger.messages == [
+            ("info", "ACE Ace_1: slot 0 RFID read is ambiguous (shared reader sibling "
+                     "reports the same tag), not applying to lane1 at startup"),
+            ("info", "ACE Ace_1: slot 1 RFID read is ambiguous (shared reader sibling "
+                     "reports the same tag), not applying to lane2 at startup")]
+
+    def test_ace2_ready_slot_keeps_lane_values(self):
+        # The ACE 2 inventory holds no tag values; AFC_ACE2_rfid identifies its spools.
+        unit = make_ace2_unit(lanes=["lane1"], inventory={
+            0: {"status": "ready", "material": "PETG"}})
+        lane = unit.lanes["lane1"]
+
+        unit._sync_slot_loaded_state()
+
+        assert lane.prep_state is True
+        assert lane.material is None
+        assert unit.printer.logger.messages == []
 
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACEGetAutoSpoolmanCreate:
-    # def test_fallback_when_helper_absent(self, monkeypatch):
-        # monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
-        # unit = ace_p2_unit("lane1", values={"auto_spoolman_create": True})
+class TestAfcACEGetAutoSpoolmanCreate:
+    def test_fallback_when_helper_absent(self, monkeypatch):
+        monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
+        unit = ace_p2_unit("lane1", values={"auto_spoolman_create": True})
 
-        # assert unit._get_auto_spoolman_create(unit.lanes["lane1"]) is True
+        assert unit._get_auto_spoolman_create(unit.lanes["lane1"]) is True
 
-    # def test_fallback_ignores_extruder_opt_in(self, monkeypatch):
-        # monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
-        # unit = ace_p2_unit("lane1")
-        # lane = unit.lanes["lane1"]
-        # lane.extruder_obj.auto_spoolman_create = True
+    def test_fallback_ignores_extruder_opt_in(self, monkeypatch):
+        monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
+        unit = ace_p2_unit("lane1")
+        lane = unit.lanes["lane1"]
+        lane.extruder_obj.auto_spoolman_create = True
 
-        # assert unit._get_auto_spoolman_create(lane) is False
+        assert unit._get_auto_spoolman_create(lane) is False
 
-    # def test_delegates_to_helper_when_present(self):
-        # # The AFC_RFID helper honours the extruder's opt-in over the unit default.
-        # unit = ace_p2_unit("lane1")
-        # lane = unit.lanes["lane1"]
-        # lane.extruder_obj.auto_spoolman_create = True
+    def test_delegates_to_helper_when_present(self):
+        # The AFC_RFID helper honours the extruder's opt-in over the unit default.
+        unit = ace_p2_unit("lane1")
+        lane = unit.lanes["lane1"]
+        lane.extruder_obj.auto_spoolman_create = True
 
-        # assert unit.auto_spoolman_create is False
-        # assert unit._get_auto_spoolman_create(lane) is True
+        assert unit.auto_spoolman_create is False
+        assert unit._get_auto_spoolman_create(lane) is True
 
-    # def test_helper_falls_back_to_unit_default_when_nothing_opts_in(self):
-        # # Neither unit nor extruder opts in, so the helper returns the unit default it is given.
-        # unit = ace_p2_unit("lane1")
-        # lane = unit.lanes["lane1"]
+    def test_helper_falls_back_to_unit_default_when_nothing_opts_in(self):
+        # Neither unit nor extruder opts in, so the helper returns the unit default it is given.
+        unit = ace_p2_unit("lane1")
+        lane = unit.lanes["lane1"]
 
-        # assert afc_ace_module.get_auto_spoolman_create is not None
-        # assert unit.auto_spoolman_create is False
-        # assert not hasattr(lane.extruder_obj, "auto_spoolman_create")
-        # assert unit._get_auto_spoolman_create(lane) is False
+        assert afc_ace_module.get_auto_spoolman_create is not None
+        assert unit.auto_spoolman_create is False
+        assert not hasattr(lane.extruder_obj, "auto_spoolman_create")
+        assert unit._get_auto_spoolman_create(lane) is False
 
 
 
@@ -8509,29 +8558,28 @@ class TestACEConnectionGetTemp:
         assert conn._logger.messages == [("debug", "ACE TX: {'id': 0, 'method': 'get_temp'}")]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestACEConnectionGetFilamentInfo:
-    # def test_get_filament_info(self):
-        # conn = ace_p2_connection()
-        # ace_p2_answer(conn, conn._serial, {"code": 0, "result": {"sku": "HPL-1"}})
+class TestACEConnectionGetFilamentInfo:
+    def test_get_filament_info(self):
+        conn = ace_p2_connection()
+        ace_p2_answer(conn, conn._serial, {"code": 0, "result": {"sku": "HPL-1"}})
 
-        # assert conn.get_filament_info(2) == {"sku": "HPL-1"}
-        # assert ace_p2_payloads(conn) == [
-            # b'{"id":0,"method":"get_filament_info","params":{"index":2}}']
-        # assert conn._logger.messages == [
-            # ("debug", "ACE TX: {'id': 0, 'method': 'get_filament_info', "
-                      # "'params': {'index': 2}}")]
+        assert conn.get_filament_info(2) == {"sku": "HPL-1"}
+        assert ace_p2_payloads(conn) == [
+            b'{"id":0,"method":"get_filament_info","params":{"index":2}}']
+        assert conn._logger.messages == [
+            ("debug", "ACE TX: {'id': 0, 'method': 'get_filament_info', "
+                      "'params': {'index': 2}}")]
 
-    # def test_get_filament_info_times_out_after_3s(self):
-        # conn = ace_p2_connection()
+    def test_get_filament_info_times_out_after_3s(self):
+        conn = ace_p2_connection()
 
-        # with pytest.raises(ACETimeoutError, match=(
-                # r"^ACE command 'get_filament_info' \(id=0\) timed out after 3\.0s$")):
-            # conn.get_filament_info(2)
+        with pytest.raises(ACETimeoutError, match=(
+                r"^ACE command 'get_filament_info' \(id=0\) timed out after 3\.0s$")):
+            conn.get_filament_info(2)
 
-        # assert conn._timeout_timestamps == [103.0]
-        # assert conn._logger.messages == [
-            # ("debug", "ACE TX: {'id': 0, 'method': 'get_filament_info', 'params': {'index': 2}}")]
+        assert conn._timeout_timestamps == [103.0]
+        assert conn._logger.messages == [
+            ("debug", "ACE TX: {'id': 0, 'method': 'get_filament_info', 'params': {'index': 2}}")]
 
 
 
@@ -8844,71 +8892,67 @@ class TestACEConnectionStopDrying:
         assert conn._logger.messages == [("debug", "ACE TX: {'id': 0, 'method': 'drying_stop'}")]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestACEConnectionEnableRfid:
-    # def test_enable_rfid(self):
-        # conn = ace_p2_connection()
-        # ace_p2_answer(conn, conn._serial, {"code": 0, "result": {"rfid": 1}})
+class TestACEConnectionEnableRfid:
+    def test_enable_rfid(self):
+        conn = ace_p2_connection()
+        ace_p2_answer(conn, conn._serial, {"code": 0, "result": {"rfid": 1}})
 
-        # assert conn.enable_rfid() == {"rfid": 1}
-        # assert ace_p2_payloads(conn) == [b'{"id":0,"method":"enable_rfid"}']
-        # assert conn._logger.messages == [("debug", "ACE TX: {'id': 0, 'method': 'enable_rfid'}")]
-
-
-
-# Uncomment below once RFID and spoolman creation support is added
-# class TestACEConnectionDisableRfid:
-    # def test_disable_rfid(self):
-        # conn = ace_p2_connection()
-        # ace_p2_answer(conn, conn._serial, {"code": 0, "result": {"rfid": 0}})
-
-        # assert conn.disable_rfid() == {"rfid": 0}
-        # assert ace_p2_payloads(conn) == [b'{"id":0,"method":"disable_rfid"}']
-        # assert conn._logger.messages == [
-            # ("debug", "ACE TX: {'id': 0, 'method': 'disable_rfid'}")]
+        assert conn.enable_rfid() == {"rfid": 1}
+        assert ace_p2_payloads(conn) == [b'{"id":0,"method":"enable_rfid"}']
+        assert conn._logger.messages == [("debug", "ACE TX: {'id': 0, 'method': 'enable_rfid'}")]
 
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestACEConnectionSetFilamentInfo:
-    # def test_set_filament_info(self):
-        # conn = ace_p2_connection()
-        # ace_p2_answer(conn, conn._serial, {"code": 0, "result": {}})
+class TestACEConnectionDisableRfid:
+    def test_disable_rfid(self):
+        conn = ace_p2_connection()
+        ace_p2_answer(conn, conn._serial, {"code": 0, "result": {"rfid": 0}})
 
-        # # A colour tuple goes out as a list.
-        # assert conn.set_filament_info(0, "PLA", (1, 2, 3)) == {}
-        # assert ace_p2_payloads(conn) == [
-            # b'{"id":0,"method":"set_filament_info","params":'
-            # b'{"index":0,"type":"PLA","color":[1,2,3]}}']
-        # assert conn._logger.messages == [
-            # ("debug", "ACE TX: {'id': 0, 'method': 'set_filament_info', "
-                      # "'params': {'index': 0, 'type': 'PLA', 'color': [1, 2, 3]}}")]
+        assert conn.disable_rfid() == {"rfid": 0}
+        assert ace_p2_payloads(conn) == [b'{"id":0,"method":"disable_rfid"}']
+        assert conn._logger.messages == [
+            ("debug", "ACE TX: {'id': 0, 'method': 'disable_rfid'}")]
 
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACEUsesFirmwareRfid:
-    # def test_v1_uses_firmware_rfid_true(self):
-        # # A V1 unit reads tags through its firmware, so the startup sweep asks it.
-        # unit = ace_p2_unit()
-        # unit._ace.set_reply("get_filament_info", "no tag")
+class TestACEConnectionSetFilamentInfo:
+    def test_set_filament_info(self):
+        conn = ace_p2_connection()
+        ace_p2_answer(conn, conn._serial, {"code": 0, "result": {}})
 
-        # unit._sync_inventory()
+        # A colour tuple goes out as a list.
+        assert conn.set_filament_info(0, "PLA", (1, 2, 3)) == {}
+        assert ace_p2_payloads(conn) == [
+            b'{"id":0,"method":"set_filament_info","params":'
+            b'{"index":0,"type":"PLA","color":[1,2,3]}}']
+        assert conn._logger.messages == [
+            ("debug", "ACE TX: {'id': 0, 'method': 'set_filament_info', "
+                      "'params': {'index': 0, 'type': 'PLA', 'color': [1, 2, 3]}}")]
 
-        # assert unit._uses_firmware_rfid is True
-        # assert unit._ace.commands == [("get_filament_info", {"index": 0}),
-                                      # ("get_filament_info", {"index": 1}),
-                                      # ("get_filament_info", {"index": 2}),
-                                      # ("get_filament_info", {"index": 3})]
-        # assert unit.printer.logger.messages == []
 
-    # def test_cleared_flag_skips_the_firmware(self):
-        # # The flag alone gates the sweep on an otherwise identical connected unit.
-        # unit = ace_p2_unit()
-        # unit._uses_firmware_rfid = False
 
-        # unit._sync_inventory()
+class TestAfcACEUsesFirmwareRfid:
+    def test_v1_uses_firmware_rfid_true(self):
+        # A V1 unit reads tags through its firmware, so the startup sweep asks it.
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_filament_info", "no tag")
 
-        # assert unit._ace.commands == []
-        # assert unit.printer.logger.messages == []
+        unit._sync_inventory()
+
+        assert unit._uses_firmware_rfid is True
+        assert unit._ace.commands == [("get_filament_info", {"index": 0}),
+                                      ("get_filament_info", {"index": 1}),
+                                      ("get_filament_info", {"index": 2}),
+                                      ("get_filament_info", {"index": 3})]
+        assert unit.printer.logger.messages == []
+
+    def test_cleared_flag_skips_the_firmware(self):
+        # The flag alone gates the sweep on an otherwise identical connected unit.
+        unit = ace_p2_unit()
+        unit._uses_firmware_rfid = False
+
+        unit._sync_inventory()
+
+        assert unit._ace.commands == []
+        assert unit.printer.logger.messages == []
 

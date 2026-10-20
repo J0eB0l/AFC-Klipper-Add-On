@@ -2669,6 +2669,64 @@ class afcAMS(afcUnit):
             slot = self._spool_map.get(lane.name)
         return slot
 
+    @staticmethod
+    def _norm_rfid_uid(uid: Any) -> str:
+        """
+        :param uid: tag UID in any case, with or without separators
+        :return str: the UID upper-case without separators
+        """
+        return "".join(ch for ch in str(uid or "") if ch.isalnum()).upper()
+
+    def _rfid_sister_uids(self, coord: AFC_OpenAMS_rfid, lane: AFCLane,
+                          rfid_slot: int) -> set:
+        """
+        Tag UIDs the spools in the other bays on this lane's reader are known
+        to carry: the tag last read for that lane, and the tags Spoolman links
+        to the lane's spool. Only bays that still hold a spool count, so a
+        spool moved to this bay is still found.
+
+        :param coord: the AFC_OpenAMS_rfid coordinator
+        :param lane: the lane being scanned
+        :param rfid_slot: the RFID slot its reader serves
+        :return set: normalized UIDs (upper-case, no separators)
+        """
+        try:
+            reads = coord.last_reads_status()
+        except Exception:
+            reads = {}
+        try:
+            from extras.AFC_RFID import _cached_spoolman_client, _spool_uids
+            client = _cached_spoolman_client(self.afc)
+        except Exception:
+            client = None
+        held = set()
+        for other in self.lanes.values():
+            if other is lane:
+                continue
+            if not getattr(other, "prep_state", False):
+                continue
+            if self._rfid_scan_slot(coord, other) != rfid_slot:
+                continue
+            uid = self._norm_rfid_uid((reads.get(other.name) or {}).get("uid"))
+            if uid:
+                held.add(uid)
+            spool_id = getattr(other, "spool_id", None)
+            if client is None or not spool_id:
+                continue
+            try:
+                spool = client.get_spool(int(spool_id))
+            except Exception as e:
+                self.logger.debug(
+                    f"OAMS: RFID scan {lane.name}: spool {spool_id} of "
+                    f"{other.name} not read from Spoolman: {e}")
+                continue
+            held.update(_spool_uids(spool or {}))
+        if held:
+            self.logger.debug(
+                f"OAMS: RFID scan {lane.name}: passing over the sister bay's "
+                f"tag(s) {', '.join(sorted(held))}")
+        return held
+
     def _rfid_scan_blocked_reason(self, lane: AFCLane,
                                   check_hub: bool = True) -> Optional[str]:
         """
@@ -2856,6 +2914,9 @@ class afcAMS(afcUnit):
                     f"OAMS: RFID scan {lane.name}: tag(s) in field at rest: "
                     f"{', '.join(sorted(baseline))} (sister vs own decided by "
                     f"motion)")
+            # A tag the sister bay's spool is known to carry is never this
+            # bay's, even when it blinks out and comes back during the feed.
+            held = self._rfid_sister_uids(coord, lane, rfid_slot)
 
             # 4) Send the load, measuring detect positions from the feed start.
             clicks_load_start = clicks_start if clicks_start is not None else 0
@@ -2870,6 +2931,7 @@ class afcAMS(afcUnit):
             seen_uid = ""
             target_uid = None
             absent: Dict[str, int] = {u: 0 for u in baseline}
+            held_seen = set()
             self.logger.debug(
                 f"OAMS: RFID scan {lane.name}: polling reader (window "
                 f"{self.rfid_scan_timeout:.0f}s)")
@@ -2919,6 +2981,9 @@ class afcAMS(afcUnit):
                     self.logger.debug(
                         f"OAMS RFID probe error on {lane.name}: {e}")
                 for u in in_field:
+                    if self._norm_rfid_uid(u) in held:
+                        held_seen.add(u)
+                        continue
                     if u not in absent:
                         # Brand-new uid: the moving tag just arrived.
                         target_uid = u
@@ -2932,7 +2997,7 @@ class afcAMS(afcUnit):
                     absent[u] = 0 if u in in_field else absent[u] + 1
                 if target_uid:
                     seen_uid = target_uid
-                    sisters = set(baseline) - {target_uid}
+                    sisters = (set(baseline) | held_seen) - {target_uid}
                     try:
                         detect_clicks = int(self.oams.encoder_clicks)
                     except Exception:
