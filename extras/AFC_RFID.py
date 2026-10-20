@@ -49,6 +49,9 @@ class SpoolmanClient:
         self._flow_k_field_ensured = False
         self._drying_fields_ensured = False
         self._tray_uid_field_ensured = False
+        # Whether this Spoolman links tags natively (0.27+). Learned from the
+        # first spool record read, which has a 'tags' list on those servers.
+        self.native_tags: Optional[bool] = None
         # Per-thread override for the failed-request line; see logging_to.
         self._thread_log = threading.local()
 
@@ -110,8 +113,7 @@ class SpoolmanClient:
                       headers={"Content-Type": "application/json"})
         result = self._get_results(req, print_error)
         if result is None and method != "GET":
-            log = getattr(self._thread_log, "logger", None)
-            (log if log is not None else self.logger).error(
+            self._log().error(
                 f"Spoolman {method} {path} failed; request body: "
                 f"{json.dumps(body) if body is not None else '(none)'}")
         return result
@@ -145,7 +147,128 @@ class SpoolmanClient:
         query = "&".join(parts)
         path = f"/v1/spool?{query}" if query else "/v1/spool"
         resp = self._spoolman_proxy("GET", path, print_error=False)
-        return resp if isinstance(resp, list) else []
+        if not isinstance(resp, list):
+            return []
+        self._learn_native_tags(resp[0] if resp else None)
+        return resp
+
+    def _learn_native_tags(self, record: Any) -> None:
+        """
+        Note whether Spoolman links tags natively, from a spool record it sent.
+
+        A 0.27+ server puts a 'tags' list on every spool; an older one has no
+        such key. A missing record teaches nothing.
+
+        :param record: a spool dict from Spoolman, or None
+        """
+        if isinstance(record, dict):
+            self.native_tags = "tags" in record
+
+    def spools_by_tag(self, uid: Any) -> list:
+        """
+        Find the spools Spoolman has this tag linked to, by its indexed lookup.
+
+        Only records that really carry the tag are kept, since a server older
+        than 0.27 ignores ?tag= and answers with every spool.
+
+        :param uid: tag UID, any separators or case
+        :return list: the spool dicts holding the tag (empty if none or error)
+        """
+        norm = _norm_uid(uid)
+        if not norm:
+            return []
+        resp = self._spoolman_proxy("GET", f"/v1/spool?tag={norm}",
+                                    print_error=False)
+        if not isinstance(resp, list):
+            return []
+        return [s for s in resp if norm in _spool_tag_uids(s)]
+
+    def filaments_by_tag(self, uid: Any) -> list:
+        """
+        Find the filaments Spoolman has this tag linked to.
+
+        :param uid: tag UID, any separators or case
+        :return list: the filament dicts holding the tag (empty if none or error)
+        """
+        norm = _norm_uid(uid)
+        if not norm:
+            return []
+        resp = self._spoolman_proxy("GET", f"/v1/filament?tag={norm}",
+                                    print_error=False)
+        if not isinstance(resp, list):
+            return []
+        return [f for f in resp if norm in _spool_tag_uids(f)]
+
+    def tag_holder(self, uid: Any) -> Optional[Tuple[str, Any]]:
+        """
+        Say which spool or filament a tag is linked to, if any.
+
+        :param uid: tag UID, any separators or case
+        :return Optional[Tuple[str, Any]]: ("spool", id) or ("filament", id),
+            None when the tag is free
+        """
+        spools = self.spools_by_tag(uid)
+        if spools:
+            return "spool", spools[0].get("id")
+        filaments = self.filaments_by_tag(uid)
+        if filaments:
+            return "filament", filaments[0].get("id")
+        return None
+
+    def link_spool_tag(self, spool_id: Any, uid: Any,
+                       tag_format: Optional[str] = None) -> Optional[dict]:
+        """
+        Link a tag to a spool in Spoolman's own tag records.
+
+        :param spool_id: Spoolman spool id
+        :param uid: tag UID, any separators or case
+        :param tag_format: kind of tag, e.g. "ntag"; informational only
+        :return Optional[dict]: the tag record, or None on failure
+        """
+        body: Dict[str, Any] = {"uid": _norm_uid(uid)}
+        if tag_format:
+            body["format"] = tag_format
+        return self._spoolman_proxy("POST", f"/v1/spool/{int(spool_id)}/tag",
+                                    body=body)
+
+    def ensure_tag_linked(self, spool_id: Any, spool: Optional[dict], uid: Any,
+                          tag_format: Optional[str] = None) -> bool:
+        """
+        Link a tag to a spool natively, unless something else already holds it.
+
+        A tag held by another spool or a filament is reported and left there:
+        moving it is the user's call, in Spoolman.
+
+        :param spool_id: Spoolman spool id
+        :param spool: that spool's record, to skip a tag it already carries
+        :param uid: tag UID, any separators or case
+        :param tag_format: kind of tag, e.g. "ntag"; informational only
+        :return bool: True when this call linked the tag
+        """
+        norm = _norm_uid(uid)
+        if (not norm
+            or not self.native_tags
+            or norm in _spool_tag_uids(spool or {})):
+            return False
+        holder = self.tag_holder(norm)
+        if holder is not None:
+            if holder != ("spool", spool_id):
+                kind, hid = holder
+                self._log().warning(
+                    f"Spoolman: tag {norm} is already linked to {kind} #{hid}, "
+                    f"so it was not linked to spool #{spool_id}. If this spool "
+                    f"is the right one, use Move it here in Spoolman.")
+            return False
+        return self.link_spool_tag(spool_id, norm, tag_format) is not None
+
+    def _log(self) -> Any:
+        """
+        Return the logger this thread's lines go to (see logging_to).
+
+        :return Any: the per-thread logger, else the moonraker's
+        """
+        log = getattr(self._thread_log, "logger", None)
+        return log if log is not None else self.logger
 
     def get_or_create_vendor(self, name: str) -> Optional[dict]:
         """
@@ -513,15 +636,18 @@ class SpoolmanClient:
             body=json.dumps({"used_weight": round(used, 2)}))
 
     def write_spool_metadata(self, spool_id: int, lot_nr: Optional[str] = None,
-                             uid: Optional[str] = None) -> Optional[dict]:
+                             uid: Optional[str] = None,
+                             tag_format: Optional[str] = None) -> Optional[dict]:
         """
         Write the tag's manufacturing date (-> lot_nr) and NFC UID (-> the
         'card_uids' extra field, merged into the spool's existing UID list as
-        comma-separated uppercase hex).
+        comma-separated uppercase hex). On Spoolman 0.27+ the UID is also
+        linked as a native tag; card_uids stays for readers that still use it.
 
         :param spool_id: Spoolman spool id to update.
         :param lot_nr: Manufacturing date string to store as lot_nr.
         :param uid: NFC tag UID to add to the spool's 'card_uids' list.
+        :param tag_format: kind of tag for the native link, e.g. "ntag".
         :return Optional[dict]: PATCH result dict, or None when there is nothing
             to write.
         """
@@ -529,7 +655,9 @@ class SpoolmanClient:
         norm = _norm_uid(uid)
         if norm:
             self._ensure_spool_fields()
-            uids = _spool_uids(self.get_spool(spool_id) or {})
+            spool = self.get_spool(spool_id) or {}
+            self.ensure_tag_linked(spool_id, spool, norm, tag_format)
+            uids = _spool_uids(spool)
             uids.add(norm)
             extra = {self.SPOOL_EXTRA_CARD_UIDS:
                      json.dumps(",".join(sorted(uids)))}
@@ -549,7 +677,10 @@ class SpoolmanClient:
         :return dict: The spool dict, or None if not found.
         """
         result = self._spoolman_proxy("GET", f"/v1/spool/{int(spool_id)}")
-        return result if isinstance(result, dict) else None
+        if not isinstance(result, dict):
+            return None
+        self._learn_native_tags(result)
+        return result
 
     def read_flow_k(self, spool_id: int) -> Optional[float]:
         """
@@ -728,14 +859,14 @@ def _decode_extra(extra: Optional[dict], key: str) -> Any:
         return raw
 
 
-def _spool_uids(spool: dict) -> set:
+def _card_uids(spool: dict) -> set:
     """
-    Return the set of normalized NFC UIDs stored on a spool.
+    Return the normalized NFC UIDs in a spool's 'card_uids' extra field.
 
-    Read from the 'card_uids' comma-separated list (Snapmaker-Extended).
+    The comma-separated list, the Snapmaker-Extended convention.
 
     :param spool: Spoolman spool dict.
-    :return set: Normalized UID strings carried by the spool.
+    :return set: Normalized UID strings in card_uids.
     """
     extra = spool.get("extra") or {}
     uids = set()
@@ -746,6 +877,34 @@ def _spool_uids(spool: dict) -> set:
             if n:
                 uids.add(n)
     return uids
+
+
+def _spool_tag_uids(record: dict) -> set:
+    """
+    Return the normalized UIDs of the tags Spoolman links to a record natively.
+
+    :param record: Spoolman spool or filament dict (0.27+ has a 'tags' list).
+    :return set: Normalized UID strings of its linked tags.
+    """
+    uids = set()
+    for tag in record.get("tags") or []:
+        n = _norm_uid(tag.get("uid") if isinstance(tag, dict) else "")
+        if n:
+            uids.add(n)
+    return uids
+
+
+def _spool_uids(spool: dict) -> set:
+    """
+    Return the set of normalized NFC UIDs a spool carries.
+
+    Its native Spoolman tags plus the 'card_uids' list, so a spool matches
+    whichever way its tag was recorded.
+
+    :param spool: Spoolman spool dict.
+    :return set: Normalized UID strings carried by the spool.
+    """
+    return _card_uids(spool) | _spool_tag_uids(spool)
 
 
 def _norm_tray_uid(tray_uid: Any) -> str:
@@ -810,7 +969,8 @@ def match_spool_for_tag(client: SpoolmanClient, uid: Any,
     Find the Spoolman spool a tag read belongs to: the roll, then the tag.
 
     The one place the order is decided, so every reader answers the same way.
-    A tag without a roll id matches on its chip UID alone. When the chip UID
+    A tag without a roll id matches on its chip UID alone, through Spoolman's
+    native tag lookup first when the server has one. When the chip UID
     also belongs to a different spool than the one matched, that spool's id is
     returned so the caller can report the duplicate record. One spool listing
     serves both lookups.
@@ -823,6 +983,16 @@ def match_spool_for_tag(client: SpoolmanClient, uid: Any,
     """
     tray = _norm_tray_uid(tray_uid)
     uid_n = _norm_uid(uid)
+    if (not tray
+        and uid_n
+        and getattr(client, "native_tags", None)):
+        # Spoolman's indexed lookup; a miss still scans card_uids below.
+        try:
+            hits = client.spools_by_tag(uid_n)
+        except Exception:
+            hits = []
+        if hits:
+            return hits[0], False, None
     try:
         spools = client.search_spools()
     except Exception:
@@ -891,6 +1061,10 @@ def find_spool_by_uid(client: SpoolmanClient, uid: Any) -> Optional[dict]:
         if target in _spool_uids(s):
             return s
     return None
+
+
+#: Spoolman's free-form tag 'format' for each chip family a reader reports.
+TAG_FORMATS = {"MifareClassic1k": "mifare_classic", "MifareUltralight": "ntag"}
 
 
 def density_for_material(material: str) -> float:
@@ -1852,7 +2026,9 @@ def _spoolman_resolve(afc: Any, prep: dict, slot_info: dict, logger: Any,
             mfg_date = slot_info.get("mfg_date")
             uid = slot_info.get("uid")
             if mfg_date or uid:
-                moonraker.write_spool_metadata(spool_id, lot_nr=mfg_date, uid=uid)
+                moonraker.write_spool_metadata(
+                    spool_id, lot_nr=mfg_date, uid=uid,
+                    tag_format=TAG_FORMATS.get(slot_info.get("tag_type") or ""))
             # Stamp the roll id on a newly created spool, unless already settled.
             if scanned_tray and not by_tray and not tray_settled:
                 moonraker.write_tray_uid(spool_id, scanned_tray)

@@ -15,10 +15,12 @@ from extras.AFC_ACE2_rfid import AFC_ACE2_RFID
 import extras.AFC_RFID as AFC_RFID
 from extras.AFC_RFID import (
     _cached_spoolman_client,
+    _card_uids,
     _decode_extra,
     _missing_filament_fields,
     _norm_tray_uid,
     _norm_uid,
+    _spool_tag_uids,
     _spool_uids,
     apply_filament_defaults,
     bed_temp_for_material,
@@ -301,7 +303,236 @@ class TestSpoolmanClientSearchSpools:
     def test_non_list_returns_empty(self):
         client, moonraker = rfid_spoolman_client({("GET", "/v1/spool"): {"not": "list"}})
         assert client.search_spools() == []
+        assert client.native_tags is None
         assert moonraker.logger.messages == []
+
+    def test_a_spool_with_tags_means_native_tags(self):
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool"): [{"id": 1, "tags": []}]})
+        assert client.search_spools() == [{"id": 1, "tags": []}]
+        assert client.native_tags is True
+        assert moonraker.logger.messages == []
+
+    def test_a_spool_without_tags_means_an_older_server(self):
+        client, moonraker = rfid_spoolman_client({("GET", "/v1/spool"): [{"id": 1}]})
+        assert client.search_spools() == [{"id": 1}]
+        assert client.native_tags is False
+        assert moonraker.logger.messages == []
+
+    def test_an_empty_listing_teaches_nothing(self):
+        client, moonraker = rfid_spoolman_client({("GET", "/v1/spool"): []})
+        assert client.search_spools() == []
+        assert client.native_tags is None
+        assert moonraker.logger.messages == []
+
+
+class TestSpoolmanClientLearnNativeTags:
+    def test_tags_key_sets_true(self):
+        client, moonraker = rfid_spoolman_client()
+        client._learn_native_tags({"id": 1, "tags": []})
+        assert client.native_tags is True
+        assert moonraker.calls == []
+
+    def test_no_tags_key_sets_false(self):
+        client, moonraker = rfid_spoolman_client()
+        client.native_tags = True
+        client._learn_native_tags({"id": 1})
+        assert client.native_tags is False
+        assert moonraker.calls == []
+
+    def test_no_record_leaves_it_unchanged(self):
+        client, moonraker = rfid_spoolman_client()
+        client.native_tags = True
+        client._learn_native_tags(None)
+        assert client.native_tags is True
+        assert moonraker.calls == []
+
+
+class TestSpoolmanClientSpoolsByTag:
+    def test_blank_uid_asks_nothing(self):
+        client, moonraker = rfid_spoolman_client()
+        assert client.spools_by_tag(" : ") == []
+        assert moonraker.calls == []
+        assert moonraker.logger.messages == []
+
+    def test_keeps_only_spools_that_hold_the_tag(self):
+        # An older server ignores ?tag= and lists every spool.
+        holder = {"id": 5, "tags": [{"uid": "ccdd"}]}
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=CCDD"): [holder, {"id": 6}]})
+        assert client.spools_by_tag("cc:dd") == [holder]
+        assert moonraker.calls == [("GET", "/v1/spool?tag=CCDD", None, False)]
+        assert moonraker.logger.messages == []
+
+    def test_non_list_answer_is_empty(self):
+        client, moonraker = rfid_spoolman_client()
+        assert client.spools_by_tag("CCDD") == []
+        assert moonraker.calls == [("GET", "/v1/spool?tag=CCDD", None, False)]
+        assert moonraker.logger.messages == []
+
+
+class TestSpoolmanClientFilamentsByTag:
+    def test_blank_uid_asks_nothing(self):
+        client, moonraker = rfid_spoolman_client()
+        assert client.filaments_by_tag("") == []
+        assert moonraker.calls == []
+        assert moonraker.logger.messages == []
+
+    def test_keeps_only_filaments_that_hold_the_tag(self):
+        holder = {"id": 7, "tags": [{"uid": "CCDD"}]}
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/filament?tag=CCDD"): [holder, {"id": 8, "tags": []}]})
+        assert client.filaments_by_tag("ccdd") == [holder]
+        assert moonraker.calls == [("GET", "/v1/filament?tag=CCDD", None, False)]
+        assert moonraker.logger.messages == []
+
+    def test_non_list_answer_is_empty(self):
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/filament?tag=CCDD"): {"not": "list"}})
+        assert client.filaments_by_tag("CCDD") == []
+        assert moonraker.logger.messages == []
+
+
+class TestSpoolmanClientTagHolder:
+    def test_a_spool_holds_it(self):
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=CCDD"): [{"id": 5, "tags": [{"uid": "CCDD"}]}]})
+        assert client.tag_holder("CCDD") == ("spool", 5)
+        # The filament lookup is never needed.
+        assert moonraker.calls == [("GET", "/v1/spool?tag=CCDD", None, False)]
+
+    def test_a_filament_holds_it(self):
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=CCDD"): [],
+             ("GET", "/v1/filament?tag=CCDD"): [{"id": 7, "tags": [{"uid": "CCDD"}]}]})
+        assert client.tag_holder("CCDD") == ("filament", 7)
+        assert moonraker.calls == [("GET", "/v1/spool?tag=CCDD", None, False),
+                                   ("GET", "/v1/filament?tag=CCDD", None, False)]
+
+    def test_a_free_tag_has_no_holder(self):
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=CCDD"): [], ("GET", "/v1/filament?tag=CCDD"): []})
+        assert client.tag_holder("CCDD") is None
+        assert moonraker.logger.messages == []
+
+
+class TestSpoolmanClientLinkSpoolTag:
+    def test_links_with_a_format(self):
+        client, moonraker = rfid_spoolman_client(
+            {("POST", "/v1/spool/5/tag"): {"uid": "CCDD", "format": "ntag"}})
+        assert client.link_spool_tag("5", "cc:dd", "ntag") == {"uid": "CCDD", "format": "ntag"}
+        assert moonraker.calls == [
+            ("POST", "/v1/spool/5/tag", {"uid": "CCDD", "format": "ntag"}, True)]
+        assert moonraker.logger.messages == []
+
+    def test_links_without_a_format(self):
+        client, moonraker = rfid_spoolman_client(
+            {("POST", "/v1/spool/5/tag"): {"uid": "CCDD"}})
+        assert client.link_spool_tag(5, "CCDD") == {"uid": "CCDD"}
+        assert moonraker.calls == [("POST", "/v1/spool/5/tag", {"uid": "CCDD"}, True)]
+        assert moonraker.logger.messages == []
+
+    def test_a_failed_link_is_none_and_logged(self):
+        client, moonraker = rfid_spoolman_client()
+        assert client.link_spool_tag(5, "CCDD") is None
+        assert moonraker.logger.messages == [
+            ("error", 'Spoolman POST /v1/spool/5/tag failed; request body: {"uid": "CCDD"}')]
+
+
+class TestSpoolmanClientEnsureTagLinked:
+    _FREE = {("GET", "/v1/spool?tag=CCDD"): [], ("GET", "/v1/filament?tag=CCDD"): []}
+
+    @staticmethod
+    def _client(routes: Dict[Tuple[str, str], Any], native: Optional[bool] = True
+                ) -> Tuple[SpoolmanClient, RfidSpoolmanMoonraker]:
+        """
+        :param routes: the moonraker's Spoolman answers
+        :param native: the client's native_tags
+        :return tuple: (client, moonraker)
+        """
+        client, moonraker = rfid_spoolman_client(routes)
+        client.native_tags = native
+        return client, moonraker
+
+    def test_links_a_free_tag(self):
+        client, moonraker = self._client(
+            {**self._FREE, ("POST", "/v1/spool/5/tag"): {"uid": "CCDD"}})
+        assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "cc:dd", "ntag") is True
+        assert moonraker.calls == [
+            ("GET", "/v1/spool?tag=CCDD", None, False),
+            ("GET", "/v1/filament?tag=CCDD", None, False),
+            ("POST", "/v1/spool/5/tag", {"uid": "CCDD", "format": "ntag"}, True)]
+        assert moonraker.logger.messages == []
+
+    def test_a_failed_link_is_false(self):
+        client, moonraker = self._client(dict(self._FREE))
+        assert client.ensure_tag_linked(5, None, "CCDD") is False
+        assert moonraker.sent("POST", "/v1/spool/5/tag") == [{"uid": "CCDD"}]
+        assert moonraker.logger.messages == [
+            ("error", 'Spoolman POST /v1/spool/5/tag failed; request body: {"uid": "CCDD"}')]
+
+    def test_a_blank_uid_does_nothing(self):
+        client, moonraker = self._client(dict(self._FREE))
+        assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "") is False
+        assert moonraker.calls == []
+
+    def test_an_older_server_does_nothing(self):
+        client, moonraker = self._client(dict(self._FREE), native=False)
+        assert client.ensure_tag_linked(5, {"id": 5}, "CCDD") is False
+        assert moonraker.calls == []
+
+    def test_an_unknown_server_does_nothing(self):
+        client, moonraker = self._client(dict(self._FREE), native=None)
+        assert client.ensure_tag_linked(5, {"id": 5}, "CCDD") is False
+        assert moonraker.calls == []
+
+    def test_a_tag_the_spool_already_carries_does_nothing(self):
+        client, moonraker = self._client(dict(self._FREE))
+        assert client.ensure_tag_linked(5, {"id": 5, "tags": [{"uid": "CCDD"}]},
+                                        "cc-dd") is False
+        assert moonraker.calls == []
+
+    def test_a_tag_on_another_spool_is_reported_not_moved(self):
+        client, moonraker = self._client(
+            {("GET", "/v1/spool?tag=CCDD"): [{"id": 9, "tags": [{"uid": "CCDD"}]}]})
+        assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "CCDD") is False
+        assert moonraker.sent("POST", "/v1/spool/5/tag") == []
+        assert moonraker.logger.messages == [
+            ("warning", "Spoolman: tag CCDD is already linked to spool #9, so it was not "
+                        "linked to spool #5. If this spool is the right one, use Move it "
+                        "here in Spoolman.")]
+
+    def test_a_tag_on_a_filament_is_reported_not_moved(self):
+        client, moonraker = self._client(
+            {("GET", "/v1/spool?tag=CCDD"): [],
+             ("GET", "/v1/filament?tag=CCDD"): [{"id": 7, "tags": [{"uid": "CCDD"}]}]})
+        assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "CCDD") is False
+        assert moonraker.sent("POST", "/v1/spool/5/tag") == []
+        assert moonraker.logger.messages == [
+            ("warning", "Spoolman: tag CCDD is already linked to filament #7, so it was "
+                        "not linked to spool #5. If this spool is the right one, use Move "
+                        "it here in Spoolman.")]
+
+    def test_a_stale_record_of_this_spool_says_nothing(self):
+        # The record was read before the link landed: Spoolman already has it here.
+        client, moonraker = self._client(
+            {("GET", "/v1/spool?tag=CCDD"): [{"id": 5, "tags": [{"uid": "CCDD"}]}]})
+        assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "CCDD") is False
+        assert moonraker.sent("POST", "/v1/spool/5/tag") == []
+        assert moonraker.logger.messages == []
+
+
+class TestSpoolmanClientLog:
+    def test_the_moonraker_logger_by_default(self):
+        client, moonraker = rfid_spoolman_client()
+        assert client._log() is moonraker.logger
+
+    def test_the_thread_logger_inside_logging_to(self):
+        client, moonraker = rfid_spoolman_client()
+        other = AceLogger()
+        with client.logging_to(other):
+            assert client._log() is other
+        assert client._log() is moonraker.logger
 
 
 class TestSpoolmanClientGetOrCreateVendor:
@@ -800,6 +1031,28 @@ class TestSpoolmanClientWriteSpoolMetadata:
             ("PATCH", "/v1/spool/5",
              {"lot_nr": "2024-05", "extra": {"card_uids": '"AABB,CCDD"'}}, True)]
         assert client._fields_ensured is True
+        assert client.native_tags is False
+        assert moonraker.logger.messages == []
+
+    def test_a_native_server_also_links_the_tag(self):
+        spool = {"id": 5, "extra": {"card_uids": '"AABB"'}, "tags": [{"uid": "AABB"}]}
+        client, moonraker = rfid_spoolman_client({
+            ("GET", "/v1/field/spool"): [{"key": "card_uids"}],
+            ("GET", "/v1/spool/5"): spool,
+            ("GET", "/v1/spool?tag=CCDD"): [],
+            ("GET", "/v1/filament?tag=CCDD"): [],
+            ("POST", "/v1/spool/5/tag"): {"uid": "CCDD"},
+            ("PATCH", "/v1/spool/5"): {"ok": 1}})
+        assert client.write_spool_metadata(5, uid="cc:dd", tag_format="ntag") == {"ok": 1}
+        assert moonraker.calls == [
+            ("GET", "/v1/field/spool", None, False),
+            ("GET", "/v1/spool/5", None, True),
+            ("GET", "/v1/spool?tag=CCDD", None, False),
+            ("GET", "/v1/filament?tag=CCDD", None, False),
+            ("POST", "/v1/spool/5/tag", {"uid": "CCDD", "format": "ntag"}, True),
+            ("GET", "/v1/spool/5", None, True),
+            ("PATCH", "/v1/spool/5", {"extra": {"card_uids": '"AABB,CCDD"'}}, True)]
+        assert client.native_tags is True
         assert moonraker.logger.messages == []
 
 
@@ -811,11 +1064,20 @@ class TestSpoolmanClientGetSpool:
         assert client.get_spool("3") == {"id": 3}
         assert moonraker.calls == [("GET", "/v1/spool/3", None, True)]
         assert moonraker.fetches == []
+        assert client.native_tags is False
+        assert moonraker.logger.messages == []
+
+    def test_a_spool_with_tags_means_native_tags(self):
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool/3"): {"id": 3, "tags": []}})
+        assert client.get_spool(3) == {"id": 3, "tags": []}
+        assert client.native_tags is True
         assert moonraker.logger.messages == []
 
     def test_a_non_dict_answer_is_no_spool(self):
         client, moonraker = rfid_spoolman_client({("GET", "/v1/spool/3"): "not a spool"})
         assert client.get_spool(3) is None
+        assert client.native_tags is None
         assert moonraker.logger.messages == []
 
 
@@ -933,6 +1195,29 @@ class TestSpoolUids:
     def test_blank_parts_skipped(self):
         spool = {"extra": {"card_uids": '"aa:bb,,  ,CCDD"'}}
         assert _spool_uids(spool) == {"AABB", "CCDD"}
+
+    def test_native_tags_and_card_uids_both_count(self):
+        spool = {"extra": {"card_uids": '"AABB"'}, "tags": [{"uid": "cc:dd"}]}
+        assert _spool_uids(spool) == {"AABB", "CCDD"}
+
+
+class TestCardUids:
+    def test_reads_card_uids_only(self):
+        spool = {"extra": {"card_uids": '"aa:bb,,CCDD"'}, "tags": [{"uid": "EEFF"}]}
+        assert _card_uids(spool) == {"AABB", "CCDD"}
+
+    def test_no_card_uids_empty(self):
+        assert _card_uids({"extra": None}) == set()
+
+
+class TestSpoolTagUids:
+    def test_normalizes_and_skips_junk(self):
+        record = {"tags": [{"uid": "cc:dd"}, "junk", {"uid": ""}, {}]}
+        assert _spool_tag_uids(record) == {"CCDD"}
+
+    def test_no_tags_empty(self):
+        assert _spool_tag_uids({"id": 1}) == set()
+        assert _spool_tag_uids({"tags": None}) == set()
 
 
 class TestNormTrayUid:
@@ -1052,6 +1337,56 @@ class TestMatchSpoolForTag:
         client, moonraker = self._client(RuntimeError("spoolman unreachable"))
         assert match_spool_for_tag(client, "AABBCCDD", "cf34cf1d") == (None, False, None)
         assert moonraker.logger.messages == []
+
+    def test_native_lookup_answers_without_the_listing(self):
+        spool = {"id": 7, "extra": {}, "tags": [{"uid": "AABBCCDD"}]}
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=AABBCCDD"): [spool], ("GET", "/v1/spool"): [spool]})
+        client.native_tags = True
+        assert match_spool_for_tag(client, "aa:bb:cc:dd", "") == (spool, False, None)
+        assert moonraker.calls == [("GET", "/v1/spool?tag=AABBCCDD", None, False)]
+        assert moonraker.logger.messages == []
+
+    def test_native_miss_falls_back_to_card_uids(self):
+        roll = self._roll(7, ["AABBCCDD"])
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=AABBCCDD"): [], ("GET", "/v1/spool"): [roll]})
+        client.native_tags = True
+        assert match_spool_for_tag(client, "AABBCCDD", "") == (roll, False, None)
+        assert moonraker.calls == [("GET", "/v1/spool?tag=AABBCCDD", None, False),
+                                   ("GET", "/v1/spool", None, False)]
+        assert moonraker.logger.messages == []
+
+    def test_native_lookup_error_falls_back_to_card_uids(self):
+        roll = self._roll(7, ["AABBCCDD"])
+        client, moonraker = rfid_spoolman_client(
+            {("GET", "/v1/spool?tag=AABBCCDD"): RuntimeError("down"),
+             ("GET", "/v1/spool"): [roll]})
+        client.native_tags = True
+        assert match_spool_for_tag(client, "AABBCCDD", "") == (roll, False, None)
+        assert moonraker.calls == [("GET", "/v1/spool?tag=AABBCCDD", None, False),
+                                   ("GET", "/v1/spool", None, False)]
+        assert moonraker.logger.messages == []
+
+    def test_a_roll_id_skips_the_native_lookup(self):
+        roll = self._roll(7, ["AABBCCDD"], "cf34cf1d")
+        client, moonraker = self._client([roll])
+        client.native_tags = True
+        assert match_spool_for_tag(client, "AABBCCDD", "cf34cf1d") == (roll, True, None)
+        assert moonraker.calls == [("GET", "/v1/spool", None, False)]
+
+    def test_no_chip_uid_skips_the_native_lookup(self):
+        client, moonraker = self._client([self._roll(7, ["AABBCCDD"])])
+        client.native_tags = True
+        assert match_spool_for_tag(client, "", "") == (None, False, None)
+        assert moonraker.calls == [("GET", "/v1/spool", None, False)]
+
+    def test_an_older_server_skips_the_native_lookup(self):
+        roll = self._roll(7, ["AABBCCDD"])
+        client, moonraker = self._client([roll])
+        client.native_tags = False
+        assert match_spool_for_tag(client, "AABBCCDD", "") == (roll, False, None)
+        assert moonraker.calls == [("GET", "/v1/spool", None, False)]
 
 
 class TestCachedSpoolmanClient:
@@ -2159,6 +2494,33 @@ class TestSyncRfidToSpoolman:
         assert lane.sends == 1
         # One client for AFC's moonraker, shared.
         assert _cached_spoolman_client(afc)._mr is afc.moonraker
+        assert logger.messages == [
+            ("info", "TEST: matched spool #300 by tag UID AABBCCDD"),
+            ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 800g left) assigned to lane1")]
+
+    def test_a_native_server_links_the_tag_with_its_format(self):
+        matched = {**self._matched(300, "AABBCCDD", 800, self._FULL_FILAMENT), "tags": []}
+        slot = {**self._FULL_TAG, "uid": "AABBCCDD", "tag_type": "MifareUltralight"}
+        afc, lane, logger = self._run(slot, self._routes(
+            [matched], **{"POST /v1/spool/300/tag": {"uid": "AABBCCDD"},
+                          "GET /v1/spool?tag=AABBCCDD": [],
+                          "GET /v1/filament?tag=AABBCCDD": []}))
+        assert afc.moonraker.sent("POST", "/v1/spool/300/tag") == [
+            {"uid": "AABBCCDD", "format": "ntag"}]
+        assert lane.spool_id == 300
+        assert logger.messages == [
+            ("info", "TEST: matched spool #300 by tag UID AABBCCDD"),
+            ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 800g left) assigned to lane1")]
+
+    def test_an_unknown_chip_family_links_without_a_format(self):
+        matched = {**self._matched(300, "AABBCCDD", 800, self._FULL_FILAMENT), "tags": []}
+        slot = {**self._FULL_TAG, "uid": "AABBCCDD"}
+        afc, lane, logger = self._run(slot, self._routes(
+            [matched], **{"POST /v1/spool/300/tag": {"uid": "AABBCCDD"},
+                          "GET /v1/spool?tag=AABBCCDD": [],
+                          "GET /v1/filament?tag=AABBCCDD": []}))
+        assert afc.moonraker.sent("POST", "/v1/spool/300/tag") == [{"uid": "AABBCCDD"}]
+        assert lane.spool_id == 300
         assert logger.messages == [
             ("info", "TEST: matched spool #300 by tag UID AABBCCDD"),
             ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 800g left) assigned to lane1")]
