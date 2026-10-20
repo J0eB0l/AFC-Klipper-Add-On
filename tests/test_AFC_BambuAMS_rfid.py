@@ -151,6 +151,15 @@ class TestQuietInfoInfo:
         _QuietInfo(inner).info("spool #124 assigned to lane12")
         assert inner.tried == ["spool #124 assigned to lane12"]
 
+    def test_the_binders_console_only_keyword_does_not_drop_the_line(self):
+        # The binder's deferred lines replay with console_only, which AFC's
+        # debug() does not take.
+        inner = BambuLogger()
+        _QuietInfo(inner).info("Bambu RFID: incomplete tag decode",
+                               console_only=False)
+        assert inner.messages == [("debug",
+                                   "Bambu RFID: incomplete tag decode")]
+
 
 class TestBambuSpoolmanClient:
     """The delegate builds its client from AFC's shared per-afc cache."""
@@ -1330,6 +1339,20 @@ class TestBambuSpoolmanSpoolmanSync:
         assert sp._spoolman_no_match == {"ecb61cd0"}
         assert sp._bind_owed == {}
         assert unit.logger.messages == []
+
+    def test_a_black_tag_reaches_the_binder_as_black(self, monkeypatch):
+        # A black tag's record has no colour, only color_black; without one
+        # the binder refuses to create the spool.
+        calls: List[Tuple[tuple, dict]] = []
+        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman",
+                            lambda *a, **k: calls.append((a, k)))
+        record = slot_info(0, material="PLA Matte", color="000000FF",
+                           uid="da11e5ac", weight=1000)
+        unit = self._sync_unit(monkeypatch, record)
+        unit.auto_spoolman_create = True
+        self._sync(unit, record)
+        assert len(calls) == 1
+        assert calls[0][0][2]["color_hex"] == "000000"
 
     def test_a_restored_lane_is_only_ever_matched(self, monkeypatch):
         # A lookup for a lane AFC restored never creates, whatever

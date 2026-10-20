@@ -120,6 +120,9 @@ class _QuietInfo:
         :param a: the log call's positional arguments
         :param k: the log call's keyword arguments
         """
+        # AFC's debug() has no console_only, and the TypeError would drop the
+        # line.
+        k.pop("console_only", None)
         try:
             self._inner.debug(*a, **k)
         except Exception:
@@ -224,7 +227,10 @@ class BambuSpoolman:
         :return dict: Spoolman-shaped slot_info
         """
         material, sub_type = _split_bambu_material(info.get("material") or "")
-        color = info.get("color")
+        # A black tag's record has no "color" (bridge_color_to_rgb), only
+        # "color_black". Spoolman needs the colour to create the spool.
+        color = info.get("color") or ("000000" if info.get("color_black")
+                                      else None)
         color_hex = ((color if color.startswith("#") else "#" + color)
                      if color else None)
         try:
