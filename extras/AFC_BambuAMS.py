@@ -1458,6 +1458,9 @@ class afcBambuAMS(afcUnit):
         # again. RESUME reloads only while it is set, so an ordinary pause
         # resumes unchanged.
         self._resume_needs_reload = False
+        # The lane whose load last failed outside a print, cleared by the next
+        # load that arrives. AFC_BAMBU_FAULT_RELOAD retries it while idle.
+        self._failed_load_lane = None
         # Set by any status frame carrying byte[19] == 0x07, cleared when a
         # fault is armed. A latch because the signal is intermittent (see
         # _on_status).
@@ -1838,7 +1841,8 @@ class afcBambuAMS(afcUnit):
             self.gcode.register_command(
                 "AFC_BAMBU_FAULT_RELOAD", self.cmd_AFC_BAMBU_FAULT_RELOAD,
                 desc="Reload whichever lane a Bambu AMS fault emptied, on any "
-                     "unit -- it finds the one holding the fault. Safe to call "
+                     "unit -- it finds the one holding the fault. Outside a "
+                     "print it retries the last failed load. Safe to call "
                      "when nothing is wrong: it returns silently. "
                      "AFC_BAMBU_FAULT_RELOAD")
         except Exception:
@@ -2555,6 +2559,9 @@ class afcBambuAMS(afcUnit):
         """
         The reload-after-fault recovery, callable by name.
 
+        Outside a print it is the printer's Retry: it loads again the lane
+        whose load last failed (_retry_failed_load).
+
         Silent and harmless when there is nothing to recover: not paused, no
         Bambu fault pending, or the lane already loaded all return without
         output, so running it when nothing is wrong costs nothing.
@@ -2584,6 +2591,8 @@ class afcBambuAMS(afcUnit):
         ```
         """
         try:
+            if self._retry_failed_load(gcmd):
+                return
             self._reload_before_resume(gcmd)
         except self.printer.command_error:
             raise                   # refused on purpose; the message says why
@@ -2592,6 +2601,36 @@ class afcBambuAMS(afcUnit):
                 f"AFC bambu {self.name}: reload-after-fault check failed "
                 f"({e}); resuming anyway. If the toolhead is empty, pause and "
                 f"load the lane by hand.")
+
+    def _retry_failed_load(self, gcmd: Any) -> bool:
+        """
+        Load again the lane whose load last failed outside a print.
+
+        The failed load reeled a declared fault's filament back into the bay,
+        so this is a fresh load of the same lane, on whichever Bambu unit
+        holds it. Never during a print: a paused print reloads through
+        _reload_before_resume, which also resumes.
+
+        :param gcmd: The Klipper GCodeCommand (for operator-facing output)
+        :return bool: True if there was a failed load to retry
+        """
+        try:
+            if self.afc.function.in_print():
+                return False
+        except Exception:
+            return False
+        for unit in self._bambu_units():
+            lane = getattr(unit, "_failed_load_lane", None)
+            if lane is None:
+                continue
+            unit._failed_load_lane = None        # a new failure sets it again
+            if getattr(lane, "tool_loaded", False):
+                return True                      # loaded since; nothing to do
+            gcmd.respond_info(
+                f"{unit.name}: retrying the load of {lane.name}...")
+            self.gcode.run_script_from_command(f"CHANGE_TOOL LANE={lane.name}")
+            return True
+        return False
 
     def _reload_before_resume(self, gcmd: Any) -> None:
         """
@@ -12393,11 +12432,28 @@ class afcBambuAMS(afcUnit):
             self.feed(cur_lane, feed_dist)       # re-attempt the load
             loaded = self._feed_until_sensor(cur_lane, timeout)
         if not loaded:
+            # Read before any reel back, which moves the odometer too.
+            try:
+                span = self._load_odom_span_mm()
+            except Exception:
+                span = None
             # The AMS retries loads on its own, so by default the filament is
             # not reeled back on a miss (that would fight the AMS's attempts).
             # It is left staged; unwind only when reel_back_on_load_fail is set.
+            # A unit that declared a fault is past its retries, so its
+            # filament is reeled into the bay, which also clears the hub for
+            # a retry.
             reeled = False
-            if self.reel_back_on_load_fail:
+            if self._declared_fault_text:
+                try:
+                    reeled = self.eject_lane(cur_lane)
+                except Exception as e:
+                    self.logger.warning(
+                        f"AFC bambu {self.name}: reel-back after failed load "
+                        f"of {cur_lane.name} did not complete: {e}")
+                tail = ("reeled it back to the bay" if reeled
+                        else "could not reel it back -- clear the path manually")
+            elif self.reel_back_on_load_fail:
                 self.stop()      # stop before reversing the direction
                 try:
                     self.retract(cur_lane, feed_dist)
@@ -12435,7 +12491,7 @@ class afcBambuAMS(afcUnit):
             # AMS from one downstream. The raw span is quoted to compare with
             # the tube length.
             try:
-                where = self._jam_location(self._load_odom_span_mm())
+                where = self._jam_location(span)
             except Exception:
                 where = ""
             if where:
@@ -12446,6 +12502,8 @@ class afcBambuAMS(afcUnit):
             if afc.function.in_print():
                 self._fault_lane = cur_lane
                 self._resume_needs_reload = True
+            else:
+                self._failed_load_lane = cur_lane
             afc.error.handle_lane_failure(
                 cur_lane, cause, pause=afc.function.in_print())
             return False
@@ -12491,11 +12549,14 @@ class afcBambuAMS(afcUnit):
             if afc.function.in_print():
                 self._fault_lane = cur_lane
                 self._resume_needs_reload = True
+            else:
+                self._failed_load_lane = cur_lane
             afc.error.handle_lane_failure(
                 cur_lane, cause, pause=afc.function.in_print())
             return False
         cur_lane.loaded_to_hub = True
         cur_lane.status = AFCLaneState.TOOL_LOADED
+        self._failed_load_lane = None
         # Acknowledge anything the AMS complained about during this load, so
         # the follower's first tick does not report its own retries as a
         # fault. Reaching the toolhead sensor settles those stalls.
@@ -13601,23 +13662,25 @@ class afcBambuAMS(afcUnit):
             return configured
         return max(configured, measured + self.eject_buffer)
 
-    def eject_lane(self, lane: Any) -> None:
+    def eject_lane(self, lane: Any) -> bool:
         """
         Reel a lane's filament fully back into the AMS bay via the bridge.
 
         This is the shared reel-back core used by the AFC eject flow
-        (LANE_UNLOAD), AFC_BAMBU_RECOVER, and AFC_RESET (via
-        get_lane_reset_command).
+        (LANE_UNLOAD), AFC_BAMBU_RECOVER, AFC_RESET (via
+        get_lane_reset_command) and a load the AMS gave up on.
 
         :param lane: The lane to eject
+        :return bool: True if the AMS reported the reel-back complete
         """
         if self._bridge is None:
             self.logger.warning(
                 f"AFC bambu {self.name}: bridge not connected, cannot eject "
                 f"{lane.name}")
-            return
+            return False
         # Halt a unit still mid feed/retry, then select and reel back. Works
         # whatever the lane's error state, so a stuck load can be recovered.
+        done = False
         self._unload_in_progress = True
         # The stop() below halts AMS motion and is the follower stand-down for
         # the eject.
@@ -13649,11 +13712,14 @@ class afcBambuAMS(afcUnit):
                     f"timeout, not on the AMS's own completion report -- the "
                     f"filament may not be fully back in the bay. Check the "
                     f"bay before loading it again.")
+            else:
+                done = True
         finally:
             self._unload_in_progress = False
         lane.loaded_to_hub = False
         if self._is_virtual_hub(lane):
             lane._load_state = False
+        return done
 
 
 def load_config_prefix(config: Any) -> afcBambuAMS:

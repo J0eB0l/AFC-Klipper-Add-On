@@ -2590,6 +2590,97 @@ class TestAfcBambuAMSCmdAFCBambuFaultReload:
         assert unit._resume_needs_reload is True
 
 
+    def test_an_idle_printer_retries_the_failed_load(self):
+        unit, lane, scripts = TestAfcBambuAMSRetryFailedLoad._unit()
+        gcmd = unit.gcode.run("AFC_BAMBU_FAULT_RELOAD")
+        assert scripts == ["CHANGE_TOOL LANE=lane13"]
+        assert gcmd.messages == [TestAfcBambuAMSRetryFailedLoad.RETRYING]
+        assert unit._failed_load_lane is None
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSRetryFailedLoad:
+    RETRYING = ("respond_info",
+                "Bambu_AMS_1: retrying the load of lane13...")
+
+    @staticmethod
+    def _unit(print_state: Optional[str] = None
+              ) -> Tuple[afcBambuAMS, Any, List[str]]:
+        """
+        A unit whose load of lane13 failed outside a print.
+
+        :param print_state: print_stats state (standby when None)
+        :return tuple: (unit, lane13, scripts the unit ran)
+        """
+        printer = make_printer(print_state=print_state)
+        unit = make_bambu_unit(printer=printer, lanes=["lane12", "lane13"])
+        lane = unit.lanes["lane13"]
+        unit._failed_load_lane = lane
+        scripts: List[str] = []
+        unit.gcode.run_script_from_command = scripts.append
+        return unit, lane, scripts
+
+    def test_the_failed_lane_is_loaded_again(self):
+        unit, _lane, scripts = self._unit()
+        gcmd = FakeGcmd()
+        assert unit._retry_failed_load(gcmd) is True
+        assert scripts == ["CHANGE_TOOL LANE=lane13"]
+        assert gcmd.messages == [self.RETRYING]
+        # Cleared: a load that fails again sets it again.
+        assert unit._failed_load_lane is None
+        assert unit.logger.messages == []
+
+    def test_nothing_failed_is_left_to_the_resume_reload(self):
+        unit, _lane, scripts = self._unit()
+        unit._failed_load_lane = None
+        gcmd = FakeGcmd()
+        assert unit._retry_failed_load(gcmd) is False
+        assert (scripts, gcmd.messages) == ([], [])
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("state", ["printing", "paused"])
+    def test_a_print_is_left_to_the_resume_reload(self, state):
+        unit, lane, scripts = self._unit(print_state=state)
+        gcmd = FakeGcmd()
+        assert unit._retry_failed_load(gcmd) is False
+        assert (scripts, gcmd.messages) == ([], [])
+        assert unit._failed_load_lane is lane
+        assert unit.logger.messages == []
+
+    def test_a_lane_loaded_since_is_not_loaded_again(self):
+        unit, lane, scripts = self._unit()
+        lane.tool_loaded = True
+        gcmd = FakeGcmd()
+        assert unit._retry_failed_load(gcmd) is True
+        assert (scripts, gcmd.messages) == ([], [])
+        assert unit._failed_load_lane is None
+        assert unit.logger.messages == []
+
+    def test_another_units_failed_load_is_found(self):
+        unit, _lane, scripts = self._unit()
+        unit._failed_load_lane = None
+        other = make_bambu_unit("Bambu_AMS_HT_1", printer=unit.printer,
+                                model="ht", ams_index=4, lanes=["lane28"])
+        other._failed_load_lane = other.lanes["lane28"]
+        gcmd = FakeGcmd()
+        assert unit._retry_failed_load(gcmd) is True
+        assert scripts == ["CHANGE_TOOL LANE=lane28"]
+        assert gcmd.messages == [
+            ("respond_info",
+             "Bambu_AMS_HT_1: retrying the load of lane28...")]
+        assert other._failed_load_lane is None
+        assert unit.logger.messages == other.logger.messages == []
+
+    def test_a_print_state_read_that_raises_retries_nothing(self):
+        unit, lane, scripts = self._unit()
+        unit.afc.function.in_print = Recorder(raises=RuntimeError("torn"))
+        gcmd = FakeGcmd()
+        assert unit._retry_failed_load(gcmd) is False
+        assert (scripts, gcmd.messages) == ([], [])
+        assert unit._failed_load_lane is lane
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSReloadBeforeResume:
     RELOADING = ("respond_info",
                  "Bambu_AMS_1: reloading lane15 before resuming (a Bambu "
@@ -23928,8 +24019,17 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
     GAVE_UP = ("warning", f"AFC bambu Bambu_AMS_1: lane1 -- the AMS says it "
                           f"has STOPPED retrying, so this load stops asking. "
                           f"Clear the path at the unit. {_P6_RETRY}.")
-    #: What a load whose unit declares a fault logs: no re-home retry.
-    DECLARED_LOGS = [KICKED, FAULT_SAID, NO_RETRY]
+    #: The reel back into the bay after a declared fault: the 100mm unload
+    #: bowden plus the 250mm hub and the 200mm eject buffer.
+    EJECT = [STOP, SELECT,
+             {"cmd": "retract", "unit": 0, "slot": 0, "mm": 550.0,
+              "mmps": 20.0},
+             STOP]
+    REELED = ("debug", "AFC bambu Bambu_AMS_1: move ended on NARRATION after "
+                       "0.1s (ok=True): [AMS_SWITCH]feed finish 0")
+    #: What a load whose unit declares a fault logs: no re-home retry, and the
+    #: filament reeled into the bay.
+    DECLARED_LOGS = [KICKED, FAULT_SAID, NO_RETRY, REELED]
     STAGED = ("left it staged -- the AMS keeps retrying; clear the path "
               "manually if it can't finish")
     TIMEOUT_SAID = "[AMS_LED]TIMEOUT error 0"
@@ -23975,6 +24075,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
     def _rig(self, monkeypatch: pytest.MonkeyPatch, *,
              sensor: Sequence[bool] = (False,), fault: Optional[str] = None,
              odom: Sequence[float] = (), values: Optional[Dict[str, Any]] = None,
+             reels: bool = False,
              **kwargs: Any) -> Tuple[afcBambuAMS, Any]:
         """
         A unit on a 100mm bowden whose feed loop kicks once per 6.83s window
@@ -23986,6 +24087,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         :param fault: what the unit says when the bulk feed goes out
         :param odom: odometer readings the unit reports at the bulk feed
         :param values: config options over the rig's
+        :param reels: the unit narrates a retract's finish 0.05s in
         :param kwargs: further _p6_unit arguments
         :return tuple: (the unit, its lane1)
         """
@@ -23996,6 +24098,9 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         readings = list(odom)
 
         def on_send(bridge: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "retract" and reels:
+                _p6_at(unit, unit.reactor.now + 0.05, lambda: setattr(
+                    bridge, "finish", (1, True, "[AMS_SWITCH]feed finish 0")))
             if frame["cmd"] != "feed":
                 return
             if fault is not None and bridge.fault[0] == 0:
@@ -24045,13 +24150,15 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
                 f"AMS meters this feed itself, so the distance is not a "
                 f"setting to tune.\n{_P6_RETRY}.")
 
-    def _declared(self, said: str) -> str:
+    @staticmethod
+    def _declared(said: str, tail: str = "reeled it back to the bay") -> str:
         """
         :param said: the unit's words, filtered
+        :param tail: what became of the filament
         :return str: the failure for a load the unit gave up on
         """
         return (f"The AMS declared a fault during the load and stopped "
-                f"trying; {self.STAGED}.\nAMS said: {said}\nClear the path at "
+                f"trying; {tail}.\nAMS said: {said}\nClear the path at "
                 f"the unit. {_P6_RETRY}.")
 
     @staticmethod
@@ -24266,18 +24373,75 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
 
     def test_a_declared_fault_gets_no_rehome(self, monkeypatch):
         # The unit ran its own retries before it declared the fault.
-        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID)
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
+                               reels=True)
         assert unit._unit_load_lane(lane) is False
-        assert unit._bridge.sent == [self.SELECT, self.PRIME] + self.WINDOW
+        assert unit._bridge.sent == (
+            [self.SELECT, self.PRIME] + self.WINDOW + self.EJECT)
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == self.DECLARED_LOGS
+
+    def test_a_declared_fault_reels_the_filament_into_the_bay(
+            self, monkeypatch):
+        # Out of the hub, so a retry is not refused with "Hub not clear".
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
+                               reels=True)
+        lane.loaded_to_hub = True
+        lane._load_state = True
+        assert unit._unit_load_lane(lane) is False
+        assert unit._bridge.sent[-4:] == self.EJECT
+        assert (lane.loaded_to_hub, lane._load_state) == (False, False)
+        assert unit.afc.error.messages == [
+            ("handle_lane_failure", self._declared(self.TIMEOUT_SAID))]
+        assert unit.afc.afcDeltaTime.messages == []
+        assert unit.logger.messages == self.DECLARED_LOGS
+
+    def test_a_reel_back_the_unit_never_finishes_is_said(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID)
+        assert unit._unit_load_lane(lane) is False
+        assert unit.afc.error.messages == [
+            ("handle_lane_failure", self._declared(
+                self.TIMEOUT_SAID,
+                tail="could not reel it back -- clear the path manually"))]
+        assert unit.afc.afcDeltaTime.messages == []
+        assert unit.logger.messages == [
+            self.KICKED, self.FAULT_SAID, self.NO_RETRY,
+            ("debug", "AFC bambu Bambu_AMS_1: move ended on the DEADLINE "
+                      "(23s) -- no signal arrived"),
+            ("warning", "AFC bambu Bambu_AMS_1: lane1 eject stopped on a "
+                        "timeout, not on the AMS's own completion report -- "
+                        "the filament may not be fully back in the bay. Check "
+                        "the bay before loading it again.")]
+
+    def test_a_reel_back_that_raises_still_reports_the_failure(
+            self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID)
+        feeding = unit._bridge.on_send
+
+        def on_send(br: FakeBridge, frame: dict) -> None:
+            feeding(br, frame)
+            if frame["cmd"] == "retract":
+                raise RuntimeError("write failed")
+        unit._bridge.on_send = on_send
+        assert unit._unit_load_lane(lane) is False
+        assert unit.afc.error.messages == [
+            ("handle_lane_failure", self._declared(
+                self.TIMEOUT_SAID,
+                tail="could not reel it back -- clear the path manually"))]
+        assert unit.afc.afcDeltaTime.messages == []
+        assert unit.logger.messages == [
+            self.KICKED, self.FAULT_SAID, self.NO_RETRY,
+            ("warning", "AFC bambu Bambu_AMS_1: reel-back after failed load "
+                        "of lane1 did not complete: write failed")]
 
     def test_a_declared_fault_with_one_retry_configured_gets_none_either(
             self, monkeypatch):
         unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
-                               values={"load_recover_attempts": 1})
+                               values={"load_recover_attempts": 1},
+                               reels=True)
         assert unit._unit_load_lane(lane) is False
-        assert unit._bridge.sent == [self.SELECT, self.PRIME] + self.WINDOW
+        assert unit._bridge.sent == (
+            [self.SELECT, self.PRIME] + self.WINDOW + self.EJECT)
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == self.DECLARED_LOGS
         assert unit.afc.error.messages == [
@@ -24287,11 +24451,14 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
             self, monkeypatch):
         # Nothing to cut, and nothing said about it.
         unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
-                               values={"load_recover_attempts": 0})
+                               values={"load_recover_attempts": 0},
+                               reels=True)
         assert unit._unit_load_lane(lane) is False
-        assert unit._bridge.sent == [self.SELECT, self.PRIME] + self.WINDOW
+        assert unit._bridge.sent == (
+            [self.SELECT, self.PRIME] + self.WINDOW + self.EJECT)
         assert unit.afc.afcDeltaTime.messages == []
-        assert unit.logger.messages == [self.KICKED, self.FAULT_SAID]
+        assert unit.logger.messages == [self.KICKED, self.FAULT_SAID,
+                                        self.REELED]
         assert unit.afc.error.messages == [
             ("handle_lane_failure", self._declared(self.TIMEOUT_SAID))]
 
@@ -24307,7 +24474,8 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
                                         self.ARRIVED]
 
     def test_a_declared_fault_names_the_retry_command(self, monkeypatch):
-        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID)
+        unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
+                               reels=True)
         unit._unit_load_lane(lane)
         assert unit.afc.error.messages == [
             ("handle_lane_failure", self._declared(self.TIMEOUT_SAID))]
@@ -24353,7 +24521,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         unit, lane = self._rig(
             monkeypatch,
             fault="[AMS_COMMON]en:1,mode:3,idx:0,ref:0 [AMS_COMMON]state:7,"
-                  "tray_now:0 [AMS_LED]TIMEOUT error 0")
+                  "tray_now:0 [AMS_LED]TIMEOUT error 0", reels=True)
         unit._unit_load_lane(lane)
         assert unit.afc.error.messages == [
             ("handle_lane_failure", self._declared(
@@ -24408,7 +24576,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
     def test_the_location_rides_along_with_a_declared_fault_too(
             self, monkeypatch):
         unit, lane = self._rig(monkeypatch, fault=self.TIMEOUT_SAID,
-                               odom=(0.0, 5004.0))
+                               odom=(0.0, 5004.0), reels=True)
         unit._unit_load_lane(lane)
         assert unit.afc.error.messages == [
             ("handle_lane_failure",
@@ -24460,6 +24628,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit._unit_load_lane(lane) is False
         assert unit._fault_lane is lane
         assert unit._resume_needs_reload is True
+        assert unit._failed_load_lane is None
         assert unit.afc.error.calls == self._failed(
             lane, self._timed_out(), pause=True)
         assert unit.afc.afcDeltaTime.messages == []
@@ -24488,6 +24657,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit._unit_load_lane(lane) is False
         assert unit._fault_lane is None
         assert unit._resume_needs_reload is False
+        assert unit._failed_load_lane is lane     # retried by hand instead
         assert unit.afc.error.calls == self._failed(lane,
                                                     self._timed_out())
         assert unit.afc.afcDeltaTime.messages == []
@@ -24521,6 +24691,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit._bridge.sent == ([self.SELECT, self.PRIME, self.BULK]
                                      + self.ARRIVAL + [self.STOP])
         assert unit.afc.save_vars.call_count == 0
+        assert unit._failed_load_lane is lane
         assert unit.afc.error.calls == self._failed(
             lane, self.LOST.format(dropped=""))
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
@@ -24528,7 +24699,9 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
 
     def test_a_held_sensor_still_completes_the_load(self, monkeypatch):
         unit, lane = self._rig(monkeypatch, sensor=[False, False, True])
+        unit._failed_load_lane = lane              # an earlier try's
         assert unit._unit_load_lane(lane) is True
+        assert unit._failed_load_lane is None
         assert lane.status == AFCLaneState.TOOL_LOADED
         assert lane.loaded_to_hub is True
         assert unit._bridge.sent == ([self.SELECT, self.PRIME, self.BULK]
@@ -26643,7 +26816,7 @@ class TestAfcBambuAMSEjectLane:
 
     def test_stops_first_then_full_rewind(self, monkeypatch):
         unit, lane, muted = self._rig(monkeypatch)
-        unit.eject_lane(lane)
+        assert unit.eject_lane(lane) is True
         assert unit._bridge.sent == [self.STOP, self.SELECT, self.RETRACT,
                                      self.STOP]
         assert muted == [True] * 4               # the fault checks are muted
@@ -26667,7 +26840,7 @@ class TestAfcBambuAMSEjectLane:
 
     def test_no_bridge_is_a_safe_noop(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch, offline=True)
-        unit.eject_lane(lane)
+        assert unit.eject_lane(lane) is False
         assert lane.loaded_to_hub is True
         assert lane._load_state is True
         assert unit._unload_in_progress is False
@@ -26677,7 +26850,7 @@ class TestAfcBambuAMSEjectLane:
 
     def test_a_latch_is_said_in_the_units_own_words(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch, fault=self.LATCH)
-        unit.eject_lane(lane)
+        assert unit.eject_lane(lane) is False
         assert unit._fault_seen == 7             # consumed here, said once
         assert lane.loaded_to_hub is False
         assert unit.logger.messages == [
@@ -26713,7 +26886,7 @@ class TestAfcBambuAMSEjectLane:
 
     def test_an_eject_that_times_out_says_it_may_be_short(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch, answers=False)
-        unit.eject_lane(lane)
+        assert unit.eject_lane(lane) is False
         assert 135.0 <= unit.reactor.now < 135.2     # the 35s deadline
         assert lane.loaded_to_hub is False
         assert unit.logger.messages == [
