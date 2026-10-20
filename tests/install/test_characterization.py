@@ -236,6 +236,51 @@ try:
         assert lines[:2] == [f"bridgebox_pool_ams={ams}", f"bridgebox_pool_ht={ht}"]
         assert message in lines[2]
 
+    @pytest.mark.parametrize("answers,connection,address,message", [
+        ("1\\n", "usb", "", "Connection: USB"),
+        ("2\\n", "usb_wifi", "", "Connection: USB, then WiFi"),
+        ("3\\n192.168.1.50\\n", "wifi", "192.168.1.50",
+         "Connection: WiFi at 192.168.1.50"),
+        ("3\\nbridge.lan:9000\\n", "wifi", "bridge.lan:9000",
+         "Connection: WiFi at bridge.lan:9000"),
+        ("\\n", "usb", "", "Connection: USB"),
+        ("3\\nhttp://192.168.1.50\\n", "usb", "",
+         "Enter the address the way the setup page shows it, like 192.168.1.50."),
+        ("3\\n\\n", "usb", "",
+         "Enter the address the way the setup page shows it, like 192.168.1.50."),
+        ("4\\n", "usb", "", "Enter 1, 2 or 3."),
+    ])
+    def test_bridgebox_ask_connection(answers, connection, address, message):
+        lines = run_case("bridgebox_ask_connection",
+                         {"answers": answers}).splitlines()
+        assert lines[:2] == [f"bridgebox_connection={connection}",
+                             f"bridgebox_address={address}"]
+        assert message in lines[2]
+
+    @pytest.mark.parametrize("mode", ["copy_unit_files", "install_additional_unit"])
+    @pytest.mark.parametrize("connection,address,serial,wifi", [
+        ("usb", "", "serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_"
+                    "serial_debug_unit_XXXXXXXXXXXX-if00", "#connection: wifi"),
+        ("usb_wifi", "", "serial_port: /dev/serial/by-id/usb-Espressif_USB_"
+                         "JTAG_serial_debug_unit_XXXXXXXXXXXX-if00",
+         "connection: wifi"),
+        ("wifi", "192.168.1.50", "serial_port: tcp://192.168.1.50:8888",
+         "#connection: wifi"),
+        ("wifi", "bridge.lan:9000", "serial_port: tcp://bridge.lan:9000",
+         "#connection: wifi"),
+    ])
+    def test_bridgebox_chain_gets_the_connection(mode, connection, address,
+                                                 serial, wifi):
+        actual = run_case(mode, {
+            "installation_type": "BridgeBox",
+            "boxturtle_name": "chain2",
+            "bridgebox_connection": connection,
+            "bridgebox_address": address,
+        }).splitlines()
+        assert [ln for ln in actual if ln.startswith("serial_port:")] == [serial]
+        assert [ln for ln in actual
+                if ln.lstrip("#").startswith("connection:")] == [wifi]
+
 except ImportError:
     pass
 

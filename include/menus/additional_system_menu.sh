@@ -120,6 +120,10 @@ additional_system_menu() {
         if [ "$installation_type" == "BridgeBox" ]; then
           bridgebox_ask_pool
         fi ;;
+      W)
+        if [ "$installation_type" == "BridgeBox" ]; then
+          bridgebox_ask_connection
+        fi ;;
       Q) exit_afc_install ;;
       M) main_menu ;;
       I)

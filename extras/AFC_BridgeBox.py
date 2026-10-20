@@ -34,6 +34,7 @@ import copy
 import json
 import math
 import os
+import secrets
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from extras.AFC_BambuAMS import (DRY_TEMP_HARD_MAX, _AMS_MODELS,
@@ -50,7 +51,8 @@ _MASTER_OPTIONS = frozenset({
     "ams_names", "ht_names", "auto_drop", "release_grace", "release_settle",
     "enroll_grace", "claim_grace", "flap_claim_grace", "flap_window",
     "afc_bowden_length", "td1_bowden_length", "dry_max_temp", "auto_vars_file",
-    "state_file", "roster", "hotplug_poll",
+    "state_file", "roster", "hotplug_poll", "connection", "wifi_ssid",
+    "wifi_password",
 })
 
 _STRUCTURAL_KEYS = frozenset(
@@ -626,6 +628,17 @@ class afcBridgeBox:
         self.state_file = (os.path.expanduser(sf) if sf
                            else (self._locate_own_file()
                                  or os.path.expanduser(self._DEFAULT_STATE)))
+        # usb, or wifi: a USB serial_port moves to WiFi once the board has
+        # joined a network (see _register_wifi).
+        self.connection = config.getchoice("connection",
+                                           {"usb": "usb", "wifi": "wifi"},
+                                           "usb")
+        # The network a board on USB is given when it lacks one, for anyone
+        # the setup hotspot does not work for.
+        self.wifi_ssid = self._wifi_text(config, "wifi_ssid", 1, 32)
+        self._wifi_password = (self._wifi_text(config, "wifi_password", 8, 63)
+                               or "")
+        self._register_wifi()
         # Prefix for fabricated unit names (see _resolve_unit_prefix).
         self.unit_prefix = self._resolve_unit_prefix(config)
         # The chain's buffer: name an existing [AFC_buffer], or leave unset and
@@ -2558,11 +2571,76 @@ class afcBridgeBox:
             "button for each occupied bay, and a Replace button for a unit "
             "waiting for a bay -- AFC_BRIDGEBOX_BAYS [CHAIN=<chain>]")
         self._register_mux(
+            "AFC_BRIDGEBOX_RESET_WIFI", self.cmd_AFC_BRIDGEBOX_RESET_WIFI,
+            "Wipe the BridgeBox's WiFi network and link key, for a move to "
+            "another printer or network; it restarts with its setup hotspot: "
+            "AFC_BRIDGEBOX_RESET_WIFI [CHAIN=<chain>]")
+        self._register_mux(
             "AFC_BRIDGEBOX_REPLACE", self.cmd_AFC_BRIDGEBOX_REPLACE,
             "Forget an offline unit and put a new unit on its bay, live: "
             "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> "
             "OLD=<old uid or bay name> [FORCE=1]. Without OLD, pops a picker "
             "of the bays held for offline units.")
+
+    def cmd_AFC_BRIDGEBOX_RESET_WIFI(self, gcmd: Any) -> None:
+        """
+        Wipe the BridgeBox's WiFi network and link key, and forget the address
+        and key this chain saved for it.
+
+        For a board moving to another printer or network: it restarts with its
+        setup hotspot, as new, and this chain makes a new key for its next
+        setup. Refused during a print, since the board restarts, and while the
+        bridge is not connected; then hold the board's BOOT button for 10
+        seconds instead.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_RESET_WIFI [CHAIN=<chain>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_RESET_WIFI CHAIN=chain1
+        ```
+        """
+        if self._is_printing():
+            error_str = (f"AFC_BRIDGEBOX_RESET_WIFI: not during a print, the "
+                         f"BridgeBox of {self.name} restarts")
+            raise gcmd.error(error_str)
+        bridge = self._chain_bridge()
+        if bridge is None or not bridge.is_connected():
+            error_str = (f"AFC_BRIDGEBOX_RESET_WIFI: no link to the BridgeBox "
+                         f"of {self.name}. Hold its BOOT button for 10 seconds "
+                         f"to reset it instead.")
+            raise gcmd.error(error_str)
+        bridge.send({"cmd": "wifi", "clear": 1})
+        bridge.send({"cmd": "reset"})
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        sec = f"{self._BASE_SECTION} {self.name}"
+        updates: Dict[str, Dict[str, str]] = {sec: {}}
+        if self._state_get(sec, "wifi_addr"):
+            updates[sec]["wifi_addr"] = ""
+        link = _bridge_mod._WIFI_LINKS.get(str(self.serial_port))
+        if link is not None:
+            # A new key for the next setup, saved before the board holds it.
+            key = self.tcp_key or secrets.token_hex(16)
+            if not self.tcp_key:
+                updates[sec]["wifi_key"] = key
+            link.forget(key)
+        if updates[sec]:
+            self._state_set(updates)
+        if link is not None and link.usb_path:
+            then = (" With its USB cable in, Klipper moves to its new address "
+                    "by itself.")
+        elif link is not None:
+            then = (" If the address its setup page shows has changed, put it "
+                    "in serial_port.")
+        else:
+            then = ""
+        gcmd.respond_info(
+            f"AFC_BridgeBox {self.name}: the BridgeBox's WiFi and link key "
+            f"are wiped and it is restarting with its bb-bridge setup "
+            f"hotspot. Set up its WiFi again from a phone." + then)
 
     def cmd_AFC_BRIDGEBOX_FORGET(self, gcmd: Any) -> None:
         """
@@ -4834,6 +4912,76 @@ class afcBridgeBox:
                 f"AFC_BridgeBox {self.name}: unit claims wait for PREP")
         return False
 
+    def _register_wifi(self) -> None:
+        """
+        Register this chain's WifiLink when its bridge keys itself.
+
+        A USB serial_port with connection: wifi moves to WiFi once the board
+        has joined a network; a tcp:// one with no tcp_key has its key stored
+        on the board at the first connect. A key made here is saved before any
+        board holds it, so a restart cannot lose it. A tcp_key, when set, is
+        the key instead.
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        _bridge_mod._WIFI_LINKS.pop(str(self.serial_port), None)
+        is_tcp = str(self.serial_port or "").strip().lower() \
+            .startswith("tcp://")
+        if is_tcp and self.tcp_key:
+            return                    # keyed by hand: the plain TCP link
+        if not is_tcp and self.connection != "wifi":
+            return
+        sec = f"{self._BASE_SECTION} {self.name}"
+        key = self.tcp_key or self._state_get(sec, "wifi_key")
+        if not key:
+            key = secrets.token_hex(16)
+            self._state_set({sec: {"wifi_key": key}})
+        addr = (self.serial_port if is_tcp
+                else (self._state_get(sec, "wifi_addr") or None))
+        _bridge_mod._WIFI_LINKS[str(self.serial_port)] = _bridge_mod.WifiLink(
+            key, self._save_wifi_addr, f"AFC_BridgeBox {self.name}",
+            usb_path=None if is_tcp else self.serial_port, addr=addr,
+            ssid=self.wifi_ssid, password=self._wifi_password)
+
+    def _wifi_text(self, config: Any, option: str, low: int,
+                   high: int) -> Optional[str]:
+        """
+        Read wifi_ssid or wifi_password, as the board's parser can take it.
+
+        The board reads a field up to the next double quote, with no escapes,
+        so a quote, a backslash or anything outside printable ASCII is refused.
+
+        :param config: the master's section
+        :param option: the option's name
+        :param low: the fewest characters allowed
+        :param high: the most characters allowed
+        :return Optional[str]: the value, or None when it is not set
+        """
+        value = config.get(option, None)
+        if value is None or value == "":
+            return None
+        bad = [c for c in value
+               if c in "\\\""
+               or not " " <= c <= "~"]
+        if bad:
+            error_str = (f"AFC_BridgeBox {self.name}: {option} can't hold "
+                         f"quotes, backslashes or non-ASCII characters; set "
+                         f"this network up from the bb-bridge hotspot")
+            raise config.error(error_str)
+        if not low <= len(value) <= high:
+            error_str = (f"AFC_BridgeBox {self.name}: {option} must be "
+                         f"{low} to {high} characters")
+            raise config.error(error_str)
+        return value
+
+    def _save_wifi_addr(self, addr: str) -> None:
+        """
+        Save the WiFi address the board reported, for the next start.
+
+        :param addr: the board's ``tcp://host:port``
+        """
+        self._state_set({f"{self._BASE_SECTION} {self.name}":
+                         {"wifi_addr": addr}})
+
     def _ensure_bridge(self) -> Any:
         """
         The bridge for our serial port, shared with any fabricated units
@@ -4867,6 +5015,7 @@ class afcBridgeBox:
                                  self.logger)
             if self._tcp_key_store:
                 bridge.store_key = self.tcp_key
+            _bridge_mod.attach_wifi(self.serial_port, bridge)
             _bridge_mod._BRIDGES[self.serial_port] = bridge
             # A network bridge that is not up yet keeps retrying rather than
             # failing the scout, as it does for the units.

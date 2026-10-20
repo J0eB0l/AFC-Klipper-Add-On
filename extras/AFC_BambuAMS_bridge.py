@@ -699,6 +699,10 @@ def split_tcp_key(raw: Optional[str]) -> Tuple[Optional[str], bool]:
     return (" ".join(parts) or None), store
 
 
+class LinkKeyError(OSError):
+    """The bridge refused the link: it holds a link key this host does not."""
+
+
 class TcpPort:
     """
     A pyserial-shaped TCP transport, for a bridge reached over the network.
@@ -850,7 +854,7 @@ class TcpPort:
                 error_str = (
                     f"{self.name}: the bridge asked for a link key and none is "
                     f"configured -- set tcp_key to match the board")
-                raise OSError(error_str)
+                raise LinkKeyError(error_str)
             self.challenged = True
             nonce = bytes.fromhex(json.loads(line)["nonce"])
             mac = hmac.new(key.encode(), nonce, hashlib.sha512).digest()[:32]
@@ -869,7 +873,7 @@ class TcpPort:
             rl = reply.split(b"\n", 1)[0].decode("utf-8", "replace")
             if '"ok":1' not in rl.replace(" ", ""):
                 error_str = f"{self.name}: the bridge rejected the link key"
-                raise OSError(error_str)
+                raise LinkKeyError(error_str)
         finally:
             self._sock.settimeout(self._timeout)
 
@@ -942,6 +946,313 @@ BB_RAW_WRITE_TIMEOUT = 5.0
 # is always seen.
 _BRIDGES: Dict[str, "BambuBridge"] = {}
 
+# The WifiLink of each chain whose bridge keys itself over WiFi, by serial
+# port. A chain master registers it at config time; whoever builds the bridge
+# hands it over (see attach_wifi).
+_WIFI_LINKS: Dict[str, "WifiLink"] = {}
+
+#: The firmware's WiFi link state for "joined, with an address" (cyw43's).
+_WIFI_LINK_UP = 3
+
+
+class WifiLink:
+    """
+    The port opener of a bridge that keys itself and is set up over WiFi.
+
+    Two ways in. A USB serial_port with ``connection: wifi`` starts on USB and,
+    once the board has joined a network (set up from its hotspot), stores the
+    link key on it, saves its address and moves to TCP. It falls back to USB
+    while the cable is in and WiFi cannot be reached. A ``tcp://`` serial_port
+    with no tcp_key stores the key on the board at the first connect, while
+    the board is still open (see on_connect). With a network in the config
+    (wifi_ssid), a board on USB that lacks it is sent it, once per start.
+    """
+
+    #: Seconds an address that failed waits before USB is left for it again.
+    RETRY_S = 60.0
+
+    def __init__(self, key: str, save: Callable[[str], None], label: str,
+                 usb_path: Optional[str] = None,
+                 addr: Optional[str] = None,
+                 ssid: Optional[str] = None,
+                 password: str = "") -> None:
+        """
+        Set up the link; attach() hands it its bridge.
+
+        :param key: the link key to use, and to store on an open board
+        :param save: called on the reactor with a newly learned address
+        :param label: names the chain in console messages
+        :param usb_path: the board's USB serial port, None for TCP only
+        :param addr: the board's ``tcp://host:port``, when known
+        :param ssid: the WiFi network to give a board on USB, if any
+        :param password: that network's password, empty for an open one
+        """
+        self.key = key
+        self._save = save
+        self.label = label
+        self.usb_path = usb_path
+        self.addr = addr
+        self.ssid = ssid
+        self._password = password
+        # Set once the network went to the board, so one it cannot join does
+        # not restart it again and again.
+        self._creds_sent = False
+        #: True while the open port is TCP.
+        self.on_wifi = False
+        self._bridge: Optional["BambuBridge"] = None
+        self._usb_open: Optional[Callable[[], Any]] = None
+        # The address whose connect failed, and when USB may leave for it.
+        self._failed_addr: Optional[str] = None
+        self._retry_at = 0.0
+        # What the linkkey write in flight is for: ("claim", addr) on an open
+        # TCP board, ("move", addr) before leaving USB for addr.
+        self._pending: Optional[Tuple[str, str]] = None
+        self._said: Optional[str] = None
+
+    def attach(self, bridge: "BambuBridge", usb_open: Callable[[], Any]) -> None:
+        """
+        Take over a bridge's port opening.
+
+        :param bridge: the bridge this link opens ports for
+        :param usb_open: the bridge's own opener, used for the USB port
+        """
+        self._bridge = bridge
+        self._usb_open = usb_open
+
+    def forget(self, key: str) -> None:
+        """
+        Start over after the board's WiFi and key were wiped.
+
+        :param key: the new link key
+        """
+        self.key = key
+        if self.usb_path:
+            self.addr = None
+        self._failed_addr = None
+        self._retry_at = 0.0
+        self._pending = None
+        self._said = None
+        self._creds_sent = False
+
+    def _say(self, state: str, message: str, warning: bool = False) -> None:
+        """
+        Tell the console about a link state, once each time it changes.
+
+        :param state: short name of the state the message describes
+        :param message: the line, after the chain's label
+        :param warning: log it as a warning
+        """
+        if state == self._said or self._bridge is None:
+            return
+        self._said = state
+        log = self._bridge.logger.warning if warning \
+            else self._bridge.logger.info
+        log(f"{self.label}: {message}")
+
+    def open(self) -> Any:
+        """
+        Open the link: TCP when the board's address is known, else USB.
+
+        A failed TCP connect falls back to USB while the cable is in, and that
+        address is tried again after RETRY_S, or at once when the cable is out.
+
+        :return Any: an open port, pyserial-shaped either way
+        """
+        usb_in = bool(self.usb_path) and os.path.exists(self.usb_path)
+        if self.addr and (not usb_in or time.monotonic() >= self._retry_at):
+            host, port = TcpPort.parse(self.addr)
+            try:
+                link = TcpPort(host, port, timeout=0.1, write_timeout=0.5,
+                               key=self.key)
+            except Exception as e:
+                self._tcp_failed(e, usb_in)
+                if not usb_in:
+                    raise
+            else:
+                self.on_wifi = True
+                self._failed_addr = None
+                self._say("wifi", f"BridgeBox connected over WiFi at "
+                                  f"{self.addr}")
+                return link
+        elif not self.addr and not usb_in:
+            self._say("no-addr", "connection: wifi needs the BridgeBox on "
+                                 "this printer's USB once, to learn its WiFi "
+                                 "address", warning=True)
+        self.on_wifi = False
+        return self._usb_open()
+
+    def _tcp_failed(self, error: Exception, usb_in: bool) -> None:
+        """
+        Note a failed TCP connect and say what to do about it.
+
+        :param error: what the connect raised
+        :param usb_in: whether the USB cable is there to fall back to
+        """
+        self._failed_addr = self.addr
+        self._retry_at = time.monotonic() + self.RETRY_S
+        if isinstance(error, LinkKeyError):
+            self._say("key", f"the BridgeBox at {self.addr} holds another "
+                             f"printer's link key. Hold its BOOT button for "
+                             f"10 seconds to reset it, then set up its WiFi "
+                             f"again.", warning=True)
+        elif usb_in:
+            self._say("usb", f"can't reach the BridgeBox on WiFi at "
+                             f"{self.addr} ({error}); staying on USB",
+                      warning=True)
+        else:
+            self._say("down", f"can't reach the BridgeBox at {self.addr} "
+                              f"({error}). If it is new, finish its WiFi "
+                              f"setup from its bb-bridge hotspot; Klipper "
+                              f"keeps trying.", warning=True)
+
+    def on_connect(self, port: Any) -> None:
+        """
+        Claim an open board: store the key on a TCP link it did not challenge.
+
+        Called on every new link, which also drops a key write the last link
+        never answered.
+
+        :param port: the port just opened
+        """
+        self._pending = None          # a new link: nothing is in flight
+        if (self.on_wifi
+                and self._bridge is not None
+                and not getattr(port, "challenged", False)):
+            self._pending = ("claim", str(self.addr))
+            self._bridge.send({"cmd": "linkkey", "key": self.key})
+
+    def on_frame(self, obj: dict) -> None:
+        """
+        Follow a USB board's WiFi state, and the replies to the key writes.
+
+        :param obj: an info, wifi or linkkey frame
+        """
+        if obj.get("evt") == "linkkey":
+            self._key_stored(obj)
+        elif not self.on_wifi and self.usb_path:
+            self._usb_wifi_state(obj)
+
+    def _usb_wifi_state(self, obj: dict) -> None:
+        """
+        Move to WiFi once the board on USB has joined a network.
+
+        A board lacking the config's network is sent it first (see
+        _send_creds). The key goes first; the move follows its reply (see
+        _key_stored). An
+        info frame naming an address that just failed waits out RETRY_S; a
+        wifi frame is a fresh join and does not.
+
+        :param obj: an info or wifi frame
+        """
+        is_info = obj.get("evt") == "info"
+        if is_info and obj.get("link") != "wifi":
+            self._say("no-radio", "this BridgeBox's firmware has no WiFi, so "
+                                  "it stays on USB", warning=True)
+            return
+        if not is_info and "saved" in obj:
+            saved = obj.get("saved")
+            if isinstance(saved, int) and saved < 0:
+                self._say("creds-failed", f"the BridgeBox did not store the "
+                                          f"WiFi network ({obj})",
+                          warning=True)
+            return
+        if is_info and self._send_creds(obj):
+            return
+        up = obj.get("wlink") if is_info else obj.get("link")
+        ip = str(obj.get("ip") or "0.0.0.0")
+        # With its hotspot up the board is still in setup, even once joined:
+        # it serves no link until the restart that ends the setup.
+        if (up != _WIFI_LINK_UP
+                or ip == "0.0.0.0"
+                or obj.get("portal")):
+            if self._creds_sent and obj.get("portal"):
+                self._say("join-failed", f"the BridgeBox could not join "
+                                         f"{self.ssid}. Check wifi_ssid and "
+                                         f"wifi_password, then "
+                                         f"FIRMWARE_RESTART, or set it up "
+                                         f"from its bb-bridge hotspot.",
+                          warning=True)
+            elif obj.get("portal") or (is_info and not obj.get("ssid")):
+                self._say("setup", "the BridgeBox isn't on your WiFi yet. "
+                                   "Join its bb-bridge hotspot from a phone "
+                                   "and choose your network; it moves to "
+                                   "WiFi by itself and stays on USB until "
+                                   "then.")
+            return
+        addr = f"tcp://{ip}:{TcpPort.DEFAULT_PORT}"
+        if (is_info
+                and addr == self._failed_addr
+                and time.monotonic() < self._retry_at):
+            return
+        if self._pending == ("move", addr) or self._bridge is None:
+            return
+        self._pending = ("move", addr)
+        self._bridge.send({"cmd": "linkkey", "key": self.key})
+
+    def _send_creds(self, obj: dict) -> bool:
+        """
+        Give the board on USB the config's WiFi network, when it lacks it.
+
+        Sent when the board holds another network, or holds this one but
+        fell back to its hotspot (a wrong password stored before), and only
+        once per start. The link key goes with it; the board restarts to join.
+
+        :param obj: an info frame
+        :return bool: whether the network was sent
+        """
+        if (not self.ssid
+                or self._creds_sent
+                or self._bridge is None):
+            return False
+        if obj.get("ssid") == self.ssid and not obj.get("portal"):
+            return False
+        self._creds_sent = True
+        self._bridge.send({"cmd": "wifi", "ssid": self.ssid,
+                           "pass": self._password, "key": self.key})
+        self._say("creds", f"giving the BridgeBox the WiFi network "
+                           f"{self.ssid} from the config; it restarts to "
+                           f"join it")
+        return True
+
+    def _key_stored(self, obj: dict) -> None:
+        """
+        Act on the board's answer to a key write: save and move, or say why not.
+
+        :param obj: the linkkey frame
+        """
+        pending, self._pending = self._pending, None
+        if pending is None or self._bridge is None:
+            return                    # a tcp_key -store write, not ours
+        kind, addr = pending
+        if obj.get("saved") not in (0, 1):
+            self._say("key-failed", f"the BridgeBox did not store its link "
+                                    f"key ({obj})", warning=True)
+            return
+        if kind == "claim":
+            self._say("claimed", "the BridgeBox now holds this printer's link "
+                                 "key, so only this printer can connect to it")
+            return
+        self.addr = addr
+        self._failed_addr = None
+        self._retry_at = 0.0
+        self._bridge.reactor.register_async_callback(
+            lambda et, a=addr: self._save(a))
+        self._say("moving", f"the BridgeBox joined WiFi at {addr}; moving "
+                            f"the link there")
+        self._bridge._drop_port()     # the reader reopens through open()
+
+
+def attach_wifi(serial_port: Optional[str], bridge: "BambuBridge") -> None:
+    """
+    Hand a new bridge the WifiLink its chain registered, if there is one.
+
+    :param serial_port: the port the bridge is registered under
+    :param bridge: the bridge, not started yet
+    """
+    link = _WIFI_LINKS.get(str(serial_port))
+    if link is not None:
+        bridge.use_wifi(link)
+
 
 class BambuBridge:
     """
@@ -974,6 +1285,8 @@ class BambuBridge:
         # the board no flash write); over TCP only an open board, since a
         # keyed one either challenged with this key or refused the link.
         self.store_key: Optional[str] = None
+        #: The WifiLink opening this bridge's ports, if its chain has one.
+        self.wifi: Optional[WifiLink] = None
         # Interpolated by _narrate_human. Not a unit name: one bridge can carry
         # several units and the narration is bus-wide; the address in each
         # message identifies the unit.
@@ -1277,6 +1590,16 @@ class BambuBridge:
             self.logger.warning("AFC bambu: request_info FAILED to send",
                                 traceback=traceback.format_exc())
 
+    def use_wifi(self, link: WifiLink) -> None:
+        """
+        Open this bridge's ports through a WifiLink (see attach_wifi).
+
+        :param link: the chain's WifiLink
+        """
+        link.attach(self, self._serial_factory)
+        self.wifi = link
+        self._serial_factory = link.open
+
     def start(self, defer_open: bool = False) -> None:
         """
         Open the port, and spin up the reader and writer threads.
@@ -1288,7 +1611,8 @@ class BambuBridge:
           that, so raising here would refuse a link that works seconds later
           and would need a Klipper restart to pick it up. A USB port missing
           at boot is a different claim (wrong device path, Pico unplugged), so
-          that still raises, which is why this defaults to off.
+          that still raises, which is why this defaults to off. A bridge
+          with a WifiLink never raises: it waits for WiFi or the cable.
         """
         try:
             self._serial = self._serial_factory()
@@ -1298,7 +1622,7 @@ class BambuBridge:
             self._down_t = None
             self._mark_connected()
         except Exception as e:
-            if not defer_open:
+            if not defer_open and self.wifi is None:
                 raise
             self._serial = None
             self.logger.warning(
@@ -2519,6 +2843,9 @@ class BambuBridge:
         obj = parse_bridge_line(line)
         if obj is None:
             return
+        if (self.wifi is not None
+                and obj.get("evt") in ("info", "wifi", "linkkey")):
+            self.wifi.on_frame(obj)
         if obj.get("evt") == "status":
             with self._lock:
                 self._latest = obj
@@ -3281,6 +3608,8 @@ class BambuBridge:
         self._info_asked = False
         if self.store_key and not getattr(self._serial, "challenged", False):
             self.send({"cmd": "linkkey", "key": self.store_key})
+        if self.wifi is not None:
+            self.wifi.on_connect(self._serial)
 
     def _drop_if_silent(self) -> bool:
         """

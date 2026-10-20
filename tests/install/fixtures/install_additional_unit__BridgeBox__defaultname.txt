@@ -55,23 +55,35 @@ placeholder
 
 [AFC_BridgeBox chain2]
 # ---- Connection ----
-# Use ONE of the two blocks below and leave the other commented out.
+# How Klipper reaches the BridgeBox. Klipper makes the link key and stores
+# it on the BridgeBox by itself; there is no key to type.
 #
 # USB (default): the BridgeBox's USB port. Find it with:
 #   ls /dev/serial/by-id/
 serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_XXXXXXXXXXXX-if00
 
-# WiFi (TCP): a BridgeBox on your network. To use it, comment out the USB
-# serial_port line above, uncomment the two lines below, and change:
-#   BRIDGE_ADDRESS  the BridgeBox's IP address or hostname. Give it a
-#                   fixed DHCP lease so it doesn't move.
-#   8888            the BridgeBox's port. 8888 is the default, so ":8888"
-#                   can be left off.
-#   LINK_KEY        the link key stored on the BridgeBox. Delete the
-#                   tcp_key line if it has no key.
-# USB is the supported transport; TCP is opt-in.
+# Move to WiFi with the cable still in: uncomment connection: wifi and run
+# FIRMWARE_RESTART. Then join the BridgeBox's bb-bridge-XXXX hotspot from a
+# phone and choose your network. Klipper sees it join, stores the link key
+# on it and moves over by itself. While the cable is in, it falls back to
+# USB whenever WiFi is down.
+#connection: wifi
+#
+# If the hotspot page doesn't work for you, put the network here instead
+# and Klipper gives it to the BridgeBox over USB. It is plain text, so keep
+# this file private. Double quotes and backslashes can't be used.
+#wifi_ssid: YOUR_NETWORK
+#wifi_password: YOUR_PASSWORD
+
+# WiFi with no cable at all: join the hotspot, choose your network, and the
+# page shows the address the BridgeBox got. Put that address here in place
+# of the USB serial_port line; Klipper stores the link key on the first
+# connect. Give the BridgeBox a fixed DHCP lease so it doesn't move.
 #serial_port: tcp://BRIDGE_ADDRESS:8888
-#tcp_key: LINK_KEY
+
+# Moving the BridgeBox to another printer or network: run
+# AFC_BRIDGEBOX_RESET_WIFI, or hold its BOOT button for 10 seconds. It
+# forgets its network and key and brings its hotspot back.
 
 # ---- Extruder ----
 # The [AFC_extruder] this chain feeds. One chain feeds one extruder. The

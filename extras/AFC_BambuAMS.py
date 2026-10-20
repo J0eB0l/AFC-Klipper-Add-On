@@ -1321,9 +1321,9 @@ class afcBambuAMS(afcUnit):
         # a section behind in AFC_auto_vars.cfg for a renamed or removed unit,
         # and that remnant must not stop the printer booting.
         self.serial_port = config.get("serial_port", None)
-        # tcp_key: the link key a tcp:// bridge demands, as entered in its
-        # setup portal. A USB cable needs none; blank leaves the link open,
-        # matching a board with no key stored.
+        # tcp_key: the link key a tcp:// bridge demands, when set by hand. A
+        # USB cable needs none; blank leaves the link open, matching a board
+        # with no key stored. A BridgeBox chain makes its own (see WifiLink).
         self.tcp_key, self._tcp_key_store = split_tcp_key(
             config.get("tcp_key", None))
         self.baud = config.getint("baud", 115200)
@@ -5137,6 +5137,7 @@ class afcBambuAMS(afcUnit):
                                  self.logger)
             if self._tcp_key_store:
                 bridge.store_key = self.tcp_key
+            _bridge_mod.attach_wifi(self.serial_port, bridge)
             # The narration goes to its own rotating file, one per master
             # (boxed units on different buses both narrate as 0x0700); the
             # first keeps the plain name.

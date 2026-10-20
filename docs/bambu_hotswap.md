@@ -882,6 +882,13 @@ known until then.
     unit has not been offline for `release_grace` on a live chain. `FORCE=1`
     overrides these and clears the toolhead record.
 
+- `AFC_BRIDGEBOX_RESET_WIFI` wipes the BridgeBox's WiFi network and link key
+  and restarts it with its bb-bridge setup hotspot, for a move to another
+  printer or network. It forgets the address the chain saved and makes a new
+  key for the next setup (a `tcp_key` you set is kept). It is refused during a
+  print and while the bridge is not connected; holding the board's BOOT button
+  for 10 seconds does the same wipe without Klipper.
+
 The `AFC_BridgeBox <chain>` status object reports:
 
 - `waiting_for_bay`: units on the chain with no bay;
@@ -972,6 +979,8 @@ Set on the `[AFC_BridgeBox <name>]` section:
 | `auto_vars_file` | `~/printer_data/config/AFC/AFC_auto_vars.cfg` | AFC's file of learned values. The chain reads bowden lengths saved there under a bay name at startup (see [Learned values](#learned-values)), and `AFC_BRIDGEBOX_FORGET` erases what is stored there under the unit's name and lanes. |
 | `buffer_chip_name` | `bambu_buffer` on the first chain, `bambu_buffer_<chain name>` on later ones | The pin chip this chain's units register for the buffer (see [Names](#names)). |
 | `hotplug_poll` | `1.0` | Seconds between watch ticks (minimum 0.5). |
+| `connection` | `usb` | `wifi` moves a USB `serial_port` to WiFi once the BridgeBox has joined a network: Klipper stores a link key it made on the board, saves the board's address in the state file and reconnects over TCP, falling back to USB while the cable is in and WiFi is down. A `tcp://` `serial_port` with no `tcp_key` stores that key on the board at the first connect. |
+| `wifi_ssid`, `wifi_password` | empty | With `connection: wifi`, the network Klipper gives a BridgeBox on USB that lacks it, once per start, instead of setting it up from the board's hotspot. Printable ASCII with no double quotes or backslashes; the password is 8 to 63 characters, or empty for an open network. |
 | `claim_grace` | `0` | Seconds a unit must stay online before it claims. |
 | `flap_window` | `120` | Seconds after an `auto_drop` release during which `flap_claim_grace` applies. |
 | `flap_claim_grace` | `15` | Seconds a unit `auto_drop` recently released must stay online before it claims again. |

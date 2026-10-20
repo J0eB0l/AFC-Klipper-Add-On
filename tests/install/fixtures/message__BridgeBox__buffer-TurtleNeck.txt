@@ -4,7 +4,7 @@
 
 - AFC-Klipper-Add-On python extensions installed to <WORKDIR>/klipper/klippy/extras/
 
-- Set serial_port (USB, or tcp:// for a WiFi BridgeBox) and extruder in the <WORKDIR>/AFC/AFC_BridgeBox.cfg file.
+- Set extruder, and serial_port unless you chose WiFi only, in the <WORKDIR>/AFC/AFC_BridgeBox.cfg file.
   
 You may now quit the script or return to the main menu.
 

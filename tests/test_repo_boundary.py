@@ -128,10 +128,15 @@ class TestRepoLayout:
             super().__init__()
             self.starts: List[bool] = []
             self.narration: List[Tuple[str, str]] = []
+            self.wifi: Any = None
 
         def start(self, defer_open: bool = False) -> None:
             """:param defer_open: keep retrying a port that is not up yet"""
             self.starts.append(defer_open)
+
+        def use_wifi(self, link: Any) -> None:
+            """:param link: the chain's WifiLink"""
+            self.wifi = link
 
         def set_narration_log(self, log_dir: str, tag: str) -> None:
             """
@@ -339,3 +344,23 @@ class TestRepoLayout:
         assert bridge.stopped is True
         assert owner._bridge is None
         assert owner.logger.messages == []
+
+    def test_the_wifi_link_registry_has_exactly_one_home(
+            self, tmp_path: pathlib.Path,
+            monkeypatch: pytest.MonkeyPatch) -> None:
+        # The master registers the chain's WifiLink; whichever builds the
+        # bridge, its scout or the first unit's ready, must find it there.
+        links: Dict[str, Any] = {}
+        monkeypatch.setattr(bridge_mod, "_WIFI_LINKS", links)
+        monkeypatch.setattr(bridge_mod, "_BRIDGES", {})
+        monkeypatch.setattr(unit_mod, "BambuBridge", self._Bridge)
+        monkeypatch.setattr(bridge_mod, "BambuBridge", self._Bridge)
+        master = make_bridgebox(tmp_path, buffer="Bamb_1", connection="wifi")
+        link = links[self.CHAIN_PORT]
+        assert master._ensure_bridge().wifi is link
+
+        bridge_mod._BRIDGES.clear()
+        owner = self._pool_unit("Bambu_AMS_1", master.printer,
+                                self.CHAIN_PORT)
+        owner._handle_ready()
+        assert owner._bridge.wifi is link

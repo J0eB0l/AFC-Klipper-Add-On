@@ -71,6 +71,10 @@ emu_board_type="EBB"
 # BridgeBox: AMS / AMS 2 Pro and AMS HT units on a chain (pool_ams, pool_ht)
 bridgebox_pool_ams=4
 bridgebox_pool_ht=8
+# BridgeBox: how Klipper reaches it (usb, usb_wifi or wifi), and for wifi the
+# address its setup page showed
+bridgebox_connection=usb
+bridgebox_address=""
 
 # Moonraker Config
 moonraker_update_config="""

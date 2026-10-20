@@ -60,6 +60,7 @@ from tests.bambu_helpers import (
     RecordingGcode,
     set_var_file,
     slot_info,
+    use_bridges,
     write_unit_vars,
 )
 
@@ -2700,6 +2701,10 @@ class TestAfcBridgeBoxInit:
             "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> OLD=<old uid "
             "or bay name> [FORCE=1]. Without OLD, pops a picker of the bays "
             "held for offline units."),
+        "AFC_BRIDGEBOX_RESET_WIFI": (
+            "Wipe the BridgeBox's WiFi network and link key, for a move to "
+            "another printer or network; it restarts with its setup hotspot: "
+            "AFC_BRIDGEBOX_RESET_WIFI [CHAIN=<chain>]"),
     }
 
     @staticmethod
@@ -2717,7 +2722,9 @@ class TestAfcBridgeBoxInit:
                     "AFC_BRIDGEBOX_ASSIGN": m.cmd_AFC_BRIDGEBOX_ASSIGN,
                     "AFC_BRIDGEBOX_UNASSIGN": m.cmd_AFC_BRIDGEBOX_UNASSIGN,
                     "AFC_BRIDGEBOX_BAYS": m.cmd_AFC_BRIDGEBOX_BAYS,
-                    "AFC_BRIDGEBOX_REPLACE": m.cmd_AFC_BRIDGEBOX_REPLACE}
+                    "AFC_BRIDGEBOX_REPLACE": m.cmd_AFC_BRIDGEBOX_REPLACE,
+                    "AFC_BRIDGEBOX_RESET_WIFI":
+                        m.cmd_AFC_BRIDGEBOX_RESET_WIFI}
         assert self._bridgebox_mux(m.printer) == {
             cmd: ("CHAIN", {"chain1": fn, None: fn})
             for cmd, fn in handlers.items()}
@@ -10156,10 +10163,15 @@ class TestAfcBridgeBoxEnsureBridge:
             """
             self.opener, self.reactor, self.logger = opener, reactor, logger
             self.starts: List[bool] = []
+            self.wifi: Any = None
 
         def start(self, defer_open: bool = False) -> None:
             """:param defer_open: keep retrying a port that is not up yet"""
             self.starts.append(defer_open)
+
+        def use_wifi(self, link: Any) -> None:
+            """:param link: the chain's WifiLink"""
+            self.wifi = link
 
     class _Port:
         """A port class recording how each port was opened."""
@@ -10230,6 +10242,25 @@ class TestAfcBridgeBoxEnsureBridge:
             (("bridge.local", 3333),
              {"timeout": 0.1, "write_timeout": 0.5, "key": "k"})]
         assert m.logger.messages == []
+
+    def test_a_self_keying_chain_hands_its_wifi_link_to_the_bridge(
+            self, tmp_path, monkeypatch):
+        # A tcp:// chain with no tcp_key: the link stores a key on the board
+        # at the first connect, so the bridge must open through it.
+        port = "tcp://bridge.local:3333"
+        monkeypatch.setattr(bridge_mod, "_WIFI_LINKS", {})
+        monkeypatch.setattr(bb_module.secrets, "token_hex",
+                            lambda n: "ab" * n)
+        m = self._scout(tmp_path, monkeypatch, port, tcp_key="")
+        link = bridge_mod._WIFI_LINKS[port]
+        bridge = m._ensure_bridge()
+        assert bridge.wifi is link
+        assert bridge.starts == [True]
+
+    def test_a_hand_keyed_chain_has_no_wifi_link(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge_mod, "_WIFI_LINKS", {})
+        m = self._scout(tmp_path, monkeypatch, "tcp://bridge.local:3333")
+        assert m._ensure_bridge().wifi is None
 
     def test_without_the_flag_the_bridge_stores_nothing(self, tmp_path,
                                                          monkeypatch):
@@ -17552,3 +17583,295 @@ class TestSlotsByModel:
         assert built == self.BUILT
         assert (printer.afc.logger.messages, printer.gcode.messages) == (
             [], [])
+
+
+# ── WiFi setup: connection, the config network, the self-made key ────────────
+
+WIFI_USB = "/dev/serial/by-id/usb-chain1-if00"
+WIFI_TCP = "tcp://192.168.4.80:8888"
+#: What the patched secrets.token_hex(16) makes.
+WIFI_NEW_KEY = "ab" * 16
+
+
+def _wifi_master(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+                 **options: Any) -> afcBridgeBox:
+    """
+    A chain master that only scouts (no roster, no pool), with its own
+    WiFi link table and a fixed made-up key.
+
+    :param options: the master's options
+    :return afcBridgeBox: the master
+    """
+    monkeypatch.setattr(bridge_mod, "_WIFI_LINKS", {})
+    monkeypatch.setattr(bb_module.secrets, "token_hex", lambda n: "ab" * n)
+    opts: Dict[str, Any] = {"roster": "", "pool_ams": 0, "pool_ht": 0}
+    opts.update(options)
+    return make_bridgebox(tmp_path, **opts)
+
+
+def _wifi_state(master: afcBridgeBox) -> Dict[str, Optional[str]]:
+    """:return dict: the chain's saved wifi_key and wifi_addr"""
+    return {k: master._state_get(SEC, k) for k in ("wifi_key", "wifi_addr")}
+
+
+class TestAfcBridgeBoxInitConnection:
+    def test_connection_defaults_to_usb(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        assert m.connection == "usb"
+        assert (m.wifi_ssid, m._wifi_password) == (None, "")
+
+    def test_connection_wifi_and_the_network_are_read(self, tmp_path,
+                                                      monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi",
+                         wifi_ssid="Shop", wifi_password="hunter22")
+        assert m.connection == "wifi"
+        assert (m.wifi_ssid, m._wifi_password) == ("Shop", "hunter22")
+
+    def test_an_unknown_connection_is_refused(self, tmp_path, monkeypatch):
+        with pytest.raises(configparser.Error) as err:
+            _wifi_master(tmp_path, monkeypatch, connection="radio")
+        assert str(err.value) == (
+            "Choice 'radio' for option 'connection' is not valid")
+
+    def test_the_wifi_options_are_not_handed_to_the_units(self, tmp_path,
+                                                          monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi",
+                         wifi_ssid="Shop", wifi_password="hunter22",
+                         pool_ams=1)
+        assert not {"connection", "wifi_ssid", "wifi_password"} & set(
+            m._chain_defaults)
+
+
+class TestAfcBridgeBoxWifiText:
+    @staticmethod
+    def _read(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+              value: Optional[str], low: int = 8, high: int = 63
+              ) -> Optional[str]:
+        """:return Optional[str]: wifi_password as _wifi_text reads ``value``"""
+        m = _wifi_master(tmp_path, monkeypatch)
+        values = {} if value is None else {"wifi_password": value}
+        return m._wifi_text(BambuConfig(SEC, m.printer, values),
+                            "wifi_password", low, high)
+
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_not_set_is_none(self, tmp_path, monkeypatch, value):
+        assert self._read(tmp_path, monkeypatch, value) is None
+
+    @pytest.mark.parametrize("value", ["12345678", "x" * 63,
+                                       "a b~!@#$%^&*()'"])
+    def test_printable_ascii_in_range_is_kept(self, tmp_path, monkeypatch,
+                                              value):
+        assert self._read(tmp_path, monkeypatch, value) == value
+
+    @pytest.mark.parametrize("value", ['hunter"22', "hunter\\22", "hünter22",
+                                       "hunter\t22"])
+    def test_what_the_board_cannot_read_is_refused(self, tmp_path,
+                                                   monkeypatch, value):
+        # The value itself never reaches the message: it is a password.
+        with pytest.raises(configparser.Error) as err:
+            self._read(tmp_path, monkeypatch, value)
+        assert str(err.value) == (
+            "AFC_BridgeBox chain1: wifi_password can't hold quotes, "
+            "backslashes or non-ASCII characters; set this network up from "
+            "the bb-bridge hotspot")
+
+    @pytest.mark.parametrize("value", ["1234567", "x" * 64])
+    def test_a_length_out_of_range_is_refused(self, tmp_path, monkeypatch,
+                                              value):
+        with pytest.raises(configparser.Error) as err:
+            self._read(tmp_path, monkeypatch, value)
+        assert str(err.value) == (
+            "AFC_BridgeBox chain1: wifi_password must be 8 to 63 characters")
+
+    def test_the_ssid_limits_come_from_init(self, tmp_path, monkeypatch):
+        with pytest.raises(configparser.Error) as err:
+            _wifi_master(tmp_path, monkeypatch, wifi_ssid="s" * 33)
+        assert str(err.value) == (
+            "AFC_BridgeBox chain1: wifi_ssid must be 1 to 32 characters")
+        m = _wifi_master(tmp_path, monkeypatch, wifi_ssid="s" * 32)
+        assert m.wifi_ssid == "s" * 32
+
+
+class TestAfcBridgeBoxRegisterWifi:
+    def test_a_usb_chain_with_connection_usb_has_no_link(self, tmp_path,
+                                                         monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        assert bridge_mod._WIFI_LINKS == {}
+        assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": None}
+
+    def test_a_stale_link_on_the_port_is_dropped(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        bridge_mod._WIFI_LINKS[WIFI_USB] = bridge_mod.WifiLink(
+            "k", lambda a: None, "old")
+        m._register_wifi()
+        assert bridge_mod._WIFI_LINKS == {}
+
+    def test_connection_wifi_makes_and_saves_a_key(self, tmp_path,
+                                                   monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi",
+                         wifi_ssid="Shop", wifi_password="hunter22")
+        link = bridge_mod._WIFI_LINKS[WIFI_USB]
+        assert (link.key, link.label, link.usb_path, link.addr) == (
+            WIFI_NEW_KEY, "AFC_BridgeBox chain1", WIFI_USB, None)
+        assert (link.ssid, link._password) == ("Shop", "hunter22")
+        assert link._save == m._save_wifi_addr
+        assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
+
+    def test_a_saved_key_and_address_are_used(self, tmp_path, monkeypatch):
+        record_chain_state(tmp_path, wifi_key="cd" * 16, wifi_addr=WIFI_TCP)
+        _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        link = bridge_mod._WIFI_LINKS[WIFI_USB]
+        assert (link.key, link.addr) == ("cd" * 16, WIFI_TCP)
+
+    def test_a_cleared_address_is_none(self, tmp_path, monkeypatch):
+        record_chain_state(tmp_path, wifi_key="cd" * 16, wifi_addr="")
+        _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        assert bridge_mod._WIFI_LINKS[WIFI_USB].addr is None
+
+    def test_a_usb_chain_with_a_tcp_key_uses_it_and_saves_nothing(
+            self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi",
+                         tcp_key="handkey1")
+        assert bridge_mod._WIFI_LINKS[WIFI_USB].key == "handkey1"
+        assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": None}
+
+    def test_a_tcp_chain_with_a_tcp_key_has_no_link(self, tmp_path,
+                                                    monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP,
+                         tcp_key="handkey1", connection="wifi")
+        assert bridge_mod._WIFI_LINKS == {}
+        assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": None}
+
+    def test_a_tcp_chain_without_a_key_keys_itself(self, tmp_path,
+                                                   monkeypatch):
+        # Whatever connection says: the address is its serial_port.
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        link = bridge_mod._WIFI_LINKS[WIFI_TCP]
+        assert (link.key, link.usb_path, link.addr) == (
+            WIFI_NEW_KEY, None, WIFI_TCP)
+        assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
+
+
+class TestAfcBridgeBoxSaveWifiAddr:
+    def test_the_address_is_saved_beside_the_key(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        m._save_wifi_addr(WIFI_TCP)
+        assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY,
+                                  "wifi_addr": WIFI_TCP}
+
+    def test_the_link_saves_through_it(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        bridge_mod._WIFI_LINKS[WIFI_USB]._save(WIFI_TCP)
+        assert m._state_get(SEC, "wifi_addr") == WIFI_TCP
+
+
+class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
+    WIPE = [{"cmd": "wifi", "clear": 1}, {"cmd": "reset"}]
+    SAID = ("AFC_BridgeBox chain1: the BridgeBox's WiFi and link key are "
+            "wiped and it is restarting with its bb-bridge setup hotspot. "
+            "Set up its WiFi again from a phone.")
+
+    @staticmethod
+    def _bridge(monkeypatch: pytest.MonkeyPatch, port: str,
+                connected: bool = True) -> FakeBridge:
+        """:return FakeBridge: the chain's bridge, registered on ``port``"""
+        bridge = FakeBridge(connected=connected)
+        use_bridges(monkeypatch, {port: bridge})
+        return bridge
+
+    @staticmethod
+    def _new_key(monkeypatch: pytest.MonkeyPatch) -> None:
+        """The next made-up key is "ef" * 16."""
+        monkeypatch.setattr(bb_module.secrets, "token_hex",
+                            lambda n: "ef" * n)
+
+    def test_it_is_refused_during_a_print(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        bridge = self._bridge(monkeypatch, WIFI_USB)
+        m.printer.set_print_state("printing")
+        cmd = _p3_cmd()
+        with pytest.raises(Exception) as err:
+            m.cmd_AFC_BRIDGEBOX_RESET_WIFI(cmd)
+        assert str(err.value) == (
+            "AFC_BRIDGEBOX_RESET_WIFI: not during a print, the BridgeBox of "
+            "chain1 restarts")
+        assert bridge.sent == []
+
+    @pytest.mark.parametrize("registered", [False, True])
+    def test_it_needs_a_connected_bridge(self, tmp_path, monkeypatch,
+                                         registered):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        if registered:
+            self._bridge(monkeypatch, WIFI_USB, connected=False)
+        else:
+            use_bridges(monkeypatch, {})
+        with pytest.raises(Exception) as err:
+            m.cmd_AFC_BRIDGEBOX_RESET_WIFI(_p3_cmd())
+        assert str(err.value) == (
+            "AFC_BRIDGEBOX_RESET_WIFI: no link to the BridgeBox of chain1. "
+            "Hold its BOOT button for 10 seconds to reset it instead.")
+        assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
+
+    def test_a_usb_chain_forgets_the_address_and_makes_a_new_key(
+            self, tmp_path, monkeypatch):
+        record_chain_state(tmp_path, wifi_key=WIFI_NEW_KEY,
+                           wifi_addr=WIFI_TCP)
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi")
+        bridge = self._bridge(monkeypatch, WIFI_USB)
+        link = bridge_mod._WIFI_LINKS[WIFI_USB]
+        link._said = "wifi"
+        self._new_key(monkeypatch)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_RESET_WIFI(cmd)
+        assert bridge.sent == self.WIPE
+        assert _wifi_state(m) == {"wifi_key": "ef" * 16, "wifi_addr": ""}
+        assert (link.key, link.addr, link._said) == ("ef" * 16, None, None)
+        assert cmd.messages == [("respond_info", self.SAID + (
+            " With its USB cable in, Klipper moves to its new address by "
+            "itself."))]
+
+    def test_a_tcp_chain_keeps_its_address(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        bridge = self._bridge(monkeypatch, WIFI_TCP)
+        link = bridge_mod._WIFI_LINKS[WIFI_TCP]
+        self._new_key(monkeypatch)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_RESET_WIFI(cmd)
+        assert bridge.sent == self.WIPE
+        assert _wifi_state(m) == {"wifi_key": "ef" * 16, "wifi_addr": None}
+        assert (link.key, link.addr) == ("ef" * 16, WIFI_TCP)
+        assert cmd.messages == [("respond_info", self.SAID + (
+            " If the address its setup page shows has changed, put it in "
+            "serial_port."))]
+
+    def test_a_hand_set_key_is_kept(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, connection="wifi",
+                         tcp_key="handkey1")
+        self._bridge(monkeypatch, WIFI_USB)
+        link = bridge_mod._WIFI_LINKS[WIFI_USB]
+        self._new_key(monkeypatch)
+        m.cmd_AFC_BRIDGEBOX_RESET_WIFI(_p3_cmd())
+        assert link.key == "handkey1"
+        assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": None}
+
+    def test_a_chain_with_no_link_only_wipes_the_board(self, tmp_path,
+                                                       monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP,
+                         tcp_key="handkey1")
+        bridge = self._bridge(monkeypatch, WIFI_TCP)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_RESET_WIFI(cmd)
+        assert bridge.sent == self.WIPE
+        assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": None}
+        assert cmd.messages == [("respond_info", self.SAID)]
+
+    def test_an_address_left_from_wifi_days_is_cleared(self, tmp_path,
+                                                       monkeypatch):
+        # Saved while the chain ran connection: wifi, now set back to usb.
+        record_chain_state(tmp_path, wifi_addr=WIFI_TCP)
+        m = _wifi_master(tmp_path, monkeypatch)
+        self._bridge(monkeypatch, WIFI_USB)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_RESET_WIFI(cmd)
+        assert _wifi_state(m) == {"wifi_key": None, "wifi_addr": ""}
+        assert cmd.messages == [("respond_info", self.SAID)]

@@ -1,2 +1,3 @@
 === OUTPUT ===
 P. Units on this chain : 4 AMS, 8 AMS HT 
+W. Connection : USB 

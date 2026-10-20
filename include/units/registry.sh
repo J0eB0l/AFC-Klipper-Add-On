@@ -580,8 +580,59 @@ bridgebox_write_pool() {
     -e "s/^pool_ht: .*/pool_ht: ${bridgebox_pool_ht}/" "$1"
 }
 
+bridgebox_connection_label() {
+  case "$bridgebox_connection" in
+    usb_wifi) echo "USB, then WiFi" ;;
+    wifi) echo "WiFi at ${bridgebox_address}" ;;
+    *) echo "USB" ;;
+  esac
+}
+
+bridgebox_ask_connection() {
+  # Sets how Klipper reaches the BridgeBox (bridgebox_connection) and, for
+  # WiFi only, the address its setup page showed (bridgebox_address).
+  local choice addr
+  echo "1. USB."
+  echo "2. USB, then WiFi: once the BridgeBox joins your WiFi from its bb-bridge hotspot, Klipper moves over by itself."
+  echo "3. WiFi only: join the bb-bridge hotspot from a phone, choose your network, and note the address the page shows."
+  read -p "How does Klipper reach this BridgeBox? (1-3, Enter keeps $(bridgebox_connection_label)): " choice
+  case "$choice" in
+    "") ;;
+    1) bridgebox_connection="usb" ;;
+    2) bridgebox_connection="usb_wifi" ;;
+    3)
+      read -p "The address the BridgeBox's setup page showed (for example 192.168.1.50): " addr
+      if ! [[ "$addr" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+        message="${RED}Enter the address the way the setup page shows it, like 192.168.1.50.${RESET}"
+        return
+      fi
+      bridgebox_connection="wifi"
+      bridgebox_address="$addr"
+      ;;
+    *)
+      message="${RED}Enter 1, 2 or 3.${RESET}"
+      return
+      ;;
+  esac
+  message="Connection: $(bridgebox_connection_label)"
+}
+
+bridgebox_write_connection() {
+  local addr="$bridgebox_address"
+  case "$bridgebox_connection" in
+    usb_wifi)
+      sed -i "s/^#connection: wifi/connection: wifi/" "$1" ;;
+    wifi)
+      if [[ "$addr" != *:* ]]; then
+        addr="${addr}:8888"
+      fi
+      sed -i "s|^serial_port: /dev/serial/by-id/.*|serial_port: tcp://${addr}|" "$1" ;;
+  esac
+}
+
 unit_install_menu_options_BridgeBox() {
   printf "P. Units on this chain : %s AMS, %s AMS HT \n" "$bridgebox_pool_ams" "$bridgebox_pool_ht"
+  printf "W. Connection : %s \n" "$(bridgebox_connection_label)"
 }
 
 unit_copy_files_BridgeBox() {
@@ -589,6 +640,7 @@ unit_copy_files_BridgeBox() {
   safe_copy "${afc_path}/templates/AFC_BridgeBox.cfg" "${afc_config_dir}/AFC_BridgeBox.cfg"
   sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_BridgeBox.cfg"
   bridgebox_write_pool "${afc_config_dir}/AFC_BridgeBox.cfg"
+  bridgebox_write_connection "${afc_config_dir}/AFC_BridgeBox.cfg"
 }
 
 unit_install_additional_BridgeBox() {
@@ -599,11 +651,12 @@ unit_install_additional_BridgeBox() {
   sed -i "s/^\(ams_names\|ht_names\):/#\1:/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   sed -i "s/^#buffer_type: FPS_PSF/buffer_type: bambu/" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
   bridgebox_write_pool "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  bridgebox_write_connection "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
 }
 
 unit_message_BridgeBox() {
   message+="""
-- Set serial_port (USB, or tcp:// for a WiFi BridgeBox) and extruder in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
+- Set extruder, and serial_port unless you chose WiFi only, in the ${afc_config_dir}/AFC_BridgeBox.cfg file.
   """
 }
 
