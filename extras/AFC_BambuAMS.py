@@ -6556,6 +6556,10 @@ class afcBambuAMS(afcUnit):
     #: arrives as several reports (the narration, state 7, a later "state:6"),
     #: and each would raise again once the hold lifts outside a print.
     FAULT_QUIET_S = 5.0
+    #: How long the AMS stays parked after an assist timeout before it
+    #: recovers by itself. Seen at 55-60 s on an AMS 2, ending with a
+    #: "state:6" report of the same episode.
+    ASSIST_TIMEOUT_LATCH_S = 90.0
 
     def _unit_state(self, latest: Optional[dict]) -> Optional[int]:
         """
@@ -6701,8 +6705,8 @@ class afcBambuAMS(afcUnit):
         self._stalled_seen = True
         if self._fault_quiet():
             return False            # the tail of a stall already raised
-        if getattr(self, "_overfeed_lane", None) is not None:
-            return False            # still latched from an overfeed
+        if self._overfeed_active():
+            return False            # still parked from an assist timeout
         if self._take_overfeed(lane):
             return False
         msg = (f"AFC bambu {self.name}: the AMS reports it has STALLED "
@@ -10933,7 +10937,6 @@ class afcBambuAMS(afcUnit):
         if on:
             self._following_lane = lane
             self._follow_last_e = None
-            self._overfeed_lane = None
         elif self._following_lane is lane:
             self._following_lane = None
             self._follow_last_e = None
@@ -11015,31 +11018,44 @@ class afcBambuAMS(afcUnit):
         self._note_overfeed(lane, pos[0], pos[1])
         return True
 
+    def _overfeed_active(self) -> bool:
+        """
+        Whether the AMS is still parked from an assist timeout.
+
+        :return bool: True within ASSIST_TIMEOUT_LATCH_S of the timeout
+        """
+        if getattr(self, "_overfeed_lane", None) is None:
+            return False
+        return time.monotonic() < getattr(self, "_overfeed_until", 0.0)
+
     def _note_overfeed(self, lane: Any, start: float, end: float) -> None:
         """
-        Log an assist stall that was an overfeed, and leave the follower armed.
+        Log an assist that timed out with the buffer nearly full, and leave
+        the follower armed.
 
-        The AMS stopped its own assist because the buffer would not come back
-        to center, which a cold or idle extruder causes. Dropping the follower
-        here is what left the next unload retracting with nothing taking the
-        filament up.
+        The AMS pushes until the buffer is full and gives up when it is not
+        within about 5 s. The filament moved, so it is not a jam. Dropping
+        the follower here is what left the next unload retracting with
+        nothing taking the filament up.
 
-        The unit then sits latched (err 0x17, link mode 7) and later narrates
-        the same episode again ("state:6"), with no new stall in it. The latch
-        (_overfeed_lane) keeps those quiet. The follower re-engages the lane
-        (finish, select, assist) once the extruder pulls again, which clears
-        the unit's latch and ends the episode; so does any other assist-on.
+        The unit then parks itself (err 0x17, link mode 7) for about a minute,
+        ignoring a select or assist sent meanwhile, and ends it with a
+        "state:6" report of the same episode. The latch (_overfeed_lane,
+        until _overfeed_until) keeps those reports quiet; the follower
+        re-engages the lane once it has passed and the extruder pulls.
 
         :param lane: The lane the AMS was assisting
         :param start: Buffer position when the assist started
         :param end: Buffer position when it stopped
         """
-        self._fault_quiet_until = time.monotonic() + self.FAULT_QUIET_S
+        now = time.monotonic()
+        self._fault_quiet_until = now + self.FAULT_QUIET_S
         self._overfeed_lane = lane
+        self._overfeed_until = now + self.ASSIST_TIMEOUT_LATCH_S
         self.logger.info(
-            f"AFC bambu {self.name}: {lane.name}: the AMS pushed more filament "
-            f"than the extruder took (buffer {start:.2f} -> {end:.2f}) and "
-            f"stopped its assist. Not a jam; the follower re-arms when the "
+            f"AFC bambu {self.name}: {lane.name}: the AMS's assist timed out "
+            f"before the buffer filled (buffer {start:.2f} -> {end:.2f}). Not "
+            f"a jam; the follower re-arms once the AMS recovers and the "
             f"extruder pulls.")
 
     def _raise_ams_fault(self, lane: Any, msg: str) -> None:
@@ -11401,13 +11417,13 @@ class afcBambuAMS(afcUnit):
             self._note_overfeed(lane, pos[0], pos[1])
             return
         low = text.lower()
-        if (getattr(self, "_overfeed_lane", None) is not None
+        if (self._overfeed_active()
                 and not _STALL_WORDS_RE.search(low)):
             # "state:6" or a link drop with no stall in it: the unit is still
-            # parked from the overfeed, not reporting a new jam.
+            # parked from the assist timeout, not reporting a new jam.
             self.logger.debug(
-                f"AFC bambu {self.name}: {lane.name}: still latched from the "
-                f"overfeed, not a new stall: {_fault_reason(text)}")
+                f"AFC bambu {self.name}: {lane.name}: still parked from the "
+                f"assist timeout, not a new stall: {_fault_reason(text)}")
             return
         # "stall exit" is the scan path finishing its pull-in, not a failure.
         if "stall exit" in low:
@@ -11558,12 +11574,13 @@ class afcBambuAMS(afcUnit):
                     fstate = st.get("fstate") if st is not None else None
                     wants = (eventtime - self._follow_last_demand
                              <= self.follow_rearm_window)
-                    if (wants
-                        and getattr(self, "_overfeed_lane", None) is loaded):
-                        # Latched from an overfeed, whatever its mode reads.
-                        # The full engage carries a select, which is what has
-                        # cleared that latch (the unload's select did).
-                        # Its answer can narrate the old latch once more.
+                    overfed = getattr(self, "_overfeed_lane", None) is loaded
+                    if overfed and self._overfeed_active():
+                        pass        # parked; it ignores commands until then
+                    elif overfed and wants:
+                        # Recovered from an assist timeout, whatever its mode
+                        # reads: the full engage (finish, select, assist).
+                        self._overfeed_lane = None
                         self._follow_reassert_last = eventtime
                         self._fault_quiet_until = (time.monotonic()
                                                    + self.FAULT_QUIET_S)

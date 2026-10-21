@@ -10360,10 +10360,10 @@ class TestAfcBambuAMSCheckUnitStalled:
 
     OVERFEED = ("[AMS_SWITCH]assist finish stall! pos:-0.27->0.64, "
                 "det:43mm")
-    OVERFEED_LOG = ("info", "AFC bambu AMS: lane1: the AMS pushed more "
-                            "filament than the extruder took (buffer -0.27 "
-                            "-> 0.64) and stopped its assist. Not a jam; the "
-                            "follower re-arms when the extruder pulls.")
+    OVERFEED_LOG = ("info", "AFC bambu AMS: lane1: the AMS's assist timed "
+                            "out before the buffer filled (buffer -0.27 -> "
+                            "0.64). Not a jam; the follower re-arms once the "
+                            "AMS recovers and the extruder pulls.")
 
     def test_an_overfeed_is_logged_and_the_follower_kept(self, monkeypatch):
         # The state byte reads 7 for it too; the narration says why.
@@ -10377,15 +10377,26 @@ class TestAfcBambuAMSCheckUnitStalled:
         # The assist is never dropped; the lane is latched as overfed.
         assert unit._bridge.sent == []
         assert unit._overfeed_lane is unit.lanes["lane1"]
+        assert unit._overfeed_active() is True
         assert unit.logger.messages == [self.OVERFEED_LOG]
 
     def test_a_unit_latched_from_an_overfeed_is_not_a_stall(self,
                                                              monkeypatch):
         unit = self._unit(monkeypatch, 0x07)
         unit._overfeed_lane = unit.lanes["lane1"]
+        unit._overfeed_until = float("inf")
         assert self._run(unit) is False
         assert unit._stalled_seen is True
         assert unit.afc.error.messages == []
+        assert unit.logger.messages == []
+
+    def test_a_stall_after_the_parked_window_raises(self, monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        unit._overfeed_lane = unit.lanes["lane1"]
+        unit._overfeed_until = 0.0
+        assert self._run(unit) is True
+        assert unit.afc.error.messages == [("AFC_error", self.STALLED)]
+        assert unit._overfeed_lane is None
         assert unit.logger.messages == []
 
     def test_a_stall_that_ended_low_still_raises(self, monkeypatch):
@@ -22095,41 +22106,54 @@ class TestAfcBambuAMSCheckAmsFault:
         assert unit._bridge.sent == []
         assert unit._overfeed_lane is unit.lanes["lane22"]
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: lane22: the AMS pushed more "
-                     "filament than the extruder took (buffer 0.10 -> 0.71) "
-                     "and stopped its assist. Not a jam; the follower re-arms "
-                     "when the extruder pulls.")]
+            ("info", "AFC bambu Bambu_AMS_1: lane22: the AMS's assist timed "
+                     "out before the buffer filled (buffer 0.10 -> 0.71). Not "
+                     "a jam; the follower re-arms once the AMS recovers and "
+                     "the extruder pulls.")]
 
     STATE6 = ("[AMS_COMMON]state:0,tray_now:2,tray_exit:15 "
               "[AMS_COMMON]state:6,tray_now:2,tray_exit:15 [AMS_LED]mc set t2")
 
     def test_the_overfeed_s_later_state_6_is_not_a_stall(self, monkeypatch):
-        # Seen 56 s after an overfeed: the unit still parked from it.
+        # Seen 55-60 s after an assist timeout: the unit ending it.
         unit = self._unit(monkeypatch, self.STATE6)
         unit._overfeed_lane = unit.lanes["lane22"]
+        unit._overfeed_until = float("inf")
         unit._check_ams_fault(unit.lanes["lane22"])
         assert unit.afc.error.messages == []
         assert unit._fault_seen == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane22: still latched from the "
-                      "overfeed, not a new stall: [AMS_COMMON]state:6,"
+            ("debug", "AFC bambu Bambu_AMS_1: lane22: still parked from the "
+                      "assist timeout, not a new stall: [AMS_COMMON]state:6,"
                       "tray_now:2,tray_exit:15  [AMS_LED]mc set t2")]
 
     def test_a_stall_while_latched_from_an_overfeed_still_raises(
             self, monkeypatch):
         unit = self._unit(monkeypatch, self.FEED_STALL)
         unit._overfeed_lane = unit.lanes["lane22"]
+        unit._overfeed_until = float("inf")
         unit._check_ams_fault(unit.lanes["lane22"])
         msg = self._stall_msg("lane22", self.FEED_STALL)
         assert unit.afc.error.messages == [("AFC_error", msg)]
         assert unit._overfeed_lane is None       # the raise ends the episode
         assert unit.logger.messages == []
 
-    def test_an_assist_on_ends_the_overfeed(self, monkeypatch):
+    def test_an_assist_on_does_not_end_the_parked_window(self, monkeypatch):
+        # A parked unit ignores it; its own "state:6" still follows.
         unit = self._unit(monkeypatch, self.STATE6)
         unit._overfeed_lane = unit.lanes["lane22"]
+        unit._overfeed_until = float("inf")
         unit.set_feed_assist(unit.lanes["lane22"], True)
-        assert unit._overfeed_lane is None
+        unit._check_ams_fault(unit.lanes["lane22"])
+        assert unit._overfeed_lane is unit.lanes["lane22"]
+        assert unit.afc.error.messages == []
+        assert len(unit.logger.messages) == 1    # the parked debug line
+
+    def test_the_parked_window_ends_by_itself(self, monkeypatch):
+        unit = self._unit(monkeypatch, self.STATE6)
+        unit._overfeed_lane = unit.lanes["lane22"]
+        unit._overfeed_until = 0.0
+        assert unit._overfeed_active() is False
         assert unit.logger.messages == []
 
     def test_a_report_in_the_quiet_window_is_spent(self, monkeypatch):
@@ -22725,10 +22749,11 @@ class TestAfcBambuAMSFollowTick:
 
     def test_an_overfed_lane_is_re_engaged_when_the_extruder_pulls(
             self, monkeypatch):
-        # Whatever the mode reads: a unit latched from an overfeed is in
-        # neither 0 nor 4. The full engage carries the select that clears it.
+        # Recovered from an assist timeout, whatever its mode reads: the
+        # full engage, not the bare assist.
         unit = self._unit(monkeypatch, following=True, fstate=7)
         unit._overfeed_lane = unit.lanes["lane1"]
+        unit._overfeed_until = 0.0
         unit._follow_last_demand = 9.0
         unit._follow_tick(10.0)
         assert unit._bridge.sent == self.ENGAGE
@@ -22737,9 +22762,22 @@ class TestAfcBambuAMSFollowTick:
         assert unit._follow_reassert_last == 10.0
         assert unit.logger.messages == []
 
+    def test_a_parked_lane_is_left_alone_while_the_extruder_pulls(
+            self, monkeypatch):
+        # It ignores commands until it recovers; one sent then is wasted.
+        unit = self._unit(monkeypatch, following=True, fstate=0)
+        unit._overfeed_lane = unit.lanes["lane1"]
+        unit._overfeed_until = float("inf")
+        unit._follow_last_demand = 9.0
+        unit._follow_tick(10.0)
+        assert unit._bridge.sent == []
+        assert unit._overfeed_lane is unit.lanes["lane1"]
+        assert unit.logger.messages == []
+
     def test_an_overfed_lane_waits_for_the_extruder(self, monkeypatch):
         unit = self._unit(monkeypatch, following=True, fstate=7)
         unit._overfeed_lane = unit.lanes["lane1"]
+        unit._overfeed_until = 0.0
         unit._follow_tick(100.0)
         assert unit._bridge.sent == []
         assert unit._overfeed_lane is unit.lanes["lane1"]
