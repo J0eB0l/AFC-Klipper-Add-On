@@ -35,7 +35,7 @@ try: from extras.AFC_RFID import (sync_rfid_to_spoolman,
                                   match_spool_for_tag, density_for_material,
                                   _spool_uids, _norm_uid, _norm_tray_uid,
                                   _spool_tray_uid, _set_spoolid_takes_on_done,
-                                  _cached_spoolman_client)
+                                  _cached_spoolman_client, report_tag_scan)
 except:
     error_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
     raise error(error_str)
@@ -483,6 +483,11 @@ class BambuSpoolman:
                         client.write_spool_metadata(spool.get("id"), uid=uid)
                     except Exception:
                         pass
+                if not restored:
+                    # A read of the bay, matched or not: tell Spoolman's
+                    # paired browsers. A restored lane's lookup read nothing.
+                    report_tag_scan(client, getattr(lane, "name", ""), uid,
+                                    "bambu")
             except Exception:
                 spool = None
                 down = restored

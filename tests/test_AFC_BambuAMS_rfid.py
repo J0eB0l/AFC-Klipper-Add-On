@@ -555,6 +555,58 @@ class TestBambuSpoolmanBindByUidBg:
             ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by UID d34e4e39")]
 
+    class _ScanClient(FakeSpoolmanClient):
+        """Spoolman that also records each scan report."""
+
+        def __init__(self, spools: Sequence[Dict[str, Any]] = ()) -> None:
+            """:param spools: Spoolman's spool records"""
+            super().__init__(spools)
+            self.reports: List[Tuple[Any, ...]] = []
+
+        def report_scan(self, reader_id: str, uid: Any, name: Any, fmt: Any) -> None:
+            """Record one scan report."""
+            self.reports.append((reader_id, uid, name, fmt))
+
+    def test_a_bay_read_is_reported_to_spoolman(self, monkeypatch):
+        monkeypatch.setattr(afc_rfid_mod.socket, "gethostname", lambda: "pi")
+        client = self._ScanClient([brfid_spool(132, uids=["D34E4E39"])])
+        unit = self._bind_unit(monkeypatch, client, "d34e4e39")
+        sp, lane = unit._measure, unit.lanes["lane14"]
+        sp._bind_by_uid_bg(lane, 2, "d34e4e39", "", tray_uid=BRFID_TRAY)
+        unit.afc.reactor.run_callbacks()
+        assert client.reports == [("afc-pi-lane14", "d34e4e39", "pi lane14", "bambu")]
+        assert unit.afc.spool.calls == [("set_spoolID", (lane, 132), {})]
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+                      "132 by UID d34e4e39")]
+
+    def test_an_unknown_tag_is_reported_too(self, monkeypatch):
+        # Unmatched is what Spoolman's Add tag dialog wants to hear about.
+        monkeypatch.setattr(afc_rfid_mod.socket, "gethostname", lambda: "pi")
+        client = self._ScanClient([])
+        unit = self._bind_unit(monkeypatch, client, "d34e4e39")
+        sp, lane = unit._measure, unit.lanes["lane14"]
+        sp._bind_by_uid_bg(lane, 2, "d34e4e39", "", tray_uid=BRFID_TRAY)
+        unit.afc.reactor.run_callbacks()
+        assert client.reports == [("afc-pi-lane14", "d34e4e39", "pi lane14", "bambu")]
+        assert unit.afc.spool.calls == []
+        assert unit.logger.messages == []
+
+    def test_a_restored_lookup_is_not_reported(self, monkeypatch):
+        client = self._ScanClient([brfid_spool(132, uids=["D34E4E39"])])
+        unit = self._bind_unit(monkeypatch, client, "d34e4e39")
+        sp, lane = unit._measure, unit.lanes["lane14"]
+        sp._bind_by_uid_bg(lane, 2, "d34e4e39", "", tray_uid=BRFID_TRAY,
+                           restored=True)
+        unit.afc.reactor.run_callbacks()
+        assert client.reports == []
+        assert unit.logger.messages == [
+            ("info", "AFC bambu Bambu_AMS_1: lane14 -- tag D34E4E39 matches Spoolman spool "
+                     "132, which has no remaining weight on record, so the lane was not "
+                     "linked to it (AFC clears a lane linked to a spool without one). "
+                     "Correct spool 132's weight in Spoolman, then run AFC_BAMBU_SCAN "
+                     "LANE=lane14 to link it")]
+
     def test_a_restored_lookup_with_no_client_is_asked_again(self, monkeypatch):
         # Spoolman or Moonraker not up yet: for a restored lane that is no
         # miss, and the bay is asked again later.

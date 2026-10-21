@@ -20,6 +20,7 @@ from extras.AFC_RFID import (
     _missing_filament_fields,
     _norm_tray_uid,
     _norm_uid,
+    _report_lane_scan,
     _spool_tag_uids,
     _spool_uids,
     apply_filament_defaults,
@@ -40,7 +41,9 @@ from extras.AFC_RFID import (
     match_spool_for_tag,
     prompt_hold_spool,
     resolve_rfid_keys,
+    report_tag_scan,
     rgb_array_to_hex,
+    scan_reader,
     SpoolmanClient,
     sync_rfid_to_spoolman,
 )
@@ -202,6 +205,13 @@ class TestSpoolmanClientSpoolmanProxy:
              {"request_method": "POST", "path": "/v1/x", "body": {"a": 1}})]
         assert moonraker.logger.messages == [
             ("error", 'Spoolman POST /v1/x failed; request body: {"a": 1}')]
+
+    def test_a_quiet_write_failure_does_not_log(self):
+        client, moonraker = rfid_spoolman_client()
+        assert client._spoolman_proxy("POST", "/v1/x", body={"a": 1},
+                                      log_failure=False) is None
+        assert moonraker.calls == [("POST", "/v1/x", {"a": 1}, True)]
+        assert moonraker.logger.messages == []
 
     def test_invalid_json_string_body_kept_as_string(self):
         client, moonraker = rfid_spoolman_client()
@@ -528,6 +538,91 @@ class TestSpoolmanClientEnsureTagLinked:
         assert client.ensure_tag_linked(5, {"id": 5, "tags": []}, "CCDD") is False
         assert moonraker.sent("POST", "/v1/spool/5/tag") == []
         assert moonraker.logger.messages == []
+
+
+class TestSpoolmanClientReportScan:
+    _SCAN = ("POST", "/v1/tag/scan")
+
+    @staticmethod
+    def _client(native: Optional[bool] = True, answer: Any = None
+                ) -> Tuple[SpoolmanClient, RfidSpoolmanMoonraker]:
+        """
+        :param native: the client's native_tags
+        :param answer: what Spoolman answers the scan with
+        :return tuple: (client, moonraker)
+        """
+        client, moonraker = rfid_spoolman_client({("POST", "/v1/tag/scan"): answer})
+        client.native_tags = native
+        return client, moonraker
+
+    def test_reports_with_name_and_format(self):
+        client, moonraker = self._client(answer={"matched_spool_id": 5})
+        assert client.report_scan("afc-lava-lane4", "cc:dd", "lava lane4", "ntag",
+                                  now=10.0) == {"matched_spool_id": 5}
+        assert moonraker.calls == [
+            ("POST", "/v1/tag/scan", {"uid": "CCDD", "reader_id": "afc-lava-lane4",
+                                      "name": "lava lane4", "format": "ntag"}, False)]
+        assert client._last_scans == {"afc-lava-lane4": ("CCDD", 10.0)}
+        assert moonraker.logger.messages == []
+
+    def test_reports_without_name_or_format(self):
+        client, moonraker = self._client()
+        assert client.report_scan("r1", "CCDD", now=1.0) is None
+        assert moonraker.sent(*self._SCAN) == [{"uid": "CCDD", "reader_id": "r1"}]
+        # A failed report is not logged.
+        assert moonraker.logger.messages == []
+
+    def test_uses_the_monotonic_clock_by_default(self, monkeypatch):
+        client, moonraker = self._client()
+        monkeypatch.setattr(time, "monotonic", lambda: 77.0)
+        client.report_scan("r1", "CCDD")
+        assert client._last_scans == {"r1": ("CCDD", 77.0)}
+
+    def test_a_repeat_within_the_window_is_not_reported(self):
+        client, moonraker = self._client()
+        client.report_scan("r1", "CCDD", now=100.0)
+        client.report_scan("r1", "ccdd", now=100.0 + 29.9)
+        assert len(moonraker.sent(*self._SCAN)) == 1
+        assert client._last_scans == {"r1": ("CCDD", 100.0)}
+
+    def test_a_repeat_after_the_window_is_reported(self):
+        client, moonraker = self._client()
+        client.report_scan("r1", "CCDD", now=100.0)
+        client.report_scan("r1", "CCDD", now=130.0)
+        assert len(moonraker.sent(*self._SCAN)) == 2
+        assert client._last_scans == {"r1": ("CCDD", 130.0)}
+
+    def test_another_tag_on_the_reader_is_reported(self):
+        client, moonraker = self._client()
+        client.report_scan("r1", "CCDD", now=100.0)
+        client.report_scan("r1", "EEFF", now=101.0)
+        assert [b["uid"] for b in moonraker.sent(*self._SCAN)] == ["CCDD", "EEFF"]
+
+    def test_the_same_tag_on_another_reader_is_reported(self):
+        client, moonraker = self._client()
+        client.report_scan("r1", "CCDD", now=100.0)
+        client.report_scan("r2", "CCDD", now=101.0)
+        assert [b["reader_id"] for b in moonraker.sent(*self._SCAN)] == ["r1", "r2"]
+
+    def test_a_blank_uid_is_not_reported(self):
+        client, moonraker = self._client()
+        assert client.report_scan("r1", "", now=1.0) is None
+        assert moonraker.calls == [] and client._last_scans == {}
+
+    def test_an_older_server_is_not_told(self):
+        client, moonraker = self._client(native=False)
+        assert client.report_scan("r1", "CCDD", now=1.0) is None
+        assert moonraker.calls == [] and client._last_scans == {}
+
+    def test_an_unknown_server_is_not_told(self):
+        client, moonraker = self._client(native=None)
+        assert client.report_scan("r1", "CCDD", now=1.0) is None
+        assert moonraker.calls == []
+
+    def test_a_non_hex_uid_is_not_reported(self):
+        client, moonraker = self._client()
+        assert client.report_scan("r1", "S0395MB25", now=1.0) is None
+        assert moonraker.calls == [] and client._last_scans == {}
 
 
 class TestSpoolmanClientLog:
@@ -1395,6 +1490,87 @@ class TestMatchSpoolForTag:
         client.native_tags = False
         assert match_spool_for_tag(client, "AABBCCDD", "") == (roll, False, None)
         assert moonraker.calls == [("GET", "/v1/spool", None, False)]
+
+
+class TestScanReader:
+    def test_host_and_lane_name_the_reader(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "lava")
+        assert scan_reader("lane4") == ("afc-lava-lane4", "lava lane4")
+
+    def test_characters_spoolman_refuses_become_dashes(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "my pi!")
+        assert scan_reader("lane 4") == ("afc-my-pi--lane-4", "my-pi- lane 4")
+
+    def test_blank_names_get_defaults(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "")
+        assert scan_reader("") == ("afc-printer-lane", "printer ")
+
+    def test_long_names_are_cut_to_64(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "h" * 80)
+        rid, name = scan_reader("lane1")
+        assert (rid, name) == (("afc-" + "h" * 80)[:64], ("h" * 80)[:64])
+
+
+class TestReportTagScan:
+    class _Client:
+        """SpoolmanClient's report_scan, recorded."""
+
+        def __init__(self, raises: Optional[Exception] = None) -> None:
+            """
+            :param raises: raised by report_scan when given
+            """
+            self.reports: List[Tuple[Any, ...]] = []
+            self.raises = raises
+
+        def report_scan(self, reader_id: str, uid: Any, name: Any, fmt: Any) -> None:
+            """Record one report."""
+            self.reports.append((reader_id, uid, name, fmt))
+            if self.raises is not None:
+                raise self.raises
+
+    def test_reports_as_the_lane_reader(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "lava")
+        client = self._Client()
+        report_tag_scan(client, "lane11", "AABB", "bambu")
+        assert client.reports == [("afc-lava-lane11", "AABB", "lava lane11", "bambu")]
+
+    def test_no_client_does_nothing(self):
+        assert report_tag_scan(None, "lane1", "AABB") is None
+
+    def test_a_failing_report_never_raises(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "lava")
+        client = self._Client(raises=RuntimeError("down"))
+        report_tag_scan(client, "lane1", "AABB")
+        assert client.reports == [("afc-lava-lane1", "AABB", "lava lane1", None)]
+
+
+class TestReportLaneScan:
+    class _Lane:
+        """An AFC lane's name."""
+
+        def __init__(self, name: str) -> None:
+            """:param name: lane name"""
+            self.name = name
+
+    def test_reports_the_lane_with_the_chip_format(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "lava")
+        client, moonraker = rfid_spoolman_client()
+        client.native_tags = True
+        monkeypatch.setattr(AFC_RFID, "_cached_spoolman_client", lambda afc: client)
+        _report_lane_scan(object(), self._Lane("lane4"),
+                          {"uid": "AABB", "tag_type": "MifareClassic1k"})
+        assert moonraker.sent("POST", "/v1/tag/scan") == [
+            {"uid": "AABB", "reader_id": "afc-lava-lane4", "name": "lava lane4",
+             "format": "mifare_classic"}]
+
+    def test_an_unknown_chip_family_has_no_format(self, monkeypatch):
+        monkeypatch.setattr(AFC_RFID.socket, "gethostname", lambda: "lava")
+        client, moonraker = rfid_spoolman_client()
+        client.native_tags = True
+        monkeypatch.setattr(AFC_RFID, "_cached_spoolman_client", lambda afc: client)
+        _report_lane_scan(object(), self._Lane("lane4"), {"uid": "AABB"})
+        assert moonraker.sent("POST", "/v1/tag/scan") == [
+            {"uid": "AABB", "reader_id": "afc-lava-lane4", "name": "lava lane4"}]
 
 
 class TestCachedSpoolmanClient:
@@ -2515,6 +2691,11 @@ class TestSyncRfidToSpoolman:
                           "GET /v1/filament?tag=AABBCCDD": []}))
         assert afc.moonraker.sent("POST", "/v1/spool/300/tag") == [
             {"uid": "AABBCCDD", "format": "ntag"}]
+        # Reported once the bind is settled, as the lane's reader.
+        reader_id, name = scan_reader("lane1")
+        assert afc.moonraker.sent("POST", "/v1/tag/scan") == [
+            {"uid": "AABBCCDD", "reader_id": reader_id, "name": name, "format": "ntag"}]
+        assert afc.moonraker.calls[-1][:2] == ("POST", "/v1/tag/scan")
         assert lane.spool_id == 300
         assert logger.messages == [
             ("info", "TEST: matched spool #300 by tag UID AABBCCDD"),
@@ -2982,6 +3163,27 @@ class TestSyncRfidToSpoolman:
         # Run on the sync's defaults: assigned, not staged.
         assert lane.spool_id == 300
         assert afc.spool.next_spool_id is None
+        assert logger.messages == [
+            ("info", "TEST: matched spool #300 by tag UID AABB"),
+            ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 100g left) assigned to lane1")]
+
+    def test_on_the_moonraker_thread_the_scan_is_reported_there(self):
+        matched = {**self._matched(300, "AABB", 100, self._FULL_FILAMENT), "tags": []}
+        queue, reactor = self._WriteQueue(), self._Reactor()
+        afc, lane, logger = self._run(
+            {**self._FULL_TAG, "tag_type": "MifareUltralight"}, self._routes(
+                [matched], **{"POST /v1/spool/300/tag": {"uid": "AABB"},
+                              "GET /v1/spool?tag=AABB": [],
+                              "GET /v1/filament?tag=AABB": []}),
+            reactor=reactor, queue=queue)
+        assert afc.moonraker.calls == []
+        queue.run()
+        reader_id, name = scan_reader("lane1")
+        assert afc.moonraker.sent("POST", "/v1/tag/scan") == [
+            {"uid": "AABB", "reader_id": reader_id, "name": name, "format": "ntag"}]
+        assert afc.moonraker.calls[-1][:2] == ("POST", "/v1/tag/scan")
+        reactor.run()
+        assert lane.spool_id == 300
         assert logger.messages == [
             ("info", "TEST: matched spool #300 by tag UID AABB"),
             ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 100g left) assigned to lane1")]

@@ -12,6 +12,7 @@
 from __future__ import annotations
 import json
 import re
+import socket
 import threading
 import time
 from contextlib import contextmanager
@@ -52,6 +53,8 @@ class SpoolmanClient:
         # Whether this Spoolman links tags natively (0.27+). Learned from the
         # first spool record read, which has a 'tags' list on those servers.
         self.native_tags: Optional[bool] = None
+        # reader_id -> (UID, monotonic time) of the last scan reported to it.
+        self._last_scans: Dict[str, Tuple[str, float]] = {}
         # Per-thread override for the failed-request line; see logging_to.
         self._thread_log = threading.local()
 
@@ -86,7 +89,7 @@ class SpoolmanClient:
         return self._mr._get_results(url_string, print_error)
 
     def _spoolman_proxy(self, method: str, path: str, body: Optional[Any] = None,
-                        print_error: bool = True) -> Any:
+                        print_error: bool = True, log_failure: bool = True) -> Any:
         """
         Spoolman API call via moonraker's proxy endpoint.
 
@@ -95,6 +98,7 @@ class SpoolmanClient:
         :param body: Optional request body; a JSON string is decoded to an
             object so moonraker's proxy sets the JSON Content-Type.
         :param print_error: Whether to log on a failed request.
+        :param log_failure: Whether a failed write logs its request body.
         :return Any: Parsed JSON result, or None on failure.
         """
         payload = {"request_method": method, "path": path}
@@ -112,7 +116,9 @@ class SpoolmanClient:
         req = Request(url, json.dumps(payload).encode('utf-8'),
                       headers={"Content-Type": "application/json"})
         result = self._get_results(req, print_error)
-        if result is None and method != "GET":
+        if (result is None
+            and method != "GET"
+            and log_failure):
             self._log().error(
                 f"Spoolman {method} {path} failed; request body: "
                 f"{json.dumps(body) if body is not None else '(none)'}")
@@ -262,6 +268,46 @@ class SpoolmanClient:
                     f"is the right one, use Move it here in Spoolman.")
             return False
         return self.link_spool_tag(spool_id, norm, tag_format) is not None
+
+    #: A reader reporting the same tag again within this many seconds is not
+    #: reported twice, so a unit re-reading a tag at rest stays quiet.
+    SCAN_REPEAT_S = 30.0
+
+    def report_scan(self, reader_id: str, uid: Any, name: Optional[str] = None,
+                    tag_format: Optional[str] = None,
+                    now: Optional[float] = None) -> Optional[dict]:
+        """
+        Tell Spoolman a reader read this tag, for its paired browsers.
+
+        Spoolman only looks the tag up and broadcasts the scan; nothing is
+        created or linked. Best-effort: a failure is not logged.
+
+        :param reader_id: stable reader id, e.g. "afc-lava-lane4"
+        :param uid: tag UID, any separators or case
+        :param name: reader name the Spoolman UI shows
+        :param tag_format: kind of tag, e.g. "ntag"; informational only
+        :param now: monotonic time, for tests
+        :return Optional[dict]: Spoolman's answer, or None when not sent or failed
+        """
+        norm = _norm_uid(uid)
+        if (not norm
+            or not self.native_tags
+            or not _HEX_UID.fullmatch(norm)):
+            return None
+        now = time.monotonic() if now is None else now
+        last = self._last_scans.get(reader_id)
+        if (last is not None
+            and last[0] == norm
+            and now - last[1] < self.SCAN_REPEAT_S):
+            return None
+        self._last_scans[reader_id] = (norm, now)
+        body: Dict[str, Any] = {"uid": norm, "reader_id": reader_id}
+        if name:
+            body["name"] = name
+        if tag_format:
+            body["format"] = tag_format
+        return self._spoolman_proxy("POST", "/v1/tag/scan", body=body,
+                                    print_error=False, log_failure=False)
 
     def _log(self) -> Any:
         """
@@ -1069,6 +1115,43 @@ def find_spool_by_uid(client: SpoolmanClient, uid: Any) -> Optional[dict]:
 
 #: Spoolman's free-form tag 'format' for each chip family a reader reports.
 TAG_FORMATS = {"MifareClassic1k": "mifare_classic", "MifareUltralight": "ntag"}
+
+
+def scan_reader(lane_name: str) -> Tuple[str, str]:
+    """
+    Name the Spoolman reader for a lane: one per lane, per printer.
+
+    Every printer shares one Spoolman, so the host name keeps two printers'
+    lane1 apart.
+
+    :param lane_name: AFC lane name
+    :return Tuple[str, str]: (reader_id, display name), each at most 64 chars
+    """
+    host = re.sub(r"[^A-Za-z0-9._:-]", "-", socket.gethostname() or "") or "printer"
+    lane = re.sub(r"[^A-Za-z0-9._:-]", "-", str(lane_name or "")) or "lane"
+    return f"afc-{host}-{lane}"[:64], f"{host} {lane_name}"[:64]
+
+
+def report_tag_scan(client: Any, lane_name: str, uid: Any,
+                    tag_format: Optional[str] = None) -> None:
+    """
+    Report a lane's tag read to Spoolman, never raising.
+
+    Called once our own match or create is done, so the scan Spoolman
+    broadcasts already resolves to the spool the lane got.
+
+    :param client: SpoolmanClient, or None when there is none
+    :param lane_name: AFC lane the tag was read on
+    :param uid: tag UID
+    :param tag_format: kind of tag, e.g. "bambu"; informational only
+    """
+    if client is None:
+        return
+    reader_id, name = scan_reader(lane_name)
+    try:
+        client.report_scan(reader_id, uid, name, tag_format)
+    except Exception:
+        pass
 
 
 def density_for_material(material: str) -> float:
@@ -2132,6 +2215,19 @@ def _set_spoolid_takes_on_done(afc: Any) -> bool:
         return False
 
 
+def _report_lane_scan(afc: Any, lane: Any, slot_info: dict) -> None:
+    """
+    Report the tag a sync just resolved to Spoolman as a scan on its lane.
+
+    :param afc: AFC main object (for the cached client)
+    :param lane: the lane the tag was read on
+    :param slot_info: decoded tag values (uid, tag_type)
+    """
+    report_tag_scan(_cached_spoolman_client(afc), getattr(lane, "name", ""),
+                    slot_info.get("uid"),
+                    TAG_FORMATS.get(slot_info.get("tag_type") or ""))
+
+
 def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any,
                           prefix: str, allow_create: bool = False,
                           set_next: bool = False, reactor: Any = None,
@@ -2177,6 +2273,7 @@ def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any,
     if reactor is None or queue is None:
         resolved = _spoolman_resolve(afc, prep, slot_info, logger, prefix,
                                      allow_create)
+        _report_lane_scan(afc, lane, slot_info)
         _spoolman_apply(afc, lane, logger, prefix, resolved, set_next,
                         done=_finish)
         return
@@ -2194,6 +2291,7 @@ def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any,
             with _cached_spoolman_client(afc).logging_to(deferred):
                 resolved = _spoolman_resolve(afc, prep, slot_info, deferred,
                                              prefix, allow_create)
+            _report_lane_scan(afc, lane, slot_info)
         except Exception as e:                       # never kill that thread
             resolved = None
             deferred.error(f"{prefix} Spoolman sync failed: {e}")
