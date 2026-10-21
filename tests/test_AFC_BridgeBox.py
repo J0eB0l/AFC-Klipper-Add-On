@@ -2869,15 +2869,10 @@ class TestAfcBridgeBoxInit:
 
         monkeypatch.setattr(configfile, "ConfigWrapper", _Recording)
         printer = make_printer()
-        live: Dict[Tuple[str, str], int] = {}
-
-        class _Validate:
-            access_tracking = live
-
-        class _ConfigFile:
-            validate = _Validate()
-
-        printer.add_object("configfile", _ConfigFile())
+        # The U1's shape: a configfile with no validate object, and the dict
+        # on the section wrappers, which the master's own wrapper shares.
+        printer.add_object("configfile", types.SimpleNamespace())
+        live = printer.access_tracking
         _bbx_boot(tmp_path, printer)
         assert [section for section, _t in seen] == [
             "AFC_BambuAMS Bambu_AMS_HT_1", "AFC_lane lane24",
@@ -15559,6 +15554,25 @@ class TestAfcBridgeBoxLiveAccessTracking:
         if configfile is not None:
             printer.add_object("configfile", configfile)
         return m
+
+    def test_the_sections_own_wrapper_comes_first(self, tmp_path):
+        # The U1's Klipper has no configfile.validate; the wrapper has it.
+        live: Dict[Any, Any] = {}
+        cf = types.SimpleNamespace(
+            validate=types.SimpleNamespace(access_tracking={}),
+            access_tracking={})
+        m = self._master(tmp_path, cf)
+        config = types.SimpleNamespace(access_tracking=live)
+        assert m._live_access_tracking(config) is live
+        assert _p6_log(m) == []
+
+    def test_a_wrapper_without_tracking_falls_through(self, tmp_path):
+        live: Dict[Any, Any] = {}
+        cf = types.SimpleNamespace(
+            validate=types.SimpleNamespace(access_tracking=live))
+        m = self._master(tmp_path, cf)
+        assert m._live_access_tracking(types.SimpleNamespace()) is live
+        assert _p6_log(m) == []
 
     def test_it_finds_tracking_on_the_validate_object(self, tmp_path):
         # Where current Klipper keeps it.

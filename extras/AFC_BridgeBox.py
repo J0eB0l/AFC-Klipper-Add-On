@@ -928,8 +928,9 @@ class afcBridgeBox:
 
         import configfile
         # Pass the live access-tracking dict, not {}: configfile.settings is
-        # built from it, and Mainsail reads sensor_type there to show humidity.
-        tracking = self._live_access_tracking()
+        # built from it, and Mainsail and Fluidd read sensor_type there to show
+        # humidity.
+        tracking = self._live_access_tracking(config)
         for section, _keys in sections:
             wrapper = configfile.ConfigWrapper(
                 self.printer, fileconfig, tracking, section)
@@ -6761,21 +6762,25 @@ class afcBridgeBox:
                         and (family is None or pu.get("family") == family)
                         and owners.get(pu.get("name")) == uid), None)
 
-    def _live_access_tracking(self) -> dict:
+    def _live_access_tracking(self, config: Any = None) -> dict:
         """
         The printer's own config access-tracking dict, or a throwaway.
 
-        Klipper has moved this between objects (it lives on configfile.validate
-        in current versions and on configfile itself in older ones), so it is
-        looked up by shape rather than by path. A miss only leaves fabricated
-        sections absent from configfile.settings and never stops a chain
-        coming up.
+        Every section wrapper of this start shares one dict, so this
+        section's own wrapper is asked first; AFC's core reads it there too.
+        Builds without it on the wrapper are covered by configfile.validate
+        (current Klipper) and configfile itself. The U1's Klipper has no
+        configfile.validate, so asking only the configfile left every
+        fabricated section out of configfile.settings there, and Fluidd
+        showed no humidity for the units. A miss never stops a chain coming
+        up.
 
+        :param config: this section's wrapper, when there is one
         :return dict: the live tracking dict, or a fresh one if not found
         """
         try:
             cf = self.printer.lookup_object("configfile", None)
-            for owner in (getattr(cf, "validate", None), cf):
+            for owner in (config, getattr(cf, "validate", None), cf):
                 at = getattr(owner, "access_tracking", None)
                 if isinstance(at, dict):
                     return at
