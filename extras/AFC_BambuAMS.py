@@ -1236,6 +1236,44 @@ def _fault_reason(text: str) -> str:
     return "  ".join(keep) if keep else text.strip()
 
 
+# "assist finish stall! pos:-0.27->0.64": the assist stopped with the buffer
+# moved from the first position to the second.
+_ASSIST_STALL_RE = re.compile(
+    r"assist finish stall!\s*pos:(-?\d+(?:\.\d+)?)->(-?\d+(?:\.\d+)?)")
+
+#: Buffer position at or above which an assist stall means the AMS overfed.
+#: A healthy buffer sits between about 0.06 and 0.45 while printing.
+OVERFEED_BUFFER_POS = 0.5
+
+
+def _overfeed_stall(text: str) -> Optional[Tuple[float, float]]:
+    """
+    The buffer positions of an assist stall that ended with the buffer
+    squeezed.
+
+    The assist stops itself when the buffer will not come back to center. If
+    it ended compressed, the AMS pushed more than the extruder took (a cold or
+    idle extruder, or a retract), which is not a jam: the path moves freely.
+    A stall that ended with the buffer low is the AMS failing to feed, and
+    stays a fault.
+
+    :param text: the raw narration buffer at the moment of the fault
+    :return tuple: (start, end) positions, or None if not an overfeed
+    """
+    if not text:
+        return None
+    m = _ASSIST_STALL_RE.search(text)
+    if m is None:
+        return None
+    start = float(m.group(1))
+    end = float(m.group(2))
+    if end < OVERFEED_BUFFER_POS:
+        return None
+    if end <= start:
+        return None
+    return (start, end)
+
+
 # The bridge registry lives in AFC_BambuAMS_bridge. Reached as
 # _bridge_mod._BRIDGES, never imported by name, so a rebind is seen by every
 # reader.
@@ -6507,6 +6545,11 @@ class afcBambuAMS(afcUnit):
     #: over to the recovery. A retrying unit reads 2; a latched one holds 7.
     STALL_LATCH_S = 10.0
 
+    #: After a raised stall, how long the detectors stay quiet. One stall
+    #: arrives as several reports (the narration, state 7, a later "state:6"),
+    #: and each would raise again once the hold lifts outside a print.
+    FAULT_QUIET_S = 5.0
+
     def _unit_state(self, latest: Optional[dict]) -> Optional[int]:
         """
         THIS unit's reported state from a bridge status frame.
@@ -6649,6 +6692,10 @@ class afcBambuAMS(afcUnit):
         if getattr(self, "_stalled_seen", False):
             return False            # already reported this stall; one per event
         self._stalled_seen = True
+        if self._fault_quiet():
+            return False            # the tail of a stall already raised
+        if self._take_overfeed(lane):
+            return False
         msg = (f"AFC bambu {self.name}: the AMS reports it has STALLED "
                f"(state {state}) on {lane.name} -- the spool is likely tangled "
                f"or the path jammed. Clear the snag, then resume.")
@@ -10922,6 +10969,69 @@ class afcBambuAMS(afcUnit):
             f"pulling against an AMS that is no longer being driven. The link "
             f"reconnects by itself -- resume once it is back.")
 
+    def _fault_quiet(self) -> bool:
+        """
+        Whether a stall was raised within the last FAULT_QUIET_S.
+
+        :return bool: True while the follow-up reports of that stall arrive
+        """
+        until = getattr(self, "_fault_quiet_until", 0.0)
+        return time.monotonic() < until
+
+    def _take_overfeed(self, lane: Any) -> bool:
+        """
+        Consume an unread assist stall that ended with the buffer squeezed.
+
+        The state byte reads 7 for an overfeed too, so the state check looks
+        at the narration before raising. The sequence is marked seen, so the
+        narration check does not report the same stall.
+
+        :param lane: The lane currently followed
+        :return bool: True if the stall was an overfeed and has been handled
+        """
+        getf = getattr(self._bridge, "last_fault", None)
+        if not callable(getf):
+            return False
+        try:
+            seq, text, _amps = getf(unit=getattr(self, "ams_index", None))
+        except Exception:
+            return False
+        if seq == getattr(self, "_fault_seen", 0):
+            return False
+        pos = _overfeed_stall(text)
+        if pos is None:
+            return False
+        self._fault_seen = seq
+        self._note_overfeed(lane, pos[0], pos[1])
+        return True
+
+    def _note_overfeed(self, lane: Any, start: float, end: float) -> None:
+        """
+        Log an assist stall that was an overfeed, and leave the follower armed.
+
+        The AMS stopped its own assist because the buffer would not come back
+        to center, which a cold or idle extruder causes. Dropping the follower
+        here is what left the next unload retracting with nothing taking the
+        filament up. A select clears the unit's latch, and the follower
+        re-asserts the assist once the extruder pulls again.
+
+        :param lane: The lane the AMS was assisting
+        :param start: Buffer position when the assist started
+        :param end: Buffer position when it stopped
+        """
+        self._fault_quiet_until = time.monotonic() + self.FAULT_QUIET_S
+        self.logger.info(
+            f"AFC bambu {self.name}: {lane.name}: the AMS pushed more filament "
+            f"than the extruder took (buffer {start:.2f} -> {end:.2f}) and "
+            f"stopped its assist. Not a jam; the follower re-arms when the "
+            f"extruder pulls.")
+        try:
+            self.select_lane(lane)
+        except Exception as e:
+            self.logger.debug(
+                f"AFC bambu {self.name}: could not clear the overfeed stop: "
+                f"{e}")
+
     def _raise_ams_fault(self, lane: Any, msg: str) -> None:
         """
         Report a stall and, when configured to pause, hold the follower off.
@@ -10933,6 +11043,7 @@ class afcBambuAMS(afcUnit):
         :param lane: The lane that stalled
         :param msg: Operator-facing description of the fault
         """
+        self._fault_quiet_until = time.monotonic() + self.FAULT_QUIET_S
         if not self.fault_pause:
             self.logger.warning(msg)
             return
@@ -11271,6 +11382,12 @@ class afcBambuAMS(afcUnit):
             return
         self._fault_seen = seq
         if not text:
+            return
+        if self._fault_quiet():
+            return
+        pos = _overfeed_stall(text)
+        if pos is not None:
+            self._note_overfeed(lane, pos[0], pos[1])
             return
         low = text.lower()
         # "stall exit" is the scan path finishing its pull-in, not a failure.
@@ -13166,6 +13283,13 @@ class afcBambuAMS(afcUnit):
             cur_lane.disable_buffer()
             cur_lane.sync_to_extruder()
             cur_lane.select_lane()
+            # The assist takes up the tip-forming retracts. A unit that dropped
+            # it (an overfeed stop, a latched error) leaves them pushing into a
+            # path nothing takes up, so the extruder stalls on the tip. A lane
+            # that ran out has nothing to take up; its own path handles it.
+            if not runout_empty:
+                self._clear_latched_error(cur_lane, "tip forming")
+                self.set_feed_assist(cur_lane, True)
             afc.do_tool_cut_tip_form(cur_lane, cur_extruder)
 
             if runout_empty:

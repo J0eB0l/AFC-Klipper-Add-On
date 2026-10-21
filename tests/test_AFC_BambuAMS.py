@@ -28,6 +28,7 @@ from extras.AFC_BambuAMS import (
     _BambuBufferChip,
     _buffer_state,
     _fault_reason,
+    _overfeed_stall,
     _gcmd_int,
     _materials_differ,
     _register_bambu_buffer_chip,
@@ -2187,6 +2188,30 @@ class TestRunByLane:
         assert str(exc.value) == (
             "AFC_BAMBU_SCAN: no Bambu unit holds a lane named 'lane14' "
             "(Bambu units: none)")
+
+
+class TestOverfeedStall:
+    """An assist stall that ended with the buffer squeezed is an overfeed."""
+
+    def test_a_squeezed_buffer_is_an_overfeed(self):
+        text = ("[AMS_COMMON]en:1,mode:3 [AMS_SWITCH]assist finish stall! "
+                "pos:-0.27->0.64, det:43mm")
+        assert _overfeed_stall(text) == (-0.27, 0.64)
+
+    def test_a_buffer_that_ended_low_is_not(self):
+        assert _overfeed_stall("assist finish stall! pos:0.40->0.10") is None
+
+    def test_a_buffer_that_did_not_fill_is_not(self):
+        assert _overfeed_stall("assist finish stall! pos:0.80->0.60") is None
+
+    def test_other_stall_text_is_not(self):
+        assert _overfeed_stall("[AMS_SWITCH]feed finish -1, stall") is None
+
+    def test_a_cut_off_position_is_not(self):
+        assert _overfeed_stall("assist finish stall! pos:0.1") is None
+
+    def test_no_text_is_not(self):
+        assert _overfeed_stall("") is None
 
 
 class TestFaultReason:
@@ -10324,6 +10349,89 @@ class TestAfcBambuAMSCheckUnitStalled:
         assert unit._stalled_seen is False
         assert unit.logger.messages == []
 
+    OVERFEED = ("[AMS_SWITCH]assist finish stall! pos:-0.27->0.64, "
+                "det:43mm")
+    OVERFEED_LOG = ("info", "AFC bambu AMS: lane1: the AMS pushed more "
+                            "filament than the extruder took (buffer -0.27 "
+                            "-> 0.64) and stopped its assist. Not a jam; the "
+                            "follower re-arms when the extruder pulls.")
+
+    def test_an_overfeed_is_logged_and_the_follower_kept(self, monkeypatch):
+        # The state byte reads 7 for it too; the narration says why.
+        unit = self._unit(monkeypatch, 0x07)
+        unit._bridge.fault = (4, self.OVERFEED, 0.0)
+        assert self._run(unit) is False
+        assert unit.afc.error.messages == []
+        assert unit._fault_seen == 4
+        assert unit._stalled_seen is True
+        assert getattr(unit, "_follow_fault_hold", False) is False
+        # A select clears the latch; the assist is never dropped.
+        assert unit._bridge.sent == [{"cmd": "select", "unit": 1, "slot": 1}]
+        assert unit.logger.messages == [self.OVERFEED_LOG]
+
+    def test_a_select_that_raises_is_logged(self, monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        unit._bridge.fault = (4, self.OVERFEED, 0.0)
+
+        def gone(lane: Any) -> tuple:
+            raise OSError("gone")
+        monkeypatch.setattr(unit, "select_lane", gone)
+        assert self._run(unit) is False
+        assert unit.afc.error.messages == []
+        assert unit.logger.messages == [
+            self.OVERFEED_LOG,
+            ("debug", "AFC bambu AMS: could not clear the overfeed stop: "
+                      "gone")]
+
+    def test_a_stall_that_ended_low_still_raises(self, monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        unit._bridge.fault = (4, "assist finish stall! pos:0.40->0.10", 0.0)
+        assert self._run(unit) is True
+        assert unit.afc.error.messages == [("AFC_error", self.STALLED)]
+        assert unit._fault_seen == 0             # left to the narration check
+        assert unit.logger.messages == []
+
+    def test_an_overfeed_already_read_does_not_excuse_a_stall(self,
+                                                              monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        unit._bridge.fault = (4, self.OVERFEED, 0.0)
+        unit._fault_seen = 4
+        assert self._run(unit) is True
+        assert unit.afc.error.messages == [("AFC_error", self.STALLED)]
+        assert unit.logger.messages == []
+
+    def test_a_bridge_without_fault_reports_raises(self, monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        monkeypatch.setattr(unit._bridge, "last_fault", None)
+        assert self._run(unit) is True
+        assert unit.afc.error.messages == [("AFC_error", self.STALLED)]
+        assert unit.logger.messages == []
+
+    def test_a_fault_read_that_raises_raises_the_stall(self, monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        unit._bridge.raising["last_fault"] = OSError("gone")
+        assert self._run(unit) is True
+        assert unit.afc.error.messages == [("AFC_error", self.STALLED)]
+        assert unit.logger.messages == []
+
+    def test_the_tail_of_a_raised_stall_is_quiet(self, monkeypatch):
+        # One stall arrives as several reports; the first raised.
+        unit = self._unit(monkeypatch, 0x07)
+        unit._fault_quiet_until = float("inf")
+        assert self._run(unit) is False
+        assert unit._stalled_seen is True
+        assert unit.afc.error.messages == []
+        assert unit._bridge.sent == []
+        assert unit.logger.messages == []
+
+    def test_a_raise_opens_the_quiet_window(self, monkeypatch):
+        unit = self._unit(monkeypatch, 0x07)
+        assert self._run(unit) is True
+        assert unit._fault_quiet() is True
+        unit._fault_quiet_until = 0.0
+        assert unit._fault_quiet() is False
+        assert unit.logger.messages == []
+
     @pytest.mark.parametrize("ustate", [0x00, 0x02, 0x03])
     def test_transitional_states_do_not(self, monkeypatch, ustate):
         # 02/00 churn while the printer retries is not a fault.
@@ -10364,6 +10472,7 @@ class TestAfcBambuAMSCheckUnitStalled:
         self._set_state(unit, 0x04)
         assert self._run(unit) is False          # clears the latch
         assert unit._stalled_seen is False
+        unit._fault_quiet_until = 0.0            # past the quiet window
         self._set_state(unit, 0x07)
         assert self._run(unit) is True           # a NEW stall reports again
         assert unit.afc.error.messages == [("AFC_error", self.STALLED)] * 2
@@ -21972,6 +22081,28 @@ class TestAfcBambuAMSCheckAmsFault:
         assert unit._fault_seen == 1
         assert unit.logger.messages == []
 
+    def test_an_overfeed_is_logged_not_raised(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          "[AMS_SWITCH]assist finish stall! pos:0.10->0.71")
+        unit._check_ams_fault(unit.lanes["lane22"])
+        assert unit.afc.error.messages == []
+        assert unit._fault_seen == 1
+        assert unit._bridge.sent == [{"cmd": "select", "unit": 0, "slot": 0}]
+        assert unit.logger.messages == [
+            ("info", "AFC bambu Bambu_AMS_1: lane22: the AMS pushed more "
+                     "filament than the extruder took (buffer 0.10 -> 0.71) "
+                     "and stopped its assist. Not a jam; the follower re-arms "
+                     "when the extruder pulls.")]
+
+    def test_a_report_in_the_quiet_window_is_spent(self, monkeypatch):
+        # The "state:6" that follows a raised stall is the same stall.
+        unit = self._unit(monkeypatch, self.FEED_STALL)
+        unit._fault_quiet_until = float("inf")
+        unit._check_ams_fault(unit.lanes["lane22"])
+        assert unit.afc.error.messages == []
+        assert unit._fault_seen == 1
+        assert unit.logger.messages == []
+
     def test_the_unit_s_error_code_is_named(self, monkeypatch):
         unit = self._unit(monkeypatch, self.FEED_STALL, amps=0.0)
         unit._bridge.err_code = (23, 100.0)
@@ -22232,6 +22363,7 @@ class TestAfcBambuAMSRunStallChecks:
         self._set_state(unit, 0)
         unit._run_stall_checks(unit.lanes["lane1"])
         assert unit._stalled_seen is False
+        unit._fault_quiet_until = 0.0            # past the quiet window
         self._set_state(unit, 0x07)
         unit._run_stall_checks(unit.lanes["lane1"])
         assert unit.afc.error.messages == [("AFC_error", self.STALLED),
@@ -25727,7 +25859,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     RETRACT = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 300.0,
                "mmps": 20.0}
     #: Everything said up to and including the unload's own retract.
-    TO_RETRACT = [SELECT, ASSIST_OFF, STOP, RETRACT]
+    TO_RETRACT = [SELECT, ASSIST_ON, ASSIST_OFF, STOP, RETRACT]
     #: One re-kick.
     REKICK = [STOP, SELECT, RETRACT]
     #: The toolhead moves of an unload that reels: the quick pull, the STN
@@ -25851,7 +25983,8 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, at_send = self._rig(monkeypatch)
         unit.unit_unload_lane(lane, lane.extruder_obj)
         assert [(cmd, moves) for cmd, moves, _f in at_send] == [
-            ("select", 1), ("assist", 1), ("stop", 1), ("retract", 3),
+            ("select", 1), ("assist", 1), ("assist", 1), ("stop", 1),
+            ("retract", 3),
             ("stop", 3)]
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
 
