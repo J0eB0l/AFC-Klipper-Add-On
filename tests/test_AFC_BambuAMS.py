@@ -8822,6 +8822,15 @@ class TestAfcBambuAMSOnStatus:
 
     # ── a flap: the bay reads empty and back, the record whole ───────────
 
+    def test_a_frame_names_the_unit_on_its_bridge(self, monkeypatch):
+        # The bridge's console sentences then say which unit spoke.
+        unit = _bambu_p5_unit(monkeypatch, bridge=FakeBridge(),
+                              lanes=[LaneSpec("lane1", 0)])
+        named: List[Tuple[int, str]] = []
+        unit._bridge.name_unit = lambda i, n: named.append((i, n))
+        unit._on_status({})
+        assert named == [(0, "Bambu_AMS_1")]
+
     @pytest.mark.parametrize("scanned", [(), (3,)],
                              ids=["bay-never-scanned", "bay-already-scanned"])
     def test_a_mid_print_flap_finds_its_spool_again_without_moving_anything(
@@ -10365,23 +10374,19 @@ class TestAfcBambuAMSCheckUnitStalled:
         assert unit._fault_seen == 4
         assert unit._stalled_seen is True
         assert getattr(unit, "_follow_fault_hold", False) is False
-        # A select clears the latch; the assist is never dropped.
-        assert unit._bridge.sent == [{"cmd": "select", "unit": 1, "slot": 1}]
+        # The assist is never dropped; the lane is latched as overfed.
+        assert unit._bridge.sent == []
+        assert unit._overfeed_lane is unit.lanes["lane1"]
         assert unit.logger.messages == [self.OVERFEED_LOG]
 
-    def test_a_select_that_raises_is_logged(self, monkeypatch):
+    def test_a_unit_latched_from_an_overfeed_is_not_a_stall(self,
+                                                             monkeypatch):
         unit = self._unit(monkeypatch, 0x07)
-        unit._bridge.fault = (4, self.OVERFEED, 0.0)
-
-        def gone(lane: Any) -> tuple:
-            raise OSError("gone")
-        monkeypatch.setattr(unit, "select_lane", gone)
+        unit._overfeed_lane = unit.lanes["lane1"]
         assert self._run(unit) is False
+        assert unit._stalled_seen is True
         assert unit.afc.error.messages == []
-        assert unit.logger.messages == [
-            self.OVERFEED_LOG,
-            ("debug", "AFC bambu AMS: could not clear the overfeed stop: "
-                      "gone")]
+        assert unit.logger.messages == []
 
     def test_a_stall_that_ended_low_still_raises(self, monkeypatch):
         unit = self._unit(monkeypatch, 0x07)
@@ -22087,12 +22092,45 @@ class TestAfcBambuAMSCheckAmsFault:
         unit._check_ams_fault(unit.lanes["lane22"])
         assert unit.afc.error.messages == []
         assert unit._fault_seen == 1
-        assert unit._bridge.sent == [{"cmd": "select", "unit": 0, "slot": 0}]
+        assert unit._bridge.sent == []
+        assert unit._overfeed_lane is unit.lanes["lane22"]
         assert unit.logger.messages == [
             ("info", "AFC bambu Bambu_AMS_1: lane22: the AMS pushed more "
                      "filament than the extruder took (buffer 0.10 -> 0.71) "
                      "and stopped its assist. Not a jam; the follower re-arms "
                      "when the extruder pulls.")]
+
+    STATE6 = ("[AMS_COMMON]state:0,tray_now:2,tray_exit:15 "
+              "[AMS_COMMON]state:6,tray_now:2,tray_exit:15 [AMS_LED]mc set t2")
+
+    def test_the_overfeed_s_later_state_6_is_not_a_stall(self, monkeypatch):
+        # Seen 56 s after an overfeed: the unit still parked from it.
+        unit = self._unit(monkeypatch, self.STATE6)
+        unit._overfeed_lane = unit.lanes["lane22"]
+        unit._check_ams_fault(unit.lanes["lane22"])
+        assert unit.afc.error.messages == []
+        assert unit._fault_seen == 1
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: lane22: still latched from the "
+                      "overfeed, not a new stall: [AMS_COMMON]state:6,"
+                      "tray_now:2,tray_exit:15  [AMS_LED]mc set t2")]
+
+    def test_a_stall_while_latched_from_an_overfeed_still_raises(
+            self, monkeypatch):
+        unit = self._unit(monkeypatch, self.FEED_STALL)
+        unit._overfeed_lane = unit.lanes["lane22"]
+        unit._check_ams_fault(unit.lanes["lane22"])
+        msg = self._stall_msg("lane22", self.FEED_STALL)
+        assert unit.afc.error.messages == [("AFC_error", msg)]
+        assert unit._overfeed_lane is None       # the raise ends the episode
+        assert unit.logger.messages == []
+
+    def test_an_assist_on_ends_the_overfeed(self, monkeypatch):
+        unit = self._unit(monkeypatch, self.STATE6)
+        unit._overfeed_lane = unit.lanes["lane22"]
+        unit.set_feed_assist(unit.lanes["lane22"], True)
+        assert unit._overfeed_lane is None
+        assert unit.logger.messages == []
 
     def test_a_report_in_the_quiet_window_is_spent(self, monkeypatch):
         # The "state:6" that follows a raised stall is the same stall.
@@ -22491,6 +22529,44 @@ class TestAfcBambuAMSDetectorTick:
                         "RuntimeError('fault table gone'); detector tick "
                         "continuing.")]
 
+    @staticmethod
+    def _restored(monkeypatch: pytest.MonkeyPatch) -> afcBambuAMS:
+        """:return afcBambuAMS: a claimed unit past its startup restore, lane1
+          at the toolhead and not followed"""
+        unit = _bambu_p5_unit(monkeypatch, bridge=FakeBridge(),
+                              lanes=[LaneSpec("lane1", 0, tool_loaded=True)])
+        unit._loaded_restore_done = True
+        return unit
+
+    def test_after_the_restore_a_dropped_assist_is_re_engaged(self,
+                                                             monkeypatch):
+        # A claimed unit whose assist a fault dropped gets it back, as a
+        # configured unit's follower tick does.
+        unit = self._restored(monkeypatch)
+        unit._detector_tick(10.0)
+        assert unit._bridge.sent == TestAfcBambuAMSFollowTick.ENGAGE
+        assert unit._following_lane is unit.lanes["lane1"]
+        assert unit.logger.messages == []
+
+    def test_an_unresolved_index_is_not_engaged(self, monkeypatch):
+        unit = self._restored(monkeypatch)
+        unit._id_resolved = False
+        unit._detector_tick(10.0)
+        assert unit._bridge.sent == []
+        assert unit.logger.messages == []
+
+    def test_a_raising_auto_arm_does_not_end_the_tick(self, monkeypatch):
+        unit = self._restored(monkeypatch)
+
+        def _broken(eventtime: float, lane: Any) -> Any:
+            raise RuntimeError("no lanes")
+
+        monkeypatch.setattr(unit, "_auto_arm", _broken)
+        assert unit._detector_tick(10.0) == pytest.approx(10.1)
+        assert unit.logger.messages == [
+            ("warning", "AFC bambu Bambu_AMS_1: follower auto-arm raised "
+                        "RuntimeError('no lanes'); detector tick continuing.")]
+
 
 class TestAfcBambuAMSFollowTick:
     #: _engage_follower on bay 0: finish (mode 09 -> 07), select, assist on.
@@ -22645,6 +22721,28 @@ class TestAfcBambuAMSFollowTick:
         assert unit._bridge.sent == [_bambu_p5_assist(True)]
         assert unit._follow_reassert_last == 10.0
         assert unit._following_lane is unit.lanes["lane1"]
+        assert unit.logger.messages == []
+
+    def test_an_overfed_lane_is_re_engaged_when_the_extruder_pulls(
+            self, monkeypatch):
+        # Whatever the mode reads: a unit latched from an overfeed is in
+        # neither 0 nor 4. The full engage carries the select that clears it.
+        unit = self._unit(monkeypatch, following=True, fstate=7)
+        unit._overfeed_lane = unit.lanes["lane1"]
+        unit._follow_last_demand = 9.0
+        unit._follow_tick(10.0)
+        assert unit._bridge.sent == self.ENGAGE
+        assert unit._overfeed_lane is None
+        assert unit._fault_quiet() is True
+        assert unit._follow_reassert_last == 10.0
+        assert unit.logger.messages == []
+
+    def test_an_overfed_lane_waits_for_the_extruder(self, monkeypatch):
+        unit = self._unit(monkeypatch, following=True, fstate=7)
+        unit._overfeed_lane = unit.lanes["lane1"]
+        unit._follow_tick(100.0)
+        assert unit._bridge.sent == []
+        assert unit._overfeed_lane is unit.lanes["lane1"]
         assert unit.logger.messages == []
 
     def test_state_0_without_extrusion_is_resting_not_dropped(self,

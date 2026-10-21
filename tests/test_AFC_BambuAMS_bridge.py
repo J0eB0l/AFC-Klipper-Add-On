@@ -1545,6 +1545,7 @@ class TestBambuBridgeSetNarrationLog:
         # At maxBytes the live file rolls to .log.1 and a fresh one starts:
         # the previous chunk survives, disk use stays bounded.
         bambu_bridge.set_narration_log(str(tmp_path), max_bytes=200)
+        bambu_bridge.RAW_NARRATION_CONSOLE = True
         lines = [f"[AMS_SWITCH]line {i} padding padding padding" for i in range(60)]
         for line in lines:
             feed_amsdbg(bambu_bridge, line)
@@ -2214,7 +2215,7 @@ class TestBambuBridgeLastHtCali:
             ("debug", diag),
             ("info", "AFC bambu u: AMS finished measuring the spool"),
             ams_echo(self.AMS1_ODOM)]
-        assert bridge.logger.file_only == [diag]
+        assert bridge.logger.file_only == [diag, ams_echo(self.AMS1_ODOM)[1]]
 
     def test_an_ams_line_mentioning_it_later_is_still_parsed(self, monkeypatch):
         # Anchored at the start: only the firmware's own lines begin with it.
@@ -2964,7 +2965,8 @@ class TestBambuBridgeLastFinish:
             ams_echo(self.ODOM_RESET), ("debug", self.NO_TRAY),
             ams_echo(self.TRAY_GONE)]
         assert bambu_bridge.logger.file_only == [
-            ams_echo(self.ODOM_RESET)[1], self.NO_TRAY]
+            ams_echo(self.ODOM_RESET)[1], self.NO_TRAY,
+            ams_echo(self.TRAY_GONE)[1]]
 
     def test_the_repeat_does_NOT_keep_completing(self, bambu_bridge):
         # Repeated at ~2 Hz. Counting each one leaves a completion pending, so
@@ -2982,8 +2984,10 @@ class TestBambuBridgeLastFinish:
             + [ams_echo(self.STATE_SWITCH), ("debug", self.NO_TRAY),
                ams_echo(self.TRAY_GONE)] * 20)
         assert bambu_bridge.logger.file_only == (
-            [ams_echo(self.ODOM_RESET)[1], self.NO_TRAY]
-            + [ams_echo(self.STATE_SWITCH)[1], self.NO_TRAY] * 20)
+            [ams_echo(self.ODOM_RESET)[1], self.NO_TRAY,
+             ams_echo(self.TRAY_GONE)[1]]
+            + [ams_echo(self.STATE_SWITCH)[1], self.NO_TRAY,
+               ams_echo(self.TRAY_GONE)[1]] * 20)
 
     def test_a_new_tray_re_arms_the_edge(self, bambu_bridge):
         # Load, unload, load, unload must give four completions, not two.
@@ -4072,8 +4076,18 @@ class TestBambuBridgeHandleLine:
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
 
+    def test_raw_narration_stays_off_the_console(self, monkeypatch):
+        # The console gets the sentences; AFC.log keeps the raw line.
+        bridge = make_bambu_bridge(monkeypatch, name="u")
+        self._say(bridge, "[AMS_SWITCH]feed finish -1, stall")
+        assert bridge.logger.messages == [
+            ("debug", "AMS: [AMS_SWITCH]feed finish -1, stall")]
+        assert bridge.logger.file_only == [
+            "AMS: [AMS_SWITCH]feed finish -1, stall"]
+
     def test_narration_with_content_is_not_file_only(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch, name="u")
+        bridge.RAW_NARRATION_CONSOLE = True
         self._say(bridge, "[AMS_SWITCH]feed finish -1, stall")
         assert bridge.logger.messages == [
             ("debug", "AMS: [AMS_SWITCH]feed finish -1, stall")]
@@ -4082,6 +4096,7 @@ class TestBambuBridgeHandleLine:
     def test_repeated_lines_are_deduped_then_re_emitted_with_a_count(
             self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch, name="u")
+        bridge.RAW_NARRATION_CONSOLE = True
         self._say(bridge, "[AMS_TRAY]tray[0] sw_sta update")
         self._say(bridge, "[AMS_TRAY]tray[0] sw_sta update")
         assert bridge.logger.messages == [
@@ -4530,6 +4545,7 @@ class TestBambuBridgeHandleLine:
 
     def test_first_line_logged(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
+        bridge.RAW_NARRATION_CONSOLE = True
         self._say(bridge, "[AMS_RFID] STEP3,feed with rfid fail!")
         assert bridge.logger.messages == [
             ("debug", "AMS: [AMS_RFID] STEP3,feed with rfid fail!")]
@@ -5828,10 +5844,46 @@ class TestAMSHuman:
                      "bay and the toolhead")]
 
     def test_an_error_code_is_named_not_dumped(self, monkeypatch):
-        assert self._said(monkeypatch, "[AMS_LINK]err_code:0x00->0x17",
-                          "[AMS_LINK]err_code:0x17->0x00") == [
-            ("info", "AFC bambu bridge: AMS raised error 0x17"),
+        assert self._said(monkeypatch, "[AMS_LINK]err_code:0x00->0x23",
+                          "[AMS_LINK]err_code:0x23->0x00") == [
+            ("info", "AFC bambu bridge: AMS raised error 0x23"),
             ("info", "AFC bambu bridge: AMS cleared its error")]
+
+    def test_the_assist_timeout_code_is_left_to_the_unit(self, monkeypatch):
+        # 0x17 follows "assist finish stall!", which the unit words itself.
+        assert self._said(monkeypatch, "[AMS_LINK]err_code:0x00->0x17",
+                          "[AMS_LINK]err_code:0x17->0x00") == []
+
+    def test_a_feed_names_its_bay(self, monkeypatch):
+        assert self._said(
+            monkeypatch,
+            "[AMS_SWITCH]feed tray:2, cnt:0,0,4,1, feed2sw:0,0,2,1") == [
+            ("info", "AFC bambu bridge: AMS: feeding from bay 3")]
+
+    def test_an_assist_stop_stays_in_the_log(self, monkeypatch):
+        assert self._said(
+            monkeypatch,
+            "[AMS_SWITCH]timeout, assist finish stall! pos:0.10->0.63") == [
+            ("debug", "AFC bambu bridge: AMS stopped its assist (buffer 0.10 "
+                      "-> 0.63)")]
+
+    def test_a_sentence_names_the_unit_that_spoke(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.name_unit(1, "Bambu_AMS_2")
+        bridge._narrate_human("[AMS_SWITCH]feed tray:2, cnt:0", 100.0, unit=1)
+        bridge._narrate_human("[AMS_DEV] STEP,first detected", 102.0, unit=0)
+        assert bridge.logger.messages == [
+            ("info", "AFC bambu Bambu_AMS_2: AMS: feeding from bay 3"),
+            ("info", "AFC bambu bridge: AMS: spool detected")]
+
+    def test_the_commanded_unit_speaks_for_unattributed_lines(
+            self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.name_unit(1, "Bambu_AMS_2")
+        bridge.set_active_unit(1)
+        bridge._narrate_human("[AMS_SWITCH]feed tray:2, cnt:0", 100.0)
+        assert bridge.logger.messages == [
+            ("info", "AFC bambu Bambu_AMS_2: AMS: feeding from bay 3")]
 
     def test_bays_are_one_based_for_humans(self, monkeypatch):
         # The wire counts from 0; an operator counts bays from 1.

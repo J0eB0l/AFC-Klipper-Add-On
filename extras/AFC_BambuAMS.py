@@ -1241,6 +1241,9 @@ def _fault_reason(text: str) -> str:
 _ASSIST_STALL_RE = re.compile(
     r"assist finish stall!\s*pos:(-?\d+(?:\.\d+)?)->(-?\d+(?:\.\d+)?)")
 
+#: Narration that states a stall, as opposed to a unit still parked from one.
+_STALL_WORDS_RE = re.compile(r"stall|finish -1|timeout error")
+
 #: Buffer position at or above which an assist stall means the AMS overfed.
 #: A healthy buffer sits between about 0.06 and 0.45 while printing.
 OVERFEED_BUFFER_POS = 0.5
@@ -6305,6 +6308,10 @@ class afcBambuAMS(afcUnit):
             if (getattr(self, "unit_uid", None)
                 and not getattr(self, "_id_resolved", True)):
                 return
+            # Names this unit on the bridge's console sentences.
+            namer = getattr(self._bridge, "name_unit", None)
+            if callable(namer):
+                namer(self.ams_index, self.name)
             # Latch the unit's give-up (byte[19] == 0x07) on every frame, since
             # only some frames carry it. Cleared when a fault is armed; own
             # try.
@@ -6694,6 +6701,8 @@ class afcBambuAMS(afcUnit):
         self._stalled_seen = True
         if self._fault_quiet():
             return False            # the tail of a stall already raised
+        if getattr(self, "_overfeed_lane", None) is not None:
+            return False            # still latched from an overfeed
         if self._take_overfeed(lane):
             return False
         msg = (f"AFC bambu {self.name}: the AMS reports it has STALLED "
@@ -10924,6 +10933,7 @@ class afcBambuAMS(afcUnit):
         if on:
             self._following_lane = lane
             self._follow_last_e = None
+            self._overfeed_lane = None
         elif self._following_lane is lane:
             self._following_lane = None
             self._follow_last_e = None
@@ -11012,25 +11022,25 @@ class afcBambuAMS(afcUnit):
         The AMS stopped its own assist because the buffer would not come back
         to center, which a cold or idle extruder causes. Dropping the follower
         here is what left the next unload retracting with nothing taking the
-        filament up. A select clears the unit's latch, and the follower
-        re-asserts the assist once the extruder pulls again.
+        filament up.
+
+        The unit then sits latched (err 0x17, link mode 7) and later narrates
+        the same episode again ("state:6"), with no new stall in it. The latch
+        (_overfeed_lane) keeps those quiet. The follower re-engages the lane
+        (finish, select, assist) once the extruder pulls again, which clears
+        the unit's latch and ends the episode; so does any other assist-on.
 
         :param lane: The lane the AMS was assisting
         :param start: Buffer position when the assist started
         :param end: Buffer position when it stopped
         """
         self._fault_quiet_until = time.monotonic() + self.FAULT_QUIET_S
+        self._overfeed_lane = lane
         self.logger.info(
             f"AFC bambu {self.name}: {lane.name}: the AMS pushed more filament "
             f"than the extruder took (buffer {start:.2f} -> {end:.2f}) and "
             f"stopped its assist. Not a jam; the follower re-arms when the "
             f"extruder pulls.")
-        try:
-            self.select_lane(lane)
-        except Exception as e:
-            self.logger.debug(
-                f"AFC bambu {self.name}: could not clear the overfeed stop: "
-                f"{e}")
 
     def _raise_ams_fault(self, lane: Any, msg: str) -> None:
         """
@@ -11044,6 +11054,7 @@ class afcBambuAMS(afcUnit):
         :param msg: Operator-facing description of the fault
         """
         self._fault_quiet_until = time.monotonic() + self.FAULT_QUIET_S
+        self._overfeed_lane = None
         if not self.fault_pause:
             self.logger.warning(msg)
             return
@@ -11390,6 +11401,14 @@ class afcBambuAMS(afcUnit):
             self._note_overfeed(lane, pos[0], pos[1])
             return
         low = text.lower()
+        if (getattr(self, "_overfeed_lane", None) is not None
+                and not _STALL_WORDS_RE.search(low)):
+            # "state:6" or a link drop with no stall in it: the unit is still
+            # parked from the overfeed, not reporting a new jam.
+            self.logger.debug(
+                f"AFC bambu {self.name}: {lane.name}: still latched from the "
+                f"overfeed, not a new stall: {_fault_reason(text)}")
+            return
         # "stall exit" is the scan path finishing its pull-in, not a failure.
         if "stall exit" in low:
             return
@@ -11474,13 +11493,120 @@ class afcBambuAMS(afcUnit):
             return
         self._check_ams_fault(lane)
 
+    def _auto_arm(self, eventtime: float, lane: Any) -> Any:
+        """
+        Keep the follower engaged on this unit's tool-loaded lane.
+
+        Engages a loaded lane that is not followed, re-asserts the assist when
+        the AMS dropped it and the extruder pulls, and stands the follower
+        down when nothing from this unit is loaded. Shared by the configured
+        unit's follower tick and a pool unit's detector tick, so a claimed
+        unit whose assist was dropped gets it back too.
+
+        :param eventtime: Reactor event time
+        :param lane: The lane currently followed, or None
+        :return Any: the lane followed after this tick, or None
+        """
+        # Evaluated every tick and never short-circuited into the test below:
+        # this call is also what releases the hold once the print resumes.
+        fault_hold = self._fault_hold_active()
+        # Auto-arm: keep the follower engaged while a lane on this unit is
+        # threaded, independent of the buffer readback and extruder wiring.
+        # Held off after a stall, since re-arming into a jam grinds.
+        if (self.follow_when_loaded
+            and not fault_hold
+            and not getattr(self, '_follow_manual_off', False)
+            and not getattr(self, '_unload_in_progress', False)):
+            loaded = self._tool_loaded_lane()
+            if (loaded is not None
+                and getattr(loaded, "status", "") == AFCLaneState.ERROR):
+                # A lane in ERROR is left to the operator: a re-armed assist
+                # would push half-retracted filament forward again. None here
+                # takes the stand-down branch below.
+                loaded = None
+            cleared = getattr(self, "_runout_cleared", None)
+            if cleared is not None:
+                if not afcBambuAMS._bay_ran_out(self, cleared):
+                    self._runout_cleared = None
+                elif loaded is cleared:
+                    # Ran out and its hub reads clear: nothing left for the
+                    # AMS to push (_check_runout_drain).
+                    loaded = None
+            if loaded is not None:
+                if lane is not loaded:
+                    # Never engaged, or the loaded lane changed -> (re)engage mode:4.
+                    self._engage_follower(loaded)   # sets _following_lane
+                    lane = self._following_lane
+                else:
+                    # Already following: re-assert mode:4 if the AMS dropped to
+                    # 0, rate-limited and only when the extruder asked for
+                    # filament within follow_rearm_window.
+                    try:
+                        e_now = self.afc.toolhead.get_position()[3]
+                        if self._follow_last_e is None:
+                            self._follow_last_e = e_now
+                        elif e_now - self._follow_last_e >= self.follow_min_extrude:
+                            self._follow_last_demand = eventtime
+                            self._follow_last_e = e_now
+                        elif e_now < self._follow_last_e:
+                            self._follow_last_e = e_now     # retract/reset
+                    except Exception:
+                        # No toolhead to read: treat as demand rather than
+                        # never re-arming.
+                        self._follow_last_demand = eventtime
+                    st = self._bridge.latest_status()
+                    fstate = st.get("fstate") if st is not None else None
+                    wants = (eventtime - self._follow_last_demand
+                             <= self.follow_rearm_window)
+                    if (wants
+                        and getattr(self, "_overfeed_lane", None) is loaded):
+                        # Latched from an overfeed, whatever its mode reads.
+                        # The full engage carries a select, which is what has
+                        # cleared that latch (the unload's select did).
+                        # Its answer can narrate the old latch once more.
+                        self._follow_reassert_last = eventtime
+                        self._fault_quiet_until = (time.monotonic()
+                                                   + self.FAULT_QUIET_S)
+                        self._engage_follower(loaded)
+                    elif (fstate == AMS_MODE_IDLE
+                          and wants
+                          and eventtime - getattr(
+                              self, "_follow_reassert_last", 0.0) >= 2.0):
+                        self._follow_reassert_last = eventtime
+                        self.set_feed_assist(loaded, True)
+            elif (lane is not None
+                  and lane is getattr(self, "_runout_drain", None)):
+                pass        # pushing a leftover out (_start_runout_drain)
+            elif lane is not None:
+                # Nothing loaded from this unit: stand down. Logged at most
+                # every 5 s, as a flickering _tool_loaded_lane() cycles here.
+                if (eventtime - getattr(self, "_follow_standdown_log", 0.0)
+                        >= 5.0):
+                    self._follow_standdown_log = eventtime
+                    try:
+                        cur_ext = self.afc.function.get_current_extruder()
+                    except Exception:
+                        cur_ext = "?"
+                    self.logger.debug(
+                        f"AFC bambu {self.name}: standing the follower down "
+                        f"for {getattr(lane, 'name', '?')} -- no tool-loaded "
+                        f"lane on this unit (afc.current="
+                        f"{getattr(self.afc, 'current', None)}, active "
+                        f"extruder={cur_ext}). If this repeats at a lane that "
+                        f"IS loaded, the active-extruder gate is the flap.")
+                self.set_feed_assist(lane, False)
+                lane = self._following_lane        # now None
+        return lane
+
     def _detector_tick(self, eventtime: float) -> float:
         """
         Periodic link-loss and stall check for a unit claimed live from the
         pool.
 
-        Runs the same detectors as _follow_tick against this unit's tool-loaded
-        lane, without engaging or re-arming the follower. Idle while the unit
+        Runs the same detectors and auto-arm as _follow_tick against this
+        unit's tool-loaded lane, so an assist the AMS or a fault dropped comes
+        back. The auto-arm waits for the startup restore, which first makes
+        sure the follow commands address the right unit. Idle while the unit
         is released (no bridge).
 
         :param eventtime: Reactor event time
@@ -11496,9 +11622,15 @@ class afcBambuAMS(afcUnit):
                 f"detector tick continuing.")
         # Called every tick: it is also what releases the hold on resume.
         try:
-            self._fault_hold_active()
-        except Exception:
-            pass
+            if (getattr(self, "_loaded_restore_done", False)
+                    and getattr(self, "_id_resolved", True)):
+                self._auto_arm(eventtime, self._following_lane)
+            else:
+                self._fault_hold_active()
+        except Exception as e:
+            self.logger.warning(
+                f"AFC bambu {self.name}: follower auto-arm raised {e!r}; "
+                f"detector tick continuing.")
         try:
             watch = self._tool_loaded_lane()
             if watch is not None and self._bridge is not None:
@@ -11552,85 +11684,7 @@ class afcBambuAMS(afcUnit):
                 log.warning(
                     f"AFC bambu {self.name}: link-loss check raised {e!r}; "
                     f"follower tick continuing.")
-        # Evaluated every tick and never short-circuited into the test below:
-        # this call is also what releases the hold once the print resumes.
-        fault_hold = self._fault_hold_active()
-        # Auto-arm: keep the follower engaged while a lane on this unit is
-        # threaded, independent of the buffer readback and extruder wiring.
-        # Held off after a stall, since re-arming into a jam grinds.
-        if (self.follow_when_loaded
-            and not fault_hold
-            and not getattr(self, '_follow_manual_off', False)
-            and not getattr(self, '_unload_in_progress', False)):
-            loaded = self._tool_loaded_lane()
-            if (loaded is not None
-                and getattr(loaded, "status", "") == AFCLaneState.ERROR):
-                # A lane in ERROR is left to the operator: a re-armed assist
-                # would push half-retracted filament forward again. None here
-                # takes the stand-down branch below.
-                loaded = None
-            cleared = getattr(self, "_runout_cleared", None)
-            if cleared is not None:
-                if not afcBambuAMS._bay_ran_out(self, cleared):
-                    self._runout_cleared = None
-                elif loaded is cleared:
-                    # Ran out and its hub reads clear: nothing left for the
-                    # AMS to push (_check_runout_drain).
-                    loaded = None
-            if loaded is not None:
-                if lane is not loaded:
-                    # Never engaged, or the loaded lane changed -> (re)engage mode:4.
-                    self._engage_follower(loaded)   # sets _following_lane
-                    lane = self._following_lane
-                else:
-                    # Already following: re-assert mode:4 if the AMS dropped to
-                    # 0, rate-limited and only when the extruder asked for
-                    # filament within follow_rearm_window.
-                    try:
-                        e_now = self.afc.toolhead.get_position()[3]
-                        if self._follow_last_e is None:
-                            self._follow_last_e = e_now
-                        elif e_now - self._follow_last_e >= self.follow_min_extrude:
-                            self._follow_last_demand = eventtime
-                            self._follow_last_e = e_now
-                        elif e_now < self._follow_last_e:
-                            self._follow_last_e = e_now     # retract/reset
-                    except Exception:
-                        # No toolhead to read: treat as demand rather than
-                        # never re-arming.
-                        self._follow_last_demand = eventtime
-                    st = self._bridge.latest_status()
-                    fstate = st.get("fstate") if st is not None else None
-                    wants = (eventtime - self._follow_last_demand
-                             <= self.follow_rearm_window)
-                    if (fstate == AMS_MODE_IDLE
-                        and wants
-                        and eventtime - getattr(
-                            self, "_follow_reassert_last", 0.0) >= 2.0):
-                        self._follow_reassert_last = eventtime
-                        self.set_feed_assist(loaded, True)
-            elif (lane is not None
-                  and lane is getattr(self, "_runout_drain", None)):
-                pass        # pushing a leftover out (_start_runout_drain)
-            elif lane is not None:
-                # Nothing loaded from this unit: stand down. Logged at most
-                # every 5 s, as a flickering _tool_loaded_lane() cycles here.
-                if (eventtime - getattr(self, "_follow_standdown_log", 0.0)
-                        >= 5.0):
-                    self._follow_standdown_log = eventtime
-                    try:
-                        cur_ext = self.afc.function.get_current_extruder()
-                    except Exception:
-                        cur_ext = "?"
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: standing the follower down "
-                        f"for {getattr(lane, 'name', '?')} -- no tool-loaded "
-                        f"lane on this unit (afc.current="
-                        f"{getattr(self.afc, 'current', None)}, active "
-                        f"extruder={cur_ext}). If this repeats at a lane that "
-                        f"IS loaded, the active-extruder gate is the flap.")
-                self.set_feed_assist(lane, False)
-                lane = self._following_lane        # now None
+        lane = self._auto_arm(eventtime, lane)
         # Fault detection follows the loaded lane, not the followed one:
         # AFC_BAMBU_FOLLOWER ENABLE=0 clears _following_lane, and running
         # without assist is when the buffer is most likely to starve.

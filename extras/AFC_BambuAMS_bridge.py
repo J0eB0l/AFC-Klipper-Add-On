@@ -385,6 +385,11 @@ _AMS_HUMAN = (
     # follower holds an unloaded tray, so it stays off the console.
     (re.compile(r"err_code:0x00\s*->\s*0x16\b"), None),
     (re.compile(r"err_code:0x16\s*->\s*0x0+\b"), None),
+    # 0x17 follows an assist that timed out ("assist finish stall!"). The
+    # unit's own sentence says what that stop meant, overfeed or jam, so the
+    # bare code would only contradict it.
+    (re.compile(r"err_code:0x00\s*->\s*0x17\b"), None),
+    (re.compile(r"err_code:0x17\s*->\s*0x0+\b"), None),
     # 0x80 is a status bit raised at motor start, not a fault; log only.
     (re.compile(r"err_code:0x00\s*->\s*0x80\b"), None),
     (re.compile(r"err_code:0x80\s*->\s*0x0+\b"), None),
@@ -434,6 +439,13 @@ _AMS_HUMAN = (
     (re.compile(r"\[AMS_LED\]\s*TIMEOUT error (\d+)"),
      lambda m: "AMS: TIMEOUT -- the unit gave up on the move"),
     # Feed milestones, with the distance that makes them meaningful.
+    (re.compile(r"\bfeed tray:(\d+)\s*,"),
+     lambda m: f"AMS: feeding from bay {int(m.group(1)) + 1}"),
+    # The assist giving up; the unit says whether it overfed or jammed.
+    (re.compile(r"assist finish stall!\s*pos:(-?[0-9.]+)->(-?[0-9.]+)"),
+     lambda m: (f"AMS stopped its assist (buffer {m.group(1)} -> "
+                f"{m.group(2)})"),
+     True),
     (re.compile(r"feed to dw ok\s*,\s*len_det:([0-9.]+)\s*m"),
      lambda m: f"AMS: filament reached the hub after {float(m.group(1)):.2f} m"),
     (re.compile(r"feed finish\s*,\s*buff_pos:[0-9.]+\s*,\s*bldc_i:[0-9.]+A"
@@ -1402,6 +1414,11 @@ class BambuBridge:
     # Console narration lines per second before the rest of a burst goes to
     # AFC.log only, so a retry storm cannot stall the reactor.
     NARRATION_CONSOLE_MAX_PER_S = 12
+    #: Whether the AMS's raw narration also goes to the console. Off: the
+    #: console gets the _AMS_HUMAN sentences, AFC.log and the narration file
+    #: keep every raw line. Each model words the same event its own way, so
+    #: raw lines read as noise to anyone not decoding them.
+    RAW_NARRATION_CONSOLE = False
 
     # An "unknown command" this soon after a link opens answers a line from
     # before it.
@@ -1432,6 +1449,9 @@ class BambuBridge:
         # several units and the narration is bus-wide; the address in each
         # message identifies the unit.
         self.name = "bridge"
+        # Chain index -> unit name, so a console sentence names the unit that
+        # spoke (see name_unit).
+        self._unit_names: Dict[int, str] = {}
         self._listeners: List[Callable[[dict], None]] = []
         # The last uartdiag report's edge and frame counts, and which bus
         # state the console was last told (see _note_uartdiag).
@@ -2422,6 +2442,31 @@ class BambuBridge:
         except Exception:
             pass          # a trace must never take the reader thread down
 
+    def name_unit(self, unit: int, name: str) -> None:
+        """
+        Record which unit answers at a chain index, for console sentences.
+
+        Called by each unit on its status frames, so a re-enrolled chain
+        renames itself on the next frame.
+
+        :param unit: chain index
+        :param name: the unit's name, e.g. Bambu_AMS_2
+        """
+        self._unit_names[int(unit)] = str(name)
+
+    def _speaker(self, unit: Optional[int]) -> str:
+        """
+        The name to put on a sentence the AMS narrated.
+
+        :param unit: chain index the narration came from, if known
+        :return str: the unit's name, else this bridge's
+        """
+        if unit is None:
+            unit = self._active_unit
+        if unit is None:
+            return self.name
+        return self._unit_names.get(int(unit), self.name)
+
     def set_active_unit(self, unit: Optional[int]) -> None:
         """
         Name the unit currently being commanded, so narration it produces is
@@ -2714,7 +2759,7 @@ class BambuBridge:
             # to a later, more general pattern that would speak for it.
             if render is None:
                 return
-            msg = f"AFC bambu {self.name}: {render(m)}"
+            msg = f"AFC bambu {self._speaker(unit)}: {render(m)}"
             if log_only:
                 # Log-only lines go to AFC.log before the console dedupe and
                 # rate limit, and still reach the tube_len/dw_len/chamber
@@ -3339,7 +3384,9 @@ class BambuBridge:
                     # The console is rate-limited: filling Klipper's gcode pipe
                     # stalls the reactor and takes the MCUs down. AFC.log keeps
                     # everything.
-                    _quiet = _ams_is_noise(_DBG_AMSTIME_RE.sub("", text).strip())
+                    _quiet = (not self.RAW_NARRATION_CONSOLE
+                              or _ams_is_noise(
+                                  _DBG_AMSTIME_RE.sub("", text).strip()))
                     if not _quiet:
                         _now = time.monotonic()
                         _win = getattr(self, "_narr_win", 0.0)
