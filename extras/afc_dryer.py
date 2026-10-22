@@ -353,7 +353,8 @@ class _BambuBackend(_Backend):
         model = str(getattr(unit, "ams_model", "ams2") or "ams2").lower()
         return {
             "model": model,
-            "label": {"ht": "AMS HT", "ams2": "AMS 2 Pro"}.get(model, "AMS"),
+            "label": {"ht": "AMS HT", "ams2": "AMS 2 Pro",
+                      "lite": "AMS Lite"}.get(model, "AMS"),
             "max_temp": int(getattr(unit, "dry_max_temp", 65)),
             "slots": int(getattr(unit, "unit_slots", 4)),
         }

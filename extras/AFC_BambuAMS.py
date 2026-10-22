@@ -1064,8 +1064,11 @@ DEADLINE_MMPS = 60.0
 LITE_UNLOAD_GUARD_MM = 300.0
 LITE_UNLOAD_MAX_S = 20.0
 #: The AMS Lite's drive speed on the bench (mm/s): times the distance past the
-#: sensor when the odometer is not reporting.
+#: sensor when the odometer is not reporting, and sizes its load window.
 LITE_MMPS = 30.0
+#: How far past its path an AMS Lite load may feed, by its odometer, before
+#: the filament is taken to be going somewhere other than the toolhead.
+LITE_OVERFEED_MM = 250.0
 
 
 def _gcmd_int(gcmd: Any, name: str, default: int,
@@ -6291,6 +6294,9 @@ class afcBambuAMS(afcUnit):
             if self._is_virtual_hub(cur_lane):
                 cur_lane._load_state = bool(
                     afcBambuAMS._hub_reads_filament(self, info))
+            elif self._is_lite():
+                # An AMS Lite lane has no load switch: its bay is its load.
+                cur_lane._load_state = bool(prep)
             if not prep:
                 # Empty bay: LED off, lane idle.
                 self.lane_not_ready(cur_lane)
@@ -6805,7 +6811,9 @@ class afcBambuAMS(afcUnit):
         (the native AFC_hub aggregates ``any(lane.raw_load_state)``), so it is
         True only while this lane's filament is threaded through the hub to
         the toolhead (``tool_loaded``), never for a merely-staged lane, or the
-        lane's own load would trip the "hub not clear" gate.
+        lane's own load would trip the "hub not clear" gate. An AMS Lite lane
+        has no hub of its own to read, so its ``_load_state`` is the bay's
+        presence.
         """
         for name, slot in self._slot_map.items():
             lane = self.lanes.get(name)
@@ -6862,6 +6870,10 @@ class afcBambuAMS(afcUnit):
             if self._is_virtual_hub(lane):
                 lane._load_state = bool(
                     afcBambuAMS._hub_reads_filament(self, info))
+            elif self._is_lite():
+                # No load switch on an AMS Lite lane, and the pinless default
+                # reads loaded: filament in its bay is the lane's load.
+                lane._load_state = bool(present)
             # Before PREP restores the var file a blank lane says nothing, so
             # hold off. Gated on afc.prep_done: a spare claimed after PREP is
             # never prepped.
@@ -12319,7 +12331,8 @@ class afcBambuAMS(afcUnit):
         return True
 
     def _feed_until_sensor(self, cur_lane: Any,
-                           timeout: Optional[float] = None) -> bool:
+                           timeout: Optional[float] = None,
+                           limit_mm: Optional[float] = None) -> bool:
         """
         Drive the AMS forward until the toolhead sensor triggers, then STOP it.
 
@@ -12334,6 +12347,8 @@ class afcBambuAMS(afcUnit):
 
         :param cur_lane: The lane being loaded
         :param timeout: Seconds to keep trying (default ``load_retry_timeout``)
+        :param limit_mm: Stop once the unit's odometer shows the load has fed
+          this far (sets ``_load_overfed``); None for no limit
         :return bool: True once the sensor triggers (AMS stopped), else False
         """
         if timeout is None:
@@ -12440,7 +12455,7 @@ class afcBambuAMS(afcUnit):
                 # Read the odometer now: it keeps climbing once the extruder
                 # takes over (tool_stn plus the purge), so any later reading
                 # would include what the toolhead consumed.
-                self._load_odom_at_sensor = self._odom_now_mm()
+                self._load_odom_at_sensor = self._feed_odom_mm(cur_lane)
                 # A clean load is already narrated by AFC's load path; log at
                 # info only when this loop had to re-kick the AMS.
                 if kicks:
@@ -12452,6 +12467,12 @@ class afcBambuAMS(afcUnit):
                         f"AFC bambu {self.name}: sensor triggered for "
                         f"{cur_lane.name}, AMS stopped")
                 return True
+            if limit_mm is not None:
+                fed = self._load_fed_mm(cur_lane)
+                if (fed is not None
+                    and fed > limit_mm):
+                    self._load_overfed = fed
+                    break
             # No fallback to the AMS's own arrival report: tool_start is always
             # a real pin or "buffer", and the unit reaching the end of its tube
             # differs from the filament reaching the toolhead when the path binds.
@@ -12694,14 +12715,19 @@ class afcBambuAMS(afcUnit):
             return False
 
         # Kick the continuous feed and tight-poll the toolhead sensor. The
-        # deadline uses DEADLINE_MMPS (~136 mm/s) over the whole retry cycle,
-        # not MOVE_DEADLINE_MAX_S.
-        speed = DEADLINE_MMPS
+        # deadline uses DEADLINE_MMPS over the whole retry cycle, not
+        # MOVE_DEADLINE_MAX_S; an AMS Lite feeds at LITE_MMPS.
+        speed = LITE_MMPS if self._is_lite() else DEADLINE_MMPS
         bulk_time = (feed_dist / speed) if speed > 0 else 0.0
         timeout = min(bulk_time + self.load_retry_timeout, LOAD_SENSOR_MAX_S)
+        # An AMS Lite reports how far it has fed, so its load also stops at
+        # the path plus LITE_OVERFEED_MM (see _feed_until_sensor).
+        limit_mm = (self.afc_bowden_length + LITE_OVERFEED_MM
+                    if self._is_lite() else None)
+        self._load_overfed = None
         # The odometer before any move; the sensor distance is the delta (see
         # _measure_path_from_odom).
-        self._load_odom_start = self._odom_now_mm()
+        self._load_odom_start = self._feed_odom_mm(cur_lane)
         self._load_odom_at_sensor = None
         # Freshness mark for the spool measurement this load may produce, so a
         # reading left in the bridge from an earlier load is not adopted as
@@ -12735,7 +12761,7 @@ class afcBambuAMS(afcUnit):
                     f"AFC bambu {self.name}: pre-load prime failed",
                     traceback=traceback.format_exc())
         self.feed(cur_lane, feed_dist)
-        loaded = self._feed_until_sensor(cur_lane, timeout)
+        loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm)
         # Printer "Retry": re-home the stalled unit (0F/0E) and feed again. A
         # unit that declared a fault already ran its own retries, so it gets
         # none and the failure is reported now, like a stock printer waiting
@@ -12749,6 +12775,9 @@ class afcBambuAMS(afcUnit):
                 f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
                 f"fault after its own retries, so there is no re-home retry; "
                 f"reporting the failure now.")
+        # Nor for a feed past its path: a retry would feed the same out again.
+        if self._load_overfed is not None:
+            attempts = 0
         # No retry for a unit that is not listening (dropped its tray
         # selection); checked every round, scoped to _load_t0.
         def _not_listening() -> str:
@@ -12809,9 +12838,9 @@ class afcBambuAMS(afcUnit):
             # Re-baseline after the re-home: mode 0F/0E is a reset and the
             # odometer moves with it, so a delta measured from before it would
             # be the re-home's motion plus the load's, not the path.
-            self._load_odom_start = self._odom_now_mm()
+            self._load_odom_start = self._feed_odom_mm(cur_lane)
             self.feed(cur_lane, feed_dist)       # re-attempt the load
-            loaded = self._feed_until_sensor(cur_lane, timeout)
+            loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm)
         if not loaded:
             # Read before any reel back, which moves the odometer too.
             try:
@@ -12861,6 +12890,15 @@ class afcBambuAMS(afcUnit):
                          f"trying; {tail}.\nAMS said: "
                          f"{_fault_reason(self._declared_fault_text)}\n"
                          f"Clear the path at the unit. {_RETRY_HINT}.")
+            elif self._load_overfed is not None:
+                cause = (f"The AMS Lite fed {cur_lane.name} "
+                         f"{self._load_overfed:.0f}mm, past its {limit_mm:.0f}mm "
+                         f"limit (the {self.afc_bowden_length:.0f}mm path plus "
+                         f"{LITE_OVERFEED_MM:.0f}mm), and it never reached the "
+                         f"toolhead sensor, so the feed was stopped.\n"
+                         f"Check that the tube from the AMS Lite to the "
+                         f"toolhead is connected and that the toolhead sensor "
+                         f"is reading. {_RETRY_HINT}.")
             else:
                 cause = (f"Filament did not reach the toolhead sensor for "
                          f"{cur_lane.name} within {timeout:.0f}s; {tail}.\n"
@@ -12870,12 +12908,13 @@ class afcBambuAMS(afcUnit):
                          f"to tune.\n{_RETRY_HINT}.")
             # How far the odometer went separates a blockage upstream of the
             # AMS from one downstream. The raw span is quoted to compare with
-            # the tube length.
+            # the tube length. A feed past its limit has already said where.
             try:
                 where = self._jam_location(span)
             except Exception:
                 where = ""
-            if where:
+            if (where
+                and self._load_overfed is None):
                 cause = f"{cause}\n{where}"
             # A load that gave up owes a reload on RESUME. The mid-print stall
             # detector never runs for it, so mark the reload here along with
@@ -13892,6 +13931,49 @@ class afcBambuAMS(afcUnit):
             pass
         return None
 
+    def _feed_odom_mm(self, lane: Any) -> Optional[float]:
+        """
+        How far along its path this unit has fed a lane, in mm.
+
+        A boxed unit's odometer counts up as it feeds. An AMS Lite's counts
+        down, and belongs to the tray it has selected, so it is read negated
+        and only once the unit says the lane's tray is selected: before that
+        it is still the previous tray's.
+
+        :param lane: the lane being fed
+        :return float: the position in mm, or None if there is none to read
+        """
+        odom = self._odom_now_mm()
+        if (odom is None
+            or not self._is_lite()):
+            return odom
+        try:
+            u = afcBambuAMS._unit_entry(self, self._bridge.latest_status() or {})
+            if int(u.get("seltray")) != self._slot_of(lane):
+                return None
+        except Exception:
+            return None            # no tray selected yet, or a torn frame
+        return -odom
+
+    def _load_fed_mm(self, lane: Any) -> Optional[float]:
+        """
+        How far the current load has fed a lane so far, in mm.
+
+        Takes the load's starting point when it has none yet: an AMS Lite's
+        odometer only becomes the lane's own once the unit has selected its
+        tray, which can be after the load began.
+
+        :param lane: the lane being loaded
+        :return float: the distance, or None while either end is unknown
+        """
+        now = self._feed_odom_mm(lane)
+        if getattr(self, "_load_odom_start", None) is None:
+            self._load_odom_start = now
+            return None
+        if now is None:
+            return None
+        return now - self._load_odom_start
+
 
     def _dw_len_str(self) -> str:
         """
@@ -14006,6 +14088,10 @@ class afcBambuAMS(afcUnit):
         Not taken from the unload: that trace runs 0 -> -0.999 and resets to 0
         without spanning the tube.
 
+        An AMS Lite unload leaves the filament ``unload_past_sensor`` behind
+        the sensor, and the next load from there travels only about that far,
+        so a Lite's figure must be longer than that by ODOM_PATH_MIN_MM.
+
         :return float: the measured distance in mm, or None if either end of
           the delta is missing or the result is outside ODOM_PATH_MIN/MAX_MM
         """
@@ -14014,7 +14100,10 @@ class afcBambuAMS(afcUnit):
         if a is None or b is None:
             return None
         span = b - a
-        if not (self.ODOM_PATH_MIN_MM <= span <= self.ODOM_PATH_MAX_MM):
+        low = self.ODOM_PATH_MIN_MM
+        if self._is_lite():
+            low += self.unload_past_sensor
+        if not (low <= span <= self.ODOM_PATH_MAX_MM):
             return None
         return span
 

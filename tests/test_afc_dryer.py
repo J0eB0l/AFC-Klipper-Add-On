@@ -654,6 +654,11 @@ class TestBambuBackendDescribe:
         assert _BambuBackend().describe(unit) == {
             "model": "ht", "label": "AMS HT", "max_temp": 85, "slots": 1}
 
+    def test_an_ams_lite_is_labelled_as_one(self):
+        unit = SimpleNamespace(ams_model="lite", dry_max_temp=65, unit_slots=4)
+        assert _BambuBackend().describe(unit) == {
+            "model": "lite", "label": "AMS Lite", "max_temp": 65, "slots": 4}
+
     def test_an_unknown_model_is_labelled_ams(self):
         unit = SimpleNamespace(ams_model="ams1", dry_max_temp=0, unit_slots=4)
         assert _BambuBackend().describe(unit) == {

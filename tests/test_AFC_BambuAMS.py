@@ -8767,6 +8767,21 @@ class TestAfcBambuAMSSystemTest:
         assert lane._load_state is (False if virtual else True)
         assert unit.logger.messages == [self.LOADED]
 
+    @pytest.mark.parametrize("present", [True, False])
+    def test_an_ams_lite_lane_loads_what_its_bay_holds(self, monkeypatch,
+                                                       present):
+        # No load switch and no hub of its own to read.
+        unit = self._unit(monkeypatch, present=present, virtual_hub=False,
+                          material="PLA", spool_id=109)
+        unit.ams_model = "lite"
+        lane = unit.lanes["lane21"]
+        lane._load_state = not present
+        assert unit.system_Test(lane, 0.0, False, False) is True
+        assert lane._load_state is present
+        assert unit.logger.messages == [
+            self.LOADED if present
+            else ("info", "lane21 tool cmd: T1 EMPTY READY FOR SPOOL")]
+
     def test_a_lane_whose_drive_cannot_be_disabled_still_preps(
             self, monkeypatch):
         unit = self._unit(monkeypatch, material="PLA", spool_id=109)
@@ -10954,6 +10969,21 @@ class TestAfcBambuAMSSyncLanes:
         assert lane._load_state is False
         assert unit.logger.messages == [
             self._verdict("Bambu_AMS_1", 0, "none")]
+
+    @pytest.mark.parametrize("present", [True, False])
+    def test_an_ams_lite_lane_loads_what_its_bay_holds(self, monkeypatch,
+                                                       present):
+        # No load switch and no hub of its own to read: the pinless default
+        # would read loaded with the bay empty.
+        unit = _bambu_p3_unit(monkeypatch, model="lite", virtual_hub=False,
+                              lanes=[LaneSpec("lane1", 0)],
+                              slots=[slot_info(0, present=present)])
+        lane = unit.lanes["lane1"]
+        lane._load_state = not present
+        unit._sync_lanes()
+        assert lane._load_state is present
+        assert unit.logger.messages == [
+            self._verdict("Bambu_AMS_1", 0, "none", present=present)]
 
     def test_missing_lane_and_empty_info_skipped(self, monkeypatch):
         # A map entry with no lane, and a bay that has never reported, are
@@ -24435,6 +24465,64 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert unit.reactor.now >= 105.0
         assert unit.logger.messages == [self._kick(1), self._kick(2)]
 
+    # an AMS Lite stops at its odometer limit
+
+    def _lite(self, monkeypatch: pytest.MonkeyPatch,
+              **fields: Any) -> Tuple[afcBambuAMS, Any, FakeBridge]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param fields: the unit's first status entry (odom, seltray)
+        :return tuple: (an AMS Lite, its lane1, its bridge)
+        """
+        bridge = FakeBridge(status=_p6_frame(**fields))
+        unit, lane = self._rig(monkeypatch, model="lite", bridge=bridge)
+        unit._load_overfed = None             # as the load sets it
+        return unit, lane, bridge
+
+    def test_an_ams_lite_past_its_limit_stops_the_attempt(self, monkeypatch):
+        unit, lane, bridge = self._lite(monkeypatch, odom=-100, seltray=0)
+        unit._load_odom_start = 100.0
+        _p6_at(unit, 101.0, lambda: setattr(
+            bridge, "status", _p6_frame(odom=-451, seltray=0)))
+        assert unit._feed_until_sensor(lane, 60.0, 350.0) is False
+        assert unit._load_overfed == 351.0
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert unit._bridge.sent == [self.FEED, self.STOP]
+        assert unit.logger.messages == [self._kick(1)]
+
+    def test_an_ams_lite_at_its_limit_feeds_on(self, monkeypatch):
+        unit, lane, _ = self._lite(monkeypatch, odom=-450, seltray=0)
+        unit._load_odom_start = 100.0
+        assert unit._feed_until_sensor(lane, 5.0, 350.0) is False
+        assert unit._load_overfed is None
+        assert unit.reactor.now >= 105.0                 # rode the window
+        assert unit.logger.messages == [self._kick(1), self._kick(2)]
+
+    def test_an_ams_lite_takes_its_start_once_its_tray_is_selected(
+            self, monkeypatch):
+        # The previous tray's odometer is not this lane's start.
+        unit, lane, bridge = self._lite(monkeypatch, odom=-900, seltray=1)
+        unit._load_odom_start = None
+        _p6_at(unit, 100.5, lambda: setattr(
+            bridge, "status", _p6_frame(odom=-50, seltray=0)))
+        _p6_at(unit, 101.0, lambda: setattr(
+            bridge, "status", _p6_frame(odom=-401, seltray=0)))
+        assert unit._feed_until_sensor(lane, 60.0, 350.0) is False
+        assert unit._load_odom_start == 50.0
+        assert unit._load_overfed == 351.0
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert unit.logger.messages == [self._kick(1)]
+
+    def test_an_ams_lite_reads_its_tray_at_the_trip(self, monkeypatch):
+        bridge = FakeBridge(status=_p6_frame(odom=-1200, seltray=0))
+        unit, lane = self._rig(monkeypatch, model="lite", bridge=bridge,
+                               sensor=[False, False, True])
+        unit._load_odom_start = 0.0
+        assert unit._feed_until_sensor(lane, 5.0, 3250.0) is True
+        assert unit._load_odom_at_sensor == 1200.0
+        assert unit._bridge.sent == [self.FEED, self.STOP]
+        assert unit.logger.messages == [self._kick(1), self._arrived(1)]
+
 
 class TestAfcBambuAMSAdvanceIntoExtruder:
     """Bite, wait for the unit to settle, arm the assist, advance the rest."""
@@ -25655,6 +25743,113 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert lane.status == AFCLaneState.TOOL_LOADED
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
         assert unit.logger.messages == [self.KICKED, self.ARRIVED]
+
+    def _lite(self, monkeypatch: pytest.MonkeyPatch, *,
+              sensor: Sequence[bool] = (False,),
+              values: Optional[Dict[str, Any]] = None,
+              **fields: Any) -> Tuple[afcBambuAMS, Any, FakeBridge]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param sensor: the toolhead sensor's script
+        :param values: config options over the rig's
+        :param fields: the AMS Lite's status entry before the load
+        :return tuple: (the AMS Lite, its lane1, its bridge)
+        """
+        bridge = FakeBridge(status=_p6_frame(**fields))
+        unit, lane = self._rig(monkeypatch, model="lite", bridge=bridge,
+                               sensor=sensor, values=values)
+        return unit, lane, bridge
+
+    @staticmethod
+    def _overfed(fed: int, limit: int, path: int) -> str:
+        """
+        :param fed: how far it fed
+        :param limit: where it was stopped
+        :param path: the path the limit was taken from
+        :return str: the failure for an AMS Lite fed past its limit
+        """
+        return (f"The AMS Lite fed lane1 {fed}mm, past its {limit}mm limit "
+                f"(the {path}mm path plus 250mm), and it never reached the "
+                f"toolhead sensor, so the feed was stopped.\nCheck that the "
+                f"tube from the AMS Lite to the toolhead is connected and "
+                f"that the toolhead sensor is reading. {_P6_RETRY}.")
+
+    def test_an_ams_lite_learns_its_path_from_the_first_load(self,
+                                                            monkeypatch):
+        unit, lane, bridge = self._lite(
+            monkeypatch, sensor=[False, False, True],
+            values={"afc_bowden_length": 1500.0}, odom=0, seltray=0)
+
+        def on_send(br: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "feed":
+                br.status = _p6_frame(odom=-1200, seltray=0)
+        bridge.on_send = on_send
+        assert unit._unit_load_lane(lane) is True
+        assert unit._bridge.sent[1] == dict(self.BULK, mm=1750.0)
+        assert unit._load_odom_start == 0.0
+        assert unit._load_odom_at_sensor == 1200.0
+        assert unit._load_overfed is None
+        assert unit.afc_bowden_length == 1200.0
+        assert unit.logger.messages == [
+            self.KICKED, self.ARRIVED,
+            ("info", "AFC bambu Bambu_AMS_1: the AMS measured its own "
+                     "filament path at 1200mm (was 1500mm) via odometer. "
+                     "Adopting it for this session -- this sizes the load "
+                     "give-up deadline.")]
+
+    def test_an_ams_lite_does_not_learn_from_the_tray_before(self,
+                                                            monkeypatch):
+        # Selected half a second in, so the 900mm the last tray read is not
+        # the start: the path is 1250 - 50.
+        unit, lane, bridge = self._lite(
+            monkeypatch, sensor=[False] * 15 + [True],
+            values={"afc_bowden_length": 1500.0}, odom=-900, seltray=1)
+        _p6_at(unit, 100.475, lambda: setattr(
+            bridge, "status", _p6_frame(odom=-50, seltray=0)))
+        _p6_at(unit, 100.525, lambda: setattr(
+            bridge, "status", _p6_frame(odom=-1250, seltray=0)))
+        assert unit._unit_load_lane(lane) is True
+        assert unit._load_odom_start == 50.0
+        assert unit.afc_bowden_length == 1200.0
+        assert unit.logger.messages == [
+            self.KICKED, self.ARRIVED,
+            ("info", "AFC bambu Bambu_AMS_1: the AMS measured its own "
+                     "filament path at 1200mm (was 1500mm) via odometer. "
+                     "Adopting it for this session -- this sizes the load "
+                     "give-up deadline.")]
+
+    def test_an_ams_lite_fed_past_its_limit_fails_without_a_retry(
+            self, monkeypatch):
+        # A tube off the toolhead: 400mm out on a 100mm path, stopped at once.
+        # The limit already says where, so the odometer's range adds nothing.
+        unit, lane, bridge = self._lite(monkeypatch, odom=0, seltray=0)
+
+        def on_send(br: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "feed":
+                br.push(_p6_frame(odom=0, seltray=0))
+                br.push(_p6_frame(odom=-400, seltray=0))
+        bridge.on_send = on_send
+        assert unit._unit_load_lane(lane) is False
+        assert unit._bridge.sent == [self.SELECT, self.BULK, self.KICK,
+                                     self.STOP]
+        assert unit._load_overfed == 400.0
+        assert unit._load_odom_span_mm() == 400.0
+        assert unit._failed_load_lane is lane
+        assert unit.afc.error.calls == self._failed(
+            lane, self._overfed(400, 350, 100))
+        assert unit.afc.afcDeltaTime.messages == []
+        assert unit.logger.messages == [self.KICKED]
+
+    def test_an_ams_lite_window_is_timed_at_its_own_speed(self, monkeypatch):
+        # (100 + 250) / 30 + 1 = 12.7s, where a boxed unit gets 6.8s.
+        unit, lane, _ = self._lite(monkeypatch,
+                                   values={"load_recover_attempts": 0})
+        assert unit._unit_load_lane(lane) is False
+        assert unit.reactor.now == pytest.approx(112.67, abs=0.06)
+        assert unit._load_overfed is None
+        assert unit.afc.error.messages == [
+            ("handle_lane_failure", self._timed_out(within=13))]
+        assert unit.logger.messages == [self.KICKED]
 
 
 class TestAfcBambuAMSPublishedSlots:
@@ -27105,6 +27300,97 @@ class TestAfcBambuAMSGetLaneResetCommand:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSFeedOdomMm:
+    """How far along its path a unit has fed a lane: a boxed unit's odometer
+    as it is, an AMS Lite's negated and only for its selected tray."""
+
+    def _rig(self, monkeypatch: pytest.MonkeyPatch, model: str,
+             **fields: Any) -> Tuple[afcBambuAMS, Any]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param model: ams_model
+        :param fields: the unit's status entry
+        :return tuple: (the unit, its lane1 in bay 0)
+        """
+        unit = _p6_unit(monkeypatch, model=model,
+                        bridge=FakeBridge(status=_p6_frame(**fields)))
+        return unit, unit.lanes["lane1"]
+
+    def test_a_boxed_unit_reads_its_odometer_as_it_is(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, "ams1", odom=3346, seltray=255)
+        assert unit._feed_odom_mm(lane) == 3346.0
+        assert unit.logger.messages == []
+
+    def test_a_unit_with_no_odometer_reads_none(self, monkeypatch):
+        boxed, boxed_lane = self._rig(monkeypatch, "ams1")
+        assert boxed._feed_odom_mm(boxed_lane) is None
+        lite, lite_lane = self._rig(monkeypatch, "lite", seltray=0)
+        assert lite._feed_odom_mm(lite_lane) is None
+        assert boxed.logger.messages == []
+        assert lite.logger.messages == []
+
+    def test_an_ams_lite_counts_down_so_it_is_negated(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, "lite", odom=-1200, seltray=0)
+        assert unit._feed_odom_mm(lane) == 1200.0
+        assert unit.logger.messages == []
+
+    def test_an_ams_lite_on_another_tray_reads_none(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, "lite", odom=-1200, seltray=1)
+        assert unit._feed_odom_mm(lane) is None
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("fields", [{}, {"seltray": "torn"}])
+    def test_an_ams_lite_with_no_tray_said_reads_none(self, monkeypatch,
+                                                      fields):
+        unit, lane = self._rig(monkeypatch, "lite", odom=-1200, **fields)
+        assert unit._feed_odom_mm(lane) is None
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSLoadFedMm:
+    """How far the current load has fed, from its start, which is taken on
+    the first reading when the load has none."""
+
+    def _rig(self, monkeypatch: pytest.MonkeyPatch,
+             start: Optional[float],
+             odom: Optional[int]) -> Tuple[afcBambuAMS, Any]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param start: the load's start, if it has one
+        :param odom: the boxed unit's odometer now, or None for none
+        :return tuple: (the unit, its lane1)
+        """
+        fields = {} if odom is None else {"odom": odom}
+        unit = _p6_unit(monkeypatch, model="ams1",
+                        bridge=FakeBridge(status=_p6_frame(**fields)))
+        unit._load_odom_start = start
+        return unit, unit.lanes["lane1"]
+
+    def test_it_is_the_distance_from_the_start(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, 100.0, 450)
+        assert unit._load_fed_mm(lane) == 350.0
+        assert unit._load_odom_start == 100.0
+        assert unit.logger.messages == []
+
+    def test_a_load_with_no_start_takes_this_reading(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, None, 450)
+        assert unit._load_fed_mm(lane) is None
+        assert unit._load_odom_start == 450.0
+        assert unit.logger.messages == []
+
+    def test_nothing_to_read_leaves_no_start(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, None, None)
+        assert unit._load_fed_mm(lane) is None
+        assert unit._load_odom_start is None
+        assert unit.logger.messages == []
+
+    def test_a_start_with_nothing_to_read_now_is_none(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, 100.0, None)
+        assert unit._load_fed_mm(lane) is None
+        assert unit._load_odom_start == 100.0
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSPathMeasurement:
     """Three units, three tubes, three dialects: the odometer, then dw_len,
     then tube_len, and no figure is made up when none of them answers."""
@@ -27239,6 +27525,17 @@ class TestAfcBambuAMSMeasurePathFromOdom:
         # The real tubes, and the 300mm and 8000mm bounds themselves.
         unit = self._rig(monkeypatch, 0.0, mm)
         assert unit._measure_path_from_odom() == mm
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("mm, measured", [(329.0, None), (330.0, 330.0),
+                                              (8000.0, 8000.0)])
+    def test_an_ams_lite_must_beat_its_unload_parking_too(self, monkeypatch,
+                                                         mm, measured):
+        # Its unload parks the filament 30mm behind the sensor, so its floor
+        # is 300mm more than that.
+        unit = self._rig(monkeypatch, 0.0, mm)
+        unit.ams_model = "lite"
+        assert unit._measure_path_from_odom() == measured
         assert unit.logger.messages == []
 
 
