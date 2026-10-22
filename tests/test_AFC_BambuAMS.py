@@ -9,7 +9,7 @@ import importlib
 import json
 import queue
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pytest
@@ -2508,7 +2508,8 @@ class TestAfcBambuAMSInit:
         assert u.logger.messages == []
 
     def test_an_ams_lite_setup_is_checked_at_init(self):
-        # A lane whose extruder has no toolhead sensor stops the AMS Lite.
+        # A lane whose extruder has a virtual toolhead sensor stops the AMS
+        # Lite.
         printer = make_printer()
         printer.add_section("AFC_lane lane1",
                             {"unit": "Bambu_AMS_1:1", "hub": "direct"})
@@ -2520,9 +2521,10 @@ class TestAfcBambuAMSInit:
         assert str(exc.value) == (
             "[AFC_BambuAMS Bambu_AMS_1] ams_model: lite cannot run this "
             "setup:\nlane1: [AFC_extruder extruder] has pin_tool_start: "
-            "virtual. An AMS Lite stops its feed at the toolhead sensor, so "
-            "it needs a real one: set pin_tool_start to the pin of a "
-            "filament switch before the extruder gears.")
+            "virtual. An AMS Lite needs a real toolhead sensor or none: set "
+            "pin_tool_start to the pin of a filament switch before the "
+            "extruder gears, or remove it and the AMS Lite's odometer ends "
+            "the load.")
 
     def test_a_boxed_unit_setup_is_not_checked(self):
         printer = make_printer()
@@ -16528,25 +16530,38 @@ class TestAfcBambuAMSIsLite:
 
 class TestAfcBambuAMSCheckLiteConfig:
     """
-    An AMS Lite stops its feed at the toolhead sensor and is alone on its
-    bus: every lane needs a real sensor and a hub setting, and no other unit
-    may share its bridge.
+    An AMS Lite stops its feed at the toolhead sensor, or with none where its
+    odometer stops, and is alone on its bus: every lane needs a real sensor
+    or none and a hub setting, and no other unit may share its bridge.
     """
 
     HEAD = "[AFC_BambuAMS Lite] ams_model: lite cannot run this setup:\n"
     PORT = "/dev/serial/by-id/usb-bambu-if00"
     NO_HUB = ("lane1: an AMS Lite has no hub. Set hub: direct on the lane, or "
               "name an [AFC_hub] with a switch_pin.")
-    NO_SENSOR = ("lane1: [AFC_extruder extruder] has no toolhead sensor. An "
-                 "AMS Lite stops its feed at it: set pin_tool_start to a "
-                 "filament switch before the extruder gears.")
     NO_BUFFER = ("lane1: [AFC_extruder extruder] has pin_tool_start: buffer, "
                  "but no buffer is set for this lane (buffer: on the lane, "
                  "the extruder or [AFC_BambuAMS Lite]). Without one an AMS "
                  "Lite has nothing to stop its feed.")
     NOT_A_U1 = ("lane1: [AFC_extruder extruder] uses u1_filament_sensor_name, "
                 "the Snapmaker U1's own sensor, which counts only on a U1. "
-                "Set pin_tool_start to a filament switch instead.")
+                "Set pin_tool_start to a filament switch instead, or remove "
+                "both and the AMS Lite's odometer ends the load.")
+
+    @staticmethod
+    def _virtual(pin: str = "virtual", lane: str = "lane1",
+                 ext: str = "extruder") -> str:
+        """
+        :param pin: the pin_tool_start that is no switch
+        :param lane: the lane
+        :param ext: its extruder
+        :return str: the problem a pin that is no switch is
+        """
+        return (f"{lane}: [AFC_extruder {ext}] has pin_tool_start: {pin}. An "
+                f"AMS Lite needs a real toolhead sensor or none: set "
+                f"pin_tool_start to the pin of a filament switch before the "
+                f"extruder gears, or remove it and the AMS Lite's odometer "
+                f"ends the load.")
 
     @staticmethod
     def _unit(**values: Any) -> Tuple[afcBambuAMS, BambuConfig]:
@@ -16679,9 +16694,9 @@ class TestAfcBambuAMSCheckLiteConfig:
     def test_a_lane_with_none_uses_the_unit_extruder(self):
         unit, cfg = self._unit()
         self._lane(unit, hub="direct")
-        self._section(unit, "AFC_extruder extruder")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="virtual")
         assert unit.extruder == "extruder"
-        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+        assert self._refused(unit, cfg) == self.HEAD + self._virtual()
 
     def test_no_extruder_anywhere_is_left_to_the_lane(self):
         # AFC_lane reports a lane with no extruder itself.
@@ -16697,22 +16712,25 @@ class TestAfcBambuAMSCheckLiteConfig:
         unit, cfg = self._unit()
         self._lane(unit, hub="direct")
         self._section(unit, "AFC_extruder extruder", pin_tool_start=pin)
-        assert self._refused(unit, cfg) == (
-            f"{self.HEAD}lane1: [AFC_extruder extruder] has pin_tool_start: "
-            f"{pin}. An AMS Lite stops its feed at the toolhead sensor, so it "
-            f"needs a real one: set pin_tool_start to the pin of a filament "
-            f"switch before the extruder gears.")
+        assert self._refused(unit, cfg) == self.HEAD + self._virtual(pin)
+
+    def test_no_sensor_runs_on_the_odometer(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder")
+        assert unit._check_lite_config(cfg) is None
+        assert unit.logger.messages == []
 
     def test_a_blank_pin_is_no_sensor(self):
         unit, cfg = self._unit()
         self._lane(unit, hub="direct")
         self._section(unit, "AFC_extruder extruder", pin_tool_start="  ")
-        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+        assert unit._check_lite_config(cfg) is None
 
     def test_no_extruder_section_is_no_sensor(self):
         unit, cfg = self._unit()
         self._lane(unit, hub="direct")
-        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+        assert unit._check_lite_config(cfg) is None
 
     def test_a_buffer_sensor_with_no_buffer_is_refused(self):
         unit, cfg = self._unit()
@@ -16756,12 +16774,12 @@ class TestAfcBambuAMSCheckLiteConfig:
         assert not hasattr(unit.printer, "get_snapmaker_config_dir")
         assert self._refused(unit, cfg) == self.HEAD + self.NOT_A_U1
 
-    def test_a_u1_with_no_sensor_named_is_still_refused(self):
+    def test_a_u1_with_no_sensor_named_runs_on_the_odometer(self):
         unit, cfg = self._unit()
         self._lane(unit, hub="direct")
         self._section(unit, "AFC_extruder extruder")
         unit.printer.get_snapmaker_config_dir = lambda: "/home/lava"
-        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+        assert unit._check_lite_config(cfg) is None
 
     # mode: combined, one splitter into one toolhead
 
@@ -16827,13 +16845,14 @@ class TestAfcBambuAMSCheckLiteConfig:
         self._section(unit, "AFC_lane lane2", unit="Lite:2", hub="direct",
                       extruder="extruder2")
         self._section(unit, "AFC_extruder extruder", pin_tool_start="buffer")
+        self._section(unit, "AFC_extruder extruder2",
+                      pin_tool_start="virtual")
         assert self._refused(unit, cfg) == (
             f"{self.HEAD}[AFC_BambuAMS Other] is on the same bridge "
             f"({self.PORT}). An AMS Lite is the only device on its bus; give "
             f"it a bridge of its own.\n{self.NO_HUB}\n{self.NO_BUFFER}\n"
-            f"lane2: [AFC_extruder extruder2] has no toolhead sensor. An AMS "
-            f"Lite stops its feed at it: set pin_tool_start to a filament "
-            f"switch before the extruder gears.\nmode: combined runs the "
+            f"{self._virtual(lane='lane2', ext='extruder2')}"
+            f"\nmode: combined runs the "
             f"trays through one splitter into one toolhead, but the lanes "
             f"name more than one extruder (lane1: extruder, lane2: "
             f"extruder2). Put every lane on the same extruder.")
@@ -17544,6 +17563,28 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit._inserted_at == {0: 100.0}
         assert unit._fresh_insert == {0: 1}
         assert unit.logger.messages == [self._inserted(), self.SCANNING]
+
+    def test_an_ams_lite_insert_is_a_fresh_spool(self, monkeypatch):
+        # Its tip is pulled in to the outlet, so its first load runs the
+        # whole path; a removal forgets it.
+        unit = self._unit(monkeypatch, model="lite")
+        unit._lite_fresh = {2}
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert unit._lite_fresh == {0, 2}
+        unit._maybe_auto_scan(0, False, slot_info(0, present=False))
+        assert unit._lite_fresh == {2}
+
+    def test_an_ams_lite_first_insert_starts_the_fresh_set(self, monkeypatch):
+        unit = self._unit(monkeypatch, model="lite")
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert unit._lite_fresh == {0}
+
+    def test_a_boxed_insert_is_not_tracked_as_fresh(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert "_lite_fresh" not in vars(unit)
+        unit._maybe_auto_scan(0, False, slot_info(0, present=False))
+        assert "_lite_fresh" not in vars(unit)
 
     def test_no_edge_when_already_present(self, monkeypatch):
         unit = self._unit(monkeypatch, prev=True)
@@ -23079,6 +23120,141 @@ class TestAfcBambuAMSRunStallChecks:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSCheckLiteClog:
+    """An AMS Lite in a print: the extruder pushing with no odometer step."""
+
+    CLOGGED = ("AFC bambu Bambu_AMS_1: lane1 has stopped moving: the extruder "
+               "pushed {mm}mm, but the AMS Lite's odometer saw no filament "
+               "leave the tray. The nozzle may be clogged, the extruder gears "
+               "slipping, or the spool snagged. Clear it, then resume.")
+
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch, *, model: str = "lite",
+              odom: Optional[float] = -1000.0, printing: bool = True,
+              **values: Any) -> afcBambuAMS:
+        """
+        An AMS Lite printing from lane1, its extruder the active one.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param model: ams_model
+        :param odom: the odometer (as the unit reports it); None for none
+        :param printing: print_stats reads printing
+        :param values: further config options
+        :return afcBambuAMS: the unit
+        """
+        fields: Dict[str, Any] = {"ustate": 0, "seltray": 0}
+        if odom is not None:
+            fields["odom"] = odom
+        unit = _p6_unit(monkeypatch, model=model,
+                        print_state="printing" if printing else None,
+                        lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
+                        bridge=FakeBridge(status=_p6_frame(**fields)),
+                        values=values)
+        monkeypatch.setattr(unit.afc.function, "get_current_extruder",
+                            lambda: "extruder")
+        return unit
+
+    @staticmethod
+    def _tick(unit: afcBambuAMS, e: float, dt: float = 1.0,
+              odom: Optional[float] = None) -> None:
+        """
+        One follower tick after the extruder has reached ``e``.
+
+        :param unit: the unit
+        :param e: the toolhead's E position
+        :param dt: seconds since the last tick
+        :param odom: a new odometer reading, if it moved
+        """
+        unit.reactor.now += dt
+        unit.afc.toolhead.e_pos = e
+        if odom is not None:
+            unit._bridge.status = _p6_frame(odom=odom, seltray=0, ustate=0)
+        unit._run_stall_checks(unit.lanes["lane1"])
+
+    def test_an_extruder_pushing_into_a_still_odometer_pauses(self,
+                                                              monkeypatch):
+        unit = self._unit(monkeypatch)
+        for e in (0.0, 20.0, 40.0, 59.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        self._tick(unit, 61.0)
+        assert unit.afc.error.messages == [
+            ("AFC_error", self.CLOGGED.format(mm=61))]
+        assert unit._follow_fault_hold is True
+        assert unit._fault_lane is unit.lanes["lane1"]
+
+    def test_an_odometer_step_starts_the_count_over(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        self._tick(unit, 0.0)
+        self._tick(unit, 50.0)
+        self._tick(unit, 55.0, odom=-1001.5)       # one step left the tray
+        self._tick(unit, 110.0)
+        assert unit.afc.error.messages == []
+        self._tick(unit, 116.0)
+        assert unit.afc.error.messages == [
+            ("AFC_error", self.CLOGGED.format(mm=61))]
+
+    def test_a_retract_and_its_unretract_cancel_out(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        for e in (0.0, 30.0, 25.0, 30.0, 55.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+
+    def test_a_gap_between_ticks_starts_over(self, monkeypatch):
+        # A pause in the follower (a held fault, a tool change) is not E
+        # pushed against a still odometer.
+        unit = self._unit(monkeypatch)
+        self._tick(unit, 0.0)
+        self._tick(unit, 50.0)
+        self._tick(unit, 120.0, dt=6.0)
+        self._tick(unit, 170.0)
+        assert unit.afc.error.messages == []
+
+    def test_another_extruder_active_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        monkeypatch.setattr(unit.afc.function, "get_current_extruder",
+                            lambda: "extruder1")
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        assert unit._clog_base is None
+
+    def test_no_odometer_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch, odom=None)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+
+    def test_a_toolhead_that_cannot_say_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+
+        def gone() -> List[float]:
+            raise RuntimeError("shutdown")
+        monkeypatch.setattr(unit.afc.toolhead, "get_position", gone)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+
+    def test_out_of_a_print_nothing_is_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch, printing=False)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit._clog_base is None
+
+    def test_with_fault_detect_off_nothing_is_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch, fault_detect=False)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        assert "_clog_t" not in vars(unit)
+
+    def test_a_boxed_unit_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch, model="ams2")
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert "_clog_t" not in vars(unit)
+
+
 class TestAfcBambuAMSDetectorTick:
     RESUMED = ("info", "AFC bambu Bambu_AMS_1: print resumed, re-arming the "
                        "follower.")
@@ -24657,6 +24833,173 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert unit._bridge.sent == [self.FEED, self.STOP]
         assert unit.logger.messages == [self._kick(1), self._arrived(1)]
 
+    # an AMS Lite with no toolhead sensor ends where its odometer stops
+
+    def _sensorless(self, monkeypatch: pytest.MonkeyPatch,
+                    sensor: Sequence[bool] = (True,),
+                    **fields: Any) -> Tuple[afcBambuAMS, Any, FakeBridge]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param sensor: what a read of the sensor would say (never read)
+        :param fields: the unit's first status entry
+        :return tuple: (an AMS Lite whose extruder has no toolhead sensor,
+          its lane1 fed from 0mm, its bridge)
+        """
+        bridge = FakeBridge(status=_p6_frame(**fields))
+        unit, lane = self._rig(monkeypatch, model="lite", bridge=bridge,
+                               sensor=sensor)
+        lane.extruder_obj.has_toolhead_sensor = False
+        unit._load_overfed = None
+        unit._load_odom_start = 0.0
+        return unit, lane, bridge
+
+    @staticmethod
+    def _at(unit: afcBambuAMS, bridge: FakeBridge, when: float,
+            **fields: Any) -> None:
+        """
+        :param unit: the unit whose clock it runs on
+        :param bridge: its bridge
+        :param when: reactor time
+        :param fields: the unit's status entry from then on
+        """
+        _p6_at(unit, when, lambda: setattr(bridge, "status",
+                                           _p6_frame(**fields)))
+
+    @staticmethod
+    def _gears(mm: int) -> LogLine:
+        """
+        :param mm: how far it fed
+        :return LogLine: the line a sensorless arrival logs
+        """
+        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 stopped {mm}mm in by "
+                         f"the AMS Lite's odometer; taking it as at the "
+                         f"extruder gears")
+
+    def test_a_sensorless_ams_lite_ends_where_its_odometer_stops(
+            self, monkeypatch):
+        # The switch would say filament; with no sensor it is never read.
+        unit, lane, bridge = self._sensorless(monkeypatch, odom=0, seltray=0)
+        self._at(unit, bridge, 100.5, odom=-300, seltray=0)
+        self._at(unit, bridge, 101.0, odom=-600, seltray=0)
+        assert unit._feed_until_sensor(lane, 60.0, 3250.0) is True
+        assert unit.reactor.now == pytest.approx(102.3, abs=0.06)
+        assert unit._load_odom_at_sensor == 600.0
+        assert unit._lite_stall_mm == 600.0
+        assert unit._lite_fault_err is None
+        assert lane.extruder_obj.sensor.reads == 0
+        assert unit._bridge.sent == [self.FEED, self.STOP]
+        assert unit.logger.messages == [self._kick(1), self._gears(600)]
+
+    def test_a_pause_shorter_than_the_stall_window_feeds_on(self,
+                                                            monkeypatch):
+        unit, lane, bridge = self._sensorless(monkeypatch, odom=0, seltray=0)
+        self._at(unit, bridge, 100.5, odom=-300, seltray=0)
+        self._at(unit, bridge, 101.6, odom=-600, seltray=0)   # 1.1s still
+        assert unit._feed_until_sensor(lane, 60.0) is True
+        assert unit.reactor.now == pytest.approx(102.9, abs=0.06)
+        assert unit._lite_stall_mm == 600.0
+
+    def test_a_feed_that_never_moves_waits_out_its_start(self, monkeypatch):
+        # The select takes a second; then the grip check judges it.
+        unit, lane, _ = self._sensorless(monkeypatch, odom=0, seltray=0)
+        assert unit._feed_until_sensor(lane, 60.0) is True
+        assert unit.reactor.now == pytest.approx(103.0, abs=0.06)
+        assert unit._lite_stall_mm == 0.0
+        assert unit.logger.messages == [self._kick(1), self._gears(0)]
+
+    def test_no_odometer_never_ends_a_sensorless_feed(self, monkeypatch):
+        unit, lane, _ = self._sensorless(monkeypatch)
+        assert unit._feed_until_sensor(lane, 5.0) is False
+        assert unit.reactor.now >= 105.0
+        assert unit._lite_stall_mm is None
+        assert unit.logger.messages == [self._kick(1), self._kick(2)]
+
+    def test_a_stop_short_of_a_fresh_path_waits_for_the_unit(self,
+                                                             monkeypatch):
+        # 300 of 1000mm is a jam, not the gears: it feeds on until the AMS
+        # Lite says its feed stalled, and that ends the attempt.
+        unit, lane, bridge = self._sensorless(monkeypatch, odom=0, seltray=0)
+        self._at(unit, bridge, 100.5, odom=-300, seltray=0)
+        self._at(unit, bridge, 103.0, odom=-300, seltray=0, lerr=[2, 1])
+        assert unit._feed_until_sensor(lane, 60.0, expect_mm=1000.0) is False
+        assert unit.reactor.now == pytest.approx(103.0, abs=0.06)
+        assert unit._lite_fault_err == (2, 1)
+        assert unit._lite_stall_mm == 300.0
+        assert getattr(unit, "_load_odom_at_sensor", None) is None
+        assert unit._bridge.sent == [self.FEED, self.STOP]
+        assert unit.logger.messages == [self._kick(1)]
+
+    def test_a_stop_near_a_fresh_path_is_the_gears(self, monkeypatch):
+        unit, lane, bridge = self._sensorless(monkeypatch, odom=0, seltray=0)
+        self._at(unit, bridge, 100.5, odom=-800, seltray=0)
+        assert unit._feed_until_sensor(lane, 60.0, expect_mm=1000.0) is True
+        assert unit.reactor.now == pytest.approx(101.8, abs=0.06)
+        assert unit._lite_stall_mm == 800.0
+
+    def test_its_own_stall_at_the_gears_ends_the_load_there(self,
+                                                            monkeypatch):
+        # Pushing into gears that are not turning: the unit stalls before the
+        # odometer window is up. The load decides what follows.
+        unit, lane, bridge = self._sensorless(monkeypatch, odom=0, seltray=0)
+        self._at(unit, bridge, 100.5, odom=-600, seltray=0)
+        self._at(unit, bridge, 101.0, odom=-600, seltray=0, lerr=[2, 1])
+        assert unit._feed_until_sensor(lane, 60.0) is True
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert unit._lite_fault_err == (2, 1)
+        assert unit._load_odom_at_sensor == 600.0
+        assert unit.logger.messages == [self._kick(1), self._gears(600)]
+
+    # an AMS Lite's own stall report
+
+    def test_with_a_sensor_its_odometer_stopping_is_not_the_end(
+            self, monkeypatch):
+        unit, lane, _ = self._lite(monkeypatch, odom=-300, seltray=0)
+        unit._load_odom_start = 0.0
+        assert unit._feed_until_sensor(lane, 5.0) is False
+        assert unit.reactor.now >= 105.0
+        assert unit._lite_fault_err is None
+        assert unit._lite_stall_mm is None
+        assert unit.logger.messages == [self._kick(1), self._kick(2)]
+
+    def test_with_a_sensor_its_own_stall_ends_the_attempt(self, monkeypatch):
+        unit, lane, bridge = self._lite(monkeypatch, odom=0, seltray=0)
+        unit._load_odom_start = 0.0
+        self._at(unit, bridge, 100.5, odom=-900, seltray=0)
+        self._at(unit, bridge, 101.0, odom=-900, seltray=0, ustate=7)
+        assert unit._feed_until_sensor(lane, 60.0) is False
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert unit._lite_fault_err == (0, 0)
+        assert unit._lite_stall_mm == 900.0
+        assert unit._bridge.sent == [self.FEED, self.STOP]
+
+    def test_a_fault_left_from_before_is_not_kicked_through(self,
+                                                            monkeypatch):
+        # The bridge clears it on the load's feed; the first kick waits for
+        # that, and the old fault is not this load's stall.
+        unit, lane, bridge = self._lite(monkeypatch, odom=0, seltray=0,
+                                        lerr=[2, 1])
+        unit._load_odom_start = 0.0
+        lane.extruder_obj.fila_tool_start.runout_helper = _P6Sensor(
+            [False] * 20 + [True])
+        self._at(unit, bridge, 100.5, odom=-50, seltray=0)
+        assert unit._feed_until_sensor(lane, 60.0) is True
+        assert unit._lite_fault_err is None
+        assert unit._bridge.sent == [self.FEED, self.STOP]
+        kicks = [m for m in unit.logger.messages if m == self._kick(1)]
+        assert kicks == [self._kick(1)]
+        assert unit.reactor.now > 100.5
+
+    def test_a_fault_that_outlasts_its_grace_ends_the_attempt(self,
+                                                              monkeypatch):
+        unit, lane, _ = self._lite(monkeypatch, odom=0, seltray=0,
+                                   lerr=[2, 2])
+        unit._load_odom_start = 0.0
+        assert unit._feed_until_sensor(lane, 60.0) is False
+        assert unit.reactor.now == pytest.approx(103.0, abs=0.06)
+        assert unit._lite_fault_err == (2, 2)
+        assert unit._bridge.sent == [self.STOP]          # never kicked
+        assert unit.logger.messages == []
+
 
 class TestAfcBambuAMSAdvanceIntoExtruder:
     """Bite, wait for the unit to settle, arm the assist, advance the rest."""
@@ -25917,6 +26260,8 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         def on_send(br: FakeBridge, frame: dict) -> None:
             if frame["cmd"] == "feed":
                 br.status = _p6_frame(odom=-1200, seltray=0)
+            elif frame["cmd"] == "assist":          # the extruder pulls
+                br.status = _p6_frame(odom=-1272, seltray=0)
         bridge.on_send = on_send
         assert unit._unit_load_lane(lane) is True
         assert unit._bridge.sent[1] == dict(self.BULK, mm=1750.0)
@@ -25942,6 +26287,9 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
             bridge, "status", _p6_frame(odom=-50, seltray=0)))
         _p6_at(unit, 100.525, lambda: setattr(
             bridge, "status", _p6_frame(odom=-1250, seltray=0)))
+        bridge.on_send = lambda br, frame: (
+            setattr(br, "status", _p6_frame(odom=-1322, seltray=0))
+            if frame["cmd"] == "assist" else None)
         assert unit._unit_load_lane(lane) is True
         assert unit._load_odom_start == 50.0
         assert unit.afc_bowden_length == 1200.0
@@ -25984,6 +26332,240 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.error.messages == [
             ("handle_lane_failure", self._timed_out(within=13))]
         assert unit.logger.messages == [self.KICKED]
+
+    # with no toolhead sensor, and its own stall reports
+
+    def _lite_feeds(self, monkeypatch: pytest.MonkeyPatch, *,
+                    to: Optional[float], pulled: Optional[float] = None,
+                    err: Optional[List[int]] = None, sensor: bool = False,
+                    values: Optional[Dict[str, Any]] = None,
+                    ) -> Tuple[afcBambuAMS, Any, FakeBridge]:
+        """
+        An AMS Lite whose feed stops at ``to`` and whose extruder then pulls.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param to: where the odometer stops once the feed goes out (mm); None
+          for an odometer that never reports
+        :param pulled: where it reads once the assist goes out; None for no
+          further movement
+        :param err: the unit's error bytes once the feed stops
+        :param sensor: the extruder has a toolhead sensor (that never trips)
+        :param values: config options over the rig's, which here learned a
+          1500mm path
+        :return tuple: (the AMS Lite, its lane1, its bridge)
+        """
+        opts: Dict[str, Any] = {"afc_bowden_length": 1500.0}
+        opts.update(values or {})
+        unit, lane, bridge = self._lite(
+            monkeypatch, values=opts,
+            **({"odom": 0, "seltray": 0} if to is not None else {}))
+        lane.extruder_obj.has_toolhead_sensor = sensor
+
+        def on_send(br: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "feed" and to is not None:
+                extra = {"lerr": err} if err else {}
+                br.status = _p6_frame(odom=-to, seltray=0, **extra)
+            elif frame["cmd"] == "rehome" and to is not None:
+                br.status = _p6_frame(odom=-to, seltray=0)   # cleared
+            elif frame["cmd"] == "assist" and pulled is not None:
+                br.status = _p6_frame(odom=-pulled, seltray=0)
+        bridge.on_send = on_send
+        return unit, lane, bridge
+
+    GEARS = ("debug", "AFC bambu Bambu_AMS_1: lane1 stopped 1200mm in by the "
+                      "AMS Lite's odometer; taking it as at the extruder "
+                      "gears")
+
+    def test_a_sensorless_ams_lite_loads_when_the_extruder_takes_it(
+            self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=1200, pulled=1272)
+        assert unit._unit_load_lane(lane) is True
+        assert unit._bridge.sent == [self.SELECT, dict(self.BULK, mm=1750.0),
+                                     self.KICK, self.STOP, self.ASSIST]
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert unit._failed_load_lane is None
+        assert unit.afc.error.messages == []
+        assert unit.logger.messages[:2] == [self.KICKED, self.GEARS]
+
+    def test_a_toolhead_already_holding_filament_is_not_fed(self,
+                                                            monkeypatch):
+        unit, lane = self._rig(monkeypatch, sensor=[True])
+        assert unit._unit_load_lane(lane) is False
+        assert unit._bridge.sent == [self.SELECT]
+        assert unit.afc.error.calls == self._failed(
+            lane, "Toolhead sensor already detects filament before loading "
+                  "lane1.\nClear the toolhead before loading (manually "
+                  "retract or run AFC_RESET for lane1).")
+
+    def test_with_no_sensor_a_switch_reading_is_not_asked(self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=1200, pulled=1272)
+        lane.extruder_obj.fila_tool_start.runout_helper = _P6Sensor([True])
+        assert unit._unit_load_lane(lane) is True
+        assert lane.extruder_obj.sensor.reads == 0
+
+    def test_a_sensorless_load_the_extruder_never_takes_fails(self,
+                                                              monkeypatch):
+        # The odometer stood still through the 72mm pull: not in the gears.
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=1200)
+        assert unit._unit_load_lane(lane) is False
+        assert unit._bridge.sent[-2:] == [self.ASSIST, self.STOP]
+        assert unit._failed_load_lane is lane
+        assert unit.afc.error.calls == self._failed(
+            lane, "The extruder did not take lane1: it pulled 72mm, but the "
+                  "AMS Lite's odometer saw only 0mm leave the tray, so the "
+                  "filament is not in the extruder gears.\nCheck that it "
+                  "reached the extruder and that the spool turns freely. "
+                  f"{_P6_RETRY}.")
+
+    def test_a_grip_failure_in_a_print_reloads_on_resume(self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=1200, pulled=1210)
+        monkeypatch.setattr(unit.afc.function, "in_print", lambda: True)
+        assert unit._unit_load_lane(lane) is False
+        assert unit._fault_lane is lane
+        assert unit._resume_needs_reload is True
+        assert unit.afc.error.calls[0][2] == {"pause": True}
+        assert "saw only 10mm leave the tray" in unit.afc.error.calls[0][1][1]
+
+    def test_its_own_stall_at_the_gears_is_cleared_before_the_pull(
+            self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=1200, pulled=1272,
+                                         err=[2, 1])
+        assert unit._unit_load_lane(lane) is True
+        sent = unit._bridge.sent
+        assert sent[sent.index(self.REHOME):] == [self.REHOME, self.SELECT,
+                                                  self.ASSIST]
+        assert ("info", "AFC bambu Bambu_AMS_1: the AMS Lite stopped lane1 "
+                        "itself (its feed stalled (error 02 01)); clearing it "
+                        "and checking that the extruder takes it"
+                ) in unit.logger.messages
+
+    def test_a_fresh_spool_that_stalls_short_fails_without_a_retry(
+            self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(
+            monkeypatch, to=300, err=[2, 1],
+            values={"afc_bowden_length": 1000.0})
+        unit._lite_fresh = {0}
+        assert unit._unit_load_lane(lane) is False
+        assert self.REHOME not in unit._bridge.sent
+        assert unit._lite_fresh == set()
+        assert unit.afc.error.calls == self._failed(
+            lane, "The AMS Lite stopped feeding lane1 300mm in, well short of "
+                  "its 1000mm path: its feed stalled (error 02 01) on tray "
+                  "1.\nThe spool may be stuck or tangled, or the filament "
+                  "caught on its way to the toolhead. Free it at the AMS "
+                  f"Lite. {_P6_RETRY}.")
+
+    def test_a_spool_parked_anywhere_has_no_path_to_fall_short_of(
+            self, monkeypatch):
+        # Not inserted this session: it may be parked anywhere, so the same
+        # stall ends the load at the gears and the pull decides.
+        unit, lane, _ = self._lite_feeds(
+            monkeypatch, to=300, pulled=372, err=[2, 1],
+            values={"afc_bowden_length": 1000.0})
+        assert unit._unit_load_lane(lane) is True
+
+    def test_with_a_sensor_its_stall_near_the_path_names_the_sensor(
+            self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(
+            monkeypatch, to=950, err=[2, 1], sensor=True,
+            values={"afc_bowden_length": 1000.0})
+        assert unit._unit_load_lane(lane) is False
+        assert unit.afc.error.calls == self._failed(
+            lane, "The AMS Lite stopped feeding lane1 950mm in before the "
+                  "toolhead sensor saw it: its feed stalled (error 02 01) on "
+                  "tray 1.\nIt stopped about where the toolhead is, so also "
+                  "check that the toolhead sensor sits before the extruder "
+                  f"gears and is reading. {_P6_RETRY}.")
+
+    def test_with_a_sensor_its_stall_early_on_names_the_spool(self,
+                                                              monkeypatch):
+        unit, lane, _ = self._lite_feeds(
+            monkeypatch, to=200, err=[2, 1], sensor=True,
+            values={"afc_bowden_length": 1000.0})
+        assert unit._unit_load_lane(lane) is False
+        assert "The spool may be stuck or tangled" in (
+            unit.afc.error.calls[0][1][1])
+
+    def test_a_sensorless_load_with_no_odometer_says_so(self, monkeypatch):
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=None,
+                                         values={"load_recover_attempts": 0})
+        assert unit._unit_load_lane(lane) is False
+        assert unit.afc.error.messages == [
+            ("handle_lane_failure",
+             "The AMS Lite never showed where lane1 stopped within 59s; "
+             f"{self.STAGED}.\nWith no toolhead sensor its odometer ends the "
+             f"load, so check that the bridge is reporting it. {_P6_RETRY}.")]
+
+    def test_a_sensorless_overfeed_names_the_gears(self, monkeypatch):
+        unit, lane, bridge = self._lite(monkeypatch, odom=0, seltray=0)
+        lane.extruder_obj.has_toolhead_sensor = False
+
+        def on_send(br: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "feed":
+                br.push(_p6_frame(odom=0, seltray=0))
+                br.push(_p6_frame(odom=-400, seltray=0))
+        bridge.on_send = on_send
+        assert unit._unit_load_lane(lane) is False
+        assert unit.afc.error.calls == self._failed(
+            lane, "The AMS Lite fed lane1 400mm, past its 350mm limit (the "
+                  "100mm path plus 250mm), and it never stopped at the "
+                  "extruder gears, so the feed was stopped.\nCheck that the "
+                  "tube from the AMS Lite to the toolhead is connected. "
+                  f"{_P6_RETRY}.")
+
+    # the grip check on its own
+
+    def test_a_short_advance_is_not_judged(self, monkeypatch):
+        unit, lane, _ = self._lite(monkeypatch, odom=0, seltray=0)
+        lane.extruder_obj.tool_stn = 8.0
+        assert unit._lite_grip_check(lane, lane.extruder_obj, 0.0) is None
+
+    def test_no_odometer_before_the_pull_is_not_judged(self, monkeypatch):
+        unit, lane, _ = self._lite(monkeypatch, odom=0, seltray=0)
+        assert unit._lite_grip_check(lane, lane.extruder_obj, None) is None
+
+    def test_an_odometer_gone_quiet_is_not_judged(self, monkeypatch):
+        unit, lane, _ = self._lite(monkeypatch)
+
+        def shut_down() -> None:
+            raise RuntimeError("shutdown")
+        monkeypatch.setattr(unit.afc.toolhead, "wait_moves", shut_down)
+        assert unit._lite_grip_check(lane, lane.extruder_obj, 0.0) is None
+        assert unit.reactor.now == pytest.approx(102.0, abs=0.06)
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: no grip check for lane1: the "
+                      "AMS Lite's odometer stopped reporting")]
+
+    def test_a_pull_seen_late_still_counts(self, monkeypatch):
+        unit, lane, bridge = self._lite(monkeypatch, odom=0, seltray=0)
+        _p6_at(unit, 101.0, lambda: setattr(
+            bridge, "status", _p6_frame(odom=-20, seltray=0)))
+        assert unit._lite_grip_check(lane, lane.extruder_obj, 0.0) is None
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+
+    def test_an_unknown_lite_fault_reads_as_a_fault(self, monkeypatch):
+        unit, _lane, _ = self._lite(monkeypatch)
+        assert unit._lite_fault_words((3, 9)) == (
+            "it stopped with a fault (error 03 09)")
+        assert unit._lite_fault_words((0, 0)) == "it stopped with a fault"
+        assert unit._lite_fault_words((2, 2)) == (
+            "its retract stalled (error 02 02)")
+
+    def test_an_extruder_that_cannot_say_has_a_sensor(self, monkeypatch):
+        # Only an extruder that says it has none runs without one.
+        class _Unsure:
+            @property
+            def has_toolhead_sensor(self) -> bool:
+                raise RuntimeError("not ready")
+        lane = SimpleNamespace(extruder_obj=_Unsure())
+        assert afcBambuAMS._has_toolhead_sensor(lane) is True
+        assert afcBambuAMS._has_toolhead_sensor(
+            SimpleNamespace(extruder_obj=None)) is True
+
+    def test_a_torn_status_is_no_lite_fault(self, monkeypatch):
+        unit, _lane, bridge = self._lite(monkeypatch)
+        bridge.status = _p6_frame(lerr="x")
+        assert unit._lite_fault() is None
 
 
 class TestAfcBambuAMSPublishedSlots:
@@ -28166,6 +28748,22 @@ class TestAfcBambuAMSLiteUnloadRetract:
         assert unit.reactor.now == pytest.approx(100.55)
         assert unit._bridge.sent == [self.RETRACT, self.STOP]
         assert unit.logger.messages == [self._cleared(25)]
+
+    def test_with_no_sensor_the_distance_runs_from_the_extruder(
+            self, monkeypatch):
+        # The switch would read filament forever; with no sensor it is not
+        # waited on, and the 25mm count starts at once: 100.42 at 60mm/s.
+        unit, lane = self._rig(monkeypatch, [True],
+                               odom=lambda t: (t - 100.0) * 60.0,
+                               unload_past_sensor=25.0)
+        lane.extruder_obj.has_toolhead_sensor = False
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.45)
+        assert lane.extruder_obj.sensor.reads == 0
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the extruder; "
+                      "25mm more")]
 
     def test_with_no_odometer_the_distance_is_timed(self, monkeypatch):
         # 25mm at 30mm/s after clearing at 100.10 is 100.93: the poll at

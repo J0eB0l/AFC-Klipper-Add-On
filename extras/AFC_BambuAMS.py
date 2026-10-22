@@ -366,8 +366,9 @@ _MC_ADDRESSING = {m: (spec[1], 0x00) for m, spec in _AMS_MODELS.items()}
 
 _HT_MODELS = ("ht",)
 #: The AMS Lite: an A1's four-tray unit. No buffer, no hub, no dryer and no
-#: spool measurement; the printer stops its feed at the toolhead sensor and
-#: the extruder pulls against a released motor. Alone on its bus.
+#: spool measurement; the printer stops its feed at the toolhead sensor, or
+#: with none where its odometer stops at the extruder gears, and the extruder
+#: pulls against a released motor. Alone on its bus.
 _LITE_MODELS = ("lite",)
 #: Models whose insert measurement gets one automatic retry when it one-edges.
 #: The AMS 2 is included because the firmware's auto-rescan declines for it and
@@ -1069,6 +1070,39 @@ LITE_MMPS = 30.0
 #: How far past its path an AMS Lite load may feed, by its odometer, before
 #: the filament is taken to be going somewhere other than the toolhead.
 LITE_OVERFEED_MM = 250.0
+#: How long an AMS Lite's odometer may stand still mid-feed before the feed
+#: counts as stopped, in seconds. Twice the 0.6s the A1 waits, so a pause is
+#: not taken for a stop, and still inside the ~2.2s before the unit flags a
+#: stall of its own.
+LITE_STALL_S = 1.2
+#: How long from the first reading a feed may show no movement at all before
+#: it counts as stopped where it began: the select takes a second, a faulted
+#: unit's clear a little more.
+LITE_START_S = 3.0
+#: A feed from a fresh spool that stops short of this share of the learned
+#: path may be jammed, so it waits for the unit's own stall report.
+LITE_JAM_SHARE = 0.75
+#: A fault the AMS Lite still shows this soon after the first kick may be the
+#: last one, which the bridge is clearing (00 for 0.3s, then the select).
+LITE_FAULT_GRACE_S = 3.0
+#: The grip check after a load: the shortest advance worth judging, the share
+#: of it the odometer must see leave the tray, and how long that may take
+#: once the advance has run.
+LITE_GRIP_MIN_STN_MM = 10.0
+LITE_GRIP_SHARE = 0.25
+LITE_GRIP_WAIT_S = 2.0
+#: One odometer step on an AMS Lite.
+LITE_ODOM_STEP_MM = 1.5
+#: How long an AMS Lite that flagged its own stall is cleared (00) before it
+#: is told to hold its tray, as the A1 starts a retry.
+LITE_CLEAR_S = 0.3
+#: In a print: how far the extruder may push with no odometer step before the
+#: filament counts as stopped. Generous, because the toolhead's E runs ahead of
+#: the stepper by the queued moves. A gap this long between checks starts over.
+LITE_CLOG_MM = 60.0
+LITE_CLOG_GAP_S = 5.0
+#: The AMS Lite's own error bytes (reply [33:35]).
+_LITE_ERRORS = {(2, 1): "its feed stalled", (2, 2): "its retract stalled"}
 #: AMS Lite `mode`: combined runs its trays through one splitter into one
 #: toolhead. direct, one tray per toolhead, is refused until it is built.
 LITE_MODE_COMBINED = "combined"
@@ -8323,9 +8357,10 @@ class afcBambuAMS(afcUnit):
         Refuse an AMS Lite setup that cannot stop its feed or share its bus.
 
         The AMS Lite has no buffer: the printer ends its feed at the toolhead
-        sensor, so every lane needs a real one. A pin_tool_start switch counts
-        on any printer; pin_tool_start: buffer only with a buffer for the
-        lane; the U1's filament sensor only on a Snapmaker U1; virtual never.
+        sensor, or with none, where the unit's odometer stops at the extruder
+        gears. A pin_tool_start switch counts on any printer; pin_tool_start:
+        buffer only with a buffer for the lane; the U1's filament sensor only
+        on a Snapmaker U1; no sensor at all is fine; virtual never.
         Its lanes have no hub unless one is named, so each sets one (hub:
         direct, or an [AFC_hub] with a switch). In mode: combined its trays
         meet at one splitter, so its lanes share one extruder and one hub.
@@ -8392,9 +8427,10 @@ class afcBambuAMS(afcUnit):
             if start in ("virtual", "unknown"):
                 problems.append(
                     f"{lane}: [{ext_sec}] has pin_tool_start: {start}. An AMS "
-                    f"Lite stops its feed at the toolhead sensor, so it needs "
-                    f"a real one: set pin_tool_start to the pin of a filament "
-                    f"switch before the extruder gears.")
+                    f"Lite needs a real toolhead sensor or none: set "
+                    f"pin_tool_start to the pin of a filament switch before "
+                    f"the extruder gears, or remove it and the AMS Lite's "
+                    f"odometer ends the load.")
             elif start == "buffer":
                 if not (_opt(sec, "buffer")
                         or _opt(ext_sec, "buffer")
@@ -8404,19 +8440,14 @@ class afcBambuAMS(afcUnit):
                         f"no buffer is set for this lane (buffer: on the "
                         f"lane, the extruder or [{me}]). Without one an AMS "
                         f"Lite has nothing to stop its feed.")
-            elif not start:
-                if _opt(ext_sec, "u1_filament_sensor_name"):
-                    if not snapmaker:
-                        problems.append(
-                            f"{lane}: [{ext_sec}] uses "
-                            f"u1_filament_sensor_name, the Snapmaker U1's own "
-                            f"sensor, which counts only on a U1. Set "
-                            f"pin_tool_start to a filament switch instead.")
-                else:
-                    problems.append(
-                        f"{lane}: [{ext_sec}] has no toolhead sensor. An AMS "
-                        f"Lite stops its feed at it: set pin_tool_start to a "
-                        f"filament switch before the extruder gears.")
+            elif (not start
+                  and _opt(ext_sec, "u1_filament_sensor_name")
+                  and not snapmaker):
+                problems.append(
+                    f"{lane}: [{ext_sec}] uses u1_filament_sensor_name, the "
+                    f"Snapmaker U1's own sensor, which counts only on a U1. "
+                    f"Set pin_tool_start to a filament switch instead, or "
+                    f"remove both and the AMS Lite's odometer ends the load.")
         for what, named, fix in (
                 ("extruder", exts, "Put every lane on the same extruder."),
                 ("hub", hubs, "Give every lane the same hub: direct, or the "
@@ -8820,6 +8851,10 @@ class afcBambuAMS(afcUnit):
             # still reads present with its inlet clear, so that one stays.
             if afcBambuAMS._inlet_ran_out_at(self, slot) is None:
                 (getattr(self, "_runout_pending", None) or {}).pop(slot, None)
+        else:
+            # An emptied AMS Lite tray holds no fresh spool, even when the
+            # edge itself is tracked silently below.
+            (getattr(self, "_lite_fresh", None) or set()).discard(slot)
         # A scan moves filament past the bay switch; treated as a removal it
         # would loop forever. Track presence silently while a scan is in
         # flight.
@@ -8853,6 +8888,13 @@ class afcBambuAMS(afcUnit):
             if ins is None:
                 ins = self._inserted_at = {}
             ins[slot] = _mono(getattr(self, "afc", None))
+            # An AMS Lite pulls a new spool's tip in to its outlet, so its
+            # first load travels the whole path (see _unit_load_lane).
+            if afcBambuAMS._is_lite(self):
+                fresh = getattr(self, "_lite_fresh", None)
+                if fresh is None:
+                    fresh = self._lite_fresh = set()
+                fresh.add(slot)
             # A follower left pushing this bay would feed the new spool on.
             _dr = getattr(self, "_runout_drain", None)
             if _dr is not None and afcBambuAMS._slot_of(self, _dr) == slot:
@@ -11747,7 +11789,60 @@ class afcBambuAMS(afcUnit):
             return
         if self._check_unit_stalled(lane):
             return
+        if self._check_lite_clog(lane):
+            return
         self._check_ams_fault(lane)
+
+    def _check_lite_clog(self, lane: Any) -> bool:
+        """
+        Pause a print whose AMS Lite filament has stopped moving.
+
+        While printing, the extruder pulls the filament off the tray with the
+        unit's motor let go, and the odometer counts it. An extruder that
+        pushes LITE_CLOG_MM with no odometer step is not moving the filament:
+        a clogged nozzle, gears slipping on it, or a snagged spool.
+
+        Counted only while this lane's extruder is the active one, from E at
+        the last odometer step, so a retract and its unretract cancel out.
+
+        :param lane: The lane threaded to the toolhead from this unit
+        :return bool: True if a fault was raised
+        """
+        if (not getattr(self, "fault_detect", False)
+            or not afcBambuAMS._is_lite(self)):
+            return False
+        now = _mono(getattr(self, "afc", None))
+        last_t = getattr(self, "_clog_t", None)
+        self._clog_t = now
+        pos = e = None
+        try:
+            ext = getattr(lane, "extruder_obj", None)
+            if (self.afc.function.in_print()
+                and (self.afc.function.get_current_extruder()
+                     == getattr(ext, "th_extruder_name", None))):
+                e = float(self.afc.toolhead.get_position()[3])
+                pos = self._feed_odom_mm(lane)
+        except Exception:
+            pos = None               # cannot tell: start over next tick
+        base = getattr(self, "_clog_base", None)
+        if (pos is None
+            or base is None
+            or last_t is None
+            or now - last_t > LITE_CLOG_GAP_S
+            or abs(pos - base[1]) >= LITE_ODOM_STEP_MM / 2):
+            self._clog_base = (e, pos) if pos is not None else None
+            return False
+        pushed = e - base[0]
+        if pushed < LITE_CLOG_MM:
+            return False
+        self._clog_base = None
+        msg = (f"AFC bambu {self.name}: {lane.name} has stopped moving: the "
+               f"extruder pushed {pushed:.0f}mm, but the AMS Lite's odometer "
+               f"saw no filament leave the tray. The nozzle may be clogged, "
+               f"the extruder gears slipping, or the spool snagged. Clear it, "
+               f"then resume.")
+        self._raise_ams_fault(lane, msg)
+        return True
 
     def _auto_arm(self, eventtime: float, lane: Any) -> Any:
         """
@@ -12314,6 +12409,141 @@ class afcBambuAMS(afcUnit):
         except Exception:
             return False
 
+    @staticmethod
+    def _has_toolhead_sensor(cur_lane: Any) -> bool:
+        """
+        Whether the lane's extruder has a toolhead sensor to end a load at.
+
+        Only an AMS Lite runs without one: its odometer ends the load instead.
+
+        :param cur_lane: the lane whose extruder to ask
+        :return bool: True unless the extruder says it has none
+        """
+        ext = getattr(cur_lane, "extruder_obj", None)
+        try:
+            return bool(getattr(ext, "has_toolhead_sensor", True))
+        except Exception:
+            return True
+
+    def _lite_fault(self) -> Optional[Tuple[int, int]]:
+        """
+        The fault an AMS Lite reports itself, from its latest status.
+
+        Its error bytes come first, about a second before its flag turns to
+        06 (reported as STALLED); either one means it has stopped.
+
+        :return tuple: the error bytes, (0, 0) when only the flag says so, or
+            None while it reports none
+        """
+        try:
+            latest = self._bridge.latest_status() if self._bridge else None
+            u = afcBambuAMS._unit_entry(self, latest or {}) or {}
+            raw = u.get("lerr") or (0, 0)
+            err = (int(raw[0]), int(raw[1]))
+            if err != (0, 0):
+                return err
+            if self._unit_state(latest) == afcBambuAMS.AMS_STATE_STALLED:
+                return (0, 0)
+        except Exception:
+            pass                  # a torn frame is not a fault
+        return None
+
+    @staticmethod
+    def _lite_fault_words(err: Tuple[int, int]) -> str:
+        """
+        An AMS Lite fault in words, with its bytes.
+
+        :param err: the error bytes from _lite_fault
+        :return str: e.g. "its feed stalled (error 02 01)"
+        """
+        what = _LITE_ERRORS.get(tuple(err), "it stopped with a fault")
+        if tuple(err) == (0, 0):
+            return what
+        return f"{what} (error {err[0]:02X} {err[1]:02X})"
+
+    def _lite_stall_cause(self, cur_lane: Any, err: Tuple[int, int],
+                          fed: Optional[float], expect_mm: Optional[float],
+                          sensor: bool) -> str:
+        """
+        The failure text for an AMS Lite load the unit stopped itself.
+
+        :param cur_lane: the lane that was loading
+        :param err: the unit's error bytes (see _lite_fault)
+        :param fed: how far the load had fed, or None
+        :param expect_mm: how far it should have fed, or None
+        :param sensor: whether the lane has a toolhead sensor
+        :return str: the cause for handle_lane_failure
+        """
+        slot = self._slot_of(cur_lane)
+        tray = f" on tray {slot + 1}" if slot is not None else ""
+        where = f" {fed:.0f}mm in" if fed is not None else ""
+        words = self._lite_fault_words(err)
+        stuck = ("The spool may be stuck or tangled, or the filament caught "
+                 "on its way to the toolhead. Free it at the AMS Lite.")
+        if not sensor:
+            short = (f", well short of its {expect_mm:.0f}mm path"
+                     if expect_mm is not None else "")
+            return (f"The AMS Lite stopped feeding {cur_lane.name}{where}"
+                    f"{short}: {words}{tray}.\n{stuck} {_RETRY_HINT}.")
+        path = self.afc_bowden_length
+        near = (fed is not None
+                and path != DEFAULT_BOWDEN_MM
+                and fed >= LITE_JAM_SHARE * path)
+        hint = ("It stopped about where the toolhead is, so also check that "
+                "the toolhead sensor sits before the extruder gears and is "
+                "reading." if near else stuck)
+        return (f"The AMS Lite stopped feeding {cur_lane.name}{where} before "
+                f"the toolhead sensor saw it: {words}{tray}.\n{hint} "
+                f"{_RETRY_HINT}.")
+
+    def _lite_grip_check(self, cur_lane: Any, cur_extruder: Any,
+                         before: Optional[float]) -> Optional[str]:
+        """
+        Whether the extruder has hold of an AMS Lite lane's filament.
+
+        Once the load ends, the extruder pulls the filament through tool_stn
+        with the unit's motor let go, and the odometer counts what leaves the
+        tray. If it barely moves, the gears never gripped: the tip stopped
+        short of them, or the spool is stuck.
+
+        :param cur_lane: the lane just loaded
+        :param cur_extruder: its extruder, for tool_stn
+        :param before: the odometer before the advance (_feed_odom_mm)
+        :return str: the failure, or None when it gripped or cannot be told
+        """
+        stn = float(getattr(cur_extruder, "tool_stn", 0) or 0)
+        if (before is None
+            or stn < LITE_GRIP_MIN_STN_MM):
+            return None
+        need = max(2 * LITE_ODOM_STEP_MM, LITE_GRIP_SHARE * stn)
+        reactor = self.afc.reactor
+        try:
+            self.afc.toolhead.wait_moves()
+        except Exception:
+            pass                  # judged on the odometer alone
+        deadline = reactor.monotonic() + LITE_GRIP_WAIT_S
+        moved: Optional[float] = None
+        while True:
+            pos = self._feed_odom_mm(cur_lane)
+            if pos is not None:
+                moved = pos - before
+                if moved >= need:
+                    return None
+            now = reactor.monotonic()
+            if now >= deadline:
+                break
+            reactor.pause(now + 0.05)
+        if moved is None:
+            self.logger.debug(
+                f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
+                f"the AMS Lite's odometer stopped reporting")
+            return None
+        return (f"The extruder did not take {cur_lane.name}: it pulled "
+                f"{stn:.0f}mm, but the AMS Lite's odometer saw only "
+                f"{max(moved, 0.0):.0f}mm leave the tray, so the filament is "
+                f"not in the extruder gears.\nCheck that it reached the "
+                f"extruder and that the spool turns freely. {_RETRY_HINT}.")
+
     # The feed ends on stop() when the sensor trips, then bridge_finish(). The
     # printer's op-03 motion byte here faults the unit (TIMEOUT 2/3).
 
@@ -12387,7 +12617,8 @@ class afcBambuAMS(afcUnit):
 
     def _feed_until_sensor(self, cur_lane: Any,
                            timeout: Optional[float] = None,
-                           limit_mm: Optional[float] = None) -> bool:
+                           limit_mm: Optional[float] = None,
+                           expect_mm: Optional[float] = None) -> bool:
         """
         Drive the AMS forward until the toolhead sensor triggers, then STOP it.
 
@@ -12400,15 +12631,28 @@ class afcBambuAMS(afcUnit):
         ``load_retry_interval`` so the AMS completes each of its own retry
         cycles instead of being reset mid-attempt.
 
+        An AMS Lite has no retries of its own, and reports its own stall
+        (``_lite_fault_err``), which ends the attempt. With no toolhead sensor
+        its odometer ends the load: a feed that stops moving for LITE_STALL_S
+        is taken to be at the extruder gears, and the grip check that follows
+        decides. One that stops short of LITE_JAM_SHARE of ``expect_mm`` feeds
+        on, until the unit reports the stall or it moves again.
+
         :param cur_lane: The lane being loaded
         :param timeout: Seconds to keep trying (default ``load_retry_timeout``)
         :param limit_mm: Stop once the unit's odometer shows the load has fed
           this far (sets ``_load_overfed``); None for no limit
+        :param expect_mm: How far an AMS Lite lane should feed before it
+          arrives, when that is known; None for no jam call
         :return bool: True once the sensor triggers (AMS stopped), else False
         """
         if timeout is None:
             timeout = self.load_retry_timeout
-        if self._toolhead_sensor_triggered(cur_lane):
+        lite = self._is_lite()
+        sensor = not lite or self._has_toolhead_sensor(cur_lane)
+        self._lite_fault_err = None
+        self._lite_stall_mm = None
+        if sensor and self._toolhead_sensor_triggered(cur_lane):
             self.stop()
             return True
         attempt_t0 = self.afc.reactor.monotonic()
@@ -12416,6 +12660,29 @@ class afcBambuAMS(afcUnit):
         last_kick = -1.0
         kicks = 0
         latched_since = None                  # when ustate first read STALLED
+        # An AMS Lite's odometer: its last reading and when it last moved, and
+        # whether this attempt has seen the unit without a fault.
+        odom_pos: Optional[float] = None
+        odom_t = attempt_t0
+        odom_moved = False
+        lite_clear = False
+
+        def _at_gears(pos: Optional[float], fed: Optional[float]) -> bool:
+            """
+            End a sensorless AMS Lite feed where its odometer stopped.
+
+            :param pos: the odometer there, kept for the path measurement
+            :param fed: how far this load had fed
+            :return bool: True
+            """
+            self.stop()
+            self._load_odom_at_sensor = pos
+            self._lite_stall_mm = fed
+            self.logger.debug(
+                f"AFC bambu {self.name}: {cur_lane.name} stopped "
+                f"{fed or 0.0:.0f}mm in by the AMS Lite's odometer; taking it "
+                f"as at the extruder gears")
+            return True
         self._fault_said_this_load = False    # say it once per load, not per kick
         while self.afc.reactor.monotonic() < deadline:
             now = self.afc.reactor.monotonic()
@@ -12450,7 +12717,11 @@ class afcBambuAMS(afcUnit):
                         f"rather than feeding a bus we cannot reach. "
                         f"{_RETRY_HINT}.")
                     break
-            if now - last_kick >= self.load_retry_interval:
+            # A kick to an AMS Lite showing a fault would clear it and feed
+            # again: a retry its user never asked for.
+            lf = self._lite_fault() if lite else None
+            if (now - last_kick >= self.load_retry_interval
+                and lf is None):
                 kicks += 1
                 last_kick = now
                 self.logger.debug(
@@ -12484,7 +12755,9 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 _ustate = None
             _hold = afcBambuAMS.STALL_LATCH_S
-            if _ustate == afcBambuAMS.AMS_STATE_STALLED:
+            if lite:
+                pass                          # its own report, below
+            elif _ustate == afcBambuAMS.AMS_STATE_STALLED:
                 if latched_since is None:
                     latched_since = now
                 elif now - latched_since >= _hold:
@@ -12505,7 +12778,8 @@ class afcBambuAMS(afcUnit):
                     f"AFC bambu {self.name}: {cur_lane.name} -- the AMS "
                     f"reported a fault during the load; still feeding, the "
                     f"unit runs its own recovery while the request continues")
-            if self._toolhead_sensor_triggered(cur_lane):
+            if (sensor
+                and self._toolhead_sensor_triggered(cur_lane)):
                 self.stop()          # halt instantly so the AMS can't retract it
                 # Read the odometer now: it keeps climbing once the extruder
                 # takes over (tool_stn plus the purge), so any later reading
@@ -12528,9 +12802,40 @@ class afcBambuAMS(afcUnit):
                     and fed > limit_mm):
                     self._load_overfed = fed
                     break
-            # No fallback to the AMS's own arrival report: tool_start is always
-            # a real pin or "buffer", and the unit reaching the end of its tube
-            # differs from the filament reaching the toolhead when the path binds.
+            if lite:
+                pos = self._feed_odom_mm(cur_lane)
+                fed = self._load_fed_mm(cur_lane)
+                if pos is not None:
+                    if odom_pos is None:
+                        odom_pos, odom_t = pos, now
+                    elif abs(pos - odom_pos) >= LITE_ODOM_STEP_MM / 2:
+                        odom_pos, odom_t, odom_moved = pos, now, True
+                wait = LITE_STALL_S if odom_moved else LITE_START_S
+                stalled = (odom_pos is not None
+                           and now - odom_t >= wait)
+                short = (expect_mm is not None
+                         and fed is not None
+                         and fed < LITE_JAM_SHARE * expect_mm)
+                if lf is None:
+                    lite_clear = True
+                elif (lite_clear
+                      or now - attempt_t0 >= LITE_FAULT_GRACE_S):
+                    # Its own word that it has stopped (an earlier fault can
+                    # show until the bridge's clear takes). No re-home and no
+                    # re-kick: the A1 leaves the retry to its user.
+                    self._lite_fault_err = lf
+                    if (sensor
+                        or short):
+                        self._lite_stall_mm = fed
+                        break
+                    return _at_gears(pos, fed)
+                if (stalled
+                    and not sensor
+                    and not short):
+                    return _at_gears(pos, fed)
+            # No fallback to the AMS's own arrival report: with a toolhead
+            # sensor, the unit reaching the end of its tube differs from the
+            # filament reaching the toolhead when the path binds.
             try:
                 self.afc.reactor.pause(now + 0.05)
             except Exception:
@@ -12715,6 +13020,8 @@ class afcBambuAMS(afcUnit):
         self._follow_fault_hold = False
         # Per-load state: a previous failure's words must not describe this one.
         self._declared_fault_text = None
+        self._lite_fault_err = None
+        self._lite_stall_mm = None
         # Same for the odometer range, which locates a failure upstream or
         # downstream of the AMS.
         self._load_odom_lo = None
@@ -12759,8 +13066,11 @@ class afcBambuAMS(afcUnit):
         else:
             feed_dist = self.afc_bowden_length + DIST_HUB_MM
 
+        lite = self._is_lite()
+        sensor = not lite or self._has_toolhead_sensor(cur_lane)
         # Pre-feed guard: never push into an already-occupied toolhead.
-        if self._toolhead_sensor_triggered(cur_lane):
+        if (sensor
+            and self._toolhead_sensor_triggered(cur_lane)):
             afc.error.handle_lane_failure(
                 cur_lane,
                 f"Toolhead sensor already detects filament before loading "
@@ -12779,6 +13089,16 @@ class afcBambuAMS(afcUnit):
         # the path plus LITE_OVERFEED_MM (see _feed_until_sensor).
         limit_mm = (self.afc_bowden_length + LITE_OVERFEED_MM
                     if self._is_lite() else None)
+        # A lane fed from a spool inserted this session travels the learned
+        # path; any other lane may be parked anywhere, so it has no expected
+        # travel and no jam is called on it.
+        slot = self._slot_of(cur_lane)
+        fresh = getattr(self, "_lite_fresh", None) or set()
+        expect_mm = (self.afc_bowden_length
+                     if (lite
+                         and slot in fresh
+                         and self.afc_bowden_length != DEFAULT_BOWDEN_MM)
+                     else None)
         self._load_overfed = None
         # The odometer before any move; the sensor distance is the delta (see
         # _measure_path_from_odom).
@@ -12816,7 +13136,8 @@ class afcBambuAMS(afcUnit):
                     f"AFC bambu {self.name}: pre-load prime failed",
                     traceback=traceback.format_exc())
         self.feed(cur_lane, feed_dist)
-        loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm)
+        loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm,
+                                         expect_mm)
         # Printer "Retry": re-home the stalled unit (0F/0E) and feed again. A
         # unit that declared a fault already ran its own retries, so it gets
         # none and the failure is reported now, like a stock printer waiting
@@ -12831,7 +13152,10 @@ class afcBambuAMS(afcUnit):
                 f"fault after its own retries, so there is no re-home retry; "
                 f"reporting the failure now.")
         # Nor for a feed past its path: a retry would feed the same out again.
-        if self._load_overfed is not None:
+        # Nor for an AMS Lite that reported its own stall: the A1 leaves that
+        # retry to its user.
+        if (self._load_overfed is not None
+            or getattr(self, "_lite_fault_err", None) is not None):
             attempts = 0
         # No retry for a unit that is not listening (dropped its tray
         # selection); checked every round, scoped to _load_t0.
@@ -12895,7 +13219,10 @@ class afcBambuAMS(afcUnit):
             # be the re-home's motion plus the load's, not the path.
             self._load_odom_start = self._feed_odom_mm(cur_lane)
             self.feed(cur_lane, feed_dist)       # re-attempt the load
-            loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm)
+            loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm,
+                                             expect_mm)
+        # The tip has moved, so the bay no longer holds a fresh spool's.
+        fresh.discard(slot)
         if not loaded:
             # Read before any reel back, which moves the odometer too.
             try:
@@ -12940,20 +13267,34 @@ class afcBambuAMS(afcUnit):
                         "the path manually if it can't finish")
             # A load that ended because the AMS gave up is a different failure
             # from one that ran out of time, so quote the unit when it spoke.
-            if self._declared_fault_text:
+            lite_err = getattr(self, "_lite_fault_err", None)
+            if lite_err is not None:
+                cause = self._lite_stall_cause(
+                    cur_lane, lite_err, getattr(self, "_lite_stall_mm", None),
+                    expect_mm, sensor)
+            elif self._declared_fault_text:
                 cause = (f"The AMS declared a fault during the load and stopped "
                          f"trying; {tail}.\nAMS said: "
                          f"{_fault_reason(self._declared_fault_text)}\n"
                          f"Clear the path at the unit. {_RETRY_HINT}.")
             elif self._load_overfed is not None:
+                end = ("reached the toolhead sensor" if sensor
+                       else "stopped at the extruder gears")
+                check = (" and that the toolhead sensor is reading" if sensor
+                         else "")
                 cause = (f"The AMS Lite fed {cur_lane.name} "
                          f"{self._load_overfed:.0f}mm, past its {limit_mm:.0f}mm "
                          f"limit (the {self.afc_bowden_length:.0f}mm path plus "
-                         f"{LITE_OVERFEED_MM:.0f}mm), and it never reached the "
-                         f"toolhead sensor, so the feed was stopped.\n"
+                         f"{LITE_OVERFEED_MM:.0f}mm), and it never {end}, so "
+                         f"the feed was stopped.\n"
                          f"Check that the tube from the AMS Lite to the "
-                         f"toolhead is connected and that the toolhead sensor "
-                         f"is reading. {_RETRY_HINT}.")
+                         f"toolhead is connected{check}. {_RETRY_HINT}.")
+            elif not sensor:
+                cause = (f"The AMS Lite never showed where {cur_lane.name} "
+                         f"stopped within {timeout:.0f}s; {tail}.\n"
+                         f"With no toolhead sensor its odometer ends the "
+                         f"load, so check that the bridge is reporting it. "
+                         f"{_RETRY_HINT}.")
             else:
                 cause = (f"Filament did not reach the toolhead sensor for "
                          f"{cur_lane.name} within {timeout:.0f}s; {tail}.\n"
@@ -12990,6 +13331,20 @@ class afcBambuAMS(afcUnit):
         # Sensor hit and the AMS is already stopped (inside _feed_until_sensor).
         # Tell it the load is complete (mode-07 "STEP7:finish") so it commits.
         self.bridge_finish(cur_lane)
+        if (lite
+            and getattr(self, "_lite_fault_err", None) is not None):
+            # A sensorless AMS Lite that flagged its own stall at the gears:
+            # clear it (00), then hold the tray for the extruder. The grip
+            # check below tells the gears from a stuck spool.
+            self.logger.info(
+                f"AFC bambu {self.name}: the AMS Lite stopped {cur_lane.name} "
+                f"itself ({self._lite_fault_words(self._lite_fault_err)}); "
+                f"clearing it and checking that the extruder takes it")
+            self.rehome()
+            afc.reactor.pause(afc.reactor.monotonic() + LITE_CLEAR_S)
+            self.select_lane(cur_lane)
+        # What has left the tray so far, for the grip check.
+        grip0 = self._feed_odom_mm(cur_lane) if lite else None
 
         # Advance to the nozzle and engage the follower (mode:4) for the print.
         # No re-select at arrival: a mode-09 select pulls the tray back and
@@ -13005,7 +13360,8 @@ class afcBambuAMS(afcUnit):
         # The sensor has the last word: the filament can fall back after the
         # trigger (e.g. a dead link dropping the assist during the advance),
         # so re-read the sensor after the advance.
-        if not self._toolhead_sensor_triggered(cur_lane):
+        if (sensor
+            and not self._toolhead_sensor_triggered(cur_lane)):
             dropped = ""
             try:
                 if self._bridge is not None and not self._bridge.is_connected():
@@ -13020,6 +13376,18 @@ class afcBambuAMS(afcUnit):
                      f"was not loaded, whatever the feed reported.{dropped}\n"
                      f"Check the path at the extruder and that the AMS still "
                      f"has the filament. {_RETRY_HINT}.")
+            self.stop()
+            if afc.function.in_print():
+                self._fault_lane = cur_lane
+                self._resume_needs_reload = True
+            else:
+                self._failed_load_lane = cur_lane
+            afc.error.handle_lane_failure(
+                cur_lane, cause, pause=afc.function.in_print())
+            return False
+        cause = (self._lite_grip_check(cur_lane, cur_extruder, grip0)
+                 if lite else None)
+        if cause is not None:
             self.stop()
             if afc.function.in_print():
                 self._fault_lane = cur_lane
@@ -13869,7 +14237,8 @@ class afcBambuAMS(afcUnit):
         ``unload_past_sensor`` mm more past the last of them (read off the
         unit's odometer, or timed when it is not reporting), and stops: after
         a retract the bridge leaves the unit idle, and the holder takes up the
-        rest.
+        rest. With no toolhead sensor, the distance runs from where the
+        extruder let go.
 
         :param cur_lane: the lane being unloaded
         :return bool: True once the sensors cleared and the distance past them
@@ -13881,7 +14250,8 @@ class afcBambuAMS(afcUnit):
         # The size only bounds the bridge's runaway guard; the stop is ours.
         self.retract(cur_lane, LITE_UNLOAD_GUARD_MM)
         deadline = reactor.monotonic() + LITE_UNLOAD_MAX_S
-        at_head = True
+        sensor = afcBambuAMS._has_toolhead_sensor(cur_lane)
+        at_head = sensor
         clear_t: Optional[float] = None
         clear_odom: Optional[float] = None
         try:
@@ -13901,8 +14271,12 @@ class afcBambuAMS(afcUnit):
                              or not splitter.state)):
                         clear_t = now
                         clear_odom = self._odom_now_mm()
-                        last = ("the toolhead sensor" if splitter is None
-                                else f"the splitter switch {splitter.name}")
+                        if splitter is not None:
+                            last = f"the splitter switch {splitter.name}"
+                        elif sensor:
+                            last = "the toolhead sensor"
+                        else:
+                            last = "the extruder"
                         self.logger.debug(
                             f"AFC bambu {self.name}: {cur_lane.name} cleared "
                             f"{last}; {past:.0f}mm more")
