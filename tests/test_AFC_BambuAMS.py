@@ -2472,6 +2472,41 @@ class TestAfcBambuAMSInit:
         assert u.arrival_assist_delay_s == 1.5
         assert u.logger.messages == []
 
+    def test_an_ams_lite_runs_combined_by_default(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite"}))
+        assert u.mode == "combined"
+        assert u.logger.messages == []
+
+    def test_an_ams_lite_reads_its_mode_in_any_case(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "mode": " Combined "}))
+        assert u.mode == "combined"
+        assert u.logger.messages == []
+
+    def test_an_ams_lite_refuses_mode_direct_for_now(self):
+        with pytest.raises(configparser.Error) as exc:
+            afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "mode": "direct"}))
+        assert str(exc.value) == (
+            "[AFC_BambuAMS Bambu_AMS_1] mode: direct, one tray per toolhead, "
+            "is not supported on the AMS Lite yet. Use mode: combined, its "
+            "trays through one splitter into one toolhead.")
+
+    def test_an_ams_lite_refuses_an_unknown_mode(self):
+        with pytest.raises(configparser.Error) as exc:
+            afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "mode": "Split"}))
+        assert str(exc.value) == (
+            "[AFC_BambuAMS Bambu_AMS_1] invalid mode 'split'. Use "
+            "'combined'.")
+
+    def test_a_boxed_unit_reads_no_mode(self):
+        # Klipper then refuses a mode: set on one as an unused option.
+        u = afcBambuAMS(unit_config(values={"ams_model": "ams2",
+                                            "mode": "direct"}))
+        assert not hasattr(u, "mode")
+        assert u.logger.messages == []
+
     def test_an_ams_lite_setup_is_checked_at_init(self):
         # A lane whose extruder has no toolhead sensor stops the AMS Lite.
         printer = make_printer()
@@ -10730,6 +10765,47 @@ class TestAfcBambuAMSIsVirtualHub:
         assert afcBambuAMS._is_virtual_hub(lane) is False
 
 
+class TestAfcBambuAMSSplitterSwitch:
+    """The lane's hub when it has a switch of its own."""
+
+    @staticmethod
+    def _lane(monkeypatch: pytest.MonkeyPatch, virtual: bool = False) -> Any:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param virtual: its unit's hub has no switch
+        :return Any: lane0 of a unit whose hub is physical or virtual
+        """
+        return TestAfcBambuAMSIsVirtualHub._lane(monkeypatch, virtual)
+
+    def test_a_hub_with_a_switch_is_it(self, monkeypatch):
+        lane = self._lane(monkeypatch)
+        assert lane.hub_obj.switch_pin == "hub_pin"
+        assert afcBambuAMS._splitter_switch(lane) is lane.hub_obj
+
+    def test_no_hub_obj_is_none(self, monkeypatch):
+        lane = self._lane(monkeypatch)
+        lane.hub_obj = None
+        assert afcBambuAMS._splitter_switch(lane) is None
+
+    def test_a_direct_hub_is_none(self, monkeypatch):
+        # AFC_lane's stand-in for hub: direct has no is_virtual_pin.
+        lane = self._lane(monkeypatch)
+        lane.hub_obj = lambda: None
+        lane.hub_obj.state = True
+        assert afcBambuAMS._splitter_switch(lane) is None
+
+    def test_a_virtual_hub_is_none(self, monkeypatch):
+        lane = self._lane(monkeypatch, virtual=True)
+        assert afcBambuAMS._splitter_switch(lane) is None
+
+    @pytest.mark.parametrize("pin", [None, ""])
+    def test_a_hub_with_no_switch_pin_is_none(self, monkeypatch, pin):
+        lane = self._lane(monkeypatch)
+        lane.hub_obj.switch_pin = pin
+        assert lane.hub_obj.is_virtual_pin() is False
+        assert afcBambuAMS._splitter_switch(lane) is None
+
+
 class TestAfcBambuAMSSyncLanes:
     SECTIONS = pytest.mark.parametrize("section", [None, True],
                                        ids=["no-section", "section"])
@@ -16687,6 +16763,61 @@ class TestAfcBambuAMSCheckLiteConfig:
         unit.printer.get_snapmaker_config_dir = lambda: "/home/lava"
         assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
 
+    # mode: combined, one splitter into one toolhead
+
+    def _two_lanes(self, unit: afcBambuAMS, lane2: Dict[str, Any],
+                   **lane1: Any) -> None:
+        """
+        lane1 and lane2 on a toolhead with a switch.
+
+        :param unit: the unit
+        :param lane2: lane2's options
+        :param lane1: lane1's options
+        """
+        self._lane(unit, **lane1)
+        self._section(unit, "AFC_lane lane2", unit="Lite:2", **lane2)
+        for ext in ("extruder", "extruder1"):
+            self._section(unit, f"AFC_extruder {ext}",
+                          pin_tool_start="EBBT0:PB3")
+
+    def test_lanes_sharing_an_extruder_and_a_hub_pass(self):
+        # lane1 takes both from the unit, lane2 names the same ones.
+        unit, cfg = self._unit(hub="Lite_hub")
+        self._two_lanes(unit, {"hub": "Lite_hub", "extruder": "extruder"})
+        assert unit._check_lite_config(cfg) is None
+        assert unit.logger.messages == []
+
+    def test_lanes_on_two_extruders_are_refused(self):
+        unit, cfg = self._unit()
+        self._two_lanes(unit, {"hub": "direct", "extruder": "extruder1"},
+                        hub="direct")
+        assert self._refused(unit, cfg) == (
+            f"{self.HEAD}mode: combined runs the trays through one splitter "
+            f"into one toolhead, but the lanes name more than one extruder "
+            f"(lane1: extruder, lane2: extruder1). Put every lane on the "
+            f"same extruder.")
+
+    def test_lanes_on_two_hubs_are_refused(self):
+        unit, cfg = self._unit(hub="Lite_hub")
+        self._two_lanes(unit, {"hub": "direct"})
+        assert self._refused(unit, cfg) == (
+            f"{self.HEAD}mode: combined runs the trays through one splitter "
+            f"into one toolhead, but the lanes name more than one hub (lane1: "
+            f"Lite_hub, lane2: direct). Give every lane the same hub: direct, "
+            f"or the [AFC_hub] at the splitter.")
+
+    def test_a_lane_with_no_hub_is_left_out_of_the_hubs(self):
+        # Its own problem is reported; one named hub is not a second.
+        unit, cfg = self._unit()
+        self._two_lanes(unit, {"hub": "direct"})
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_HUB
+
+    def test_a_lane_with_no_extruder_is_left_out_of_the_extruders(self):
+        unit, cfg = self._unit(extruder=None)
+        self._two_lanes(unit, {"hub": "direct"}, hub="direct",
+                        extruder="extruder1")
+        assert unit._check_lite_config(cfg) is None
+
     # every problem at once
 
     def test_every_problem_is_named_in_one_error(self):
@@ -16702,7 +16833,10 @@ class TestAfcBambuAMSCheckLiteConfig:
             f"it a bridge of its own.\n{self.NO_HUB}\n{self.NO_BUFFER}\n"
             f"lane2: [AFC_extruder extruder2] has no toolhead sensor. An AMS "
             f"Lite stops its feed at it: set pin_tool_start to a filament "
-            f"switch before the extruder gears.")
+            f"switch before the extruder gears.\nmode: combined runs the "
+            f"trays through one splitter into one toolhead, but the lanes "
+            f"name more than one extruder (lane1: extruder, lane2: "
+            f"extruder2). Put every lane on the same extruder.")
 
 
 class TestAfcBambuAMSSendHtFlag:
@@ -27180,19 +27314,22 @@ class TestAfcBambuAMSUnitUnloadLane:
                   "UNIT=Bambu_AMS_1 LANE=lane1.")
 
     @staticmethod
-    def _lite(monkeypatch: pytest.MonkeyPatch, *,
-              sensor: Sequence[bool]) -> Tuple[afcBambuAMS, Any]:
+    def _lite(monkeypatch: pytest.MonkeyPatch, *, sensor: Sequence[bool],
+              splitter: bool = False) -> Tuple[afcBambuAMS, Any]:
         """
         An AMS Lite with lane1 at the toolhead on a 500mm unload bowden.
 
         :param monkeypatch: pytest's monkeypatch fixture
         :param sensor: the toolhead sensor's script
+        :param splitter: its hub, Bambu_AMS_1_hub, has a switch; otherwise
+          the hub is virtual
         :return tuple: (the unit, lane1)
         """
         unit = _p6_unit(monkeypatch, model="lite", sensor=sensor,
                         lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
                         slots=[slot_info(0, material="PLA", state="idle")],
-                        values={"afc_unload_bowden_length": 500.0})
+                        values={"afc_unload_bowden_length": 500.0},
+                        virtual_hub=not splitter)
         unit._presence_ok = True
         return unit, unit.lanes["lane1"]
 
@@ -27229,6 +27366,37 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert lane.status == AFCLaneState.ERROR
         assert lane.tool_loaded is True
         assert unit._unload_in_progress is False
+        assert unit.logger.messages == [self.ISSUED]
+
+    def test_an_ams_lite_stuck_at_its_splitter_switch_says_so(
+            self, monkeypatch):
+        unit, lane = self._lite(monkeypatch, sensor=[False], splitter=True)
+        lane.hub_obj.state = True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, "AFC bambu unload failed for lane1: [AFC_hub "
+                    "Bambu_AMS_1_hub] at the splitter still sees filament "
+                    "after 20s of AMS Lite retract. An AMS Lite pulls back at "
+                    "most 300mm, so that switch has to sit closer than that "
+                    "to the toolhead. Free it at the splitter, then run "
+                    "AFC_BAMBU_RECOVER UNIT=Bambu_AMS_1 LANE=lane1."),
+             {"pause": False})]
+        assert lane.status == AFCLaneState.ERROR
+        assert unit.logger.messages == [
+            self.ISSUED,
+            ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+                      "sensor; on to the splitter switch Bambu_AMS_1_hub")]
+
+    def test_an_ams_lite_stuck_at_the_toolhead_names_the_toolhead(
+            self, monkeypatch):
+        # The switch upstream sees it too; the toolhead is where it is held.
+        unit, lane = self._lite(monkeypatch, sensor=[True], splitter=True)
+        lane.hub_obj.state = True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure", (lane, self.LITE_STUCK),
+             {"pause": False})]
         assert unit.logger.messages == [self.ISSUED]
 
 
@@ -27949,6 +28117,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
     def _rig(cls, monkeypatch: pytest.MonkeyPatch, sensor: Sequence[bool], *,
              odom: Optional[Callable[[float], Optional[float]]] = None,
              ustate: Optional[int] = None, offline: bool = False,
+             splitter: bool = False,
              **values: Any) -> Tuple[afcBambuAMS, Any]:
         """
         An AMS Lite with lane1 at the toolhead; the clock starts at 100.0.
@@ -27958,13 +28127,16 @@ class TestAfcBambuAMSLiteUnloadRetract:
         :param odom: the odometer (mm) at a clock time; None reads none
         :param ustate: the unit's reported state
         :param offline: no bridge
+        :param splitter: its hub, Bambu_AMS_1_hub, has a switch (reading
+          clear); otherwise the hub is virtual
         :param values: further unit options
         :return tuple: (the unit, lane1)
         """
         bridge = cls._Bridge()
         unit = _p6_unit(monkeypatch, model="lite", sensor=sensor,
                         lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
-                        values=values, bridge=bridge, offline=offline)
+                        values=values, bridge=bridge, offline=offline,
+                        virtual_hub=not splitter)
         bridge.clock = unit.reactor
         if odom is not None:
             bridge.odom = odom
@@ -28094,6 +28266,69 @@ class TestAfcBambuAMSLiteUnloadRetract:
         assert unit._bridge is None
         assert unit.reactor.now == pytest.approx(120.0, abs=0.06)
         assert unit.logger.messages == []
+
+    # a switch at the splitter
+
+    #: The toolhead sensor clearing ahead of the splitter switch.
+    ON_TO = ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+                      "sensor; on to the splitter switch Bambu_AMS_1_hub")
+
+    @staticmethod
+    def _past_splitter(mm: int) -> LogLine:
+        """
+        :param mm: the distance past the switch
+        :return LogLine: the line the splitter switch clearing logs
+        """
+        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 cleared the splitter "
+                         f"switch Bambu_AMS_1_hub; {mm}mm more")
+
+    def test_the_distance_runs_from_the_splitter_switch(self, monkeypatch):
+        # The head clears at 100.05 and the switch at 100.17, seen on the
+        # 100.20 poll with the odometer at 12mm; 25mm more at 60mm/s is
+        # 100.62, so the polls stop at 100.65.
+        unit, lane = self._rig(monkeypatch, [True, False], splitter=True,
+                               odom=lambda t: (t - 100.0) * 60.0,
+                               unload_past_sensor=25.0)
+        lane.hub_obj.state = True
+        _p6_at(unit, 100.17, lambda: setattr(lane.hub_obj, "state", False))
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.65)
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [self.ON_TO, self._past_splitter(25)]
+
+    def test_a_splitter_switch_already_clear_is_passed_at_once(
+            self, monkeypatch):
+        # Both clear on the 100.10 poll, so the distance is as without it.
+        unit, lane = self._rig(monkeypatch, [True, True, False],
+                               splitter=True,
+                               odom=lambda t: (t - 100.0) * 60.0,
+                               unload_past_sensor=25.0)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.55)
+        assert unit.logger.messages == [self.ON_TO, self._past_splitter(25)]
+
+    def test_a_splitter_switch_that_never_clears_fails_at_the_deadline(
+            self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, [False], splitter=True)
+        lane.hub_obj.state = True
+        assert unit._lite_unload_retract(lane) is False
+        assert unit.reactor.now == pytest.approx(120.0, abs=0.06)
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [self.ON_TO]
+
+    def test_a_stall_before_the_splitter_switch_clears_fails_at_once(
+            self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, [False], splitter=True,
+                               ustate=afcBambuAMS.AMS_STATE_STALLED)
+        lane.hub_obj.state = True
+        assert unit._lite_unload_retract(lane) is False
+        assert unit.reactor.now == 100.0
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [
+            self.ON_TO,
+            ("warning", "AFC bambu Bambu_AMS_1: the AMS Lite stalled "
+                        "retracting lane1 before it cleared the splitter "
+                        "switch Bambu_AMS_1_hub")]
 
 
 class TestAfcBambuAMSLiteRelease:

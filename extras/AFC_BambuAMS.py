@@ -1069,6 +1069,10 @@ LITE_MMPS = 30.0
 #: How far past its path an AMS Lite load may feed, by its odometer, before
 #: the filament is taken to be going somewhere other than the toolhead.
 LITE_OVERFEED_MM = 250.0
+#: AMS Lite `mode`: combined runs its trays through one splitter into one
+#: toolhead. direct, one tray per toolhead, is refused until it is built.
+LITE_MODE_COMBINED = "combined"
+LITE_MODE_DIRECT = "direct"
 
 
 def _gcmd_int(gcmd: Any, name: str, default: int,
@@ -1596,6 +1600,22 @@ class afcBambuAMS(afcUnit):
         self.unload_past_sensor = config.getfloat(
             "unload_past_sensor", 30.0, minval=0.0)
         if self._is_lite():
+            # How its trays reach the printer. combined: all of them through
+            # one splitter into one toolhead, past one shared sensor. direct
+            # waits on whether a tray the AMS Lite is not driving still turns
+            # freely when another toolhead pulls on it. AMS Lite only.
+            self.mode = config.get("mode", LITE_MODE_COMBINED).lower().strip()
+            if self.mode == LITE_MODE_DIRECT:
+                error_str = (
+                    f"[{config.get_name()}] mode: direct, one tray per "
+                    f"toolhead, is not supported on the AMS Lite yet. Use "
+                    f"mode: combined, its trays through one splitter into one "
+                    f"toolhead.")
+                raise config.error(error_str)
+            if self.mode != LITE_MODE_COMBINED:
+                error_str = (f"[{config.get_name()}] invalid mode "
+                             f"'{self.mode}'. Use '{LITE_MODE_COMBINED}'.")
+                raise config.error(error_str)
             # Nothing to wait for at the sensor: the AMS Lite holds the tray
             # with its motor released the moment the feed stops, as the A1
             # leaves it for the extruder.
@@ -6790,6 +6810,24 @@ class afcBambuAMS(afcUnit):
                 and hasattr(hub, 'is_virtual_pin')
                 and hub.is_virtual_pin())
 
+    @staticmethod
+    def _splitter_switch(lane: Any) -> Any:
+        """
+        The lane's hub when it has a switch of its own: on an AMS Lite, the
+        switch at the splitter where its trays meet.
+
+        :param lane: Lane whose hub to inspect
+        :return: the AFC_hub, or None for hub: direct, a virtual hub or a hub
+            with no switch_pin
+        """
+        hub = getattr(lane, 'hub_obj', None)
+        if (hub is None
+            or not hasattr(hub, 'is_virtual_pin')
+            or hub.is_virtual_pin()
+            or not getattr(hub, 'switch_pin', None)):
+            return None
+        return hub
+
     # Lane states we must never overwrite from a passive status poll: a load,
     # unload, eject, or error is mid-flight and owns the lane's status.
     _ACTIVE_STATES = (AFCLaneState.TOOL_LOADED, AFCLaneState.TOOL_LOADING,
@@ -8289,8 +8327,9 @@ class afcBambuAMS(afcUnit):
         on any printer; pin_tool_start: buffer only with a buffer for the
         lane; the U1's filament sensor only on a Snapmaker U1; virtual never.
         Its lanes have no hub unless one is named, so each sets one (hub:
-        direct, or an [AFC_hub] with a switch). And it is alone on its bus, so
-        no other unit may name its serial_port.
+        direct, or an [AFC_hub] with a switch). In mode: combined its trays
+        meet at one splitter, so its lanes share one extruder and one hub.
+        And it is alone on its bus, so no other unit may name its serial_port.
 
         Read from the merged config, since the lanes and extruders it judges
         connect after this unit.
@@ -8329,20 +8368,25 @@ class afcBambuAMS(afcUnit):
                     f"[{sec}] is on the same bridge ({port}). An AMS Lite is "
                     f"the only device on its bus; give it a bridge of its own.")
         snapmaker = hasattr(self.printer, "get_snapmaker_config_dir")
+        hubs: Dict[str, str] = {}
+        exts: Dict[str, str] = {}
         for sec in fc.sections():
             m = re.match(r"(?i)afc_lane\s+(\S+)$", sec)
             if (not m
                 or (_opt(sec, "unit") or "").split(":")[0] != unit):
                 continue
             lane = m.group(1)
-            if not (_opt(sec, "hub")
-                    or self.hub):
+            hub = _opt(sec, "hub") or self.hub
+            if hub:
+                hubs[lane] = hub
+            else:
                 problems.append(
                     f"{lane}: an AMS Lite has no hub. Set hub: direct on the "
                     f"lane, or name an [AFC_hub] with a switch_pin.")
             ext = _opt(sec, "extruder") or self.extruder
             if ext is None:
                 continue                  # AFC_lane reports a missing extruder
+            exts[lane] = ext
             ext_sec = f"AFC_extruder {ext}"
             start = (_opt(ext_sec, "pin_tool_start") or "").lower()
             if start in ("virtual", "unknown"):
@@ -8373,6 +8417,17 @@ class afcBambuAMS(afcUnit):
                         f"{lane}: [{ext_sec}] has no toolhead sensor. An AMS "
                         f"Lite stops its feed at it: set pin_tool_start to a "
                         f"filament switch before the extruder gears.")
+        for what, named, fix in (
+                ("extruder", exts, "Put every lane on the same extruder."),
+                ("hub", hubs, "Give every lane the same hub: direct, or the "
+                              "[AFC_hub] at the splitter.")):
+            if len(set(named.values())) > 1:
+                pairs = ", ".join(f"{lane}: {name}"
+                                  for lane, name in named.items())
+                problems.append(
+                    f"mode: combined runs the trays through one splitter "
+                    f"into one toolhead, but the lanes name more than one "
+                    f"{what} ({pairs}). {fix}")
         if problems:
             error_str = (f"[{me}] ams_model: lite cannot run this setup:\n"
                          + "\n".join(problems))
@@ -13648,10 +13703,22 @@ class afcBambuAMS(afcUnit):
             self._clear_latched_error(cur_lane, "the unload retract")
             if self._is_lite():
                 if not self._lite_unload_retract(cur_lane):
+                    splitter = afcBambuAMS._splitter_switch(cur_lane)
+                    if (splitter is not None
+                        and not self._toolhead_sensor_triggered(cur_lane)):
+                        stuck = (f"[AFC_hub {splitter.name}] at the splitter "
+                                 f"still sees filament after "
+                                 f"{LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
+                                 f"retract. An AMS Lite pulls back at most "
+                                 f"{LITE_UNLOAD_GUARD_MM:.0f}mm, so that switch "
+                                 f"has to sit closer than that to the "
+                                 f"toolhead. Free it at the splitter")
+                    else:
+                        stuck = (f"the toolhead sensor still sees filament "
+                                 f"after {LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
+                                 f"retract. Free it at the toolhead")
                     msg = (f"AFC bambu unload failed for {cur_lane.name}: "
-                           f"the toolhead sensor still sees filament after "
-                           f"{LITE_UNLOAD_MAX_S:.0f}s of AMS Lite retract. "
-                           f"Free it at the toolhead, then run "
+                           f"{stuck}, then run "
                            f"{self.get_lane_reset_command(cur_lane, 0.0)}.")
                     afc.error.handle_lane_failure(
                         cur_lane, msg, pause=afc.function.in_print())
@@ -13792,44 +13859,64 @@ class afcBambuAMS(afcUnit):
 
     def _lite_unload_retract(self, cur_lane: Any) -> bool:
         """
-        Pull an AMS Lite lane just clear of the toolhead sensor, then let go.
+        Pull an AMS Lite lane just clear of the splitter, then let go.
 
         The AMS Lite's spool holder is spring-loaded and takes back only a
         little, so its filament is never reeled home the way a boxed AMS reels
         it. Like the A1, this retracts until the toolhead sensor clears, then
-        ``unload_past_sensor`` mm more (read off the unit's odometer, or timed
-        when it is not reporting), and stops: after a retract the bridge leaves
-        the unit idle, and the holder takes up the rest.
+        until the switch at the splitter clears when the lane's hub has one
+        (AFC will not load past a hub that sees filament), then
+        ``unload_past_sensor`` mm more past the last of them (read off the
+        unit's odometer, or timed when it is not reporting), and stops: after
+        a retract the bridge leaves the unit idle, and the holder takes up the
+        rest.
 
         :param cur_lane: the lane being unloaded
-        :return bool: True once the sensor cleared and the distance past it ran
+        :return bool: True once the sensors cleared and the distance past them
+            ran
         """
         reactor = self.afc.reactor
         past = self.unload_past_sensor
+        splitter = afcBambuAMS._splitter_switch(cur_lane)
         # The size only bounds the bridge's runaway guard; the stop is ours.
         self.retract(cur_lane, LITE_UNLOAD_GUARD_MM)
         deadline = reactor.monotonic() + LITE_UNLOAD_MAX_S
+        at_head = True
         clear_t: Optional[float] = None
         clear_odom: Optional[float] = None
         try:
             while True:
                 now = reactor.monotonic()
                 if clear_t is None:
-                    if not self._toolhead_sensor_triggered(cur_lane):
+                    if (at_head
+                        and not self._toolhead_sensor_triggered(cur_lane)):
+                        at_head = False
+                        if splitter is not None:
+                            self.logger.debug(
+                                f"AFC bambu {self.name}: {cur_lane.name} "
+                                f"cleared the toolhead sensor; on to the "
+                                f"splitter switch {splitter.name}")
+                    if (not at_head
+                        and (splitter is None
+                             or not splitter.state)):
                         clear_t = now
                         clear_odom = self._odom_now_mm()
+                        last = ("the toolhead sensor" if splitter is None
+                                else f"the splitter switch {splitter.name}")
                         self.logger.debug(
                             f"AFC bambu {self.name}: {cur_lane.name} cleared "
-                            f"the toolhead sensor; {past:.0f}mm more")
+                            f"{last}; {past:.0f}mm more")
                     elif now >= deadline:
                         return False
                     elif (self._unit_state(self._bridge.latest_status()
                                            if self._bridge else None)
                           == afcBambuAMS.AMS_STATE_STALLED):
+                        where = ("the toolhead sensor" if at_head
+                                 else f"the splitter switch {splitter.name}")
                         self.logger.warning(
                             f"AFC bambu {self.name}: the AMS Lite stalled "
                             f"retracting {cur_lane.name} before it cleared "
-                            f"the toolhead sensor")
+                            f"{where}")
                         return False
                 if clear_t is not None:
                     # Odometer runs up as filament goes back on an AMS Lite;
