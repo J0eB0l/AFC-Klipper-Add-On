@@ -356,7 +356,7 @@ _AMS_MODELS = {
     "ht":      (True,   0x1800,   None,   85),   # AMS HT
     # AFC_BridgeBox's own tags, which it writes into the sections it builds.
     "boxed":   (False,  0x0700,   None,   65),   # 0x0700, generation unconfirmed
-    "lite":    (False,  0x0700,   None,   65),   # AMS Lite
+    "lite":    (False,  0x1200,   None,   65),   # AMS Lite (no heater)
 }
 
 # MC poll addressing: device = the unit class, id = the bus address (see
@@ -365,6 +365,10 @@ _AMS_MODELS = {
 _MC_ADDRESSING = {m: (spec[1], 0x00) for m, spec in _AMS_MODELS.items()}
 
 _HT_MODELS = ("ht",)
+#: The AMS Lite: an A1's four-tray unit. No buffer, no hub, no dryer and no
+#: spool measurement; the printer stops its feed at the toolhead sensor and
+#: the extruder pulls against a released motor. Alone on its bus.
+_LITE_MODELS = ("lite",)
 #: Models whose insert measurement gets one automatic retry when it one-edges.
 #: The AMS 2 is included because the firmware's auto-rescan declines for it and
 #: defers to the host.
@@ -1054,6 +1058,15 @@ DRYREM_TICK_SLACK_S = 120.0
 #: the wire. The AMS retracts at about 136 mm/s, so this errs slow.
 DEADLINE_MMPS = 60.0
 
+#: AMS Lite unload: the retract's runaway size, and how long the toolhead
+#: sensor gets to clear before the unload is called failed. The host stops the
+#: retract itself (see _lite_unload_retract).
+LITE_UNLOAD_GUARD_MM = 300.0
+LITE_UNLOAD_MAX_S = 20.0
+#: The AMS Lite's drive speed on the bench (mm/s): times the distance past the
+#: sensor when the odometer is not reporting.
+LITE_MMPS = 30.0
+
 
 def _gcmd_int(gcmd: Any, name: str, default: int,
               minval: int, maxval: int) -> int:
@@ -1414,8 +1427,8 @@ class afcBambuAMS(afcUnit):
         # Extra mm (beyond bowden + DIST_HUB_MM) to retract when ejecting a lane so
         # the filament clears the hub and pulls fully back into the AMS bay.
         self.eject_buffer = config.getfloat("eject_buffer", 200.0, minval=0.0)
-        # Boxed AMS by default (auto|ams). "lite" is reserved for the AMS Lite,
-        # a future addition that is neither implemented nor tested yet.
+        # The bus the firmware drives: boxed by default (auto|ams), "lite" for
+        # an AMS Lite. ams_model: lite sets it (see below).
         self.variant = config.getchoice(
             "variant", {"auto": "auto", "ams": "ams", "lite": "lite"}, "auto")
         # Which AMS on the daisy-chain this unit represents (0..MAX_AMS-1).
@@ -1560,6 +1573,32 @@ class afcBambuAMS(afcUnit):
         # so UID pinning can update it on connect. Above chain index 3 this is
         # untested.
         self._dry_id_follows_index = self.dry_ams_id is None
+        # The AMS Lite is its own bus variant, and the only device on it.
+        if self._is_lite():
+            if self.variant == "ams":
+                error_str = (
+                    f"[{config.get_name()}] variant: ams is a boxed AMS's bus, "
+                    f"and ams_model: lite is an AMS Lite. Leave variant out.")
+                raise config.error(error_str)
+            self.variant = "lite"
+        elif self.variant == "lite":
+            error_str = (
+                f"[{config.get_name()}] variant: lite is the AMS Lite's bus; "
+                f"set ams_model: lite for an AMS Lite.")
+            raise config.error(error_str)
+        # How far an AMS Lite unload pulls past the toolhead sensor. Its spool
+        # holder is spring-loaded and takes back only a little, so the
+        # filament is never reeled home: it stops just clear of the sensor
+        # and the place the trays' tubes join. AMS Lite only.
+        self.unload_past_sensor = config.getfloat(
+            "unload_past_sensor", 30.0, minval=0.0)
+        if self._is_lite():
+            # Nothing to wait for at the sensor: the AMS Lite holds the tray
+            # with its motor released the moment the feed stops, as the A1
+            # leaves it for the extruder.
+            self.arrival_assist_delay_s = config.getfloat(
+                "arrival_assist_delay_s", 0.0, minval=0.0)
+            self._check_lite_config(config)
         # Real bay count: 1 for an HT, 4 for boxed units. Arrays stay
         # SLOTS_PER_UNIT long, but everything user-visible is clamped to
         # unit_slots.
@@ -3326,6 +3365,10 @@ class afcBambuAMS(afcUnit):
         """
         if self._bridge is None:
             return False
+        if self._is_lite():
+            # Alone on its bus, with no measurement and no scan motion: a scan
+            # is a fresh tag read.
+            return self.scan(slot)
         # One spool operation on the bus at a time: two units scanning at once
         # can take Klipper down. The printer serialises these the same way.
         claim = getattr(self._bridge, "try_claim_bus", None)
@@ -5774,14 +5817,22 @@ class afcBambuAMS(afcUnit):
         # One try per send, so a failure cannot skip _send_mc_addr: without it
         # the log drain never asks an HT, and every HT move and measurement is
         # lost while the bus looks healthy.
-        for what, fn in (
-                ("units", lambda: self._bridge.send(
-                    {"cmd": "units", "n": self.ams_index + 1})),
-                ("ht flag", lambda: self._send_ht_flag(self._bridge)),
-                ("model", lambda: afcBambuAMS._send_unit_model(self, self._bridge)),
-                ("mc address", lambda: self._send_mc_addr(self._bridge)),
-                ("arm cadence", lambda: self._bridge.send(
-                    {"cmd": "armms", "ms": int(FOLLOW_ARM_MS)}))):
+        sends: Tuple[Tuple[str, Callable[[], Any]], ...] = (
+            ("units", lambda: self._bridge.send(
+                {"cmd": "units", "n": self.ams_index + 1})),
+            ("ht flag", lambda: self._send_ht_flag(self._bridge)),
+            ("model", lambda: afcBambuAMS._send_unit_model(self, self._bridge)),
+            ("mc address", lambda: self._send_mc_addr(self._bridge)),
+            ("arm cadence", lambda: self._bridge.send(
+                {"cmd": "armms", "ms": int(FOLLOW_ARM_MS)})))
+        if self._is_lite():
+            # The AMS Lite has no HT flag, model, MC poll or arm cadence: only
+            # its bus variant, which a rebooted bridge forgets, and one unit.
+            sends = (
+                ("variant", lambda: self._bridge.send(
+                    {"cmd": "variant", "set": "lite"})),
+                ("units", lambda: self._bridge.send({"cmd": "units", "n": 1})))
+        for what, fn in sends:
             try:
                 fn()
             except Exception as e:
@@ -7466,6 +7517,11 @@ class afcBambuAMS(afcUnit):
             (getattr(self, "_measure_wait_said", None) or set()).discard(slot)
         except Exception:
             pass
+        if self._is_lite():
+            # Nothing to wait out: the bridge reads every loaded AMS Lite bay
+            # each round and drops a bay's record when its spool leaves or
+            # arrives, so the record is the bay's own (verdict "none").
+            return
         t0 = getattr(self, "_scan_t0", None)
         if t0 is None or not (0 <= slot < len(t0)):
             return
@@ -8140,6 +8196,14 @@ class afcBambuAMS(afcUnit):
             "quiet_while_measuring": False,
             "slots": 1,
         },
+        "lite": {
+            "fw_model": None,        # the firmware runs it as its own variant
+            "commands_scan": False,  # the bridge reads its tags round and round
+            "pre_read_safe": True,
+            "measure_route": None,   # it never measures a spool
+            "quiet_while_measuring": False,
+            "slots": 4,
+        },
     }
 
     @property
@@ -8194,6 +8258,113 @@ class afcBambuAMS(afcUnit):
             return prof["fw_model"] == 2
         return (bool(getattr(self, "has_heater", False))
                 and getattr(self, "dry_dev_addr", 0) == 0x1800)
+
+    def _is_lite(self) -> bool:
+        """
+        Whether this unit is an AMS Lite.
+
+        :return bool: True for an AMS Lite. getattr, because test stand-ins
+            carry only ams_model.
+        """
+        return getattr(self, "ams_model", "") in _LITE_MODELS
+
+    def _check_lite_config(self, config: Any) -> None:
+        """
+        Refuse an AMS Lite setup that cannot stop its feed or share its bus.
+
+        The AMS Lite has no buffer: the printer ends its feed at the toolhead
+        sensor, so every lane needs a real one. A pin_tool_start switch counts
+        on any printer; pin_tool_start: buffer only with a buffer for the
+        lane; the U1's filament sensor only on a Snapmaker U1; virtual never.
+        Its lanes have no hub unless one is named, so each sets one (hub:
+        direct, or an [AFC_hub] with a switch). And it is alone on its bus, so
+        no other unit may name its serial_port.
+
+        Read from the merged config, since the lanes and extruders it judges
+        connect after this unit.
+
+        :param config: this unit's config section
+        :raises config.error: naming every problem found
+        """
+        fc = getattr(config, "fileconfig", None)
+        if fc is None:
+            return
+        me = config.get_name()
+        unit = me.split()[-1]
+
+        def _opt(section: str, key: str) -> Optional[str]:
+            """
+            One option of another section, trimmed; None when unset or blank.
+
+            :param section: the section name
+            :param key: the option
+            :return str: the value, or None
+            """
+            if (not fc.has_section(section)
+                or not fc.has_option(section, key)):
+                return None
+            return (fc.get(section, key) or "").strip() or None
+
+        problems: List[str] = []
+        port = (self.serial_port or "").strip()
+        for sec in fc.sections():
+            m = re.match(r"(?i)afc_bambuams\s+(\S+)$", sec)
+            if (port
+                and m
+                and sec != me
+                and (_opt(sec, "serial_port") or "") == port):
+                problems.append(
+                    f"[{sec}] is on the same bridge ({port}). An AMS Lite is "
+                    f"the only device on its bus; give it a bridge of its own.")
+        snapmaker = hasattr(self.printer, "get_snapmaker_config_dir")
+        for sec in fc.sections():
+            m = re.match(r"(?i)afc_lane\s+(\S+)$", sec)
+            if (not m
+                or (_opt(sec, "unit") or "").split(":")[0] != unit):
+                continue
+            lane = m.group(1)
+            if not (_opt(sec, "hub")
+                    or self.hub):
+                problems.append(
+                    f"{lane}: an AMS Lite has no hub. Set hub: direct on the "
+                    f"lane, or name an [AFC_hub] with a switch_pin.")
+            ext = _opt(sec, "extruder") or self.extruder
+            if ext is None:
+                continue                  # AFC_lane reports a missing extruder
+            ext_sec = f"AFC_extruder {ext}"
+            start = (_opt(ext_sec, "pin_tool_start") or "").lower()
+            if start in ("virtual", "unknown"):
+                problems.append(
+                    f"{lane}: [{ext_sec}] has pin_tool_start: {start}. An AMS "
+                    f"Lite stops its feed at the toolhead sensor, so it needs "
+                    f"a real one: set pin_tool_start to the pin of a filament "
+                    f"switch before the extruder gears.")
+            elif start == "buffer":
+                if not (_opt(sec, "buffer")
+                        or _opt(ext_sec, "buffer")
+                        or self.buffer_name):
+                    problems.append(
+                        f"{lane}: [{ext_sec}] has pin_tool_start: buffer, but "
+                        f"no buffer is set for this lane (buffer: on the "
+                        f"lane, the extruder or [{me}]). Without one an AMS "
+                        f"Lite has nothing to stop its feed.")
+            elif not start:
+                if _opt(ext_sec, "u1_filament_sensor_name"):
+                    if not snapmaker:
+                        problems.append(
+                            f"{lane}: [{ext_sec}] uses "
+                            f"u1_filament_sensor_name, the Snapmaker U1's own "
+                            f"sensor, which counts only on a U1. Set "
+                            f"pin_tool_start to a filament switch instead.")
+                else:
+                    problems.append(
+                        f"{lane}: [{ext_sec}] has no toolhead sensor. An AMS "
+                        f"Lite stops its feed at it: set pin_tool_start to a "
+                        f"filament switch before the extruder gears.")
+        if problems:
+            error_str = (f"[{me}] ams_model: lite cannot run this setup:\n"
+                         + "\n".join(problems))
+            raise config.error(error_str)
 
     def _send_ht_flag(self, bridge: Any, persist: bool = True) -> None:
         """
@@ -8813,7 +8984,9 @@ class afcBambuAMS(afcUnit):
         # A lane on this unit is at the toolhead: hold the scan (a tag read
         # pulses the whole unit's follower); _scan_defer replays it. The HT is
         # exempt.
-        if not self._is_ht() and _unit_tool_loaded(self):
+        if (not self._is_ht()
+            and not self._is_lite()
+            and _unit_tool_loaded(self)):
             self._auto_scanned[slot] = True
             defer = getattr(self, "_scan_defer", None)
             if defer is not None and 0 <= slot < len(defer):
@@ -11782,6 +11955,20 @@ class afcBambuAMS(afcUnit):
                 pass
         return True
 
+    def _lite_release(self) -> bool:
+        """
+        Let an AMS Lite go: idle, no tray held (01/FF/00).
+
+        A stop after a feed keeps the tray held, as the A1 leaves it for the
+        extruder; idle is the word for a lane that is done with.
+
+        :return bool: True if the command was issued
+        """
+        if self._bridge is None:
+            return False
+        self._bridge.send({"cmd": "litecmd", "m": 1, "t": 255, "x": 0})
+        return True
+
     def rehome(self) -> bool:
         """
         Run the AMS re-home motion only (mode 0F/0E, ~3s), the printer's "Retry"
@@ -11848,6 +12035,10 @@ class afcBambuAMS(afcUnit):
         """
         if self._bridge is None:
             return False
+        if self._is_lite():
+            # Boxed frames. The AMS Lite's own finish is the hold the stop at
+            # the sensor already left it in.
+            return True
         for hexf in self._FINISH_FRAMES:
             self._bridge.send({"cmd": "raw", "hex": hexf})
         return True
@@ -12529,7 +12720,9 @@ class afcBambuAMS(afcUnit):
                 f"AFC bambu {self.name}: skipping the pre-load prime -- the "
                 f"chamber is drying and mode 09/7F arms the follower before "
                 f"the select, which the printer never does")
-        if not self._is_ht() and not _dry_now:
+        if (not self._is_ht()
+            and not self._is_lite()
+            and not _dry_now):
             try:
                 slot = self._slot_of(cur_lane)
                 if slot is not None:
@@ -13414,6 +13607,17 @@ class afcBambuAMS(afcUnit):
             # Re-check: the unit can latch again during the STN retracts.
             # Only a status read when it is healthy.
             self._clear_latched_error(cur_lane, "the unload retract")
+            if self._is_lite():
+                if not self._lite_unload_retract(cur_lane):
+                    msg = (f"AFC bambu unload failed for {cur_lane.name}: "
+                           f"the toolhead sensor still sees filament after "
+                           f"{LITE_UNLOAD_MAX_S:.0f}s of AMS Lite retract. "
+                           f"Free it at the toolhead, then run "
+                           f"{self.get_lane_reset_command(cur_lane, 0.0)}.")
+                    afc.error.handle_lane_failure(
+                        cur_lane, msg, pause=afc.function.in_print())
+                    return False
+                return self._finish_unload(cur_lane)
             self.retract(cur_lane, retract_dist)
             # End the wait on the unit's own word; the sensor check below
             # decides whether the filament is home.
@@ -13513,22 +13717,7 @@ class afcBambuAMS(afcUnit):
             # the unit answers "there is no tray" at ~2 Hz for ~34s, audible and
             # noise on a shared bus.
             self.stop()
-
-            if afc.post_unload_macro is not None:
-                self.gcode.run_script_from_command(afc.post_unload_macro)
-
-            cur_lane.set_tool_unloaded(normal_toolchange=True)
-            cur_lane.status = AFCLaneState.NONE
-            # Tip is staged near the hub, ready for a fast reload.
-            cur_lane.loaded_to_hub = True
-            # Refresh virtual-hub occupancy now so a toolchange does not bail
-            # "hub not clear" before the next poll; wait for a reported hub
-            # sensor to clear.
-            if self._is_virtual_hub(cur_lane):
-                cur_lane._load_state = not afcBambuAMS._wait_hub_clear(
-                    self, cur_lane)
-            afc.save_vars()
-            return True
+            return self._finish_unload(cur_lane)
         except Exception as e:
             afc.error.handle_lane_failure(
                 cur_lane,
@@ -13537,6 +13726,88 @@ class afcBambuAMS(afcUnit):
             return False
         finally:
             self._unload_in_progress = False
+
+    def _finish_unload(self, cur_lane: Any) -> bool:
+        """
+        Close out an unload whose filament has left the toolhead.
+
+        :param cur_lane: the lane unloaded
+        :return bool: True
+        """
+        afc = self.afc
+        if afc.post_unload_macro is not None:
+            self.gcode.run_script_from_command(afc.post_unload_macro)
+
+        cur_lane.set_tool_unloaded(normal_toolchange=True)
+        cur_lane.status = AFCLaneState.NONE
+        # Tip is staged near the hub, ready for a fast reload.
+        cur_lane.loaded_to_hub = True
+        # Refresh virtual-hub occupancy now so a toolchange does not bail
+        # "hub not clear" before the next poll; wait for a reported hub
+        # sensor to clear.
+        if self._is_virtual_hub(cur_lane):
+            cur_lane._load_state = not afcBambuAMS._wait_hub_clear(
+                self, cur_lane)
+        afc.save_vars()
+        return True
+
+    def _lite_unload_retract(self, cur_lane: Any) -> bool:
+        """
+        Pull an AMS Lite lane just clear of the toolhead sensor, then let go.
+
+        The AMS Lite's spool holder is spring-loaded and takes back only a
+        little, so its filament is never reeled home the way a boxed AMS reels
+        it. Like the A1, this retracts until the toolhead sensor clears, then
+        ``unload_past_sensor`` mm more (read off the unit's odometer, or timed
+        when it is not reporting), and stops: after a retract the bridge leaves
+        the unit idle, and the holder takes up the rest.
+
+        :param cur_lane: the lane being unloaded
+        :return bool: True once the sensor cleared and the distance past it ran
+        """
+        reactor = self.afc.reactor
+        past = self.unload_past_sensor
+        # The size only bounds the bridge's runaway guard; the stop is ours.
+        self.retract(cur_lane, LITE_UNLOAD_GUARD_MM)
+        deadline = reactor.monotonic() + LITE_UNLOAD_MAX_S
+        clear_t: Optional[float] = None
+        clear_odom: Optional[float] = None
+        try:
+            while True:
+                now = reactor.monotonic()
+                if clear_t is None:
+                    if not self._toolhead_sensor_triggered(cur_lane):
+                        clear_t = now
+                        clear_odom = self._odom_now_mm()
+                        self.logger.debug(
+                            f"AFC bambu {self.name}: {cur_lane.name} cleared "
+                            f"the toolhead sensor; {past:.0f}mm more")
+                    elif now >= deadline:
+                        return False
+                    elif (self._unit_state(self._bridge.latest_status()
+                                           if self._bridge else None)
+                          == afcBambuAMS.AMS_STATE_STALLED):
+                        self.logger.warning(
+                            f"AFC bambu {self.name}: the AMS Lite stalled "
+                            f"retracting {cur_lane.name} before it cleared "
+                            f"the toolhead sensor")
+                        return False
+                if clear_t is not None:
+                    # Odometer runs up as filament goes back on an AMS Lite;
+                    # either way, the distance is how far it moved.
+                    odom = self._odom_now_mm()
+                    if (clear_odom is not None
+                        and odom is not None):
+                        if abs(odom - clear_odom) >= past:
+                            return True
+                    elif now - clear_t >= past / LITE_MMPS:
+                        return True
+                    # A unit that stops short (the holder is full) ends it.
+                    if now - clear_t >= 2.0 * past / LITE_MMPS + 2.0:
+                        return True
+                reactor.pause(now + 0.05)
+        finally:
+            self.stop()
 
     # ── PREP / eject helpers (base afcUnit overrides) ──
 
@@ -13873,6 +14144,19 @@ class afcBambuAMS(afcUnit):
                 f"AFC bambu {self.name}: bridge not connected, cannot eject "
                 f"{lane.name}")
             return False
+        if self._is_lite():
+            # Its spring-loaded holder cannot take the tube's length back, so
+            # nothing is reeled: the unit is let go and the filament comes out
+            # by hand.
+            self._lite_release()
+            self.logger.info(
+                f"AFC bambu {self.name}: an AMS Lite cannot reel "
+                f"{getattr(lane, 'name', 'a lane')} back to its spool. It is "
+                f"released: pull the filament out at the AMS Lite.")
+            lane.loaded_to_hub = False
+            if self._is_virtual_hub(lane):
+                lane._load_state = False
+            return True
         # Halt a unit still mid feed/retry, then select and reel back. Works
         # whatever the lane's error state, so a stuck load can be recovered.
         done = False

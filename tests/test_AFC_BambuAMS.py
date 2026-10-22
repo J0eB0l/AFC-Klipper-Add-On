@@ -2378,7 +2378,7 @@ class TestAfcBambuAMSInit:
     @pytest.mark.parametrize("model,heater,addr,ceiling,slots", [
         ("ams1", False, 0x0700, 65, 4), ("ams2", True, 0x0700, 65, 4),
         ("ht", True, 0x1800, 85, 1), ("boxed", False, 0x0700, 65, 4),
-        ("lite", False, 0x0700, 65, 4)])
+        ("lite", False, 0x1200, 65, 4)])
     def test_every_model_builds_through_init(self, model, heater, addr,
                                              ceiling, slots):
         # Every model-dependent line of __init__ runs; a NameError in any of
@@ -2410,6 +2410,95 @@ class TestAfcBambuAMSInit:
         assert str(exc.value) == (
             "[AFC_BambuAMS Bambu_AMS_1] ams_model: 'ams3' is not a known "
             "model. Valid: ams1, ams2, boxed, ht, lite")
+
+    # the AMS Lite
+
+    def test_an_ams_lite_runs_its_own_bus_variant(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite"}))
+        assert u.variant == "lite"
+        assert u.logger.messages == []
+
+    def test_an_ams_lite_takes_variant_auto_as_lite(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "variant": "auto"}))
+        assert u.variant == "lite"
+        assert u.logger.messages == []
+
+    def test_a_boxed_unit_keeps_its_variant(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "ams1",
+                                            "variant": "ams"}))
+        assert u.variant == "ams"
+        assert u.logger.messages == []
+
+    def test_an_ams_lite_refuses_the_boxed_bus(self):
+        with pytest.raises(configparser.Error) as exc:
+            afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "variant": "ams"}))
+        assert str(exc.value) == (
+            "[AFC_BambuAMS Bambu_AMS_1] variant: ams is a boxed AMS's bus, "
+            "and ams_model: lite is an AMS Lite. Leave variant out.")
+
+    def test_a_boxed_unit_refuses_the_lite_bus(self):
+        with pytest.raises(configparser.Error) as exc:
+            afcBambuAMS(unit_config(values={"ams_model": "ams2",
+                                            "variant": "lite"}))
+        assert str(exc.value) == (
+            "[AFC_BambuAMS Bambu_AMS_1] variant: lite is the AMS Lite's bus; "
+            "set ams_model: lite for an AMS Lite.")
+
+    def test_the_distance_past_the_sensor_defaults_to_30mm(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite"}))
+        assert u.unload_past_sensor == 30.0
+        assert u.logger.messages == []
+
+    def test_the_distance_past_the_sensor_can_be_set(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "unload_past_sensor": "12.5"}))
+        assert u.unload_past_sensor == 12.5
+        assert u.logger.messages == []
+
+    def test_an_ams_lite_waits_nothing_at_the_sensor_by_default(self):
+        # It holds the tray with its motor released the moment its feed
+        # stops; a boxed unit's 4 s wait for its follower is not needed.
+        lite = afcBambuAMS(unit_config(values={"ams_model": "lite"}))
+        boxed = afcBambuAMS(unit_config(values={"ams_model": "ams2"}))
+        assert (lite.arrival_assist_delay_s,
+                boxed.arrival_assist_delay_s) == (0.0, 4.0)
+        assert lite.logger.messages == boxed.logger.messages == []
+
+    def test_an_ams_lite_arrival_wait_can_still_be_set(self):
+        u = afcBambuAMS(unit_config(values={"ams_model": "lite",
+                                            "arrival_assist_delay_s": "1.5"}))
+        assert u.arrival_assist_delay_s == 1.5
+        assert u.logger.messages == []
+
+    def test_an_ams_lite_setup_is_checked_at_init(self):
+        # A lane whose extruder has no toolhead sensor stops the AMS Lite.
+        printer = make_printer()
+        printer.add_section("AFC_lane lane1",
+                            {"unit": "Bambu_AMS_1:1", "hub": "direct"})
+        printer.add_section("AFC_extruder extruder",
+                            {"pin_tool_start": "virtual"})
+        with pytest.raises(configparser.Error) as exc:
+            afcBambuAMS(unit_config(printer=printer,
+                                    values={"ams_model": "lite"}))
+        assert str(exc.value) == (
+            "[AFC_BambuAMS Bambu_AMS_1] ams_model: lite cannot run this "
+            "setup:\nlane1: [AFC_extruder extruder] has pin_tool_start: "
+            "virtual. An AMS Lite stops its feed at the toolhead sensor, so "
+            "it needs a real one: set pin_tool_start to the pin of a "
+            "filament switch before the extruder gears.")
+
+    def test_a_boxed_unit_setup_is_not_checked(self):
+        printer = make_printer()
+        printer.add_section("AFC_lane lane1",
+                            {"unit": "Bambu_AMS_1:1", "hub": "direct"})
+        printer.add_section("AFC_extruder extruder",
+                            {"pin_tool_start": "virtual"})
+        u = afcBambuAMS(unit_config(printer=printer,
+                                    values={"ams_model": "ams2"}))
+        assert u.ams_model == "ams2"
+        assert u.logger.messages == []
 
 
 class TestAfcBambuAMSRegisterGcodeCommands:
@@ -3347,6 +3436,38 @@ class TestAfcBambuAMSStartCapscan:
             "info", "AFC bambu Bambu_AMS_1: lane8 (slot 1) capscan ended "
                     "without a measurement (no reading within 180 s); it is "
                     "no longer waiting for one")]
+
+    def test_an_ams_lite_scan_is_a_tag_read_with_no_bus_claim(
+            self, monkeypatch):
+        # Alone on its bus and never measuring: no claim, no measurement
+        # window, and calibrate means nothing to it.
+        unit = _bambu_p3_unit(monkeypatch, model="lite",
+                              lanes=["lane1", "lane2"],
+                              slots=[slot_info(0), slot_info(1)])
+        assert unit._start_capscan(1, cali=True, insert=True) is True
+        assert unit._bridge.sent == [{"cmd": "scan", "unit": 0,
+                                      "addr": 0x1200, "slot": 1}]
+        assert unit._bridge.claimed_bus is None
+        assert not hasattr(unit, "_cap_pending")      # no window opened
+        assert unit.logger.messages == []
+
+    def test_an_ams_lite_on_a_held_bus_still_scans(self, monkeypatch):
+        # A boxed unit defers here; the AMS Lite has the bus to itself.
+        unit = _bambu_p3_unit(monkeypatch, model="lite", lanes=["lane1"],
+                              slots=[slot_info(0)])
+        unit._bridge.claimed_bus = "Bambu_AMS_2"
+        assert unit._start_capscan(0) is True
+        assert unit._bridge.sent == [{"cmd": "scan", "unit": 0,
+                                      "addr": 0x1200, "slot": 0}]
+        assert unit._bridge.claimed_bus == "Bambu_AMS_2"
+        assert unit.logger.messages == []
+
+    def test_an_offline_ams_lite_scans_nothing(self, monkeypatch):
+        unit = _bambu_p3_unit(monkeypatch, model="lite", lanes=["lane1"],
+                              offline=True)
+        assert unit._start_capscan(0) is False
+        assert unit._bridge is None
+        assert unit.logger.messages == []
 
 
 class TestAfcBambuAMSCmdAFCBambuCapscan:
@@ -7720,6 +7841,22 @@ class TestAfcBambuAMSAnnounceUnit:
             ("debug", "AFC bambu AMS: connect announce could not send htunit "
                       "(RuntimeError('boom'))"),
             self._failed("arm cadence")]
+
+    def test_an_ams_lite_gets_its_variant_and_one_unit(self, monkeypatch):
+        # No HT flag, model, MC poll or arm cadence, and one unit whatever
+        # its index: the AMS Lite is the only device on its bus.
+        unit = self._unit(monkeypatch, model="lite", ams_index=2)
+        unit._announce_unit()
+        assert unit._bridge.sent == [{"cmd": "variant", "set": "lite"},
+                                     {"cmd": "units", "n": 1}]
+        assert unit.logger.messages == []
+
+    def test_a_failing_variant_does_not_skip_the_unit_count(
+            self, monkeypatch):
+        unit = self._unit(monkeypatch, model="lite", refuse=("variant",))
+        unit._announce_unit()
+        assert unit._bridge.sent == [{"cmd": "units", "n": 1}]
+        assert unit.logger.messages == [self._failed("variant")]
 
 
 class TestAfcBambuAMSOnBridgeReconnect:
@@ -15311,6 +15448,21 @@ class TestAfcBambuAMSOpenScan:
         assert getattr(unit, "_scan_seq0", None) is None
         assert unit.logger.messages == []
 
+    def test_an_ams_lite_bay_is_released_but_never_held(self, monkeypatch):
+        # Its bridge reads every loaded bay each round and drops a record
+        # when the spool changes, so there is no scan to wait out: the bay
+        # shows its own record at once.
+        unit = _bambu_p3_unit(monkeypatch, model="lite", lanes=["lane15"],
+                              slots=[slot_info(0, sseq=7, sres=1, mseq=3)])
+        unit._scan_notag[0] = True
+        unit._open_scan(0)
+        assert unit._scan_notag == [False, False, False, False]
+        assert unit._scanned_bays == {0}
+        assert unit._scan_t0 == [None, None, None, None]
+        assert not hasattr(unit, "_scan_seq0")        # nothing baselined
+        assert unit._scan_verdict(0) == "none"
+        assert unit.logger.messages == []
+
 
 class TestAfcBambuAMSScanVerdict:
     """
@@ -16209,11 +16361,19 @@ class TestAfcBambuAMSProfile:
         assert self._profile(monkeypatch, "ams2")["slots"] == 4
 
     def test_an_unknown_model_falls_back_without_raising(self, monkeypatch):
-        # A model with no profile row (the BridgeBox's "lite" tag) takes the
+        # A model with no profile row (the BridgeBox's "boxed" tag) takes the
         # AMS 2's.
-        assert self._profile(monkeypatch, "lite") == {
+        assert self._profile(monkeypatch, "boxed") == {
             "fw_model": 1, "commands_scan": True, "pre_read_safe": True,
             "measure_route": "narration", "quiet_while_measuring": True,
+            "slots": 4}
+
+    def test_the_ams_lite_has_its_own_profile(self, monkeypatch):
+        # No firmware model number (it is a bus variant of its own), its tags
+        # read by the bridge round and round, and no spool measurement.
+        assert self._profile(monkeypatch, "lite") == {
+            "fw_model": None, "commands_scan": False, "pre_read_safe": True,
+            "measure_route": None, "quiet_while_measuring": False,
             "slots": 4}
 
 
@@ -16242,6 +16402,277 @@ class TestAfcBambuAMSIsHt:
         assert ams2._is_ht() is False
         for unit in (ht, ams1, ams2):
             assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSIsLite:
+    def test_only_the_lite_is_lite(self, monkeypatch):
+        for model, lite in (("lite", True), ("ams1", False), ("ams2", False),
+                            ("ht", False), ("boxed", False)):
+            unit = _p4_unit(monkeypatch, model=model)
+            assert unit._is_lite() is lite
+            assert unit.logger.messages == []
+
+    def test_it_reads_the_model_as_it_is_now(self, monkeypatch):
+        # A pool claim can change ams_model after init.
+        unit = _p4_unit(monkeypatch, model="ams2")
+        unit.ams_model = "lite"
+        assert unit._is_lite() is True
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSCheckLiteConfig:
+    """
+    An AMS Lite stops its feed at the toolhead sensor and is alone on its
+    bus: every lane needs a real sensor and a hub setting, and no other unit
+    may share its bridge.
+    """
+
+    HEAD = "[AFC_BambuAMS Lite] ams_model: lite cannot run this setup:\n"
+    PORT = "/dev/serial/by-id/usb-bambu-if00"
+    NO_HUB = ("lane1: an AMS Lite has no hub. Set hub: direct on the lane, or "
+              "name an [AFC_hub] with a switch_pin.")
+    NO_SENSOR = ("lane1: [AFC_extruder extruder] has no toolhead sensor. An "
+                 "AMS Lite stops its feed at it: set pin_tool_start to a "
+                 "filament switch before the extruder gears.")
+    NO_BUFFER = ("lane1: [AFC_extruder extruder] has pin_tool_start: buffer, "
+                 "but no buffer is set for this lane (buffer: on the lane, "
+                 "the extruder or [AFC_BambuAMS Lite]). Without one an AMS "
+                 "Lite has nothing to stop its feed.")
+    NOT_A_U1 = ("lane1: [AFC_extruder extruder] uses u1_filament_sensor_name, "
+                "the Snapmaker U1's own sensor, which counts only on a U1. "
+                "Set pin_tool_start to a filament switch instead.")
+
+    @staticmethod
+    def _unit(**values: Any) -> Tuple[afcBambuAMS, BambuConfig]:
+        """
+        :param values: unit options over an AMS Lite named Lite on extruder,
+          with no hub
+        :return tuple: (the unit, built with no lanes yet, its section)
+        """
+        opts: Dict[str, Any] = {"ams_model": "lite", "hub": None}
+        opts.update(values)
+        cfg = unit_config("Lite", values=opts)
+        return afcBambuAMS(cfg), cfg
+
+    @staticmethod
+    def _section(target: afcBambuAMS, section: str, **values: Any) -> None:
+        """
+        Declare a section in the unit's merged config.
+
+        :param target: the unit
+        :param section: the section name
+        :param values: its options
+        """
+        target.printer.add_section(section, values)
+
+    def _lane(self, unit: afcBambuAMS, name: str = "lane1",
+              **values: Any) -> None:
+        """
+        :param unit: the unit
+        :param name: the lane, on Lite's bay 1
+        :param values: further lane options
+        """
+        self._section(unit, f"AFC_lane {name}", unit="Lite:1", **values)
+
+    @staticmethod
+    def _refused(unit: afcBambuAMS, cfg: BambuConfig) -> str:
+        """
+        :param unit: the unit
+        :param cfg: its section
+        :return str: the config error the check raises
+        """
+        with pytest.raises(configparser.Error) as exc:
+            unit._check_lite_config(cfg)
+        return str(exc.value)
+
+    # a setup that runs
+
+    def test_a_direct_lane_with_a_switch_passes(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder",
+                      pin_tool_start="EBBT0:PB3")
+        assert unit._check_lite_config(cfg) is None
+        assert unit.logger.messages == []
+
+    def test_a_config_with_no_merged_file_is_not_checked(self):
+        unit, cfg = self._unit()
+        self._lane(unit)                    # no hub and no extruder section
+        cfg.fileconfig = None
+        assert unit._check_lite_config(cfg) is None
+        assert unit.logger.messages == []
+
+    # its own bus
+
+    def test_another_unit_on_its_bridge_is_refused(self):
+        unit, cfg = self._unit()
+        self._section(unit, "AFC_BambuAMS Other", serial_port=self.PORT)
+        assert self._refused(unit, cfg) == (
+            f"{self.HEAD}[AFC_BambuAMS Other] is on the same bridge "
+            f"({self.PORT}). An AMS Lite is the only device on its bus; give "
+            f"it a bridge of its own.")
+
+    def test_another_unit_on_another_bridge_passes(self):
+        unit, cfg = self._unit()
+        self._section(unit, "AFC_BambuAMS Other",
+                      serial_port="tcp://192.168.6.20:8888")
+        assert unit._check_lite_config(cfg) is None
+
+    def test_another_kind_of_unit_on_that_port_is_not_this_check(self):
+        unit, cfg = self._unit()
+        self._section(unit, "AFC_ACE Other", serial_port=self.PORT)
+        assert unit._check_lite_config(cfg) is None
+
+    def test_no_port_on_either_unit_is_not_a_shared_bridge(self):
+        # A blank port names no bridge to share.
+        unit, cfg = self._unit(serial_port=None)
+        self._section(unit, "AFC_BambuAMS Other", ams_model="ams2")
+        assert unit.serial_port is None
+        assert unit._check_lite_config(cfg) is None
+
+    # which lanes
+
+    def test_a_lane_on_another_unit_is_not_checked(self):
+        unit, cfg = self._unit()
+        self._section(unit, "AFC_lane lane9", unit="Other:1")
+        assert unit._check_lite_config(cfg) is None
+
+    def test_a_lane_with_no_unit_is_not_checked(self):
+        unit, cfg = self._unit()
+        self._section(unit, "AFC_lane lane9", hub="direct")
+        assert unit._check_lite_config(cfg) is None
+
+    # the hub
+
+    def test_a_lane_with_no_hub_is_refused(self):
+        unit, cfg = self._unit()
+        self._lane(unit)
+        self._section(unit, "AFC_extruder extruder",
+                      pin_tool_start="EBBT0:PB3")
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_HUB
+
+    def test_the_unit_hub_serves_a_lane_with_none(self):
+        unit, cfg = self._unit(hub="Lite_hub")
+        self._lane(unit)
+        self._section(unit, "AFC_extruder extruder",
+                      pin_tool_start="EBBT0:PB3")
+        assert unit.hub == "Lite_hub"
+        assert unit._check_lite_config(cfg) is None
+
+    # which extruder
+
+    def test_the_lane_extruder_is_the_one_checked(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct", extruder="extruder1")
+        self._section(unit, "AFC_extruder extruder",
+                      pin_tool_start="virtual")
+        self._section(unit, "AFC_extruder extruder1",
+                      pin_tool_start="EBBT1:PB3")
+        assert unit._check_lite_config(cfg) is None
+
+    def test_a_lane_with_none_uses_the_unit_extruder(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder")
+        assert unit.extruder == "extruder"
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+
+    def test_no_extruder_anywhere_is_left_to_the_lane(self):
+        # AFC_lane reports a lane with no extruder itself.
+        unit, cfg = self._unit(extruder=None)
+        self._lane(unit, hub="direct")
+        assert unit.extruder is None
+        assert unit._check_lite_config(cfg) is None
+
+    # the toolhead sensor
+
+    @pytest.mark.parametrize("pin", ["virtual", "unknown"])
+    def test_a_pin_that_is_no_switch_is_refused(self, pin):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start=pin)
+        assert self._refused(unit, cfg) == (
+            f"{self.HEAD}lane1: [AFC_extruder extruder] has pin_tool_start: "
+            f"{pin}. An AMS Lite stops its feed at the toolhead sensor, so it "
+            f"needs a real one: set pin_tool_start to the pin of a filament "
+            f"switch before the extruder gears.")
+
+    def test_a_blank_pin_is_no_sensor(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="  ")
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+
+    def test_no_extruder_section_is_no_sensor(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+
+    def test_a_buffer_sensor_with_no_buffer_is_refused(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="buffer")
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_BUFFER
+
+    def test_a_buffer_sensor_with_a_lane_buffer_passes(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct", buffer="ramming")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="buffer")
+        assert unit._check_lite_config(cfg) is None
+
+    def test_a_buffer_sensor_with_an_extruder_buffer_passes(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="buffer",
+                      buffer="ramming")
+        assert unit._check_lite_config(cfg) is None
+
+    def test_a_buffer_sensor_with_a_unit_buffer_passes(self):
+        unit, cfg = self._unit(buffer="ramming")
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="buffer")
+        assert unit.buffer_name == "ramming"
+        assert unit._check_lite_config(cfg) is None
+
+    def test_the_u1_sensor_counts_on_a_u1(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder",
+                      u1_filament_sensor_name="e0_filament")
+        unit.printer.get_snapmaker_config_dir = lambda: "/home/lava"
+        assert unit._check_lite_config(cfg) is None
+
+    def test_the_u1_sensor_does_not_count_elsewhere(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder",
+                      u1_filament_sensor_name="e0_filament")
+        assert not hasattr(unit.printer, "get_snapmaker_config_dir")
+        assert self._refused(unit, cfg) == self.HEAD + self.NOT_A_U1
+
+    def test_a_u1_with_no_sensor_named_is_still_refused(self):
+        unit, cfg = self._unit()
+        self._lane(unit, hub="direct")
+        self._section(unit, "AFC_extruder extruder")
+        unit.printer.get_snapmaker_config_dir = lambda: "/home/lava"
+        assert self._refused(unit, cfg) == self.HEAD + self.NO_SENSOR
+
+    # every problem at once
+
+    def test_every_problem_is_named_in_one_error(self):
+        unit, cfg = self._unit()
+        self._section(unit, "AFC_BambuAMS Other", serial_port=self.PORT)
+        self._lane(unit)
+        self._section(unit, "AFC_lane lane2", unit="Lite:2", hub="direct",
+                      extruder="extruder2")
+        self._section(unit, "AFC_extruder extruder", pin_tool_start="buffer")
+        assert self._refused(unit, cfg) == (
+            f"{self.HEAD}[AFC_BambuAMS Other] is on the same bridge "
+            f"({self.PORT}). An AMS Lite is the only device on its bus; give "
+            f"it a bridge of its own.\n{self.NO_HUB}\n{self.NO_BUFFER}\n"
+            f"lane2: [AFC_extruder extruder2] has no toolhead sensor. An AMS "
+            f"Lite stops its feed at it: set pin_tool_start to a filament "
+            f"switch before the extruder gears.")
 
 
 class TestAfcBambuAMSSendHtFlag:
@@ -17434,6 +17865,25 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit._bridge.claimed_bus is None
         assert unit._scan_t0[0] == 100.0
         assert unit.logger.messages == [self._inserted(), self.SCANNING]
+
+    def test_an_ams_lite_scans_with_a_lane_at_the_toolhead(self, monkeypatch):
+        # Its tag read moves no filament (the bridge reads the bay itself),
+        # so a loaded lane holds nothing back and nothing is pulled in.
+        unit = _p4_unit(monkeypatch, model="lite", scan_primed=True, lanes=[
+            LaneSpec("lane1", 0, tool_loaded=True), LaneSpec("lane2", 1)],
+            slots=[slot_info(0)])
+        unit._maybe_auto_scan(1, True, slot_info(1))
+        assert unit._auto_scanned[1] is True
+        assert unit._scan_defer == [False, False, False, False]
+        assert unit._defaults_due == {}
+        assert unit._scan_t0 == [None, None, None, None]
+        assert unit._bridge.sent == [{"cmd": "scan", "unit": 0,
+                                      "addr": 0x1200, "slot": 1}]
+        assert unit.reactor.callbacks == []
+        assert unit.logger.messages == [
+            self._inserted(1),
+            ("debug", "AFC bambu Bambu_AMS_1: new spool detected in slot 1, "
+                      "scanning tag")]
 
 
 class TestAfcBambuAMSStartTagScan:
@@ -23144,6 +23594,18 @@ class TestAfcBambuAMSBridgeFinish:
             {"cmd": "raw", "hex": "3DC50CC8030007007F023654"}]
         assert unit.logger.messages == []
 
+    def test_an_ams_lite_gets_no_boxed_frames(self, monkeypatch):
+        # Its finish is the hold the stop at the sensor left it in.
+        unit = _bambu_p5_unit(monkeypatch, model="lite", bridge=FakeBridge())
+        assert unit.bridge_finish() is True
+        assert unit._bridge.sent == []
+        assert unit.logger.messages == []
+
+    def test_an_offline_ams_lite_finishes_nothing(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, model="lite", offline=True)
+        assert unit.bridge_finish() is False
+        assert unit.logger.messages == []
+
 
 class TestAfcBambuAMSWaitMove:
     PREFIX = "AFC bambu Bambu_AMS_1: move ended on"
@@ -25182,6 +25644,18 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
                                         self._recover(1, 1), self.KICKED,
                                         self.GAVE_UP]
 
+    def test_an_ams_lite_is_never_primed(self, monkeypatch):
+        # Its bridge answers a prime without the bus, and its arrival ends in
+        # the hold, not the boxed finish frames.
+        unit, lane = self._rig(monkeypatch, model="lite",
+                               sensor=[False, False, True])
+        assert unit._unit_load_lane(lane) is True
+        assert unit._bridge.sent == [self.SELECT, self.BULK, self.KICK,
+                                     self.STOP, self.ASSIST]
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
+        assert unit.logger.messages == [self.KICKED, self.ARRIVED]
+
 
 class TestAfcBambuAMSPublishedSlots:
     """The bays a unit reports, trimmed on the way out to the bays it has."""
@@ -26500,6 +26974,68 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.gcode.scripts == ["_AFTER_UNLOAD"]
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
 
+    # an AMS Lite pulls just clear of the toolhead sensor
+
+    #: The AMS Lite's retract: sized only by its runaway guard.
+    LITE_RETRACT = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 300.0,
+                    "mmps": 20.0}
+    LITE_STUCK = ("AFC bambu unload failed for lane1: the toolhead sensor "
+                  "still sees filament after 20s of AMS Lite retract. Free it "
+                  "at the toolhead, then run AFC_BAMBU_RECOVER "
+                  "UNIT=Bambu_AMS_1 LANE=lane1.")
+
+    @staticmethod
+    def _lite(monkeypatch: pytest.MonkeyPatch, *,
+              sensor: Sequence[bool]) -> Tuple[afcBambuAMS, Any]:
+        """
+        An AMS Lite with lane1 at the toolhead on a 500mm unload bowden.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param sensor: the toolhead sensor's script
+        :return tuple: (the unit, lane1)
+        """
+        unit = _p6_unit(monkeypatch, model="lite", sensor=sensor,
+                        lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
+                        slots=[slot_info(0, material="PLA", state="idle")],
+                        values={"afc_unload_bowden_length": 500.0})
+        unit._presence_ok = True
+        return unit, unit.lanes["lane1"]
+
+    def test_an_ams_lite_retracts_past_the_sensor_not_the_bowden(
+            self, monkeypatch):
+        unit, lane = self._lite(monkeypatch, sensor=[False])
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit._bridge.sent == [self.SELECT, self.ASSIST_ON,
+                                     self.ASSIST_OFF, self.STOP,
+                                     self.LITE_RETRACT, self.STOP]
+        assert unit.afc.e_moves == self.E_MOVES
+        # Timed with no odometer: 30mm at 30mm/s, to within a 50ms poll.
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert lane.status == AFCLaneState.NONE
+        assert lane.tool_loaded is False
+        assert lane.loaded_to_hub is True
+        assert unit._unload_in_progress is False
+        assert unit.afc.error.messages == []
+        assert unit.logger.messages == [
+            self.ISSUED,
+            ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+                      "sensor; 30mm more")]
+
+    def test_an_ams_lite_that_never_clears_the_sensor_fails_the_lane(
+            self, monkeypatch):
+        unit, lane = self._lite(monkeypatch, sensor=[True])
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit._bridge.sent == [self.SELECT, self.ASSIST_ON,
+                                     self.ASSIST_OFF, self.STOP,
+                                     self.LITE_RETRACT, self.STOP]
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure", (lane, self.LITE_STUCK),
+             {"pause": False})]
+        assert lane.status == AFCLaneState.ERROR
+        assert lane.tool_loaded is True
+        assert unit._unload_in_progress is False
+        assert unit.logger.messages == [self.ISSUED]
+
 
 class TestAfcBambuAMSPrepPostLoad:
     """After PREP: a present spool is staged at the hub, and a lane threaded
@@ -27021,6 +27557,263 @@ class TestAfcBambuAMSReadyToFollow:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSFinishUnload:
+    """Close out an unload whose filament has left the toolhead."""
+
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch, *, hubv: int = 0xB1,
+              virtual_hub: bool = True) -> Tuple[afcBambuAMS, Any]:
+        """
+        lane1 still recorded at the toolhead, mid unload.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param hubv: bay 0's hub sensor reading (0xD0 and below is clear)
+        :param virtual_hub: its hub is the bay's own sensor, not a switch
+        :return tuple: (the unit, lane1)
+        """
+        unit = _p6_unit(monkeypatch, lanes=[LaneSpec("lane1", 0,
+                                                     tool_loaded=True)],
+                        slots=[slot_info(0, hubv=hubv)],
+                        virtual_hub=virtual_hub)
+        lane = unit.lanes["lane1"]
+        lane.status = AFCLaneState.TOOL_UNLOADING
+        lane._load_state = True
+        return unit, lane
+
+    def test_the_lane_is_left_unloaded_and_staged(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch)
+        assert unit._finish_unload(lane) is True
+        assert lane.tool_loaded is False
+        assert lane.extruder_obj.lane_loaded is None
+        assert lane.status == AFCLaneState.NONE
+        assert lane.loaded_to_hub is True
+        assert lane._load_state is False         # the bay's hub reads clear
+        assert unit.afc.save_vars.call_count == 1
+        assert unit.gcode.scripts == []
+        assert unit.logger.messages == []
+
+    def test_the_post_unload_macro_runs(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch)
+        unit.afc.post_unload_macro = "_AFC_POST_UNLOAD"
+        assert unit._finish_unload(lane) is True
+        assert unit.gcode.scripts == ["_AFC_POST_UNLOAD"]
+        assert unit.logger.messages == []
+
+    def test_a_hub_still_reading_filament_shows_occupied(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, hubv=0xE8)
+        assert unit._finish_unload(lane) is True
+        assert lane._load_state is True
+        assert unit.logger.messages == [
+            ("warning", "AFC bambu Bambu_AMS_1: lane1 unloaded but bay 1's "
+                        "hub sensor still reads filament (0xE8); the hub "
+                        "shows occupied until it clears")]
+
+    def test_a_hub_switch_keeps_its_own_state(self, monkeypatch):
+        # Its pin drives the lane's load state; the bay's sensor is not
+        # waited on.
+        unit, lane = self._unit(monkeypatch, hubv=0xE8, virtual_hub=False)
+        assert unit._finish_unload(lane) is True
+        assert lane._load_state is True
+        assert unit.reactor.pauses == []
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSLiteUnloadRetract:
+    """
+    An AMS Lite unload: retract until the toolhead sensor clears, then
+    unload_past_sensor more, by the odometer or by the clock, then stop.
+    """
+
+    RETRACT = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 300.0,
+               "mmps": 20.0}
+    STOP = {"cmd": "stop"}
+
+    class _Bridge(FakeBridge):
+        """A bridge whose unit's odometer and state follow the clock."""
+
+        def __init__(self) -> None:
+            """No odometer and no state until a test sets them."""
+            super().__init__()
+            self.clock: Any = None
+            self.odom: Callable[[float], Optional[float]] = lambda _t: None
+            self.ustate: Optional[int] = None
+
+        def latest_status(self) -> Optional[dict]:
+            """:return dict: unit 0's entry as of the clock's time"""
+            entry: Dict[str, Any] = {"n": 0}
+            odom = self.odom(self.clock.now)
+            if odom is not None:
+                entry["odom"] = odom
+            if self.ustate is not None:
+                entry["ustate"] = self.ustate
+            return {"units": [entry]}
+
+    @classmethod
+    def _rig(cls, monkeypatch: pytest.MonkeyPatch, sensor: Sequence[bool], *,
+             odom: Optional[Callable[[float], Optional[float]]] = None,
+             ustate: Optional[int] = None, offline: bool = False,
+             **values: Any) -> Tuple[afcBambuAMS, Any]:
+        """
+        An AMS Lite with lane1 at the toolhead; the clock starts at 100.0.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param sensor: the toolhead sensor's script, one value per read
+        :param odom: the odometer (mm) at a clock time; None reads none
+        :param ustate: the unit's reported state
+        :param offline: no bridge
+        :param values: further unit options
+        :return tuple: (the unit, lane1)
+        """
+        bridge = cls._Bridge()
+        unit = _p6_unit(monkeypatch, model="lite", sensor=sensor,
+                        lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
+                        values=values, bridge=bridge, offline=offline)
+        bridge.clock = unit.reactor
+        if odom is not None:
+            bridge.odom = odom
+        bridge.ustate = ustate
+        return unit, unit.lanes["lane1"]
+
+    @staticmethod
+    def _cleared(mm: int) -> LogLine:
+        """
+        :param mm: the distance past the sensor
+        :return LogLine: the line the sensor clearing logs
+        """
+        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+                         f"sensor; {mm}mm more")
+
+    # the distance past the sensor
+
+    @pytest.mark.parametrize("sign", [1, -1], ids=["lite", "boxed-sign"])
+    def test_the_odometer_measures_the_distance_past_the_sensor(
+            self, monkeypatch, sign):
+        # Clears at 100.10 with the odometer at 6mm; 25mm more at 60mm/s is
+        # 100.52, so the 50ms polls stop at 100.55. Either sign counts.
+        unit, lane = self._rig(monkeypatch, [True, True, False],
+                               odom=lambda t: sign * (t - 100.0) * 60.0,
+                               unload_past_sensor=25.0)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.55)
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [self._cleared(25)]
+
+    def test_with_no_odometer_the_distance_is_timed(self, monkeypatch):
+        # 25mm at 30mm/s after clearing at 100.10 is 100.93: the poll at
+        # 100.95, where the odometer would have stopped at 100.55.
+        unit, lane = self._rig(monkeypatch, [True, True, False],
+                               unload_past_sensor=25.0)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.95)
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [self._cleared(25)]
+
+    def test_an_odometer_that_starts_after_the_clear_is_not_used(
+            self, monkeypatch):
+        # Nothing to measure from.
+        unit, lane = self._rig(
+            monkeypatch, [True, True, False], unload_past_sensor=25.0,
+            odom=lambda t: None if t < 100.2 else (t - 100.0) * 60.0)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.95)
+        assert unit.logger.messages == [self._cleared(25)]
+
+    def test_an_odometer_lost_after_the_clear_falls_back_to_time(
+            self, monkeypatch):
+        unit, lane = self._rig(
+            monkeypatch, [True, True, False], unload_past_sensor=25.0,
+            odom=lambda t: (t - 100.0) * 60.0 if t < 100.2 else None)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(100.95)
+        assert unit.logger.messages == [self._cleared(25)]
+
+    def test_a_unit_that_stops_short_is_let_go_in_time(self, monkeypatch):
+        # Its holder is full: the odometer sits at 6mm. Twice the timed 25mm
+        # plus 2s after the clear is 103.77, polled at 103.80.
+        unit, lane = self._rig(monkeypatch, [True, True, False],
+                               odom=lambda _t: 6.0, unload_past_sensor=25.0)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(103.80)
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [self._cleared(25)]
+
+    def test_no_distance_stops_as_the_sensor_clears(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, [False],
+                               odom=lambda t: (t - 100.0) * 60.0,
+                               unload_past_sensor=0.0)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == 100.0
+        assert unit.reactor.pauses == []
+        assert unit.logger.messages == [self._cleared(0)]
+
+    def test_the_default_distance_is_30mm(self, monkeypatch):
+        # Timed: 30mm at 30mm/s from a clear at 100.0, to within a poll.
+        unit, lane = self._rig(monkeypatch, [False])
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert unit.logger.messages == [self._cleared(30)]
+
+    # before the sensor clears
+
+    def test_a_sensor_that_never_clears_fails_at_the_deadline(
+            self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, [True])
+        assert unit._lite_unload_retract(lane) is False
+        assert unit.reactor.now == pytest.approx(120.0, abs=0.06)
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == []
+
+    def test_a_stall_before_the_clear_fails_at_once(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, [True],
+                               ustate=afcBambuAMS.AMS_STATE_STALLED)
+        assert unit._lite_unload_retract(lane) is False
+        assert unit.reactor.now == 100.0
+        assert unit._bridge.sent == [self.RETRACT, self.STOP]
+        assert unit.logger.messages == [
+            ("warning", "AFC bambu Bambu_AMS_1: the AMS Lite stalled "
+                        "retracting lane1 before it cleared the toolhead "
+                        "sensor")]
+
+    def test_another_state_keeps_it_retracting(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, [True, True, False],
+                               ustate=afcBambuAMS.AMS_STATE_STALLED - 1)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(101.1, abs=0.06)
+        assert unit.logger.messages == [self._cleared(30)]
+
+    def test_a_stall_after_the_clear_is_not_a_failure(self, monkeypatch):
+        # Past the sensor the unload has done its job; the pull runs out its
+        # time.
+        unit, lane = self._rig(monkeypatch, [False],
+                               ustate=afcBambuAMS.AMS_STATE_STALLED)
+        assert unit._lite_unload_retract(lane) is True
+        assert unit.reactor.now == pytest.approx(101.0, abs=0.06)
+        assert unit.logger.messages == [self._cleared(30)]
+
+    def test_with_no_bridge_it_waits_out_the_deadline(self, monkeypatch):
+        # Nothing to retract and no state to read: no stall can be seen.
+        unit, lane = self._rig(monkeypatch, [True], offline=True)
+        assert unit._lite_unload_retract(lane) is False
+        assert unit._bridge is None
+        assert unit.reactor.now == pytest.approx(120.0, abs=0.06)
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSLiteRelease:
+    def test_it_sends_the_idle_word(self, monkeypatch):
+        unit = _p4_unit(monkeypatch, model="lite")
+        assert unit._lite_release() is True
+        assert unit._bridge.sent == [{"cmd": "litecmd", "m": 1, "t": 255,
+                                      "x": 0}]
+        assert unit.logger.messages == []
+
+    def test_no_bridge_sends_nothing(self, monkeypatch):
+        unit = _p4_unit(monkeypatch, model="lite", offline=True)
+        assert unit._lite_release() is False
+        assert unit._bridge is None
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSEjectLane:
     """Reel a lane back to its bay: stop, select, retract, stop, and say so
     when the unit latched or never reported finishing."""
@@ -27165,6 +27958,39 @@ class TestAfcBambuAMSEjectLane:
                         "timeout, not on the AMS's own completion report -- "
                         "the filament may not be fully back in the bay. Check "
                         "the bay before loading it again.")]
+
+    # an AMS Lite cannot reel a lane home
+
+    LITE_LET_GO = ("info", "AFC bambu Bambu_AMS_1: an AMS Lite cannot reel "
+                           "lane20 back to its spool. It is released: pull "
+                           "the filament out at the AMS Lite.")
+
+    def test_an_ams_lite_is_let_go_not_reeled(self, monkeypatch):
+        unit, lane, muted = self._rig(monkeypatch, model="lite")
+        assert unit.eject_lane(lane) is True
+        assert unit._bridge.sent == [{"cmd": "litecmd", "m": 1, "t": 255,
+                                      "x": 0}]
+        assert muted == [False]
+        assert lane.loaded_to_hub is False
+        assert lane._load_state is False         # the bay's hub reads clear
+        assert unit._unload_in_progress is False
+        assert unit.logger.messages == [self.LITE_LET_GO]
+
+    def test_an_ams_lite_hub_switch_keeps_its_own_state(self, monkeypatch):
+        unit, lane, _ = self._rig(monkeypatch, model="lite",
+                                  virtual_hub=False)
+        assert unit.eject_lane(lane) is True
+        assert lane.loaded_to_hub is False
+        assert lane._load_state is True
+        assert unit.logger.messages == [self.LITE_LET_GO]
+
+    def test_an_offline_ams_lite_cannot_be_let_go(self, monkeypatch):
+        unit, lane, _ = self._rig(monkeypatch, model="lite", offline=True)
+        assert unit.eject_lane(lane) is False
+        assert lane.loaded_to_hub is True
+        assert unit.logger.messages == [
+            ("warning", "AFC bambu Bambu_AMS_1: bridge not connected, cannot "
+                        "eject lane20")]
 
 
 class TestModuleImport:
@@ -27492,10 +28318,11 @@ class TestAMSModels:
     def test_bambuams_accepts_every_model_bridgebox_can_emit(self,
                                                              monkeypatch):
         # BridgeBox writes its roster tag straight into ams_model, its own
-        # boxed and lite included; each must build and poll its own device.
+        # boxed and lite included; each must build and poll its own device
+        # (the AMS Lite answers at 0x1200).
         from extras.AFC_BridgeBox import _SLOTS_BY_MODEL
         mc_addr = {"ams1": 0x0700, "ams2": 0x0700, "boxed": 0x0700,
-                   "ht": 0x1800, "lite": 0x0700}
+                   "ht": 0x1800, "lite": 0x1200}
         assert sorted(_SLOTS_BY_MODEL) == sorted(mc_addr)
         for model, addr in mc_addr.items():
             unit = _p6_unit(monkeypatch, model=model)
