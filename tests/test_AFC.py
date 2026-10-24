@@ -1819,6 +1819,53 @@ class TestChangeTool_ExceptionHandling:
         call_kwargs = obj.error.AFC_error.call_args.kwargs
         assert call_kwargs.get("pause") is True
 
+    def _make_in_print(self, in_print=True):
+        obj, cur_lane = self._make_raising_fixture()
+        obj.function.in_print.side_effect = (
+            lambda return_file=False: (in_print, "pizza.gcode") if return_file else in_print)
+        return obj, cur_lane
+
+    MESSAGE = ("An unexpected error occurred during CHANGE_TOOL: {}. "
+               "Please check the logs and report this issue to developers.")
+    LOGS = [("info", "Tool Change - lane1 -> lane2"),
+            ("error", "Unexpected error during CHANGE_TOOL:\n")]
+
+    def test_an_exception_during_a_print_records_the_interrupted_change(self):
+        """A U1 head that fails to dock raises out of the change, and AFC_RESUME
+        must finish that change like one whose load returned False."""
+        obj, cur_lane = self._make_in_print()
+        obj.CHANGE_TOOL(cur_lane, purge_length=186.3)
+        assert obj.resume_toolchange == ("T0", "lane2", 186.3, "pizza.gcode")
+        obj.error.AFC_error.assert_called_once_with(
+            self.MESSAGE.format("simulated failure"), pause=True)
+        assert obj.logger.messages == self.LOGS
+
+    def test_an_exception_outside_a_print_records_nothing(self):
+        obj, cur_lane = self._make_in_print(in_print=False)
+        obj.resume_toolchange = ("T9", "lane9", 60.0, "old.gcode")
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        obj.function.in_print.assert_any_call(return_file=True)
+        obj.error.AFC_error.assert_called_once_with(
+            self.MESSAGE.format("simulated failure"), pause=False)
+        assert obj.logger.messages == self.LOGS
+
+    def test_the_error_text_loses_its_angle_brackets_and_final_period(self):
+        """Moonraker shows an error holding < or > as "Unknown"."""
+        obj, cur_lane = self._make_in_print()
+        obj.TOOL_LOAD.side_effect = KeyError("<AFCLane lane2> is unknown.")
+        obj.CHANGE_TOOL(cur_lane)
+        obj.error.AFC_error.assert_called_once_with(
+            self.MESSAGE.format("'(AFCLane lane2) is unknown.'"), pause=True)
+        assert obj.logger.messages == self.LOGS
+
+    def test_an_error_without_text_is_named_by_its_type(self):
+        obj, cur_lane = self._make_in_print()
+        obj.TOOL_LOAD.side_effect = ValueError()
+        obj.CHANGE_TOOL(cur_lane)
+        obj.error.AFC_error.assert_called_once_with(self.MESSAGE.format("ValueError"), pause=True)
+        assert obj.logger.messages == self.LOGS
+
 
 # ── cmd_CHANGE_TOOL: NEW_EXTRUDER_TEMP parameter parsing ─────────────────────
 
@@ -5300,20 +5347,23 @@ class TestToolLoadZeroesEOnSnapmakerPause:
         return [c for c in afc.gcode.run_script_from_command.call_args_list
                 if c.args and c.args[0] == "G92 E0"]
 
-    def test_snapmaker_paused_zeroes_e(self):
+    def test_snapmaker_paused_zeroes_e_and_points_the_resume_at_the_head(self):
         afc, lane = self._make(snapmaker=True, paused=True)
         assert afc.TOOL_LOAD(lane)
         assert len(self._g92_calls(afc)) == 1
+        afc.error.point_snapmaker_resume_at.assert_called_once_with(lane)
         assert afc.logger.messages == [("info", "Loading lane1")]
 
     def test_snapmaker_printing_leaves_e(self):
         afc, lane = self._make(snapmaker=True, paused=False)
         assert afc.TOOL_LOAD(lane)
         assert self._g92_calls(afc) == []
+        afc.error.point_snapmaker_resume_at.assert_not_called()
         assert afc.logger.messages == [("info", "Loading lane1")]
 
     def test_other_printer_paused_leaves_e(self):
         afc, lane = self._make(snapmaker=False, paused=True)
         assert afc.TOOL_LOAD(lane)
         assert self._g92_calls(afc) == []
+        afc.error.point_snapmaker_resume_at.assert_not_called()
         assert afc.logger.messages == [("info", "Loading lane1")]

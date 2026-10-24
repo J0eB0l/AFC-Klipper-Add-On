@@ -35,6 +35,7 @@ def _make_afc_error():
     afc = MockAFC()
     afc.error_state = False
     afc.current_state = State.IDLE
+    afc.auto_home = False
     afc.function = MagicMock()
     afc.function.is_homed = MagicMock(return_value=True)
     afc.function.is_paused = MagicMock(return_value=False)
@@ -1508,6 +1509,7 @@ class TestFinishInterruptedToolchange:
         afc.resume_toolchange = ("T16", "lane28", 269.0, "pizza.gcode")
         afc.function.in_print = MagicMock(return_value=(in_print, print_file))
         afc.CHANGE_TOOL = MagicMock()
+        err._home_xy_if_lost = MagicMock()
         return err, afc, lane
 
     def test_nothing_pending_goes_on(self):
@@ -1516,12 +1518,14 @@ class TestFinishInterruptedToolchange:
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
         afc.function.in_print.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert err.logger.messages == []
 
     def test_not_printing_drops_it(self):
         err, afc, lane = self._make(in_print=False)
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert afc.resume_toolchange is None
         assert err.logger.messages == []
 
@@ -1529,6 +1533,7 @@ class TestFinishInterruptedToolchange:
         err, afc, lane = self._make(print_file="other.gcode")
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert afc.resume_toolchange is None
         assert err.logger.messages == []
 
@@ -1537,6 +1542,7 @@ class TestFinishInterruptedToolchange:
         afc.lanes = {}
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert afc.resume_toolchange is None
         assert err.logger.messages == []
 
@@ -1544,6 +1550,7 @@ class TestFinishInterruptedToolchange:
         err, afc, lane = self._make(tool_loaded=True)
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert afc.resume_toolchange is None
         assert err.logger.messages == []
 
@@ -1552,6 +1559,7 @@ class TestFinishInterruptedToolchange:
         afc.get_bypass_state.return_value = True
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert afc.resume_toolchange is None
         assert err.logger.messages == []
 
@@ -1579,6 +1587,7 @@ class TestFinishInterruptedToolchange:
         afc.tool_cmds = {"T16": "lane29"}
         assert err._finish_interrupted_toolchange() is True
         afc.CHANGE_TOOL.assert_not_called()
+        err._home_xy_if_lost.assert_not_called()
         assert afc.resume_toolchange is None
         assert err.logger.messages == []
 
@@ -1594,9 +1603,16 @@ class TestFinishInterruptedToolchange:
         err, afc, lane = self._make()
         afc.error_state = True
 
+        def home():
+            # X and Y are homed while the error still stands, so a homing failure
+            # leaves the state as it was
+            assert afc.error_state is True
+        err._home_xy_if_lost.side_effect = home
+
         def change_tool(cur_lane, purge_length=None, restore_pos=True, count_change=True):
-            # CHANGE_TOOL runs with the error cleared, like a normal change
+            # CHANGE_TOOL runs with the error cleared and X/Y homed, like a normal change
             assert afc.error_state is False
+            err._home_xy_if_lost.assert_called_once_with()
             cur_lane.tool_loaded = True
             afc.resume_toolchange = None
         afc.CHANGE_TOOL.side_effect = change_tool
@@ -1622,4 +1638,169 @@ class TestFinishInterruptedToolchange:
         err, afc, lane = self._make()
         assert err._finish_interrupted_toolchange() is False
         assert afc.error_state is False
+        err._home_xy_if_lost.assert_called_once_with()
         assert err.logger.messages == [self.FINISHING, self.NOT_LOADED]
+
+
+class TestHomeXyIfLost:
+    """Finishing a tool change needs X and Y homed; a U1 drops them when a head
+    fails to dock. Z is never homed here."""
+
+    HOMING = ("info", "AFC_RESUME: homing X and Y before finishing the tool change")
+
+    def _make(self, homed_axes, auto_home=True):
+        err, afc = _make_afc_error()
+        afc.auto_home = auto_home
+        kin = afc.toolhead.get_kinematics.return_value
+        kin.get_status.return_value = {"homed_axes": homed_axes}
+        return err, afc, kin
+
+    def test_without_auto_home_the_change_decides(self):
+        err, afc, kin = self._make("z", auto_home=False)
+        err._home_xy_if_lost()
+        kin.get_status.assert_not_called()
+        afc.gcode.run_script_from_command.assert_not_called()
+        afc.toolhead.wait_moves.assert_not_called()
+        assert err.logger.messages == []
+
+    def test_a_homed_printer_is_left_alone(self):
+        err, afc, kin = self._make("xyz")
+        err._home_xy_if_lost()
+        kin.get_status.assert_called_once_with(afc.reactor.monotonic())
+        afc.gcode.run_script_from_command.assert_not_called()
+        afc.toolhead.wait_moves.assert_not_called()
+        assert err.logger.messages == []
+
+    def test_lost_x_and_y_are_homed(self):
+        err, afc, kin = self._make("z")
+        err._home_xy_if_lost()
+        afc.gcode.run_script_from_command.assert_called_once_with("G28 X Y")
+        afc.toolhead.wait_moves.assert_called_once_with()
+        assert err.logger.messages == [self.HOMING]
+
+    def test_a_lost_x_alone_is_homed(self):
+        err, afc, kin = self._make("yz")
+        err._home_xy_if_lost()
+        afc.gcode.run_script_from_command.assert_called_once_with("G28 X Y")
+        afc.toolhead.wait_moves.assert_called_once_with()
+        assert err.logger.messages == [self.HOMING]
+
+    def test_a_lost_y_alone_is_homed(self):
+        err, afc, kin = self._make("xz")
+        err._home_xy_if_lost()
+        afc.gcode.run_script_from_command.assert_called_once_with("G28 X Y")
+        afc.toolhead.wait_moves.assert_called_once_with()
+        assert err.logger.messages == [self.HOMING]
+
+    def test_a_lost_z_leaves_homing_to_the_change(self):
+        err, afc, kin = self._make("y")
+        err._home_xy_if_lost()
+        afc.gcode.run_script_from_command.assert_not_called()
+        afc.toolhead.wait_moves.assert_not_called()
+        assert err.logger.messages == []
+
+    def test_a_lost_z_with_x_and_y_homed_does_nothing(self):
+        err, afc, kin = self._make("xy")
+        err._home_xy_if_lost()
+        afc.gcode.run_script_from_command.assert_not_called()
+        afc.toolhead.wait_moves.assert_not_called()
+        assert err.logger.messages == []
+
+
+class TestPointSnapmakerResumeAt:
+    """A Snapmaker U1's INNER_RESUME resumes on the extruder its INNER_PAUSE saw,
+    so a load during the pause tells it the new one, at the highest of the
+    slicer's, the saved and the heater's temperature."""
+
+    def _make(self, snapmaker=True, macro=True, name="extruder", index=0, tool="T0",
+              heater=220.0, saved=0, slicer=None):
+        err, afc = _make_afc_error()
+        afc.snapmaker_printer = snapmaker
+        afc.print_tool_temperatures = slicer
+        if macro:
+            inner_resume = MagicMock()
+            inner_resume.variables = {f"extruder{index}_temp": saved}
+            err.printer._objects["gcode_macro INNER_RESUME"] = inner_resume
+        lane = MagicMock()
+        lane.lane_extruder_index = index
+        lane.current_map = tool
+        lane.extruder_obj.th_extruder_name = name
+        lane.extruder_obj.get_heater.return_value.target_temp = heater
+        return err, afc, lane
+
+    @staticmethod
+    def _set(variable, value):
+        return call(f"SET_GCODE_VARIABLE MACRO=INNER_RESUME VARIABLE={variable} VALUE={value}")
+
+    def _resumes_on(self, name, degrees):
+        return [("debug", f"AFC_RESUME: INNER_RESUME now resumes on {name} at {degrees}C")]
+
+    def test_another_printer_is_left_alone(self):
+        err, afc, lane = self._make(snapmaker=False)
+        err.point_snapmaker_resume_at(lane)
+        afc.gcode.run_script_from_command.assert_not_called()
+        assert err.logger.messages == []
+
+    def test_a_snapmaker_without_the_macro_is_left_alone(self):
+        err, afc, lane = self._make(macro=False)
+        err.point_snapmaker_resume_at(lane)
+        afc.gcode.run_script_from_command.assert_not_called()
+        assert err.logger.messages == []
+
+    def test_the_heater_target_is_used_when_nothing_else_is_higher(self):
+        err, afc, lane = self._make(heater=220.0, saved=70, slicer=None)
+        err.point_snapmaker_resume_at(lane)
+        assert afc.gcode.run_script_from_command.call_args_list == [
+            self._set("last_extruder_index", 0),
+            self._set("last_extruder_temp", 220.0),
+            self._set("extruder0_temp", 220.0)]
+        assert err.logger.messages == self._resumes_on("extruder", 220)
+
+    def test_the_saved_pause_temperature_wins_over_a_lower_load(self):
+        """A load during the pause heats to the lane's material default, which
+        must not lower the print's temperature INNER_PAUSE saved."""
+        err, afc, lane = self._make(name="extruder2", index=2, tool="T5", heater=210.0,
+                                    saved=220, slicer=None)
+        err.point_snapmaker_resume_at(lane)
+        assert afc.gcode.run_script_from_command.call_args_list == [
+            self._set("last_extruder_index", 2),
+            self._set("last_extruder_temp", 220.0),
+            self._set("extruder2_temp", 220.0)]
+        assert err.logger.messages == self._resumes_on("extruder2", 220)
+
+    def test_the_slicer_temperature_for_the_tool_wins_when_highest(self):
+        err, afc, lane = self._make(name="extruder2", index=2, tool="T5", heater=210.0,
+                                    saved=40, slicer=[200, 200, 200, 200, 200, 235.0])
+        err.point_snapmaker_resume_at(lane)
+        assert afc.gcode.run_script_from_command.call_args_list == [
+            self._set("last_extruder_index", 2),
+            self._set("last_extruder_temp", 235.0),
+            self._set("extruder2_temp", 235.0)]
+        assert err.logger.messages == self._resumes_on("extruder2", 235)
+
+    def test_a_tool_the_slicer_did_not_list_is_skipped(self):
+        err, afc, lane = self._make(tool="T5", heater=210.0, saved=0, slicer=[250.0])
+        err.point_snapmaker_resume_at(lane)
+        assert afc.gcode.run_script_from_command.call_args_list == [
+            self._set("last_extruder_index", 0),
+            self._set("last_extruder_temp", 210.0),
+            self._set("extruder0_temp", 210.0)]
+        assert err.logger.messages == self._resumes_on("extruder", 210)
+
+    def test_a_map_that_is_not_a_tool_number_is_skipped(self):
+        err, afc, lane = self._make(tool="RED", heater=210.0, saved=0, slicer=[250.0])
+        err.point_snapmaker_resume_at(lane)
+        assert afc.gcode.run_script_from_command.call_args_list == [
+            self._set("last_extruder_index", 0),
+            self._set("last_extruder_temp", 210.0),
+            self._set("extruder0_temp", 210.0)]
+        assert err.logger.messages == self._resumes_on("extruder", 210)
+
+    def test_a_negative_tool_number_is_skipped(self):
+        err, afc, lane = self._make(tool="T-1", heater=210.0, saved=0, slicer=[250.0])
+        err.point_snapmaker_resume_at(lane)
+        assert afc.gcode.run_script_from_command.call_args_list == [
+            self._set("last_extruder_index", 0),
+            self._set("last_extruder_temp", 210.0),
+            self._set("extruder0_temp", 210.0)]
+        assert err.logger.messages == self._resumes_on("extruder", 210)

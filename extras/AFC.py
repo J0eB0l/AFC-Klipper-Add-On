@@ -1756,8 +1756,11 @@ class afc:
                     # printing, so a load during a pause leaves the unload's retract in
                     # it and the U1's RESUME pulls the new filament back that far.
                     # G92 E0 zeroes it; the resume restores the print's E position.
+                    # That RESUME also goes back to the head active at the pause, so it
+                    # is told the head this load went into.
                     if self.snapmaker_printer and self.function.is_paused():
                         self.gcode.run_script_from_command("G92 E0")
+                        self.error.point_snapmaker_resume_at(cur_lane)
                     # Update lane and extruder state for tracking.
                     cur_extruder.lane_loaded = cur_lane.name
                     self.spool.set_active_spool(cur_lane.spool_id)
@@ -2792,11 +2795,18 @@ class afc:
                     self.current_toolchange += 1
         # Copilot yes this is a bare exception, ignore please since this is being done on purpose
         # to make sure all exceptions are catched
-        except Exception:
+        except Exception as exc:
             trace = traceback.format_exc()
             self.logger.error("Unexpected error during CHANGE_TOOL:\n", traceback=trace)
+            # An error raised from inside the change (a toolchanger's park or pick, a
+            # unit's load) interrupts it just as a failed unload or load does
+            self._note_interrupted_toolchange(cur_lane, purge_length)
+            # Angle brackets in the text would make Moonraker show the error as "Unknown"
+            reason = (str(exc).replace("<", "(").replace(">", ")").rstrip(".")
+                      or type(exc).__name__)
             self.error.AFC_error(
-                "An unexpected error occurred during CHANGE_TOOL. Please check the logs and report this issue to developers.",
+                f"An unexpected error occurred during CHANGE_TOOL: {reason}. "
+                "Please check the logs and report this issue to developers.",
                 pause=self.function.in_print()
             )
         finally:

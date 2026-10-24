@@ -223,6 +223,7 @@ class AfcToolchanger(afcUnit):
         self._increase_unselect()
         self.afc.function.log_toolhead_pos("Before toolswap: ")
         # Save the current position before switching tools and subtract offsets
+        saved_position = list(self.afc.last_gcode_position[:3])
         for i in range(0, 3):
             self.afc.last_gcode_position[i] -= self.afc.gcode_move.base_position[i]
         # Perform a tool swap by selecting the appropriate extruder based on the lane's extruder object.
@@ -230,11 +231,17 @@ class AfcToolchanger(afcUnit):
         name = lane.extruder_obj.th_extruder_name
         tool_index = 0 if name == "extruder" else int(name.replace("extruder", ""))
 
-        if lane.extruder_obj.custom_tool_swap:
-            self.logger.info(f"Running custom select: {lane.extruder_obj.custom_tool_swap}")
-            self.afc.gcode.run_script_from_command(f"{lane.extruder_obj.custom_tool_swap}")
-        else:
-            self.afc.gcode.run_script_from_command('SELECT_TOOL T={}'.format(tool_index))
+        try:
+            if lane.extruder_obj.custom_tool_swap:
+                self.logger.info(f"Running custom select: {lane.extruder_obj.custom_tool_swap}")
+                self.afc.gcode.run_script_from_command(f"{lane.extruder_obj.custom_tool_swap}")
+            else:
+                self.afc.gcode.run_script_from_command('SELECT_TOOL T={}'.format(tool_index))
+        except Exception:
+            # A swap that raises never gets its offsets added back below, and the retry
+            # after the pause takes them off again, so put the saved position back
+            self.afc.last_gcode_position[:3] = saved_position
+            raise
         lane.extruder_obj.next_pickup = False
 
         if current_extruder:

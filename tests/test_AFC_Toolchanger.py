@@ -585,6 +585,23 @@ class TestToolSwap:
         assert captured["status"] == State.TOOL_DOCK
         assert current_extruder.status == State.IDLE
 
+    def test_a_swap_that_raises_puts_the_saved_position_back(self):
+        """A U1 head that fails to dock raises out of PICK_EXTRUDER after the
+        offsets came off the saved position; the retry would take them off again."""
+        tool = _make_toolchanger_for_tool_swap()
+        tool.function.get_current_extruder_obj.return_value = None
+        tool.afc.gcode_move.base_position = [-0.15, -0.17, -0.04, 0.0]
+        tool.afc.last_gcode_position = [169.61, 248.7, 2.35, 1643.6]
+        lane = _make_lane_for_tool_swap()
+        lane.extruder_obj.custom_tool_swap = "PICK_EXTRUDER"
+        tool.afc.gcode.run_script_from_command = MagicMock(side_effect=RuntimeError("no dock"))
+
+        with pytest.raises(RuntimeError, match="no dock"):
+            tool.tool_swap(lane)
+
+        assert tool.afc.last_gcode_position == [169.61, 248.7, 2.35, 1643.6]
+        assert lane.extruder_obj.next_pickup is True
+
     def test_no_current_extruder_does_not_raise(self):
         """Covers the `current_extruder` falsy branch: no .status assignment
         happens on a None object, and the swap still completes normally."""

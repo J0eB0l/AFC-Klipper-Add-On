@@ -379,6 +379,7 @@ class afcError:
             return True
 
         self.logger.info(f"AFC_RESUME: finishing the tool change to {lane.name}")
+        self._home_xy_if_lost()
         self.set_error_state(False)
         # The pause's own position is restored after the user's RESUME, and the
         # change was counted when it first ran
@@ -388,6 +389,61 @@ class afcError:
                               "paused. Clear the fault and resume again.")
             return False
         return True
+
+    def _home_xy_if_lost(self) -> None:
+        """
+        Home X and Y before finishing a tool change when only they are unhomed.
+
+        A Snapmaker U1 drops the X and Y homing when a head fails to dock, and the
+        park and pick that finish the change need them. Only a printer with auto_home
+        homes here, as in check_homed. Z is never homed mid print, so with it unhomed
+        as well the change's own homing check decides.
+        """
+        if not self.afc.auto_home:
+            return
+        curtime = self.afc.reactor.monotonic()
+        homed = self.afc.toolhead.get_kinematics().get_status(curtime)["homed_axes"]
+        if "z" in homed and ("x" not in homed or "y" not in homed):
+            self.logger.info("AFC_RESUME: homing X and Y before finishing the tool change")
+            self.afc.gcode.run_script_from_command("G28 X Y")
+            self.afc.toolhead.wait_moves()
+
+    def point_snapmaker_resume_at(self, lane: AFCLane) -> None:
+        """
+        Tell a Snapmaker U1's INNER_RESUME which head a load during a pause left to resume on.
+
+        INNER_PAUSE saves the extruder that was active at the pause, and INNER_RESUME
+        re-selects, heats and primes that one, which would swap a head loaded during the
+        pause (AFC_RESUME finishing an interrupted change, or a T(n) or TOOL_LOAD by hand)
+        back out. The resume temperature is the highest of the slicer's temperature for
+        the lane's T(n), the target INNER_PAUSE saved for that head and the heater's
+        target, so a load's material default never lowers the print's temperature.
+        Printers without the macro, Snapmaker or not, need nothing.
+
+        :param lane: Lane the load put in the head
+        """
+        if not self.afc.snapmaker_printer:
+            return
+        macro = self.printer.lookup_object("gcode_macro INNER_RESUME", None)
+        if macro is None:
+            return
+        index = lane.lane_extruder_index
+        candidates = [lane.extruder_obj.get_heater().target_temp,
+                      macro.variables.get(f"extruder{index}_temp", 0)]
+        try:
+            tool = int(str(lane.current_map).lstrip("T"))
+            if tool >= 0:
+                candidates.append(self.afc.print_tool_temperatures[tool])
+        except (ValueError, IndexError, TypeError):
+            pass
+        target = max(float(temp) for temp in candidates)
+        self.logger.debug(f"AFC_RESUME: INNER_RESUME now resumes on "
+                          f"{lane.extruder_obj.th_extruder_name} at {target:.0f}C")
+        for variable, value in (("last_extruder_index", index),
+                                ("last_extruder_temp", target),
+                                (f"extruder{index}_temp", target)):
+            self.afc.gcode.run_script_from_command(
+                f"SET_GCODE_VARIABLE MACRO=INNER_RESUME VARIABLE={variable} VALUE={value}")
 
     cmd_AFC_PAUSE_help = "Pauses print, raises z by z-hop amount, and then calls users pause macro"
     def cmd_AFC_PAUSE(self, gcmd: GCodeCommand) -> None:
