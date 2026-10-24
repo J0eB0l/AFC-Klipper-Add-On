@@ -2016,15 +2016,18 @@ class TestAfcAMSInit:
         assert ams._engagement_length == 20.0
         assert ams._engagement_speed == 300.0
         assert ams._defer_engagement is False
+        assert ams._engagement_min_clicks == 10
+        assert ams._load_failure == ""
 
     def test_custom_engagement_params(self):
         config, printer, afc = self._config(
             values={"engagement_length": 15.0, "engagement_speed": 200.0,
-                    "defer_engagement": True})
+                    "defer_engagement": True, "engagement_min_clicks": 4})
         ams = self._build(config)
         assert ams._engagement_length == 15.0
         assert ams._engagement_speed == 200.0
         assert ams._defer_engagement is True
+        assert ams._engagement_min_clicks == 4
 
     def test_clog_sensitivity_lowercased(self):
         config, printer, afc = self._config(values={"clog_sensitivity": "HIGH"})
@@ -2185,15 +2188,39 @@ class TestVerifyEngagement:
         ams, afc, printer, reactor = _make_ams(oams=oams)
         # Simulate the encoder advancing once the extrude commands are sent.
         ams._oams_extrude = MagicMock(
-            side_effect=lambda *a, **k: setattr(oams, "encoder_clicks", 5))
+            side_effect=lambda *a, **k: setattr(oams, "encoder_clicks", 12))
         lane = _make_lane("lane1")
 
         result = ams._verify_engagement(lane)
 
         assert result is True
         assert any(
-            lvl == "info" and "Engagement verified: encoder moved 5 clicks" in m
+            lvl == "info" and "Engagement verified: encoder moved 12 clicks" in m
             for lvl, m in ams.logger.messages)
+
+    def test_a_status_is_waited_for_before_the_encoder_is_read(self):
+        class _FakeOams:
+            def __init__(self):
+                self.encoder_clicks = 0
+
+        oams = _FakeOams()
+        ams, afc, printer, reactor = _make_ams(oams=oams)
+        ams._oams_extrude = MagicMock()
+        pauses = []
+
+        def pause(t):
+            pauses.append(t)
+            if t == 101.0:
+                # The status carrying the move's clicks lands during the wait.
+                oams.encoder_clicks = 30
+        reactor.pause = pause
+        lane = _make_lane("lane1")
+
+        result = ams._verify_engagement(lane)
+
+        assert result is True
+        assert pauses == [101.5, 101.0]
+        assert ("info", "Engagement verified: encoder moved 30 clicks") in ams.logger.messages
 
     def test_encoder_moved_enough_on_retry_returns_true(self):
         class _FakeOams:
@@ -2207,9 +2234,9 @@ class TestVerifyEngagement:
 
         def pause(t):
             pause_calls["n"] += 1
-            if pause_calls["n"] == 2:
+            if pause_calls["n"] == 3:
                 # Simulate the encoder catching up during the brief retry pause.
-                oams.encoder_clicks = 3
+                oams.encoder_clicks = 11
         reactor.pause = pause
         lane = _make_lane("lane1")
 
@@ -2218,7 +2245,7 @@ class TestVerifyEngagement:
         assert result is True
         assert any(
             lvl == "info"
-            and "Engagement verified on retry: encoder moved 3 clicks" in m
+            and "Engagement verified on retry: encoder moved 11 clicks" in m
             for lvl, m in ams.logger.messages)
 
     def test_no_encoder_movement_returns_false(self):
@@ -2232,8 +2259,43 @@ class TestVerifyEngagement:
 
         assert result is False
         assert (
-            "error", "Engagement verification failed: encoder moved only 0 clicks"
+            "error",
+            "Engagement verification failed: encoder moved only 0 clicks of the 10 needed"
         ) in ams.logger.messages
+        assert ams._load_failure == "encoder moved only 0 clicks of the 10 needed"
+
+    def test_too_little_encoder_movement_returns_false(self):
+        class _FakeOams:
+            def __init__(self):
+                self.encoder_clicks = 0
+
+        oams = _FakeOams()
+        ams, afc, printer, reactor = _make_ams(oams=oams)
+        ams._oams_extrude = MagicMock(
+            side_effect=lambda *a, **k: setattr(oams, "encoder_clicks", 6))
+        lane = _make_lane("lane1")
+
+        result = ams._verify_engagement(lane)
+
+        assert result is False
+        assert (
+            "error",
+            "Engagement verification failed: encoder moved only 6 clicks of the 10 needed"
+        ) in ams.logger.messages
+
+    def test_the_configured_minimum_is_used(self):
+        class _FakeOams:
+            def __init__(self):
+                self.encoder_clicks = 0
+
+        oams = _FakeOams()
+        ams, afc, printer, reactor = _make_ams(
+            oams=oams, config_values={"engagement_min_clicks": 4})
+        ams._oams_extrude = MagicMock(
+            side_effect=lambda *a, **k: setattr(oams, "encoder_clicks", 4))
+        lane = _make_lane("lane1")
+
+        assert ams._verify_engagement(lane) is True
 
     def test_no_oams_returns_false_without_reading_encoder(self):
         ams, afc, printer, reactor = _make_ams(oams=None)
@@ -3064,9 +3126,19 @@ class TestUnitLoadLane:
         lane = _make_lane("lane1")
         result = ams.unit_load_lane(lane, MagicMock())
         assert result is False
-        afc.error.handle_lane_failure.assert_called_once()
-        _, kwargs = afc.error.handle_lane_failure.call_args
-        assert kwargs["pause"] is True
+        afc.error.handle_lane_failure.assert_called_once_with(
+            lane, "OpenAMS load failed for lane1", pause=True)
+
+    def test_the_failure_reason_is_in_the_pause_message(self):
+        ams, afc, printer, reactor = _make_ams()
+        ams._oams_load_sequence = MagicMock(return_value=False)
+        ams._load_failure = "encoder moved only 2 clicks of the 10 needed"
+        afc.function.in_print.return_value = False
+        lane = _make_lane("lane1")
+        assert ams.unit_load_lane(lane, MagicMock()) is False
+        afc.error.handle_lane_failure.assert_called_once_with(
+            lane, "OpenAMS load failed for lane1: encoder moved only 2 clicks of the 10 needed",
+            pause=False)
 
 
 class TestUnitUnloadLane:
@@ -5064,6 +5136,22 @@ class TestOamsLoad:
         ext.tool_unload_speed = 25.0
         lane = _make_lane("lane1", extruder_obj=ext, **overrides)
         return lane
+
+    def test_a_load_starts_with_no_failure_reason(self):
+        oams = MagicMock()
+        oams.determine_current_spool.return_value = None
+        oams.load_spool_with_retry.return_value = (True, "ok")
+        ams, afc, printer, reactor = _make_ams(oams=oams)
+        ams._load_failure = "an earlier load's reason"
+        ams._verify_engagement = MagicMock(return_value=True)
+        ams._advance_tool_stn_to_nozzle = MagicMock()
+        ams._wait_for_idle = MagicMock(return_value=True)
+        lane = self._lane()
+
+        result = ams._oams_load(lane)
+
+        assert result is True
+        assert ams._load_failure == ""
 
     def test_no_oams_returns_false(self):
         ams, afc, printer, reactor = _make_ams(oams=None)

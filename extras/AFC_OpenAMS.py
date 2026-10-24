@@ -56,6 +56,11 @@ except: raise error(ERROR_STR.format(import_lib="AFC_temperature", trace=traceba
 # hardware controller lives in its own AFC_OAMS.py because Klipper resolves the
 # [AFC_OAMS ...] config section to that module name.
 
+# Seconds to let a status message land before reading the encoder after an
+# engagement move, since the count only arrives with the unit's status.
+ENGAGEMENT_SETTLE = 1.0
+
+
 class OAMSStatus(IntEnum):
     """
     Enumeration of firmware action/status codes reported by the OAMS MCU.
@@ -665,7 +670,13 @@ class afcAMS(afcUnit):
         self._engagement_length = config.getfloat("engagement_length", 20.0, minval=1.0)
         self._engagement_speed = config.getfloat("engagement_speed", 300.0, minval=10.0)
         self._defer_engagement = config.getboolean("defer_engagement", False)
+        # Encoder clicks the engagement move must turn: a 20 mm move turns
+        # some 35 on a 1.75 click/mm encoder, while a filament jammed short of
+        # the extruder gears turns a few as the follower compresses the buffer.
+        self._engagement_min_clicks = config.getint("engagement_min_clicks", 10, minval=1)
         self._engagement_params: Dict[str, tuple[float, float]] = {}
+        # Why the last load failed, for the pause message.
+        self._load_failure = ""
 
         # RFID scan-on-insert: feed a freshly inserted spool so its tag passes
         # the reader, read it, then unload back. Opt-in per unit.
@@ -1208,13 +1219,14 @@ class afcAMS(afcUnit):
             if remaining > 0:
                 self._oams_extrude(remaining, engagement_speed, "engagement_main")
 
-            # Check encoder movement
+            # Check encoder movement, once a status has carried the count
+            self.afc.reactor.pause(self.afc.reactor.monotonic() + ENGAGEMENT_SETTLE)
             encoder_after = 0
             if self.oams and hasattr(self.oams, 'encoder_clicks'):
                 encoder_after = self.oams.encoder_clicks or 0
 
             encoder_delta = abs(encoder_after - encoder_before)
-            min_movement = 2
+            min_movement = self._engagement_min_clicks
 
             if encoder_delta >= min_movement:
                 self.logger.info(
@@ -1231,8 +1243,9 @@ class afcAMS(afcUnit):
                     f"Engagement verified on retry: encoder moved {encoder_retry} clicks")
                 return True
 
-            self.logger.error(
-                f"Engagement verification failed: encoder moved only {encoder_delta} clicks")
+            self._load_failure = (f"encoder moved only {encoder_delta} clicks of the "
+                                  f"{min_movement} needed")
+            self.logger.error(f"Engagement verification failed: {self._load_failure}")
             return False
 
         finally:
@@ -1718,8 +1731,9 @@ class afcAMS(afcUnit):
             # pause the print when printing, so a failed toolchange doesn't
             # continue with no filament loaded. Returning False alone only resets
             # toolchange stats in the core and never pauses.
+            reason = f": {self._load_failure}" if self._load_failure else ""
             self.afc.error.handle_lane_failure(
-                cur_lane, f"OpenAMS load failed for {cur_lane.name}",
+                cur_lane, f"OpenAMS load failed for {cur_lane.name}{reason}",
                 pause=self.afc.function.in_print())
             return False
         return True
@@ -1892,6 +1906,7 @@ class afcAMS(afcUnit):
             return False
 
         spool_index = self._spool_map.get(cur_lane.name, 0)
+        self._load_failure = ""
 
         # Wait for OAMS idle
         self._wait_for_idle()
