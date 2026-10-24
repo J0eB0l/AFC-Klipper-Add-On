@@ -44,10 +44,33 @@ advance_pin: !turtleneck:ADVANCE
 trailing_pin: !turtleneck:TRAILING
 multiplier_high: 1.05   # default 1.05, factor to feed more filament
 multiplier_low:  0.95   # default 0.95, factor to feed less filament
-led_index: Buffer_Indicator:1
+led_index: ${unit_name}_Buffer_Indicator:1
 
-[AFC_led Buffer_Indicator]
+[AFC_led ${unit_name}_Buffer_Indicator]
 pin: turtleneck:RGB
+chain_count: 1
+color_order: GRBW
+initial_RED: 0.0
+initial_GREEN: 0.0
+initial_BLUE: 0.0
+initial_WHITE: 0.0
+EOF
+)
+      buffer_name="${unit_name}"
+      ;;
+    "TurtleNeck2Remastered")
+      buffer_config=$(cat <<EOF
+[AFC_buffer ${unit_name}]
+type: FPS_PSF
+adc_pin: TN2R:PSF
+neutral_point: 0.5
+max_tension: 0.1
+max_compression: 0.9
+reversed: true  #Test slide by hand and look at buffer state in mainsail/fluidd Set to true if display shows opposite of your tested state.
+led_index: ${unit_name}_Buffer_Indicator:1
+
+[AFC_led ${unit_name}_Buffer_Indicator]
+pin: TN2R:RGB
 chain_count: 1
 color_order: GRBW
 initial_RED: 0.0
@@ -103,6 +126,15 @@ append_buffer_config() {
     if ! grep -qF "[include mcu/TurtleNeckv2.cfg]" "$target_file"; then
       ensure_trailing_newline "$target_file"
       echo -e "\n[include mcu/TurtleNeckv2.cfg]" >> "$target_file"
+    fi
+  fi
+
+  # Add [include mcu/TN2.cfg] to the target file if buffer_type is TurtleNeck2Remastered and not present
+  if [ "$buffer_type" == "TurtleNeck2Remastered" ]; then
+    safe_copy "${afc_path}/config/mcu/TN2.cfg" "$afc_config_dir/mcu/"
+    if ! grep -qF "[include mcu/TN2.cfg]" "$target_file"; then
+      ensure_trailing_newline "$target_file"
+      echo -e "\n[include mcu/TN2.cfg]" >> "$target_file"
     fi
   fi
 }
@@ -190,6 +222,68 @@ replace_buffer_section() {
     in_section && /^\[.+\]/ {
       in_section = 0
     }
+    in_section { next }
+    { print $0 }
+  ' "$file_path" > "$file_path.tmp" && mv "$file_path.tmp" "$file_path"
+}
+
+list_existing_buffers() {
+  # Echoes the name of every [AFC_buffer <name>] section defined in the cfg
+  # files directly under $afc_config_dir, one per line, sorted and unique.
+  grep -hE '^\[AFC_buffer [^]]+\]' "$afc_config_dir"/*.cfg 2>/dev/null \
+    | sed -E 's/^\[AFC_buffer ([^]]+)\].*/\1/' | sort -u
+}
+
+prompt_shared_buffer_name() {
+  # Asks which existing buffer a new additional unit should share and sets
+  # the global `shared_buffer_name` (empty if skipped or none exist).
+  local buffers choice i=1 name
+  shared_buffer_name=""
+  buffers=$(list_existing_buffers)
+  if [ -z "$buffers" ]; then
+    print_msg WARNING "No existing buffers found in ${afc_config_dir}; set 'buffer:' manually."
+    return 0
+  fi
+  echo ""
+  echo "Existing buffers:"
+  while IFS= read -r name; do
+    printf "  %s. %s\n" "$i" "$name"
+    i=$((i + 1))
+  done <<< "$buffers"
+  while true; do
+    read -r -p "Enter the number or name of the buffer to share (blank to skip): " choice || choice=""
+    if [ -z "$choice" ]; then
+      return 0
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      name=$(sed -n "${choice}p" <<< "$buffers")
+    elif grep -qxF -- "$choice" <<< "$buffers"; then
+      name="$choice"
+    else
+      name=""
+    fi
+    if [ -n "$name" ]; then
+      shared_buffer_name="$name"
+      return 0
+    fi
+    print_msg WARNING "'$choice' is not one of the existing buffers."
+  done
+}
+
+remove_buffer_section() {
+  # Removes one [AFC_buffer <name>] section (header through its body and one
+  # trailing blank line) from a config file. Commented lines are untouched.
+  # Arguments:
+  #   $1: file_path - The path to the configuration file containing the block.
+  #   $2: section_header - The exact header line, e.g. "[AFC_buffer Claymore_2_buffer]".
+  local file_path="$1"
+  local section_header="$2"
+
+  awk -v header="$section_header" '
+    BEGIN { in_section = 0 }
+    $0 == header { in_section = 1; next }
+    in_section && /^$/ { in_section = 0; next }
+    in_section && /^\[.+\]/ { in_section = 0 }
     in_section { next }
     { print $0 }
   ' "$file_path" > "$file_path.tmp" && mv "$file_path.tmp" "$file_path"
