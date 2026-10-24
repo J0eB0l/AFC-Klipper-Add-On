@@ -58,7 +58,7 @@ class TestReplayOfTheRecordedCases:
         assert missing_types.isdisjoint(registered_types)
         assert replayed, "no BoxTurtle fixtures were replayed"
         assert (FIXTURES / "message__BoxTurtle_4Lane__buffer-None.txt").exists()
-        assert len(pending) == 110  # replayed by test_install_flow_install.py
+        assert len(pending) == 125  # replayed by test_install_flow_install.py
         assert not unregistered
 
 
@@ -289,6 +289,13 @@ class TestAdditionalDefaultName:
     def test_an_unknown_type_falls_back_to_unit_n(self, printer_tree: PrinterTree) -> None:
         sel = UnitSelection(installation_type="Nope")
         assert additional_default_name(make_ctx(printer_tree), sel) == "Unit_1"
+
+    def test_the_fallback_skips_taken_unit_numbers_too(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        ctx.afc_config_dir.mkdir(parents=True)
+        (ctx.afc_config_dir / "AFC_Unit_1.cfg").write_text("placeholder\n")
+        sel = UnitSelection(installation_type="Nope")
+        assert additional_default_name(ctx, sel) == "Unit_2"
 
 
 class TestRegistry:

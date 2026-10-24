@@ -117,6 +117,32 @@ class UnitType(ABC):
         """
         return []
 
+    def additional_prefix(self, sel: UnitSelection) -> str:
+        """
+        The prefix additional units are named with, ``additional_name_prefix`` unless the
+        choices on the selection change it.
+
+        :param sel: the user's unit choices
+        :return str: the prefix
+        """
+        return self.additional_name_prefix
+
+    def lowest_free_name(self, ctx: Context, sel: UnitSelection) -> str:
+        """
+        The default name for an additional unit: the lowest free ``<prefix>_N``.
+
+        "Free" means no matching unit file exists yet in the AFC config directory.
+
+        :param ctx: installer context
+        :param sel: the user's unit choices
+        :return str: the name
+        """
+        prefix = self.additional_prefix(sel)
+        number = 1
+        while (ctx.afc_config_dir / self.additional_probe_file(prefix, number, sel)).is_file():
+            number += 1
+        return f"{prefix}_{number}"
+
     def refresh_additional_name(self, ctx: Context, sel: UnitSelection) -> None:
         """
         Reset the unit name to the lowest free default unless the user chose a name.
@@ -124,10 +150,8 @@ class UnitType(ABC):
         :param ctx: installer context
         :param sel: the user's unit choices, ``unit_name`` may be updated
         """
-        from installer.unit_registry.naming import lowest_free_name
-
         if not sel.turtle_renamed:
-            sel.unit_name = lowest_free_name(ctx, sel, self)
+            sel.unit_name = self.lowest_free_name(ctx, sel)
 
     def on_select(self, sel: UnitSelection) -> None:
         """

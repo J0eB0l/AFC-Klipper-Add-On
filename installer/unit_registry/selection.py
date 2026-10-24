@@ -28,3 +28,10 @@ class UnitSelection:
     additional_buffer_type: str = "None"
     toolhead_sensor: str = "Ramming"
     toolhead_sensor_pin: str = "Unknown"
+    ace_unit_type: str = "V1"
+    bridgebox_pool_ams: int = 4
+    bridgebox_pool_ht: int = 8
+    bridgebox_connection: str = "usb"
+    bridgebox_address: str = ""
+    bridgebox_serial: str = "auto"
+    bridgebox_extruder: str = "extruder"

@@ -222,7 +222,7 @@ class TestEmuUnit:
 
 
 class TestTheCompleteRegistry:
-    def test_the_nine_types_are_in_menu_order(self) -> None:
+    def test_the_eleven_types_are_in_menu_order(self) -> None:
         assert [u.display_name for u in UNIT_TYPES] == [
             "BoxTurtle (4-Lane)",
             "BoxTurtle (8-Lane)",
@@ -231,6 +231,8 @@ class TestTheCompleteRegistry:
             "Claymore",
             "QuattroBox",
             "OpenAMS",
+            "ACE",
+            "BridgeBox",
             "ViViD",
             "EMU",
         ]
@@ -238,9 +240,9 @@ class TestTheCompleteRegistry:
     def test_keys_are_the_unit_keys(self) -> None:
         assert [u.key for u in UNIT_TYPES] == [
             "BoxTurtle_4Lane", "BoxTurtle_8Lane", "NightOwl", "HTLF", "Claymore",
-            "QuattroBox", "OpenAMS", "ViViD", "EMU",
+            "QuattroBox", "OpenAMS", "ACE", "BridgeBox", "ViViD", "EMU",
         ]
 
-    def test_only_vivid_lacks_additional_unit_buffer_support(self) -> None:
+    def test_only_bridgebox_and_vivid_lack_additional_unit_buffer_support(self) -> None:
         unsupported = [u.display_name for u in UNIT_TYPES if not u.additional_buffer_supported]
-        assert unsupported == ["ViViD"]
+        assert unsupported == ["BridgeBox", "ViViD"]

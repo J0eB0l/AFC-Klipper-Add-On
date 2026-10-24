@@ -171,7 +171,7 @@ class TestStepNavigation:
         assert menu.step() is None
         assert calls(deps) == ["exit"]
 
-    @pytest.mark.parametrize("answer", ["0", "10", "-1", "1.5", "x", "", "²", "١"])
+    @pytest.mark.parametrize("answer", ["0", "99", "-1", "1.5", "x", "", "²", "١"])
     @pytest.mark.parametrize("mode", [INSTALL, ADDITIONAL])
     def test_anything_else_is_reported_and_the_picker_stays(
         self, tmp_path: Path, mode: str, answer: str

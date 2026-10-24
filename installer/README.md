@@ -59,6 +59,9 @@ A unit type is one class. The menus, the type picker and the buffer prompts read
      wording.
    * `on_select()`, `after_sensor_change()`, `cycle_buffer()`: adjust the buffer when the type is
      picked or the sensor / ramming choice flips.
+   * `additional_prefix()`, `lowest_free_name()`: change how additional units are named when
+     `<additional_name_prefix>_N` probed as `AFC_<name>.cfg` is not it (a prefix that depends on a
+     choice, or names found in config sections rather than file names).
 
    Copy files with `safe_copy(ctx, console, prompter, source, destination)`. It asks before
    replacing anything. Edit config with the helpers in `config_editor/` (below), never with text

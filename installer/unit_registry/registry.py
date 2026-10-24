@@ -13,7 +13,9 @@ from installer.platform_core.context import Context
 from installer.unit_registry.base import GENERIC_BUFFER_OPTIONS, UnitType
 from installer.unit_registry.naming import ask_for_name, lowest_free_name
 from installer.unit_registry.selection import UnitSelection
+from installer.unit_registry.units.ace import Ace
 from installer.unit_registry.units.boxturtle import BoxTurtle4Lane, BoxTurtle8Lane
+from installer.unit_registry.units.bridgebox import BridgeBox
 from installer.unit_registry.units.claymore import Claymore
 from installer.unit_registry.units.emu import Emu
 from installer.unit_registry.units.htlf import Htlf
@@ -31,6 +33,8 @@ UNIT_TYPES: List[UnitType] = [
     Claymore(),
     QuattroBox(),
     OpenAms(),
+    Ace(),
+    BridgeBox(),
     Vivid(),
     Emu(),
 ]

@@ -19,6 +19,8 @@ UNIT_VARIANTS: dict[str, list[dict[str, str]]] = {
     "NightOwl": [{"nightowl_board_type": b} for b in ["ERB_2.0", "OWLFC_Mini"]],
     "ViViD": [{}],
     "OpenAMS": [{}],
+    "ACE": [{"ace_unit_type": v} for v in ["V1", "V2_Pro"]],
+    "BridgeBox": [{}],
     "HTLF": [{"htlf_board_type": b} for b in ["ERB", "MMB_1.1", "MMB_1.0"]],
     "Claymore": [{"htlf2_board_type": "AFC_Lite"}],
     "QuattroBox": [
@@ -41,6 +43,8 @@ ADDITIONAL_UNIT_DEFAULT_NAME = {
     "ViViD": "Vivid_1",
     "QuattroBox": "QuattroBox_1",
     "OpenAMS": "AMS_1",
+    "ACE": "Ace_2",
+    "BridgeBox": "chain2",
     "EMU": "EMU_1",
     "HTLF": "HTLF_1",
     "Claymore": "Claymore_1",
@@ -72,6 +76,9 @@ def iter_cases():
 
             # install_additional_unit: type-specific default name and a custom one.
             default_add_name = ADDITIONAL_UNIT_DEFAULT_NAME[itype]
+            if variant.get("ace_unit_type") == "V2_Pro":
+                # an ACE 2 Pro is an Ace2_N, its own module with its own names
+                default_add_name = "Ace2_2"
             for name_label, name_value in (
                 ("defaultname", default_add_name),
                 ("customname", "CustomName2"),
@@ -189,6 +196,15 @@ def iter_cases():
             "seed_files": "AFC_MMB_HTLF_1.cfg",
         },
     )
+    # An ACE's default name depends on its generation: the ACE Pro probes AFC_Ace_N.cfg and
+    # the ACE 2 Pro AFC_Ace2_N.cfg, so an existing unit of the other generation does not
+    # count as taken.
+    for ace_type, seed in (("V1", "AFC_Ace_1.cfg"), ("V2_Pro", "AFC_Ace2_1.cfg")):
+        yield (
+            f"additional_default_name__ACE__{ace_type}__first-existing",
+            "additional_default_name",
+            {"installation_type": "ACE", "ace_unit_type": ace_type, "seed_files": seed},
+        )
 
 
 def all_cases():

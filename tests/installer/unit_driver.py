@@ -46,6 +46,7 @@ def selection_from(overrides: Dict[str, str]) -> UnitSelection:
         "qb_board_type": "qb_board_type",
         "qb_motor_type": "qb_motor_type",
         "emu_board_type": "emu_board_type",
+        "ace_unit_type": "ace_unit_type",
     }
     for key, value in overrides.items():
         if key in names:
@@ -80,6 +81,14 @@ LEGACY_KEYS = {
     "Board Type": {"HTLF": "D", "QuattroBox": "E", "EMU": "H", "Claymore": "H", "NightOwl": "J"},
     "Motor Type": {"QuattroBox": "F"},
     "Lane Count": {"EMU": "G"},
+    "Unit Type": {"ACE": "K"},
+}
+# BridgeBox rows were recorded with a key letter and a label that names no unit.
+LEGACY_LABEL_KEYS = {
+    "Units on this chain": "P",
+    "Connection": "W",
+    "USB serial port": "S",
+    "Extruder": "X",
 }
 
 
@@ -91,6 +100,9 @@ def legacy_rows(options: List[Any], sel: Any, additional: bool) -> List[Tuple[st
         if option.label.endswith(" Name"):
             key = "1" if additional else "C"
             text = f"{option.label}{':' if additional else ' :'} {value}"
+        elif option.label in LEGACY_LABEL_KEYS:
+            key = LEGACY_LABEL_KEYS[option.label]
+            text = f"{option.label} : {value}"
         else:
             unit, _, kind = option.label.partition(" ")
             key = LEGACY_KEYS[kind][unit]

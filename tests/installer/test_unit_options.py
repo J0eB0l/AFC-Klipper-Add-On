@@ -122,10 +122,10 @@ class TestUnitTypeDefaults:
 
     @pytest.mark.parametrize("unit", UNIT_TYPES, ids=[u.key for u in UNIT_TYPES])
     def test_buffer_selectable_and_ramming_wording(self, unit) -> None:  # type: ignore
-        no_choice = unit.key in ("ViViD", "OpenAMS")
+        no_choice = unit.key in ("ViViD", "OpenAMS", "BridgeBox")
         assert unit.buffer_selectable is not no_choice
-        expected = "an FPS Board" if unit.key == "OpenAMS" else "a TurtleNeck buffer"
-        assert unit.ramming_hardware == expected
+        expected = {"OpenAMS": "an FPS Board", "BridgeBox": "the Bambu AMS buffer"}
+        assert unit.ramming_hardware == expected.get(unit.key, "a TurtleNeck buffer")
 
 
 class TestQuattroBoxCycling:
@@ -149,7 +149,7 @@ class TestDefaultName:
             ("BoxTurtle_4Lane", "Turtle_1"), ("BoxTurtle_8Lane", "Turtle_1"),
             ("NightOwl", "NightOwl_1"), ("HTLF", "HTLF_1"), ("Claymore", "Claymore_1"),
             ("QuattroBox", "QuattroBox_1"), ("OpenAMS", "AMS_1"), ("ViViD", "Vivid_1"),
-            ("EMU", "EMU_1"),
+            ("EMU", "EMU_1"), ("ACE", "Ace_1"), ("BridgeBox", "chain1"),
         ],
     )
     def test_each_type_starts_with_its_own_first_name(self, key: str, expected: str) -> None:
@@ -173,6 +173,10 @@ class TestUnitOptionLists:
             ("ViViD", [], ["ViViD Name"]),
             ("EMU", ["EMU Name", "EMU Lane Count", "EMU Board Type"],
              ["EMU Name", "EMU Lane Count", "EMU Board Type"]),
+            ("ACE", ["ACE Unit Type"], ["ACE Name", "ACE Unit Type"]),
+            ("BridgeBox", ["Units on this chain", "Connection", "USB serial port", "Extruder"],
+             ["BridgeBox Chain Name", "Units on this chain", "Connection", "USB serial port",
+              "Extruder"]),
         ],
     )
     def test_labels_in_order(
