@@ -156,8 +156,9 @@ class TestUnitTemperatureCardInit:
         card = UnitTemperatureCard(config, "Ace_1", reader, printer.logger)
 
         assert (card.printer, card.reactor, card.name, card.reader, card.logger,
-                card.report_time) == (printer, printer.reactor, "Ace_1", reader,
-                                      printer.logger, REPORT_TIME)
+                card.report_time, card.reports_humidity) == (
+                    printer, printer.reactor, "Ace_1", reader, printer.logger,
+                    REPORT_TIME, True)
         assert (card.temperature, card.humidity, card.measured_min,
                 card.measured_max, card._read_failed) == (None, None, None, None, False)
         assert card.humidity_view.card is card
@@ -169,6 +170,10 @@ class TestUnitTemperatureCardInit:
     def test_report_time_is_taken(self):
         card = _card(report_time=2.5)
         assert card.report_time == 2.5
+
+    def test_no_humidity_is_taken(self):
+        card = _card(humidity=False)
+        assert card.reports_humidity is False
 
 
 class TestUnitTemperatureCardHandleReady:
@@ -273,13 +278,24 @@ class TestHumidityViewInit:
 
 
 class TestHumidityViewGetStatus:
-    def test_temperature_alone_until_a_humidity_is_reported(self):
-        card = _card(reader=FakeReader((26.456, None)))
+    def test_zeros_before_any_reading_on_a_unit_that_reports_humidity(self):
+        assert _card().humidity_view.get_status(100.0) == {
+            "temperature": 0.0, "humidity": 0.0}
+
+    def test_zero_temperature_alone_before_any_reading_on_a_unit_without(self):
+        card = _card(humidity=False)
+        assert card.humidity_view.get_status(100.0) == {"temperature": 0.0}
+
+    def test_temperature_alone_until_a_unit_without_humidity_reports_one(self):
+        card = _card(reader=FakeReader((26.456, None)), humidity=False)
         card._sample(100.0)
         assert card.humidity_view.get_status(105.0) == {"temperature": 26.46}
 
-    def test_zero_temperature_before_any_reading(self):
-        assert _card().humidity_view.get_status(100.0) == {"temperature": 0.0}
+    def test_a_humidity_a_unit_without_one_reports_is_shown(self):
+        card = _card(reader=FakeReader((26.0, 41.456)), humidity=False)
+        card._sample(100.0)
+        assert card.humidity_view.get_status(105.0) == {
+            "temperature": 26.0, "humidity": 41.46}
 
     def test_humidity_beside_the_temperature_rounded(self):
         card = _card(reader=FakeReader((26.0, 41.456)))
@@ -297,16 +313,23 @@ class TestAddCard:
         printer = config.get_printer()
         reader = FakeReader()
 
-        card = add_card(config, "Ace_1", reader, printer.logger, report_time=3.0)
+        card = add_card(config, "Ace_1", reader, printer.logger, report_time=3.0,
+                        humidity=False)
 
         assert isinstance(card, UnitTemperatureCard)
-        assert (card.name, card.reader, card.report_time) == ("Ace_1", reader, 3.0)
+        assert (card.name, card.reader, card.report_time, card.reports_humidity) == (
+            "Ace_1", reader, 3.0, False)
         assert printer.objects["temperature_sensor Ace_1"] is card
         assert printer.objects["aht10 Ace_1"] is card.humidity_view
         assert printer.heaters.available_sensors == ["temperature_sensor Ace_1"]
         assert config.access_tracking == {
             ("temperature_sensor ace_1", "sensor_type"): SENSOR_TYPE}
         assert printer.logger.messages == []
+
+    def test_humidity_is_reported_unless_said_otherwise(self, tracking_configfile):
+        config = _config()
+        card = add_card(config, "Ace_1", FakeReader(), config.get_printer().logger)
+        assert card.reports_humidity is True
 
     def test_a_config_still_carrying_the_sensor_section_is_refused(self):
         config = _config()

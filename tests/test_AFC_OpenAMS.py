@@ -2085,6 +2085,7 @@ class TestAfcAMSInit:
         assert card.reader == ams.hdc1080.read
         assert printer._objects["temperature_sensor ams1"] is card
         assert printer._objects["aht10 ams1"] is card.humidity_view
+        assert card.reports_humidity is True
         wrapper, sensor = heaters.register_sensor.call_args[0]
         assert (wrapper.get_name(), sensor) == ("temperature_sensor ams1", card)
 

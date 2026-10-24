@@ -551,6 +551,7 @@ class TestAfcACEInit:
         assert card is unit.printer.objects["temperature_sensor Ace_1"]
         assert unit.printer.objects["aht10 Ace_1"] is card.humidity_view
         assert card.reader == unit._card_reading
+        assert card.reports_humidity is False
         assert unit.printer.heaters.available_sensors == ["temperature_sensor Ace_1"]
 
     def test_temperature_card_failure_is_logged_and_leaves_none(self):

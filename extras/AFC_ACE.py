@@ -260,6 +260,9 @@ class afcACE(afcUnit):
     # V1 ACE reads tags through the firmware (get_filament_info); AFC_ACE2 sets
     # this False since it reads them host-side (AFC_ACE2_rfid).
     _uses_firmware_rfid = True
+    # V1 ACE has no humidity sensor; AFC_ACE2 sets this True so its temperature
+    # card publishes humidity from the start.
+    _reports_humidity = False
 
     def __init__(self, config: ConfigWrapper) -> None:
         """
@@ -458,7 +461,8 @@ class afcACE(afcUnit):
         # The unit's Mainsail/Fluidd temperature card: the ACE's temperature,
         # and its humidity on an ACE 2.
         self.temperature_card = AFC_temperature.add_card(
-            config, self.name, self._card_reading, self.logger)
+            config, self.name, self._card_reading, self.logger,
+            humidity=self._reports_humidity)
 
     def handle_connect(self) -> None:
         """

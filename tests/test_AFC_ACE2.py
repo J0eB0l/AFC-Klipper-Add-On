@@ -2297,6 +2297,12 @@ class TestACE2ConnectionDisableRfid:
 
 
 class TestAfcACE2Init:
+    def test_the_temperature_card_reports_humidity(self):
+        unit = make_ace2_unit()
+        card = unit.temperature_card
+        assert unit.printer.objects["temperature_sensor Ace2_1"] is card
+        assert card.reports_humidity is True
+
     def test_ace_uid_non_integer_raises_config_error(self):
         # "abc" cannot parse as int: the except ValueError branch leaves nums
         # empty, which then also fails the length-3 check below it.

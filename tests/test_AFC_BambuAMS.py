@@ -2342,6 +2342,7 @@ class TestAfcBambuAMSInit:
         assert printer.lookup_object("temperature_sensor Bambu_AMS_1") is card
         assert printer.lookup_object("aht10 Bambu_AMS_1") is card.humidity_view
         assert card.reader == u._card_reading
+        assert card.reports_humidity is True
 
     def test_a_recorded_pool_unit_builds_its_card(self):
         config = unit_config(values={"pool": True, "unit_uid": "AAAABBBBCCCCDDDD"})

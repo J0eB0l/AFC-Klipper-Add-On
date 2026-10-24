@@ -1146,6 +1146,8 @@ class afcACE2(afcACE):
     # (AFC_ACE2_rfid), not through the firmware's get_filament_info, so it must
     # not do the V1 firmware inventory sweep at startup prep.
     _uses_firmware_rfid = False
+    # The ACE 2 reports humidity with its temperature (GET_TEMP env channel).
+    _reports_humidity = True
 
     def __init__(self, config: ConfigWrapper) -> None:
         """

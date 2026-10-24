@@ -65,7 +65,8 @@ class UnitTemperatureCard:
     """
 
     def __init__(self, config: ConfigWrapper, name: str, reader: Reader,
-                 logger: AFC_logger, report_time: float = REPORT_TIME) -> None:
+                 logger: AFC_logger, report_time: float = REPORT_TIME,
+                 humidity: bool = True) -> None:
         """
         :param config: the unit's section wrapper
         :param name: the unit's name, the card's name on the UIs
@@ -73,6 +74,8 @@ class UnitTemperatureCard:
             the unit does not have
         :param logger: the AFC logger
         :param report_time: seconds between samples
+        :param humidity: whether the unit reports a humidity; such a card
+            publishes the field before its first reading
         """
         self.printer: Printer = config.get_printer()
         self.reactor: Reactor = self.printer.get_reactor()
@@ -80,6 +83,7 @@ class UnitTemperatureCard:
         self.reader = reader
         self.logger = logger
         self.report_time = report_time
+        self.reports_humidity = humidity
         self.temperature: Optional[float] = None
         self.humidity: Optional[float] = None
         self.measured_min: Optional[float] = None
@@ -159,17 +163,22 @@ class HumidityView:
     def get_status(self, eventtime: float) -> Dict[str, float]:
         """
         :param eventtime: reactor time (unused)
-        :return dict: temperature, plus humidity once the unit has reported one
+        :return dict: temperature, plus humidity on a unit that reports one
+            (0.0 before its first reading) or once any unit has reported one
         """
+        # Klipper fixes a subscription's fields at its first query, and
+        # Moonraker subscribes to every object with none named, so a field
+        # that first appears later never reaches Mainsail or Fluidd. A unit
+        # known to report humidity therefore publishes the field at once.
         status = {"temperature": round(self.card.temperature or 0.0, 2)}
-        if self.card.humidity is not None:
-            status["humidity"] = round(self.card.humidity, 2)
+        if self.card.reports_humidity or self.card.humidity is not None:
+            status["humidity"] = round(self.card.humidity or 0.0, 2)
         return status
 
 
 def add_card(config: ConfigWrapper, name: str, reader: Reader,
-             logger: AFC_logger, report_time: float = REPORT_TIME
-             ) -> Optional[UnitTemperatureCard]:
+             logger: AFC_logger, report_time: float = REPORT_TIME,
+             humidity: bool = True) -> Optional[UnitTemperatureCard]:
     """
     Build ``name``'s card and register it with the printer and heaters.
 
@@ -183,6 +192,7 @@ def add_card(config: ConfigWrapper, name: str, reader: Reader,
         unit does not have
     :param logger: the AFC logger
     :param report_time: seconds between samples
+    :param humidity: whether the unit reports a humidity
     :return Optional[UnitTemperatureCard]: the card, or None when it could not
         be built
     """
@@ -193,7 +203,8 @@ def add_card(config: ConfigWrapper, name: str, reader: Reader,
         raise config.error(error_str)
     printer = config.get_printer()
     try:
-        card = UnitTemperatureCard(config, name, reader, logger, report_time)
+        card = UnitTemperatureCard(config, name, reader, logger, report_time,
+                                   humidity)
         printer.add_object(section, card)
         printer.add_object(f"{HUMIDITY_KIND} {name}", card.humidity_view)
         _register_sensor(config, section, card)
