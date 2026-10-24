@@ -934,6 +934,8 @@ class TestCmdAfcResume:
         afc.gcode_move.last_position = [0.0, 0.0, 10.0]  # z=10 > 0+0.5
         afc.move_z_pos = MagicMock()
         afc.restore_pos = MagicMock()
+        # Paused at the guard and the capture; the user's RESUME then unpauses
+        afc.function.is_paused.side_effect = [True, True, False, False]
         from tests.conftest import MockGCodeCommand
         gcmd = MockGCodeCommand()
         err.set_error_state = MagicMock()
@@ -942,7 +944,7 @@ class TestCmdAfcResume:
         assert err.logger.messages == [
             ("debug", "AFC_RESUME: not moving in z cur_pos:[0.0, 0.0, 10.0] move_z_pos:0.5"),
             ("debug", "AFC_RESUME: Before User Restore"),
-            ("debug", "RESUME-Error State: False, Is Paused True, "
+            ("debug", "RESUME-Error State: False, Is Paused False, "
                       "Position_saved False, in toolchange: False"),
         ]
 
@@ -970,9 +972,10 @@ class TestCmdAfcResume:
         trigger the restore branch."""
         err, afc = _make_afc_error()
         # is_paused(): True at the entry guard (bypasses the early return),
-        # then False for the temp_is_paused capture and the final debug log,
-        # so error_state is the only reason the restore branch runs here.
-        afc.function.is_paused.side_effect = [True, False, False]
+        # then False for the temp_is_paused capture, the still-paused check
+        # and the final debug log, so error_state is the only reason the
+        # restore branch runs here.
+        afc.function.is_paused.side_effect = [True, False, False, False]
         afc.error_state = True
         afc.position_saved = False
         afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
@@ -991,7 +994,7 @@ class TestCmdAfcResume:
         """position_saved alone, independent of error_state and
         temp_is_paused, is sufficient to trigger the restore branch."""
         err, afc = _make_afc_error()
-        afc.function.is_paused.side_effect = [True, False, False]
+        afc.function.is_paused.side_effect = [True, False, False, False]
         afc.error_state = False
         afc.position_saved = True
         afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
@@ -1010,9 +1013,9 @@ class TestCmdAfcResume:
         """temp_is_paused alone, independent of error_state and
         position_saved, is sufficient to trigger the restore branch."""
         err, afc = _make_afc_error()
-        # Constant True: the entry guard, the temp_is_paused capture, and the
-        # final debug log all see the printer as paused.
-        afc.function.is_paused.return_value = True
+        # The entry guard and the temp_is_paused capture see the printer as
+        # paused; the user's RESUME then unpauses it.
+        afc.function.is_paused.side_effect = [True, True, False, False]
         afc.error_state = False
         afc.position_saved = False
         afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
@@ -1033,9 +1036,9 @@ class TestCmdAfcResume:
         has since cleared, and no position was saved -> restore branch must
         not run."""
         err, afc = _make_afc_error()
-        # 3 reads of is_paused(): early-return guard, temp_is_paused capture,
-        # final debug-log format call.
-        afc.function.is_paused.side_effect = [True, False, False]
+        # 4 reads of is_paused(): early-return guard, temp_is_paused capture,
+        # the still-paused check after the user's RESUME, final debug log.
+        afc.function.is_paused.side_effect = [True, False, False, False]
         afc.error_state = False
         afc.position_saved = False
         afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
@@ -1055,7 +1058,7 @@ class TestCmdAfcResume:
         """Entering the resume block (error_state True) but not homed must
         still clear set_error_state/pause, just without restoring position."""
         err, afc = _make_afc_error()
-        afc.function.is_paused.return_value = True
+        afc.function.is_paused.side_effect = [True, True, False, False]
         afc.function.is_homed.return_value = False
         afc.error_state = True
         afc.position_saved = False
@@ -1074,6 +1077,111 @@ class TestCmdAfcResume:
 
 
 # ── cmd_AFC_PAUSE ─────────────────────────────────────────────────────────────
+
+    def _pending_toolchange(self, afc, loads):
+        """Record an interrupted tool change to lane28 in pizza.gcode, whose
+        CHANGE_TOOL loads the lane when ``loads`` and fails otherwise."""
+        lane = MagicMock()
+        lane.name = "lane28"
+        lane.tool_loaded = False
+        afc.lanes = {"lane28": lane}
+        afc.tool_cmds = {"T16": "lane28"}
+        afc.get_bypass_state = MagicMock(return_value=False)
+        afc.resume_toolchange = ("T16", "lane28", 269.0, "pizza.gcode")
+        afc.function.in_print = MagicMock(return_value=(True, "pizza.gcode"))
+
+        def change_tool(cur_lane, purge_length=None, restore_pos=True, count_change=True):
+            if loads:
+                cur_lane.tool_loaded = True
+                afc.resume_toolchange = None
+            else:
+                afc.error_state = True
+        afc.CHANGE_TOOL = MagicMock(side_effect=change_tool)
+        return lane
+
+    def test_a_refused_user_resume_keeps_the_saved_position(self):
+        # A Snapmaker U1's RESUME refuses while its toolhead sensor reads
+        # empty, and the print stays paused
+        from tests.conftest import MockGCodeCommand
+        err, afc = _make_afc_error()
+        afc.function.is_paused.return_value = True
+        afc.error_state = True
+        afc.position_saved = True
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.gcode_move.last_position = [0.0, 0.0, 10.0]
+        afc.z_hop = 0.5
+        afc.move_z_pos = MagicMock()
+        afc.restore_pos = MagicMock()
+        err.pause_modes = (True, False)
+        err.pause = True
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        afc.gcode.run_script_from_command.assert_called_once()
+        afc.restore_pos.assert_not_called()
+        assert afc.error_state is True
+        assert afc.position_saved is True
+        assert err.pause is True
+        assert err.pause_modes == (True, False)
+        assert err.logger.messages == [
+            ("debug", "AFC_RESUME: not moving in z cur_pos:[0.0, 0.0, 10.0] move_z_pos:0.5"),
+            ("debug", "AFC_RESUME: Before User Restore"),
+            ("info", "AFC_RESUME: the print is still paused, keeping the saved "
+                     "position for the next resume"),
+        ]
+
+    def test_an_interrupted_tool_change_is_finished_before_the_user_resume(self):
+        from tests.conftest import MockGCodeCommand
+        err, afc = _make_afc_error()
+        afc.function.is_paused.side_effect = [True, True, False, False]
+        afc.error_state = True
+        afc.position_saved = True
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.gcode_move.last_position = [0.0, 0.0, 10.0]
+        afc.z_hop = 0.5
+        afc.move_z_pos = MagicMock()
+        afc.restore_pos = MagicMock()
+        order = []
+        lane = self._pending_toolchange(afc, loads=True)
+        change_tool = afc.CHANGE_TOOL.side_effect
+        afc.CHANGE_TOOL.side_effect = lambda *a, **k: (order.append("CHANGE_TOOL"),
+                                                       change_tool(*a, **k))
+        afc.gcode.run_script_from_command.side_effect = lambda script: order.append(script)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        afc.CHANGE_TOOL.assert_called_once_with(lane, 269.0, restore_pos=False, count_change=False)
+        assert order == ["CHANGE_TOOL", f"{err.AFC_RENAME_RESUME_NAME} "]
+        afc.restore_pos.assert_called_once_with(False)
+        assert afc.position_saved is True       # restore_pos is mocked
+        assert afc.error_state is False
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == [
+            ("info", "AFC_RESUME: finishing the tool change to lane28"),
+            ("debug", "AFC_RESUME: not moving in z cur_pos:[0.0, 0.0, 10.0] move_z_pos:0.5"),
+            ("debug", "AFC_RESUME: Before User Restore"),
+            ("debug", "RESUME-Error State: False, Is Paused False, "
+                      "Position_saved True, in toolchange: False"),
+        ]
+
+    def test_a_tool_change_that_fails_again_stays_paused(self):
+        from tests.conftest import MockGCodeCommand
+        err, afc = _make_afc_error()
+        afc.function.is_paused.return_value = True
+        afc.position_saved = True
+        afc.restore_pos = MagicMock()
+        afc.move_z_pos = MagicMock()
+        err.pause_modes = (True, False)
+        self._pending_toolchange(afc, loads=False)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        afc.gcode.run_script_from_command.assert_not_called()
+        afc.move_z_pos.assert_not_called()
+        afc.restore_pos.assert_not_called()
+        assert afc.position_saved is True
+        assert err.pause_modes == (True, False)
+        assert afc.resume_toolchange == ("T16", "lane28", 269.0, "pizza.gcode")
+        assert err.logger.messages == [
+            ("info", "AFC_RESUME: finishing the tool change to lane28"),
+            ("error", "AFC_RESUME: lane28 did not load, so the print stays "
+                      "paused. Clear the fault and resume again."),
+        ]
+
 
 class TestCmdAfcPause:
     def test_not_paused_saves_position(self):
@@ -1273,6 +1381,7 @@ class TestPauseResumeExtrudeMode:
             if script.startswith(err.AFC_RENAME_RESUME_NAME):
                 afc.gcode_move.absolute_coord = True
                 afc.gcode_move.allow_absolute_extrude = True
+                afc.function.is_paused.return_value = False
         afc.gcode.run_script_from_command.side_effect = run_script
         return err, afc
 
@@ -1331,3 +1440,186 @@ class TestPauseResumeExtrudeMode:
         afc.function.is_paused.return_value = True
         err.cmd_AFC_RESUME(MockGCodeCommand())
         assert afc.gcode_move.allow_absolute_extrude is True
+
+    def test_refused_resume_keeps_pause_modes_and_position(self):
+        # A Snapmaker U1's RESUME refuses while its toolhead sensor reads empty
+        # and leaves the print paused
+        from tests.conftest import MockGCodeCommand
+        err, afc = self._make(absolute_coord=True, absolute_extrude=False)
+
+        def refuse(script):
+            if script.startswith(err.AFC_RENAME_RESUME_NAME):
+                afc.gcode_move.absolute_coord = True
+                afc.gcode_move.allow_absolute_extrude = True
+        afc.gcode.run_script_from_command.side_effect = refuse
+        afc.function.is_paused.return_value = False
+        err.cmd_AFC_PAUSE(MockGCodeCommand())
+        afc.position_saved = True
+        afc.function.is_paused.return_value = True
+        err.logger.messages.clear()
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+
+        afc.restore_pos.assert_not_called()
+        assert afc.position_saved is True
+        assert err.pause_modes == (True, False)
+        assert err.logger.messages == [
+            ("debug", "AFC_RESUME: not moving in z cur_pos:[0.0, 0.0, 10.0, 0.0] move_z_pos:0.0"),
+            ("debug", "AFC_RESUME: Before User Restore"),
+            ("info", "AFC_RESUME: the print is still paused, keeping the saved "
+                     "position for the next resume"),
+        ]
+
+        # The next resume goes through and puts everything back
+        def accept(script):
+            if script.startswith(err.AFC_RENAME_RESUME_NAME):
+                afc.function.is_paused.return_value = False
+        afc.gcode.run_script_from_command.side_effect = accept
+        err.logger.messages.clear()
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        afc.restore_pos.assert_called_once_with(False)
+        assert afc.gcode_move.allow_absolute_extrude is False
+        assert err.pause_modes is None
+        assert err.logger.messages == [
+            ("debug", "AFC_RESUME: not moving in z cur_pos:[0.0, 0.0, 10.0, 0.0] move_z_pos:0.0"),
+            ("debug", "AFC_RESUME: Before User Restore"),
+            ("debug", "AFC_RESUME: restored absolute_coord True, absolute_extrude False"),
+            ("debug", "RESUME-Error State: False, Is Paused False, "
+                      "Position_saved True, in toolchange: False"),
+        ]
+
+
+class TestFinishInterruptedToolchange:
+    """A tool change whose unload or load failed is remembered, and AFC_RESUME
+    finishes it before the user's RESUME, since the print file is already past
+    that T(n)."""
+
+    FINISHING = ("info", "AFC_RESUME: finishing the tool change to lane28")
+    NOT_LOADED = ("error", "AFC_RESUME: lane28 did not load, so the print stays "
+                           "paused. Clear the fault and resume again.")
+
+    def _make(self, tool_loaded=False, in_print=True, print_file="pizza.gcode"):
+        err, afc = _make_afc_error()
+        lane = MagicMock()
+        lane.name = "lane28"
+        lane.tool_loaded = tool_loaded
+        afc.lanes = {"lane28": lane}
+        afc.tool_cmds = {"T16": "lane28"}
+        afc.get_bypass_state = MagicMock(return_value=False)
+        afc.resume_toolchange = ("T16", "lane28", 269.0, "pizza.gcode")
+        afc.function.in_print = MagicMock(return_value=(in_print, print_file))
+        afc.CHANGE_TOOL = MagicMock()
+        return err, afc, lane
+
+    def test_nothing_pending_goes_on(self):
+        err, afc, lane = self._make()
+        afc.resume_toolchange = None
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        afc.function.in_print.assert_not_called()
+        assert err.logger.messages == []
+
+    def test_not_printing_drops_it(self):
+        err, afc, lane = self._make(in_print=False)
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == []
+
+    def test_another_print_file_drops_it(self):
+        err, afc, lane = self._make(print_file="other.gcode")
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == []
+
+    def test_unknown_lane_drops_it(self):
+        err, afc, lane = self._make()
+        afc.lanes = {}
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == []
+
+    def test_lane_loaded_by_hand_drops_it(self):
+        err, afc, lane = self._make(tool_loaded=True)
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == []
+
+    def test_filament_in_the_bypass_drops_it(self):
+        err, afc, lane = self._make()
+        afc.get_bypass_state.return_value = True
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == []
+
+    def test_a_remapped_tool_finishes_on_its_new_lane(self):
+        err, afc, lane = self._make()
+        other = MagicMock()
+        other.name = "lane29"
+        other.tool_loaded = False
+        afc.lanes["lane29"] = other
+        afc.tool_cmds = {"T16": "lane29"}
+        assert err._finish_interrupted_toolchange() is False
+        afc.CHANGE_TOOL.assert_called_once_with(other, 269.0, restore_pos=False,
+                                                count_change=False)
+        assert err.logger.messages == [
+            ("info", "AFC_RESUME: finishing the tool change to lane29"),
+            ("error", "AFC_RESUME: lane29 did not load, so the print stays "
+                      "paused. Clear the fault and resume again.")]
+
+    def test_a_remapped_tool_loaded_by_hand_drops_it(self):
+        err, afc, lane = self._make()
+        other = MagicMock()
+        other.name = "lane29"
+        other.tool_loaded = True
+        afc.lanes["lane29"] = other
+        afc.tool_cmds = {"T16": "lane29"}
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_not_called()
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == []
+
+    def test_an_unmapped_tool_falls_back_to_the_lane(self):
+        err, afc, lane = self._make()
+        afc.tool_cmds = {}
+        assert err._finish_interrupted_toolchange() is False
+        afc.CHANGE_TOOL.assert_called_once_with(lane, 269.0, restore_pos=False,
+                                                count_change=False)
+        assert err.logger.messages == [self.FINISHING, self.NOT_LOADED]
+
+    def test_finishes_the_tool_change(self):
+        err, afc, lane = self._make()
+        afc.error_state = True
+
+        def change_tool(cur_lane, purge_length=None, restore_pos=True, count_change=True):
+            # CHANGE_TOOL runs with the error cleared, like a normal change
+            assert afc.error_state is False
+            cur_lane.tool_loaded = True
+            afc.resume_toolchange = None
+        afc.CHANGE_TOOL.side_effect = change_tool
+
+        assert err._finish_interrupted_toolchange() is True
+        afc.CHANGE_TOOL.assert_called_once_with(lane, 269.0, restore_pos=False, count_change=False)
+        assert afc.error_state is False
+        assert afc.resume_toolchange is None
+        assert err.logger.messages == [self.FINISHING]
+
+    def test_a_load_that_sets_the_error_stays_paused(self):
+        err, afc, lane = self._make()
+
+        def change_tool(cur_lane, purge_length=None, restore_pos=True, count_change=True):
+            cur_lane.tool_loaded = True
+            afc.error_state = True
+        afc.CHANGE_TOOL.side_effect = change_tool
+
+        assert err._finish_interrupted_toolchange() is False
+        assert err.logger.messages == [self.FINISHING, self.NOT_LOADED]
+
+    def test_a_load_that_leaves_the_lane_unloaded_stays_paused(self):
+        err, afc, lane = self._make()
+        assert err._finish_interrupted_toolchange() is False
+        assert afc.error_state is False
+        assert err.logger.messages == [self.FINISHING, self.NOT_LOADED]

@@ -148,6 +148,9 @@ class afc:
         # tool position when tool change was requested
         self.change_tool_pos = None
         self.in_toolchange = False
+        # (T(n), lane name, purge length, print file) of a tool change that failed
+        # part way, so AFC_RESUME can finish it
+        self.resume_toolchange: Optional[tuple] = None
         self.tool_start = None
 
         # Save/resume pos variables
@@ -647,6 +650,8 @@ class afc:
         self.in_print_timer = self.reactor.register_timer( self.in_print_reactor_timer, self.reactor.monotonic() + 5 )
         self.error.reset_failure()
         self.gcode.run_script_from_command("CLEAR_PAUSE")
+        # A new print never finishes the tool change an earlier one left
+        self.resume_toolchange = None
         self.number_of_toolchanges = 0
         self.current_toolchange    = -1
         self.print_tool_temperatures = []
@@ -1747,6 +1752,12 @@ class afc:
                                                purge_length=purge_length)
 
                     cur_lane.enable_fault_detection()
+                    # A Snapmaker U1 counts extruder moves in printing_e_pos only while
+                    # printing, so a load during a pause leaves the unload's retract in
+                    # it and the U1's RESUME pulls the new filament back that far.
+                    # G92 E0 zeroes it; the resume restores the print's E position.
+                    if self.snapmaker_printer and self.function.is_paused():
+                        self.gcode.run_script_from_command("G92 E0")
                     # Update lane and extruder state for tracking.
                     cur_extruder.lane_loaded = cur_lane.name
                     self.spool.set_active_spool(cur_lane.spool_id)
@@ -2613,7 +2624,38 @@ class afc:
         else:
             self.error.AFC_error(f"Error trying to lookup lane for {Tcmd}")
 
-    def CHANGE_TOOL(self, cur_lane: AFCLane, purge_length: Optional[float]=None, restore_pos: bool=True, new_extruder_temp: Optional[float]=None) -> None:
+    def _note_interrupted_toolchange(self, cur_lane: AFCLane,
+                                     purge_length: Optional[float]) -> None:
+        """
+        Remember the T(n) and lane a failed tool change was loading, so that
+        AFC_RESUME can finish the change once the fault is cleared. Only kept
+        during a print; a new print clears it (_reset_file_callback).
+
+        :param cur_lane: Lane the tool change was loading
+        :param purge_length: Purge length the tool change was asked for
+        """
+        try:
+            in_print, filename = self.function.in_print(return_file=True)
+            self.resume_toolchange = ((cur_lane.current_map, cur_lane.name, purge_length, filename)
+                                      if in_print else None)
+        except Exception as e:
+            self.resume_toolchange = None
+            self.logger.debug(f"Not keeping the tool change to {cur_lane.name} for resume: {e}")
+
+    def CHANGE_TOOL(self, cur_lane: AFCLane, purge_length: Optional[float]=None,
+                    restore_pos: bool=True, new_extruder_temp: Optional[float]=None,
+                    count_change: bool=True) -> None:
+        """
+        Change to the given lane: unload the lane that is loaded, then load this one.
+        A failed unload or load during a print is recorded so that AFC_RESUME can
+        finish the change.
+
+        :param cur_lane: Lane to change to
+        :param purge_length: Purge length for the load, None for the default
+        :param restore_pos: Set False to leave the toolhead where the load left it
+        :param new_extruder_temp: Temperature to heat the next extruder to
+        :param count_change: Set False when finishing a change already counted
+        """
         try:
             self.afcDeltaTime.set_start_time()
             # Check if the bypass filament sensor detects filament; if so, abort the tool change.
@@ -2661,7 +2703,10 @@ class afc:
                 if cur_lane._afc_prep_done:
                     # Log the tool change operation for debugging or informational purposes.
                     self.logger.info("Tool Change - {} -> {}".format(self.current, cur_lane.name))
-                    if not self.error_state and self.number_of_toolchanges != 0 and self.current_toolchange != self.number_of_toolchanges:
+                    if (count_change
+                        and not self.error_state
+                        and self.number_of_toolchanges != 0
+                        and self.current_toolchange != self.number_of_toolchanges):
                         self.current_toolchange += 1
                         self.logger.raw("//      Change {} out of {}".format(self.current_toolchange, self.number_of_toolchanges))
 
@@ -2681,6 +2726,7 @@ class afc:
                             # Error happened, reset toolchanges without error count
                             # and increase unload error count
                             self.afc_stats.increase_unload_error_count(self)
+                            self._note_interrupted_toolchange(cur_lane, purge_length)
                             return
 
                         if (force_unload
@@ -2723,6 +2769,7 @@ class afc:
 
                 # Load the new lane and restore the toolhead position if successful.
                 if self.TOOL_LOAD(cur_lane, purge_length, set_start_time=False) and not self.error_state:
+                    self.resume_toolchange = None
                     if restore_pos:
                         self.restore_pos()
                     total_time = self.afcDeltaTime.log_total_time("Total change time:")
@@ -2733,6 +2780,7 @@ class afc:
                     # Error happened, reset toolchanges without error count
                     # and increase load error count
                     self.afc_stats.increase_load_error_count(self)
+                    self._note_interrupted_toolchange(cur_lane, purge_length)
             else:
                 # Calling handle activate extruder just to make sure lanes are synced as tool
                 # could have been changed with KTC SELECT_TOOL and lane might not be synced

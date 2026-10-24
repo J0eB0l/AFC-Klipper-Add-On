@@ -5147,3 +5147,173 @@ class TestJoinThreads:
         obj._var_write_thread.join.side_effect = lambda *a, **kw: order.append("join")
         obj.join_threads()
         assert order == ["put_nowait", "join"]
+
+
+# ── CHANGE_TOOL: remembering an interrupted tool change for AFC_RESUME ────────
+
+class TestChangeTool_ResumeToolchange:
+    """A failed unload or load during a print records the T(n) and lane
+    CHANGE_TOOL was loading, so AFC_RESUME can finish the change."""
+
+    CHANGE = ("info", "Tool Change - lane1 -> lane2")
+
+    def _make(self, in_print=True):
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        obj.function.in_print.side_effect = (
+            lambda return_file=False: (in_print, "pizza.gcode") if return_file else in_print)
+        return obj, cur_lane, current_lane
+
+    def test_failed_unload_records_the_lane(self):
+        obj, cur_lane, _ = self._make()
+        obj.TOOL_UNLOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane, purge_length=269.0)
+        assert obj.resume_toolchange == ("T0", "lane2", 269.0, "pizza.gcode")
+        obj.error.fix.assert_called_once()
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_failed_load_records_the_lane(self):
+        obj, cur_lane, _ = self._make()
+        obj.TOOL_LOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane, purge_length=60.0)
+        assert obj.resume_toolchange == ("T0", "lane2", 60.0, "pizza.gcode")
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_failed_load_outside_a_print_records_nothing(self):
+        obj, cur_lane, _ = self._make(in_print=False)
+        obj.TOOL_LOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_successful_load_clears_it(self):
+        obj, cur_lane, _ = self._make()
+        obj.resume_toolchange = ("T0", "lane2", 60.0, "pizza.gcode")
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_print_state_error_records_nothing(self):
+        obj, cur_lane, _ = self._make()
+        obj.function.in_print.side_effect = RuntimeError("no print_stats")
+        obj.TOOL_UNLOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        obj.error.fix.assert_called_once()
+        assert obj.logger.messages == [
+            self.CHANGE,
+            ("debug", "Not keeping the tool change to lane2 for resume: no print_stats")]
+
+
+class TestChangeTool_CountChange:
+    """AFC_RESUME finishing a change passes count_change=False, since the
+    change was counted when it first ran."""
+
+    def _make(self):
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.number_of_toolchanges = 40
+        obj.current_toolchange = 10
+        return obj, cur_lane
+
+    def test_a_change_is_counted(self):
+        obj, cur_lane = self._make()
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.current_toolchange == 11
+        assert obj.logger.messages == [("info", "Tool Change - lane1 -> lane2"),
+                                       ("raw", "//      Change 11 out of 40")]
+
+    def test_a_finished_change_is_not_counted_again(self):
+        obj, cur_lane = self._make()
+        obj.CHANGE_TOOL(cur_lane, count_change=False)
+        assert obj.current_toolchange == 10
+        assert obj.logger.messages == [("info", "Tool Change - lane1 -> lane2")]
+
+
+class TestResetFileCallback:
+    def test_a_new_print_drops_the_unfinished_tool_change(self):
+        obj = _make_afc()
+        obj.error = MagicMock()
+        obj.save_vars = MagicMock()
+        obj.print_data_metadata = None
+        obj.resume_toolchange = ("T16", "lane28", 269.0, "pizza.gcode")
+        obj.current_toolchange = 12
+        obj._reset_file_callback()
+        assert obj.resume_toolchange is None
+        assert obj.current_toolchange == -1
+        obj.error.reset_failure.assert_called_once_with()
+        obj.gcode.run_script_from_command.assert_called_once_with("CLEAR_PAUSE")
+        assert obj.logger.messages == []
+
+
+class TestAfcInitResumeToolchange:
+    def test_nothing_to_finish_at_start(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter()))
+        assert obj.resume_toolchange is None
+
+
+class TestNoteInterruptedToolchange:
+    def _make(self):
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.logger.messages.clear()
+        return obj, cur_lane
+
+    def test_during_a_print_it_keeps_the_tool_lane_purge_and_file(self):
+        obj, cur_lane = self._make()
+        cur_lane.current_map = "T16"
+        obj.function.in_print.side_effect = None
+        obj.function.in_print.return_value = (True, "pizza.gcode")
+        obj._note_interrupted_toolchange(cur_lane, 269.0)
+        obj.function.in_print.assert_called_once_with(return_file=True)
+        assert obj.resume_toolchange == ("T16", "lane2", 269.0, "pizza.gcode")
+        assert obj.logger.messages == []
+
+    def test_outside_a_print_it_keeps_nothing(self):
+        obj, cur_lane = self._make()
+        obj.resume_toolchange = ("T9", "lane9", 60.0, "old.gcode")
+        obj.function.in_print.side_effect = None
+        obj.function.in_print.return_value = (False, None)
+        obj._note_interrupted_toolchange(cur_lane, 269.0)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == []
+
+    def test_a_print_state_error_keeps_nothing(self):
+        obj, cur_lane = self._make()
+        obj.resume_toolchange = ("T9", "lane9", 60.0, "old.gcode")
+        obj.function.in_print.side_effect = RuntimeError("no print_stats")
+        obj._note_interrupted_toolchange(cur_lane, None)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == [
+            ("debug", "Not keeping the tool change to lane2 for resume: no print_stats")]
+
+class TestToolLoadZeroesEOnSnapmakerPause:
+    """A U1 keeps the unload's retract in printing_e_pos when the load runs
+    during a pause, so TOOL_LOAD zeroes E there and nowhere else."""
+
+    def _make(self, snapmaker, paused):
+        afc, lane, _ = TestToolLoadDisplayStatusLifecycle()._make()
+        afc.load_sequence = MagicMock(return_value=True)
+        afc.snapmaker_printer = snapmaker
+        afc.function.is_paused.return_value = paused
+        return afc, lane
+
+    def _g92_calls(self, afc):
+        return [c for c in afc.gcode.run_script_from_command.call_args_list
+                if c.args and c.args[0] == "G92 E0"]
+
+    def test_snapmaker_paused_zeroes_e(self):
+        afc, lane = self._make(snapmaker=True, paused=True)
+        assert afc.TOOL_LOAD(lane)
+        assert len(self._g92_calls(afc)) == 1
+        assert afc.logger.messages == [("info", "Loading lane1")]
+
+    def test_snapmaker_printing_leaves_e(self):
+        afc, lane = self._make(snapmaker=True, paused=False)
+        assert afc.TOOL_LOAD(lane)
+        assert self._g92_calls(afc) == []
+        assert afc.logger.messages == [("info", "Loading lane1")]
+
+    def test_other_printer_paused_leaves_e(self):
+        afc, lane = self._make(snapmaker=False, paused=True)
+        assert afc.TOOL_LOAD(lane)
+        assert self._g92_calls(afc) == []
+        assert afc.logger.messages == [("info", "Loading lane1")]

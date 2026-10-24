@@ -529,6 +529,7 @@ class MockAFC:
         self.log_frame_data = True
         self.position_saved = False
         self.in_toolchange = False
+        self.resume_toolchange = None
         self.error_timeout = 600
         self.td1_defined = False
         self.td1_present = False

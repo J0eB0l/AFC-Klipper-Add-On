@@ -269,6 +269,10 @@ class afcError:
         This function clears the error state of the AFC system, sets the in_toolchange flag to False,
         runs the resume script, and restores the toolhead position to the last saved position.
 
+        A tool change that failed part way during the print is finished first, and the print stays
+        paused if that load fails again. When the user's RESUME leaves the print paused, the saved
+        position is kept for the next resume.
+
         This is not a macro that should normally need to be called by the user.
 
         Usage
@@ -289,6 +293,9 @@ class afcError:
         # Save current pause state
         temp_is_paused = self.afc.function.is_paused()
 
+        if not self._finish_interrupted_toolchange():
+            return
+
         # Verify that printer is in absolute mode
         self.afc.function.check_absolute_mode("AFC_RESUME")
 
@@ -306,6 +313,14 @@ class afcError:
         self.afc.gcode.run_script_from_command(
             f"{self.AFC_RENAME_RESUME_NAME} {gcmd.get_raw_command_parameters()}"
         )
+
+        # The user's RESUME can refuse and leave the print paused (a Snapmaker U1
+        # does when its toolhead sensor reads empty). Keep the saved position and
+        # modes for the resume that does go through.
+        if self.afc.function.is_paused():
+            self.logger.info("AFC_RESUME: the print is still paused, keeping the saved "
+                             "position for the next resume")
+            return
 
         # The only time our resume should restore position is if there was an error that caused the pause
         if (self.afc.error_state
@@ -335,6 +350,44 @@ class afcError:
             f"Position_saved {self.afc.position_saved}, "
             f"in toolchange: {self.afc.in_toolchange}"
         )
+
+    def _finish_interrupted_toolchange(self) -> bool:
+        """
+        Finish the tool change a failure interrupted, before the user's RESUME.
+
+        CHANGE_TOOL records the T(n) and lane it was loading when its unload or load
+        fails and the print pauses. The print file has already moved past that T(n),
+        so without this a plain RESUME prints with the old lane, or an empty toolhead.
+        A lane loaded by hand for that T(n) during the pause, or filament in the
+        bypass, needs nothing more.
+
+        :return bool: True to go on with the resume, False to stay paused
+        """
+        pending = self.afc.resume_toolchange
+        if pending is None:
+            return True
+        tool, lane_name, purge_length, filename = pending
+        in_print, print_file = self.afc.function.in_print(return_file=True)
+        # A SET_MAP during the pause moves the T(n) to another lane
+        lane = self.afc.lanes.get(self.afc.tool_cmds.get(tool, lane_name))
+        if (not in_print
+            or print_file != filename
+            or lane is None
+            or lane.tool_loaded
+            or self.afc.get_bypass_state()):
+            self.afc.resume_toolchange = None
+            return True
+
+        self.logger.info(f"AFC_RESUME: finishing the tool change to {lane.name}")
+        self.set_error_state(False)
+        # The pause's own position is restored after the user's RESUME, and the
+        # change was counted when it first ran
+        self.afc.CHANGE_TOOL(lane, purge_length, restore_pos=False, count_change=False)
+        if self.afc.error_state or not lane.tool_loaded:
+            self.logger.error(f"AFC_RESUME: {lane.name} did not load, so the print stays "
+                              "paused. Clear the fault and resume again.")
+            return False
+        return True
 
     cmd_AFC_PAUSE_help = "Pauses print, raises z by z-hop amount, and then calls users pause macro"
     def cmd_AFC_PAUSE(self, gcmd: GCodeCommand) -> None:
