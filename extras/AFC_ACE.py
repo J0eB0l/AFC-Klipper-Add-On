@@ -780,8 +780,8 @@ class afcACE(afcUnit):
         self.afc.reactor.register_callback(self._resync_assist_after_reconnect)
         # The reset also undid any setup listeners made, so tell them, off the
         # serial path too.
-        self.afc.reactor.register_callback(
-            lambda et: self.printer.send_event("afc_ace:connected", self, True))
+        self.afc.reactor.register_callback(lambda et: self.printer.send_event(
+                                           "afc_ace:connected", self, True))
 
     def _apply_feed_check(self) -> None:
         """
@@ -794,7 +794,7 @@ class afcACE(afcUnit):
         """
         Set the factory identify after a connect or reset. No-op for V1 ACE,
         which keeps the identify enable_rfid gave it; afcACE2 overrides it to
-        turn identify off for skip_factory_autostage.
+        follow skip_factory_autostage.
         """
         pass
 
@@ -3143,16 +3143,14 @@ class afcACE(afcUnit):
 
     def _pick_test_slot(self) -> Optional[int]:
         """
-        First slot holding a spool: a recognized tag or SKU, or the firmware
-        reporting it loaded (status == 'ready').
+        First slot that reports a recognized tag / SKU (a loaded spool).
 
         :return Optional[int]: The slot index of the first loaded spool, or None if none.
         """
         for slot in range(self.SLOTS_PER_UNIT):
             inv = self._slot_inventory[slot]
             if (inv.get("rfid") in (2, 3)
-                or inv.get("sku")
-                or inv.get("status", "") == "ready"):
+                or inv.get("sku")):
                 return slot
         return None
 

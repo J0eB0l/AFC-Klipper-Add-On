@@ -1264,7 +1264,7 @@ class TestAfcACEResyncAssistAfterReconnect:
         assert unit.afc.reactor.pending == []
         assert unit.logger.messages == [
             ("info", "ACE2 Ace2_1: feed check set check_length=200 error_length=185"),
-            ("info", "ACE2 Ace2_1: factory identify off on every slot")]
+            ("info", "ACE2 Ace2_1: factory identify off for every slot")]
 
     def test_clears_all_slots_then_reconciles(self):
         # An ACE 2 unit, so the feed-check push that ends the resync is visible.
@@ -1286,7 +1286,7 @@ class TestAfcACEResyncAssistAfterReconnect:
         assert unit.logger.messages == [
             ("info", "ACE assist watchdog: enabling feed assist for lane0 (slot 0)"),
             ("info", "ACE2 Ace2_1: feed check set check_length=200 error_length=185"),
-            ("info", "ACE2 Ace2_1: factory identify off on every slot")]
+            ("info", "ACE2 Ace2_1: factory identify off for every slot")]
 
     def test_a_failed_stop_does_not_end_the_sweep(self):
         unit = ace_p1_unit("lane0", feed_assist_active=[2])
@@ -5706,12 +5706,6 @@ class TestAfcACEPickTestSlot:
     def test_returns_first_recognized_slot(self):
         # rfid 1 is an unrecognized tag, so slot 0 is skipped.
         unit = ace_p2_unit(inventory={0: {"rfid": 1}, 2: {"rfid": 2}, 3: {"rfid": 3}})
-
-        assert unit._pick_test_slot() == 2
-
-    def test_returns_first_ready_slot(self):
-        unit = ace_p2_unit(inventory={0: {"status": "empty"}, 2: {"status": "ready"},
-                                      3: {"status": "ready"}})
 
         assert unit._pick_test_slot() == 2
 

@@ -1235,20 +1235,23 @@ class afcACE2(afcACE):
 
     def _apply_identify(self) -> None:
         """
-        Turn the factory identify off on every slot for skip_factory_autostage,
-        so an insert is left to AFC's staging. The unit turns it back on across
-        a reset, so this is sent on connect and reconnect.
+        Set the factory identify on every slot: off for skip_factory_autostage,
+        so an insert is left to AFC's staging, else on so the unit's firmware
+        stages it. The unit turns it back on across a reset, so this is sent on
+        connect and reconnect.
         """
-        if self._ace is None or not self.skip_factory_autostage:
+        if self._ace is None:
             return
+        enable = not self.skip_factory_autostage
+        state = "on" if enable else "off"
         try:
             for slot in range(self.SLOTS_PER_UNIT):
                 self._ace.send_command_async(
-                    "set_rfid_enable", {"index": slot, "enable": False})
-            self.logger.info(f"ACE2 {self.name}: factory identify off on every slot")
+                    "set_rfid_enable", {"index": slot, "enable": enable})
+            self.logger.info(f"ACE2 {self.name}: factory identify {state} for every slot")
         except Exception as e:
             self.logger.warning(
-                f"ACE2 {self.name}: factory identify off failed (non-fatal): {e}")
+                f"ACE2 {self.name}: factory identify {state} failed (non-fatal): {e}")
 
     def stage_initial_load(self) -> float:
         """

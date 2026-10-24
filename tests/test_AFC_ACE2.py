@@ -40,7 +40,6 @@ from tests.ace_helpers import (
     AceLogger,
     AcePrinter,
     capture_log,
-    DEFAULT,
     FakeAce2Connection,
     FakeSerial,
     LaneSpec,
@@ -2425,17 +2424,39 @@ class TestAfcACE2Staging:
 
         assert unit._ace.async_commands == self.OFF
         assert unit.printer.logger.messages == [
-            ("info", "ACE2 Ace2_1: factory identify off on every slot")]
+            ("info", "ACE2 Ace2_1: factory identify off for every slot")]
 
-    @pytest.mark.parametrize("values,connection", [
-        ({"skip_factory_autostage": False}, DEFAULT), ({}, None)])
-    def test_identify_left_alone(self, values, connection):
-        unit = make_ace2_unit(values=values, connection=connection)
+    def test_factory_staging_turns_identify_on(self):
+        unit = make_ace2_unit(values={"skip_factory_autostage": False})
 
         unit._apply_identify()
 
-        assert unit._ace is None or unit._ace.async_commands == []
+        assert unit._ace.async_commands == [
+            ("set_rfid_enable", {"index": s, "enable": True}) for s in range(4)]
+        assert unit.printer.logger.messages == [
+            ("info", "ACE2 Ace2_1: factory identify on for every slot")]
+
+    def test_identify_left_alone_while_disconnected(self):
+        unit = make_ace2_unit(connection=None)
+
+        unit._apply_identify()
+
+        assert unit._ace is None
         assert unit.printer.logger.messages == []
+
+    def test_identify_failure_is_logged(self):
+        printer = AcePrinter()
+        link = make_fake_ace_connection(ace2=True, printer=printer,
+                                        cls=TestAfcACE2ApplyFeedCheck.RefusingLink)
+        link.error = RuntimeError("serial down")
+        unit = make_ace2_unit(printer=printer, connection=link)
+
+        unit._apply_identify()
+
+        # The first send raised, so the rest of the slots were not sent.
+        assert link.async_commands == [self.OFF[0]]
+        assert printer.logger.messages == [
+            ("warning", "ACE2 Ace2_1: factory identify off failed (non-fatal): serial down")]
 
     def test_connect_turns_identify_off(self):
         unit = make_ace2_unit(connect=False)
