@@ -78,6 +78,16 @@ extruder: extruder          # the [AFC_extruder] fed; a lane can override
 # Toggle it live with AFC_ACE_STUCK_SPOOL_DETECTION UNIT=Ace2_2 ENABLE=0.
 #stuck_spool_detection: True
 
+# ---- Staging ----
+# skip_factory_autostage turns the unit's factory identify off on every
+# slot, which skips its slow factory insert cycle; AFC then stages an
+# insert itself, feeding stage_initial_dist mm into the unit plus dist_hub.
+# With [AFC_ACE2_rfid] the tag is read on the way; without it, or with its
+# disable_rfid, the insert is one plain feed. False leaves staging to the
+# unit's firmware.
+#skip_factory_autostage: True
+#stage_initial_dist: 500
+
 # ---- Dryer ----
 #max_dryer_temperature: 70  # C. AFC_ACE_DRY never heats above this (the V1
                             # ACE uses 55). Set 0 to hide this unit's
@@ -210,14 +220,11 @@ max_temp: 85                # Klipper shuts down above this, so keep it
 #auto_tag_adjust: True
 #auto_tag_adjust_dist: 75
 #
-# Staging. skip_factory_autostage turns off the unit's slow factory insert
-# cycle; AFC then feeds stage_initial_dist mm into the unit plus dist_hub,
-# reading the tag on the way. It feeds at stage_scan_speed mm/s (90 at
-# most) for the first stage_scan_dist mm while polling the reader, and
-# stops to read when a tag answers.
-#skip_factory_autostage: True
+# Staging read. While the unit stages an insert (its
+# skip_factory_autostage above), AFC reads the tag on the way: it feeds at
+# stage_scan_speed mm/s (90 at most) for the first stage_scan_dist mm
+# while polling the reader, and stops to read when a tag answers.
 #stage_read: True                # False reads the tag once staged instead
-#stage_initial_dist: 500
 #stage_scan_dist: 600
 #stage_scan_speed: 25
 #
@@ -232,8 +239,7 @@ max_temp: 85                # Klipper shuts down above this, so keep it
 #
 # Leave lane_slot_map unset: the unit supplies each lane's slot. Set, only
 # the lanes listed are read, as lane:slot with slot 0-3 (one less than in
-# unit:), and with skip_factory_autostage on a lane left out is not fed
-# stage_initial_dist on insert either.
+# unit:).
 #lane_slot_map: lane0:0, lane1:1, lane2:2, lane3:3
 #
 # Read retries, reader timing and more staging options are described
