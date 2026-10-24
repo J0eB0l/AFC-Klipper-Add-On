@@ -486,7 +486,7 @@ class Espooler:
         if self.afc_motor_fwd is not None or self.afc_motor_rwd is not None:
             self.reactor.update_timer( self.stats_timer, self.reactor.monotonic() + 30 )
         else:
-            self.logger.info(f"Not starting timer for {self.name}")
+            self.logger.debug(f"Not starting timer for {self.name}")
 
     def handle_connect(self, lane_obj):
         """

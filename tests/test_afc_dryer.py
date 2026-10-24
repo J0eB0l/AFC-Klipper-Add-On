@@ -1929,7 +1929,7 @@ class TestAFCDryerRequestDry:
     def test_ace_start_uses_duration_not_time(self):
         panel, printer = discovered_dryer_panel(DryerAceUnit("Ace2_1"))
         script = panel.request_dry("Ace2_1", "start", 50, 240, 0)
-        assert script == "ACE_DRY UNIT=Ace2_1 TEMP=50 DURATION=240"
+        assert script == "AFC_ACE_DRY UNIT=Ace2_1 TEMP=50 DURATION=240"
         self._assert_queued(printer, script)
         assert panel.logger.messages == []
 
@@ -1938,17 +1938,17 @@ class TestAFCDryerRequestDry:
                                                 DryerAceUnit("Ace2_1"))
         assert panel.request_dry("AMS_2", "stop", 0, 0, 0) == (
             "AFC_BAMBU_HEATER_STOP UNIT=AMS_2")
-        assert panel.request_dry("Ace2_1", "stop", 0, 0, 0) == "ACE_DRY_STOP UNIT=Ace2_1"
+        assert panel.request_dry("Ace2_1", "stop", 0, 0, 0) == "AFC_ACE_DRY_STOP UNIT=Ace2_1"
         for callback in dryer_queued_callbacks(printer):
             callback(0.0)
         assert [c.args for c in printer._gcode.run_script.call_args_list] == [
-            ("AFC_BAMBU_HEATER_STOP UNIT=AMS_2",), ("ACE_DRY_STOP UNIT=Ace2_1",)]
+            ("AFC_BAMBU_HEATER_STOP UNIT=AMS_2",), ("AFC_ACE_DRY_STOP UNIT=Ace2_1",)]
         assert panel.logger.messages == []
 
     def test_temp_is_clamped_to_the_units_ceiling(self):
         panel, printer = discovered_dryer_panel(DryerAceUnit("Ace2_1", max_temp=55.0))
         script = panel.request_dry("Ace2_1", "start", 85, 60, 0)
-        assert script == "ACE_DRY UNIT=Ace2_1 TEMP=55 DURATION=60"
+        assert script == "AFC_ACE_DRY UNIT=Ace2_1 TEMP=55 DURATION=60"
         self._assert_queued(printer, script)
         assert panel.logger.messages == []
 
@@ -1964,7 +1964,7 @@ class TestAFCDryerRequestDry:
         calls = self._spy_ace_start(monkeypatch)
         panel, printer = discovered_dryer_panel(DryerAceUnit("Ace2_1"))
         script = panel.request_dry("Ace2_1", "start", 50, 60, 0)
-        assert script == "ACE_DRY UNIT=Ace2_1 TEMP=50 DURATION=60"
+        assert script == "AFC_ACE_DRY UNIT=Ace2_1 TEMP=50 DURATION=60"
         assert calls == [("Ace2_1", 50, 60, 0)]
         self._assert_queued(printer, script)
         assert panel.logger.messages == []
@@ -2068,14 +2068,14 @@ class TestAFCDryerRequestDry:
         panel, printer = discovered_dryer_panel(ace)
         ace.max_dryer_temperature = 70.0
         script = panel.request_dry("Ace2_1", "start", 70, 60, 0)
-        assert script == "ACE_DRY UNIT=Ace2_1 TEMP=55 DURATION=60"
+        assert script == "AFC_ACE_DRY UNIT=Ace2_1 TEMP=55 DURATION=60"
         self._assert_queued(printer, script)
         assert panel.logger.messages == []
 
     def test_generation_does_not_change_the_commands(self):
         panel, printer = discovered_dryer_panel(DryerAce2Unit("Ace2_1"))
         script = panel.request_dry("Ace2_1", "start", 50, 240, 0)
-        assert script == "ACE_DRY UNIT=Ace2_1 TEMP=50 DURATION=240"
+        assert script == "AFC_ACE_DRY UNIT=Ace2_1 TEMP=50 DURATION=240"
         self._assert_queued(printer, script)
         assert panel.logger.messages == []
 
@@ -2102,7 +2102,7 @@ class TestAFCDryerRequestDry:
         calls = self._spy_ace_start(monkeypatch)
         panel, printer = discovered_dryer_panel(DryerAceUnit("Ace_1"))
         script = panel.request_dry("Ace_1", "start", 50, 60, 1)
-        assert script == "ACE_DRY UNIT=Ace_1 TEMP=50 DURATION=60 ROTATE=1"
+        assert script == "AFC_ACE_DRY UNIT=Ace_1 TEMP=50 DURATION=60 ROTATE=1"
         assert calls == [("Ace_1", 50, 60, 1)]
         self._assert_queued(printer, script)
         assert panel.logger.messages == []
@@ -2773,8 +2773,8 @@ class TestBackendInterface:
             "snapshot": {"online": False, "drying": False, "temperature": None,
                          "humidity": None, "target": None, "remaining": None,
                          "duration": None, "note": ""},
-            "start": "ACE_DRY UNIT=Ace_1 TEMP=55 DURATION=60 ROTATE=1",
-            "stop": "ACE_DRY_STOP UNIT=Ace_1"}),
+            "start": "AFC_ACE_DRY UNIT=Ace_1 TEMP=55 DURATION=60 ROTATE=1",
+            "stop": "AFC_ACE_DRY_STOP UNIT=Ace_1"}),
     ], ids=["bambu", "ace"])
     def test_every_backend_implements_the_hooks(self, backend, unit, expected):
         # Every hook answers for its own unit; none falls through to _Backend.

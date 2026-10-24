@@ -1809,7 +1809,8 @@ class AFCLane:
 
     def get_toolhead_pre_sensor_state(self):
         """
-        Helper function that returns current state of toolhead pre sensor or buffer if user has extruder setup for ramming.
+        Helper function that returns current state of toolhead pre sensor or buffer
+        if user has extruder setup for ramming.
 
         For a U1 toolhead motion sensor (needs encoder rotation for filament_present
         but has a physical switch for static detection), the raw hardware button

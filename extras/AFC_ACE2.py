@@ -1,6 +1,6 @@
 # AFCProject Automated Filament Changer
 #
-# Copyright (C) 2024-2026 AFCProject
+# Copyright (C) 2026 AFCProject
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
@@ -107,13 +107,10 @@ class Cmd:
     MFRC522_READER_POWER = 0x52
 
 
-SLOT_STATES = {
-    0: 'ready', 1: 'feeding', 2: 'rollback', 3: 'assisting',
-    4: 'rollback_assisting', 5: 'preloading', 6: 'upgrading',
-    129: 'feed_error', 130: 'rollback_error', 131: 'assist_error',
-    132: 'preload_error', 133: 'stuck_error', 134: 'tangled_error',
-    135: 'motor_error',
-}
+SLOT_STATES = {0: 'ready', 1: 'feeding', 2: 'rollback', 3: 'assisting', 4: 'rollback_assisting',
+               5: 'preloading', 6: 'upgrading', 129: 'feed_error', 130: 'rollback_error',
+               131: 'assist_error', 132: 'preload_error', 133: 'stuck_error', 134: 'tangled_error',
+               135: 'motor_error'}
 FILAMENT_STATES = {0: 'empty', 1: 'unknown', 2: 'identified', 3: 'identifying'}
 
 # GET_SENSOR_STATE (opcode 73) 17-channel bitmask layout: each of the 4 slots
@@ -125,8 +122,7 @@ SENSORS_PER_SLOT = 4
 SENSOR_INSERT, SENSOR_EMPTY, SENSOR_BUF_RST, SENSOR_BUF_BACK = 0, 1, 2, 3
 SENSOR_BUF_FEED_BIT = 16     # shared buffer-feed sensor (not per-slot)
 SENSOR_BITMASK_WIDTH = 17
-DRY_STATES = {0: 'stop', 1: 'starting', 2: 'keeping',
-              3: 'stopping', 4: 'ptc_error', 5: 'ntc_error'}
+DRY_STATES = {0: 'stop', 1: 'starting', 2: 'keeping', 3: 'stopping', 4: 'ptc_error', 5: 'ntc_error'}
 
 FEED_MODE_FEED = 0
 FEED_MODE_ROLLBACK = 1
@@ -136,9 +132,7 @@ FEED_MODE_ROLLBACK_ASSIST = 3
 # Opcodes whose response reports a status/error in protobuf field 1 (0 = ok).
 # For every other opcode field 1 is data; the feed/rollback family's error_2
 # refusal is relied on by _start_feed_assist and the load sequence.
-_ERROR_CODE_OPCODES = frozenset({
-    Cmd.FEED_OR_ROLLBACK, Cmd.STOP_FEED_OR_ROLLBACK, Cmd.UPDATE_SPEED,
-})
+_ERROR_CODE_OPCODES = frozenset({Cmd.FEED_OR_ROLLBACK, Cmd.STOP_FEED_OR_ROLLBACK, Cmd.UPDATE_SPEED})
 
 
 def crc16_kermit(data: Union[bytes, bytearray]) -> int:
@@ -246,6 +240,7 @@ def pb_decode(data: Union[bytes, bytearray]) -> Dict[int, List[Tuple[int, Any]]]
     """
     fields: Dict[int, Any] = {}
     pos = 0
+    val: Any
     while pos < len(data):
         tag, pos = pb_decode_varint(data, pos)
         fnum, wtype = tag >> 3, tag & 7
@@ -271,8 +266,7 @@ def pb_decode(data: Union[bytes, bytearray]) -> Dict[int, List[Tuple[int, Any]]]
     return fields
 
 
-def _fval(fields: Dict[int, List[Tuple[int, Any]]], num: int,
-          default: Any = 0) -> Any:
+def _fval(fields: Dict[int, List[Tuple[int, Any]]], num: int, default: Any = 0) -> Any:
     """
     Return the value of the first entry for a protobuf field.
 
@@ -284,8 +278,7 @@ def _fval(fields: Dict[int, List[Tuple[int, Any]]], num: int,
     return fields.get(num, [(0, default)])[0][1]
 
 
-def _fstr(fields: Dict[int, List[Tuple[int, Any]]], num: int,
-          default: str = '') -> str:
+def _fstr(fields: Dict[int, List[Tuple[int, Any]]], num: int, default: str = '') -> str:
     """
     Return a decoded string for the first entry of a length-delimited field.
 
@@ -333,8 +326,7 @@ def dump_fields(fields: Dict[int, List[Tuple[int, Any]]]) -> Dict[int, Any]:
     return out
 
 
-def method_to_v2(method: str,
-                 params: Optional[Dict[str, Any]]) -> Tuple[int, bytes]:
+def method_to_v2(method: str, params: Optional[Dict[str, Any]]) -> Tuple[int, bytes]:
     """
     Map a V1 method name + params to a (cmd_opcode, protobuf_payload) tuple.
 
@@ -354,25 +346,22 @@ def method_to_v2(method: str,
     if method == 'start_feed_assist':
         slot = int(params.get('index', 0))
         speed = int(params.get('speed', 10))
-        return Cmd.FEED_OR_ROLLBACK, (
-            pb_uint32(1, slot) + pb_uint32(2, speed)
-            + pb_uint32(3, 0) + pb_uint32(4, FEED_MODE_ASSIST))
+        return Cmd.FEED_OR_ROLLBACK, (pb_uint32(1, slot) + pb_uint32(2, speed) + pb_uint32(3, 0)
+                                      + pb_uint32(4, FEED_MODE_ASSIST))
     if method == 'stop_feed_assist':
         return Cmd.STOP_FEED_OR_ROLLBACK, pb_uint32(1, int(params.get('index', 0)))
     if method == 'feed_filament':
         slot = int(params.get('index', 0))
         length = int(params.get('length', 0))
         speed = int(params.get('speed', 50))
-        return Cmd.FEED_OR_ROLLBACK, (
-            pb_uint32(1, slot) + pb_uint32(2, speed)
-            + pb_uint32(3, length) + pb_uint32(4, FEED_MODE_FEED))
+        return Cmd.FEED_OR_ROLLBACK, (pb_uint32(1, slot) + pb_uint32(2, speed)
+                                      + pb_uint32(3, length) + pb_uint32(4, FEED_MODE_FEED))
     if method == 'unwind_filament':
         slot = int(params.get('index', 0))
         length = int(params.get('length', 0))
         speed = int(params.get('speed', 50))
-        return Cmd.FEED_OR_ROLLBACK, (
-            pb_uint32(1, slot) + pb_uint32(2, speed)
-            + pb_uint32(3, length) + pb_uint32(4, FEED_MODE_ROLLBACK))
+        return Cmd.FEED_OR_ROLLBACK, (pb_uint32(1, slot) + pb_uint32(2, speed)
+                                      + pb_uint32(3, length) + pb_uint32(4, FEED_MODE_ROLLBACK))
     if method == 'stop_feed_filament':
         return Cmd.STOP_FEED_OR_ROLLBACK, pb_uint32(1, int(params.get('index', 0)))
     if method == 'update_feeding_speed':
@@ -387,14 +376,12 @@ def method_to_v2(method: str,
         # The DRYING fan field is on/off, not a speed: map any positive fan_speed
         # to 1 (unlike SET_FAN's 0-100% scale).
         fan_on = 1 if int(params.get('fan_speed', 1)) > 0 else 0
-        return Cmd.DRYING, (pb_uint32(1, temp) + pb_uint32(2, duration)
-                            + pb_uint32(3, fan_on))
+        return Cmd.DRYING, (pb_uint32(1, temp) + pb_uint32(2, duration) + pb_uint32(3, fan_on))
     if method == 'drying_stop':
         return Cmd.DRYING, pb_uint32(1, 0) + pb_uint32(2, 0)
     if method == 'set_fan_speed':
         speed = int(params.get('speed', 0))
-        return Cmd.SET_FAN, (pb_uint32(1, speed)
-                             + pb_bool(2, speed > 0) + pb_bool(3, speed > 0))
+        return Cmd.SET_FAN, (pb_uint32(1, speed) + pb_bool(2, speed > 0) + pb_bool(3, speed > 0))
     if method == 'set_rfid_enable':
         slot = int(params.get('index', 0))
         enable = bool(params.get('enable', True))
@@ -404,8 +391,7 @@ def method_to_v2(method: str,
         # pass), field 2 = error_length (checkpoint distance). Both 3..254.
         check_len = int(params.get('check_length', 254))
         error_len = int(params.get('error_length', 254))
-        return Cmd.SET_FEED_CHECK, (pb_uint32(1, check_len)
-                                    + pb_uint32(2, error_len))
+        return Cmd.SET_FEED_CHECK, (pb_uint32(1, check_len) + pb_uint32(2, error_len))
     if method == 'mfrc522_reg_read':
         # arg = (slot<<16) | reg  (see Cmd.MFRC522_REG_READ)
         return Cmd.MFRC522_REG_READ, pb_uint32(1, int(params.get('arg', 0)) & 0xFFFFFFFF)
@@ -466,20 +452,14 @@ def encode_frame(request_id: int, cmd: int, payload: bytes = b'') -> bytes:
     if len(payload) > MAX_PAYLOAD_LEN:
         error_str = f"V2 payload exceeds {MAX_PAYLOAD_LEN} bytes for opcode {cmd}"
         raise ValueError(error_str)
-    inner = bytearray([
-        FLAG_REQUEST,
-        seq & 0xFF, (seq >> 8) & 0xFF,
-        cmd & 0xFF,
-        len(payload) & 0xFF,
-    ])
+    inner = bytearray([FLAG_REQUEST, seq & 0xFF, (seq >> 8) & 0xFF, cmd & 0xFF,
+                       len(payload) & 0xFF])
     inner.extend(payload)
     crc = crc16_kermit(bytes(inner))
-    return (bytes(PREAMBLE) + bytes(inner)
-            + bytes([crc & 0xFF, (crc >> 8) & 0xFF, END_MARKER]))
+    return (bytes(PREAMBLE) + bytes(inner) + bytes([crc & 0xFF, (crc >> 8) & 0xFF, END_MARKER]))
 
 
-def encode_request(request_id: int, method: str,
-                   params: Optional[Dict[str, Any]]) -> bytes:
+def encode_request(request_id: int, method: str, params: Optional[Dict[str, Any]]) -> bytes:
     """
     Build a complete V2 request frame for a method/params.
 
@@ -517,25 +497,22 @@ def _decode_status(fields: Dict[int, List[Tuple[int, Any]]]) -> Dict[str, Any]:
             # consumers (e.g. _derive_action's slot tag) can name the slot.
             'index': len(slots),
             # Any non-empty filament state means present ('identified' needs an
-            # RFID read); RFID identification was carried separately in 'rfid'.
+            # RFID read); RFID identification is carried separately in 'rfid'.
             'status': 'empty' if filament_state == 'empty' else 'ready',
             'slot_status': slot_state,
-            # Uncomment below once RFID and spoolman creation support is added
-            # 'sku': '', 'type': '',
-            # 'rfid': 2 if filament_state == 'identified' else 0,
-            # 'brand': '',
-            # 'color': [0, 0, 0],
+            'sku': '', 'type': '',
+            'rfid': 2 if filament_state == 'identified' else 0,
+            'brand': '',
+            'color': [0, 0, 0],
         })
     while len(slots) < 4:
         slots.append({
             'index': len(slots),
             'status': 'empty', 'slot_status': 'unknown',
-            # Uncomment below once RFID and spoolman creation support is added
-            # 'sku': '', 'type': '', 'rfid': 0, 'brand': '',
-            # 'color': [0, 0, 0],
+            'sku': '', 'type': '', 'rfid': 0, 'brand': '',
+            'color': [0, 0, 0],
         })
-    dry_status = {'status': 'stop', 'target_temp': 0,
-                  'duration': 0, 'remain_time': 0}
+    dry_status = {'status': 'stop', 'target_temp': 0, 'duration': 0, 'remain_time': 0}
     for wtype, dry_payload in fields.get(2, []):
         if wtype != 2:
             continue
@@ -547,9 +524,7 @@ def _decode_status(fields: Dict[int, List[Tuple[int, Any]]]) -> Dict[str, Any]:
             'remain_time': _fval(dsub, 4, 0),
         }
         break
-    any_busy = any(
-        s.get('slot_status') in ('feeding', 'rollback', 'preloading')
-        for s in slots)
+    any_busy = any(s.get('slot_status') in ('feeding', 'rollback', 'preloading') for s in slots)
     return {
         'status': 'busy' if any_busy else 'ready',
         'dryer_status': dry_status,
@@ -585,8 +560,7 @@ def v2_response_to_v1(cmd: int, seq: int, payload: bytes,
     except Exception as e:
         # f-string, not printf args: AFC's logger.debug takes
         # (message, only_debug, traceback).
-        (logger or _logger).debug(
-            f"ACE2 protobuf decode failure cmd={cmd}: {e}")
+        (logger or _logger).debug(f"ACE2 protobuf decode failure cmd={cmd}: {e}")
         return ret
     if cmd == Cmd.DISCOVER_DEVICE:
         ret['result'] = {'uid1': _fval(fields, 1), 'uid2': _fval(fields, 2),
@@ -663,8 +637,7 @@ def v2_response_to_v1(cmd: int, seq: int, payload: bytes,
                 'length': _fval(sub, 2, 0),
                 'decoder': _fval(sub, 3, 0),
             })
-        ret['result'] = {'feed_info': feeds,
-                         'raw_fields': sorted(fields.keys())}
+        ret['result'] = {'feed_info': feeds, 'raw_fields': sorted(fields.keys())}
     elif cmd in (Cmd.GET_FILAMENT_INFO, Cmd.FILAMENT_IDENTIFY):
         ftype = _fstr(fields, 4, '')
         # Field 5 is repeated (up to 10), one per colour of the spool.
@@ -701,8 +674,7 @@ def v2_response_to_v1(cmd: int, seq: int, payload: bytes,
             'sku': _fstr(fields, 3, ''),
             'type': ftype, 'brand': '', 'color': color,
             'colors_rgba': colors_rgba,
-            # Uncomment below once RFID and spoolman creation support is added
-            # 'rfid': 2 if ftype else 0,
+            'rfid': 2 if ftype else 0,
             # diameter is uint32 in 0.01mm units. Field 11 is a static tag value
             # surfaced as total_length (mm), not a live remaining.
             'diameter': _fval(fields, 8, 0) / 100.0,
@@ -713,7 +685,7 @@ def v2_response_to_v1(cmd: int, seq: int, payload: bytes,
             'icon_type': _fval(fields, 10, 0),
             'extruder_temp': extruder_temp,
             'hotbed_temp': bed_temp,
-            # Full raw field map for diagnostics (see ACE_RFID_DUMP).
+            # Full raw field map for diagnostics (see AFC_ACE_RFID_DUMP).
             'raw': dump_fields(fields),
         }
     elif cmd == Cmd.MFRC522_REG_READ:
@@ -723,7 +695,8 @@ def v2_response_to_v1(cmd: int, seq: int, payload: bytes,
         # Only opcodes in _ERROR_CODE_OPCODES treat field 1 as an error code.
         if cmd in _ERROR_CODE_OPCODES:
             code = _fval(fields, 1, 0)
-            if isinstance(code, int) and code != 0:
+            if (isinstance(code, int)
+                and code != 0):
                 ret['code'] = code
                 ret['msg'] = f"error_{code}"
         # No dedicated decoder for this opcode. Surface the decoded protobuf
@@ -788,7 +761,7 @@ def decode_frames(buffer: bytearray,
     return results
 
 
-# ── ACE2 auto-discovery: serial_port: auto + ace_index (V2 probe) ───────────
+# ACE2 auto-discovery: serial_port: auto + ace_index (V2 probe)
 # Like V1's autodetect with a V2 probe. ace_index orders units by USB topology
 # (cable order); the STM32 UID confirms an ACE 2 and allows pinning via ace_uid.
 # Only unclaimed ports are probed.
@@ -840,7 +813,8 @@ def _ace2_extract_uid(buf: bytearray) -> Optional[Tuple[int, int, int]]:
     :return Optional[Tuple[int, int, int]]: the UID, or None if not found yet
     """
     i = buf.find(PREAMBLE)
-    if i < 0 or len(buf) < i + HEADER_LEN:
+    if (i < 0
+        or len(buf) < i + HEADER_LEN):
         return None
     flags = buf[i + 2]
     cmd = buf[i + 5]
@@ -848,7 +822,8 @@ def _ace2_extract_uid(buf: bytearray) -> Optional[Tuple[int, int, int]]:
     end = i + HEADER_LEN + payload_len + TRAILER_LEN
     if len(buf) < end:
         return None
-    if not (flags & FLAG_RESPONSE) or cmd != Cmd.DISCOVER_DEVICE:
+    if (not (flags & FLAG_RESPONSE)
+        or cmd != Cmd.DISCOVER_DEVICE):
         return None
     payload = bytes(buf[i + HEADER_LEN:i + HEADER_LEN + payload_len])
     try:
@@ -861,8 +836,7 @@ def _ace2_extract_uid(buf: bytearray) -> Optional[Tuple[int, int, int]]:
         return None
 
 
-def probe_ace2_uid(port: str, baud: int,
-                   timeout: float = 1.5) -> Optional[Tuple[int, int, int]]:
+def probe_ace2_uid(port: str, baud: int, timeout: float = 1.5) -> Optional[Tuple[int, int, int]]:
     """
     Open `port`, send one V2 discover_device, and return the ACE 2's 96-bit
     STM32 UID. Standalone (no reactor); never raises.
@@ -879,8 +853,7 @@ def probe_ace2_uid(port: str, baud: int,
         return None
     ser = None
     try:
-        ser = pyserial.Serial(port=port, baudrate=baud, timeout=0.2,
-                              write_timeout=0.5)
+        ser = pyserial.Serial(port=port, baudrate=baud, timeout=0.2, write_timeout=0.5)
         with contextlib.suppress(Exception):
             ser.reset_input_buffer()
         ser.write(encode_frame(0, Cmd.DISCOVER_DEVICE))
@@ -904,10 +877,8 @@ def probe_ace2_uid(port: str, baud: int,
                 ser.close()
 
 
-def resolve_ace2_port(ace_index: int, baud: int,
-                      ace_uid: Optional[Tuple[int, int, int]] = None,
-                      settle: float = 6.0,
-                      logger: Optional[Any] = None) -> Optional[str]:
+def resolve_ace2_port(ace_index: int, baud: int, ace_uid: Optional[Tuple[int, int, int]] = None,
+                      settle: float = 6.0, logger: Optional[Any] = None) -> Optional[str]:
     """
     The tty for the ACE 2 this section wants. Probes CH34x devices over a
     settle window (rides the watchdog re-enumeration). With ace_uid, binds to
@@ -922,10 +893,11 @@ def resolve_ace2_port(ace_index: int, baud: int,
     :return Optional[str]: the port, or None if no matching unit was found
     """
     deadline = time.time() + max(settle, 0.5)
-    found: Dict[str, tuple] = {}
+    found: Dict[str, Tuple[int, int, int]] = {}
     while True:
         for port in _ace2_scan_candidates():
-            if port in _ACE_CLAIMED_PORTS or port in found:
+            if (port in _ACE_CLAIMED_PORTS
+                or port in found):
                 continue
             uid = probe_ace2_uid(port, baud)
             if uid is not None:
@@ -934,7 +906,8 @@ def resolve_ace2_port(ace_index: int, baud: int,
                     # f-string: this can be AFC's logger, whose info() takes
                     # (message, console_only).
                     logger.info(f"ACE2 autodetect: {port} -> uid {uid}")
-                if ace_uid is not None and uid == tuple(ace_uid):
+                if (ace_uid is not None
+                    and uid == tuple(ace_uid)):
                     return port
         if time.time() >= deadline:
             break
@@ -975,12 +948,10 @@ class ACE2Connection(ACEConnection):
                     and (self._ace_uid is None
                          or uid == tuple(self._ace_uid))):
                     return self._resolved_port
-        port = resolve_ace2_port(self._ace_index, self._baud_rate,
-                                 ace_uid=self._ace_uid,
+        port = resolve_ace2_port(self._ace_index, self._baud_rate, ace_uid=self._ace_uid,
                                  logger=logger or self._logger)
         if port is None:
-            error_str = (f"ACE2 autodetect: no unit found for ace_index "
-                         f"{self._ace_index}"
+            error_str = (f"ACE2 autodetect: no unit found for ace_index " f"{self._ace_index}"
                          + (f" / ace_uid {self._ace_uid}" if self._ace_uid else "")
                          + " (serial_port: auto). Is it plugged in / powered?")
             raise ACESerialError(error_str)
@@ -995,8 +966,7 @@ class ACE2Connection(ACEConnection):
         try:
             self.send_command("discover_device", timeout=3.0)
         except Exception as e:
-            self._logger.debug(
-                f"ACE2 discover_device failed (non-fatal): {e}")
+            self._logger.debug(f"ACE2 discover_device failed (non-fatal): {e}")
 
     def _poll_extras(self) -> None:
         """
@@ -1022,7 +992,8 @@ class ACE2Connection(ACEConnection):
                                 the device reports a non-zero error code.
         :raises ACETimeoutError: When no response arrives before the deadline.
         """
-        if not self._connected or self._serial is None:
+        if (not self._connected
+            or self._serial is None):
             error_str = "ACE2 not connected"
             raise ACESerialError(error_str)
         # The V2 wire id is 16 bits, so key the pending completion by the masked
@@ -1079,8 +1050,7 @@ class ACE2Connection(ACEConnection):
             return result.get("result", result)
         return result
 
-    def send_command_async(self, method: str,
-                           params: Optional[Dict[str, Any]] = None) -> None:
+    def send_command_async(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
         """
         Send a V2 request without waiting for a response (fire-and-forget).
 
@@ -1090,7 +1060,8 @@ class ACE2Connection(ACEConnection):
         :param method: V1 method name to send.
         :param params: Optional dict of method parameters.
         """
-        if not self._connected or self._serial is None:
+        if (not self._connected
+            or self._serial is None):
             return
         # 16-bit wire id (see send_command): track the masked value so the
         # unit's echoed id matches and its reply is recognised, not logged as
@@ -1112,8 +1083,7 @@ class ACE2Connection(ACEConnection):
             return
         self._logger.debug(f"ACE2 TX (async): id={request_id} {method}")
 
-    def _response_matches_pending(self, response_id: int,
-                                  response: Any) -> bool:
+    def _response_matches_pending(self, response_id: int, response: Any) -> bool:
         """
         Reject a reply whose opcode doesn't match the pending request's. The
         16-bit wire id recycles every 65536 requests, so a very late reply for a
@@ -1146,22 +1116,19 @@ class ACE2Connection(ACEConnection):
     # The Pro 2 enables RFID per-slot (V1's global enable_rfid/disable_rfid don't
     # exist). Best-effort enable/disable all slots; fire-and-forget so connect
     # never blocks on it.
-    # Uncomment below once RFID and spoolman creation support is added
-    # def enable_rfid(self) -> None:
-    #     """
-    #     Best-effort enable per-slot RFID identification on every slot.
-    #     """
-    #     for slot in range(self.slot_count):
-    #         self.send_command_async(
-    #             "set_rfid_enable", {"index": slot, "enable": True})
-    #
-    # def disable_rfid(self) -> None:
-    #     """
-    #     Best-effort disable per-slot RFID identification on every slot.
-    #     """
-    #     for slot in range(self.slot_count):
-    #         self.send_command_async(
-    #             "set_rfid_enable", {"index": slot, "enable": False})
+    def enable_rfid(self) -> None:
+        """
+        Best-effort enable per-slot RFID identification on every slot.
+        """
+        for slot in range(self.slot_count):
+            self.send_command_async("set_rfid_enable", {"index": slot, "enable": True})
+
+    def disable_rfid(self) -> None:
+        """
+        Best-effort disable per-slot RFID identification on every slot.
+        """
+        for slot in range(self.slot_count):
+            self.send_command_async("set_rfid_enable", {"index": slot, "enable": False})
 
 
 # ── Unit: the V1 ACE unit with the V2 transport swapped in ───────────
@@ -1192,7 +1159,7 @@ class afcACE2(afcACE):
         # Optional per-box pin for serial_port: auto: the STM32 UID from
         # discover_device as "uid1,uid2,uid3" (as in AFC_ACE_serial.log).
         # When omitted, ace_index picks by USB-topology (cable) order.
-        self.ace_uid: Optional[tuple] = None
+        self.ace_uid: Optional[Tuple[int, int, int]] = None
         _uid = config.get("ace_uid", None)
         if _uid:
             parts = tuple(p for p in _uid.replace(",", " ").split() if p)
@@ -1205,22 +1172,20 @@ class afcACE2(afcACE):
                              f"'uid1,uid2,uid3' (copy them from the discover line in "
                              f"AFC_ACE_serial.log); got '{_uid}'")
                 raise config.error(error_str)
-            self.ace_uid = nums
+            uid1, uid2, uid3 = nums
+            self.ace_uid = (uid1, uid2, uid3)
         # ACE 2 Pro V2 serial runs at 230400 baud (the V1 ACE default is
         # 115200); at the wrong baud the unit never sees a valid frame and
         # never replies. Override the inherited default.
         self.baud_rate = config.getint("baud_rate", 230400)
         # Pro 2 allows a higher dryer set-point than the Pro V1 (55C default).
-        self.max_dryer_temperature = config.getfloat(
-            "max_dryer_temperature", 70.0, minval=0.0)
+        self.max_dryer_temperature = config.getfloat("max_dryer_temperature", 70.0, minval=0.0)
         # Encoder feed-check (V2 SET_FEED_CHECK): at feed_error_length mm the
         # encoder must read at least feed_check_length, giving a slip tolerance of
         # ~feed_error_length - feed_check_length / 1.2342 (~23mm at 200/185).
         # Lower feed_check_length to widen it; 3 effectively disables the check.
-        self.feed_check_length = config.getint(
-            "feed_check_length", 200, minval=3, maxval=254)
-        self.feed_error_length = config.getint(
-            "feed_error_length", 185, minval=3, maxval=254)
+        self.feed_check_length = config.getint("feed_check_length", 200, minval=3, maxval=254)
+        self.feed_error_length = config.getint("feed_error_length", 185, minval=3, maxval=254)
         # The encoder can only reach feed_error_length * 1.2342, so a
         # feed_check_length at or above that would fail every feed.
         _expected = self.feed_error_length * ACE2_ENCODER_SCALE
@@ -1263,11 +1228,10 @@ class afcACE2(afcACE):
                 "error_length": self.feed_error_length,
             })
             self.logger.info(
-                (f"ACE2 {self.name}: feed check set check_length={self.feed_check_length} "
-                    f"error_length={self.feed_error_length}"))
+                f"ACE2 {self.name}: feed check set check_length={self.feed_check_length} "
+                f"error_length={self.feed_error_length}")
         except Exception as e:
-            self.logger.warning(
-                f"ACE2 {self.name}: set_feed_check failed (non-fatal): {e}")
+            self.logger.warning(f"ACE2 {self.name}: set_feed_check failed (non-fatal): {e}")
 
     def _apply_identify(self) -> None:
         """
@@ -1298,8 +1262,7 @@ class afcACE2(afcACE):
     # ACE2 slot states that mean the encoder/odometer disagrees with the
     # commanded motor move, a real upstream jam, tangle, slip, or motor fault.
     # The unit's OdometerTimer task derives these, so they are hardware-accurate.
-    _ENCODER_JAM_STATES = (
-        'stuck_error', 'tangled_error', 'assist_error', 'motor_error')
+    _ENCODER_JAM_STATES = ('stuck_error', 'tangled_error', 'assist_error', 'motor_error')
 
     def _check_stuck(self, result: Dict[str, Any]) -> None:
         """
@@ -1346,8 +1309,7 @@ class afcACE2(afcACE):
         self._stuck_tripped = True
         # Defer the pause off the serial/heartbeat path onto the reactor.
         self.afc.reactor.register_callback(
-            lambda et, n=name, s=slot, st=state:
-            self._handle_encoder_jam(n, s, st))
+            lambda et, n=name, s=slot, st=state: self._handle_encoder_jam(n, s, st))
 
     def _handle_encoder_jam(self, name: str, slot: int, state: str) -> None:
         """
@@ -1363,17 +1325,14 @@ class afcACE2(afcACE):
             self._stop_feed_assist(slot)
         except Exception:
             pass
-        pretty = {
-            'stuck_error': 'stuck spool (encoder saw no movement while feeding)',
-            'tangled_error': 'tangled spool',
-            'assist_error': 'feed-assist slip (encoder fell behind the motor)',
-            'motor_error': 'motor error',
-        }.get(state, state)
-        msg = (
-            f"ACE2 {self.name} lane {name}: {pretty}. The unit's filament encoder reports "
-            "the spool is not moving with the motor, likely a jam or tangle at "
-            "the unit. Clear the snag, then resume. Run ACE_STUCK_SPOOL_DETECTION "
-            "ENABLE=0 to disable this check.")
+        pretty = {'stuck_error': 'stuck spool (encoder saw no movement while feeding)',
+                  'tangled_error': 'tangled spool',
+                  'assist_error': 'feed-assist slip (encoder fell behind the motor)',
+                  'motor_error': 'motor error'}.get(state, state)
+        msg = (f"ACE2 {self.name} lane {name}: {pretty}. The unit's filament encoder reports "
+               "the spool is not moving with the motor, likely a jam or tangle at "
+               "the unit. Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION "
+               "ENABLE=0 to disable this check.")
         try:
             # Route through AFC so it snapshots position and uses the AFC
             # pause/resume path (z-hop, restore on AFC_RESUME).
@@ -1382,8 +1341,7 @@ class afcACE2(afcACE):
             self.logger.error(msg)
             self.gcode.run_script_from_command("PAUSE")
 
-    def _make_connection(self, reactor: Reactor, serial_port: str,
-                         logger: logging.Logger,
+    def _make_connection(self, reactor: Reactor, serial_port: str, logger: logging.Logger,
                          baud_rate: int) -> ACE2Connection:
         """
         Create the V2 transport used in place of the V1 ACE connection.
@@ -1394,22 +1352,20 @@ class afcACE2(afcACE):
         :param baud_rate: Serial baud rate.
         :return ACE2Connection: A configured :class:`ACE2Connection` instance.
         """
-        return ACE2Connection(reactor=reactor, serial_port=serial_port,
-                              logger=logger, baud_rate=baud_rate,
-                              ace_index=self.ace_index, ace_uid=self.ace_uid)
+        return ACE2Connection(reactor=reactor, serial_port=serial_port, logger=logger,
+                              baud_rate=baud_rate, ace_index=self.ace_index, ace_uid=self.ace_uid)
 
-    # Uncomment below once RFID and spoolman creation support is added
-    # def _reader_sibling_slot(self, slot: int) -> Optional[int]:
-    #     """
-    #     ACE 2 Pro has 2 MFRC522 readers, each covering a slot pair (0/1 -> r0,
-    #     2/3 -> r1). The paired slot shares the reader, so a static read of one can
-    #     return the other's tag, used to skip ambiguous startup RFID reads.
-    #
-    #     :param slot: 0-based slot index
-    #     :return Optional[int]: the slot sharing this slot's reader, or None
-    #     """
-    #     sib = int(slot) ^ 1
-    #     return sib if 0 <= sib < self.SLOTS_PER_UNIT else None
+    def _reader_sibling_slot(self, slot: int) -> Optional[int]:
+        """
+        ACE 2 Pro has 2 MFRC522 readers, each covering a slot pair (0/1 -> r0,
+        2/3 -> r1). The paired slot shares the reader, so a static read of one can
+        return the other's tag, used to skip ambiguous startup RFID reads.
+
+        :param slot: 0-based slot index
+        :return Optional[int]: the slot sharing this slot's reader, or None
+        """
+        sib = int(slot) ^ 1
+        return sib if 0 <= sib < self.SLOTS_PER_UNIT else None
 
     # No _refresh_slot_inventory override: the ACE 2 reads tags host-side over the
     # MFRC522 passthrough (AFC_ACE2_rfid), and _uses_firmware_rfid = False gates

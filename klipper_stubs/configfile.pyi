@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional, Tuple, TypeVar, Union, overload
 from klippy import Printer
 
 _T = TypeVar("_T")
+_V = TypeVar("_V")
 
 class error(Exception): ...
 
@@ -82,6 +83,16 @@ class ConfigWrapper:
     def getlists(self, option: str, default: _T, seps: tuple = (',',), count: Optional[int] = None,
                  parser: Callable[[str], Any] = str,
                  note_valid: bool = True) -> Union[Tuple[Any, ...], _T]: ...
+    # getchoice always returns a value out of `choices`, since `default`
+    # (when given) must itself be a valid key of `choices` -- unlike the
+    # scalar getters above, there's no "unparsed default passes through
+    # untouched" case to split into a separate overload.
+    @overload
+    def getchoice(self, option: str, choices: dict[Any, _V], *,
+                  note_valid: bool = True) -> _V: ...
+    @overload
+    def getchoice(self, option: str, choices: dict[Any, _V], default: Any,
+                  note_valid: bool = True) -> _V: ...
     def getsection(self, section: str) -> ConfigWrapper: ...
     def has_section(self, section: str) -> bool: ...
     def deprecate(self, option: str, value: Any = None) -> None: ...

@@ -1348,7 +1348,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
     def _suppress_assist(self, slots: Any) -> None:
         """
         Stop feed assist on the given slots and suppress the watchdog so it
-        stays off until we restore it (mirrors ACE_FEED_ASSIST ENABLE=0).
+        stays off until we restore it (mirrors AFC_ACE_FEED_ASSIST ENABLE=0).
 
         :param slots: physical slots to stop assist on
         """
@@ -1901,7 +1901,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
 
         Reads block 5 (primary colour) and block 16 (colour count @258, second
         colour @260 in reversed ABGR) by default. Named to avoid the V1 unit's
-        firmware ACE_RFID_DUMP.
+        firmware AFC_ACE_RFID_DUMP.
 
         Usage
         -------
@@ -1974,7 +1974,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
 
     def rescan_lane(self, lane_name: str, gcmd: "GCodeCommand") -> None:
         """
-        ACE_RFID_RESCAN on an ACE 2 lane: turn the spool past the reader
+        AFC_ACE_RFID_RESCAN on an ACE 2 lane: turn the spool past the reader
         and apply the tag it reads to the lane.
 
         Every move runs to completion, so the lane's position is known exactly

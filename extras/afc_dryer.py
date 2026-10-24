@@ -3,7 +3,7 @@
 # Bambu AMS 2 Pro / AMS HT and Anycubic ACE units all have drying heaters, and
 # all of them are otherwise driven by typed G-code with different names, units
 # and argument spellings (AFC_BAMBU_HEATER_START ... TIME=minutes vs
-# ACE_DRY ... DURATION=minutes). This serves a single control panel for all of
+# AFC_ACE_DRY ... DURATION=minutes). This serves a single control panel for all of
 # them, discovered from the printer config at startup: whatever dryers exist in
 # AFC.cfg appear here, drawn to match their hardware.
 #
@@ -429,7 +429,7 @@ class _AceBackend(_Backend):
 
     object_prefixes = ("AFC_ACE", "AFC_ACE2")
     kind = "ace"
-    # Rotation is AFC's own (ACE_DRY ROTATE=1), not the firmware's: it turns
+    # Rotation is AFC's own (AFC_ACE_DRY ROTATE=1), not the firmware's: it turns
     # the spools of unthreaded lanes, gated as on a Bambu unit.
     supports_rotate = True
 
@@ -556,9 +556,9 @@ class _AceBackend(_Backend):
         :param temp: target temperature in C
         :param minutes: cycle length in minutes
         :param rotate: 1 to turn the free spools while drying, 0 not to
-        :return str: the ACE_DRY command line
+        :return str: the AFC_ACE_DRY command line
         """
-        script = f"ACE_DRY UNIT={name} TEMP={temp} DURATION={minutes}"
+        script = f"AFC_ACE_DRY UNIT={name} TEMP={temp} DURATION={minutes}"
         return script + " ROTATE=1" if rotate else script
 
     def stop_script(self, name: str) -> str:
@@ -566,9 +566,9 @@ class _AceBackend(_Backend):
         G-code that stops an ACE dry cycle.
 
         :param name: unit name as configured
-        :return str: the ACE_DRY_STOP command line
+        :return str: the AFC_ACE_DRY_STOP command line
         """
-        return f"ACE_DRY_STOP UNIT={name}"
+        return f"AFC_ACE_DRY_STOP UNIT={name}"
 
 
 def _env_reading(unit: Any) -> Dict[str, Optional[float]]:

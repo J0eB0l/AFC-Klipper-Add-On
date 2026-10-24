@@ -33,6 +33,9 @@ from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
+    from extras.AFC import afc
+    from extras.heaters import PrinterHeaters
+    from mcu import MCU
 
 ACE_REPORT_TIME = 1.0  # seconds between samples
 _REGISTERED = False
@@ -59,14 +62,11 @@ class TemperatureACE:
         self.ace_unit_name = config.get("ace_unit", "Ace1")
         # Thermal channel to report. 'default' is the box/env temp from get_status;
         # the others are ACE2 GET_TEMP channels (box1/box2, ptc1/ptc2 heaters, env).
-        self.channel = config.getchoice(
-            "channel",
-            {c: c for c in ("default", "box1", "box2", "ptc1", "ptc2", "env")},
-            "default")
+        self.channel = config.getchoice("channel",
+            {c: c for c in ("default", "box1", "box2", "ptc1", "ptc2", "env")}, "default")
         # Register under a Mainsail-recognized sensor name so the UI also shows
         # humidity, like temperature_oams' option of the same name.
-        self.simulate_aht3x = config.getboolean(
-            "simulate_supported_sensor_mainsail", True)
+        self.simulate_aht3x = config.getboolean("simulate_supported_sensor_mainsail", True)
 
         # Temperature state
         self.temp = 0.0
@@ -98,9 +98,7 @@ class TemperatureACE:
         if self.printer.get_start_args().get("debugoutput") is not None:
             return
 
-        self.sample_timer = self.reactor.register_timer(
-            self._sample_ace_temperature
-        )
+        self.sample_timer = self.reactor.register_timer(self._sample_ace_temperature)
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
 
     def _log(self) -> Any:
@@ -121,8 +119,8 @@ class TemperatureACE:
 
         # Try to grab AFC's logger for consistent log output
         try:
-            afc = self.printer.lookup_object("AFC")
-            self._logger = afc.logger
+            afc_obj: afc = self.printer.lookup_object("AFC")
+            self._logger = afc_obj.logger
         except Exception:
             pass
 
@@ -131,14 +129,10 @@ class TemperatureACE:
             # first query; Mainsail registers the humidity field early.
             if getattr(self._ace_unit, "type", "") == "ACE2":
                 self._has_humidity = True
-            self._log().info(
-                f"temperature_ace: linked to AFC_ACE unit '{self.ace_unit_name}'"
-            )
+            self._log().info(f"temperature_ace: linked to AFC_ACE unit '{self.ace_unit_name}'")
         else:
             self._log().warning(
-                f"temperature_ace: AFC_ACE unit '{self.ace_unit_name}' not found; "
-                "reporting 0C"
-            )
+                f"temperature_ace: AFC_ACE unit '{self.ace_unit_name}' not found; reporting 0C")
 
         if hasattr(self, "sample_timer"):
             self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
@@ -179,8 +173,8 @@ class TemperatureACE:
             or the unit is not (yet) available.
         """
         try:
-            afc = self.printer.lookup_object("AFC")
-            units = getattr(afc, "units", {})
+            afc_obj: afc = self.printer.lookup_object("AFC")
+            units = getattr(afc_obj, "units", {})
             unit = units.get(self.ace_unit_name)
             if unit is not None:
                 return unit
@@ -189,9 +183,7 @@ class TemperatureACE:
 
         # Fallback: try direct printer object lookup
         try:
-            return self.printer.lookup_object(
-                f"AFC_ACE {self.ace_unit_name}", None
-            )
+            return self.printer.lookup_object(f"AFC_ACE {self.ace_unit_name}", None)
         except Exception:
             return None
 
@@ -223,25 +215,22 @@ class TemperatureACE:
                     # A specific GET_TEMP channel (ACE2). env_humidity travels
                     # with the same cache, so surface it too.
                     temp_info = getattr(self._ace_unit, "_cached_temp_info", {})
-                    self.temp = float(
-                        temp_info.get(self.channel + "_temp", 0.0) or 0.0)
+                    self.temp = float(temp_info.get(self.channel + "_temp", 0.0) or 0.0)
                     if "env_humidity" in temp_info:
                         self._has_humidity = True
-                        self.humidity = float(
-                            temp_info.get("env_humidity", 0.0) or 0.0)
+                        self.humidity = float(temp_info.get("env_humidity", 0.0) or 0.0)
 
                 if self.temp > 0:
                     self.measured_min = min(self.measured_min, self.temp)
                     self.measured_max = max(self.measured_max, self.temp)
 
-                if self.temp > 0 and self.temp < self.min_temp:
+                if (self.temp > 0
+                    and self.temp < self.min_temp):
                     self.printer.invoke_shutdown(
-                        f"ACE temperature {self.temp:.1f} below minimum of {self.min_temp:.1f}"
-                    )
+                        f"ACE temperature {self.temp:.1f} below minimum of {self.min_temp:.1f}")
                 if self.temp > self.max_temp:
                     self.printer.invoke_shutdown(
-                        f"ACE temperature {self.temp:.1f} above maximum of {self.max_temp:.1f}"
-                    )
+                        f"ACE temperature {self.temp:.1f} above maximum of {self.max_temp:.1f}")
             else:
                 self.temp = 0.0
         except Exception as e:
@@ -251,9 +240,9 @@ class TemperatureACE:
             self.temp = 0.0
 
         if self._callback:
-            mcu = self.printer.lookup_object("mcu")
+            mcu_obj: MCU = self.printer.lookup_object("mcu")
             measured_time = self.reactor.monotonic()
-            self._callback(mcu.estimated_print_time(measured_time), self.temp)
+            self._callback(mcu_obj.estimated_print_time(measured_time), self.temp)
 
         return eventtime + ACE_REPORT_TIME
 
@@ -314,6 +303,7 @@ def _register_sensor_factory(config: "ConfigWrapper") -> None:
     if _REGISTERED:
         return
     printer = config.get_printer()
+    heaters: PrinterHeaters
     try:
         heaters = printer.lookup_object("heaters")
     except Exception:

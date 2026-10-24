@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import struct
+import sys
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import pytest
@@ -11,6 +12,8 @@ import pytest
 from extras.AFC_ACE import ACESerialError, ACETimeoutError, afcACE
 from extras.AFC_ACE2 import (
     _ace2_extract_uid,
+    _ace2_scan_candidates,
+    _ace2_topology_key,
     _decode_status,
     _fstr,
     _fval,
@@ -20,17 +23,20 @@ from extras.AFC_ACE2 import (
     dump_fields,
     encode_frame,
     encode_request,
+    load_config_prefix,
     method_to_v2,
     pb_bool,
     pb_decode,
     pb_decode_varint,
     pb_string,
     pb_varint,
+    probe_ace2_uid,
     resolve_ace2_port,
     v2_response_to_v1,
 )
 import extras.AFC_ACE2 as afc_ace2_module
 from tests.ace_helpers import (
+    AceConfig,
     AceLogger,
     AcePrinter,
     capture_log,
@@ -165,19 +171,19 @@ class Ace2Wire:
         return cls.frame(seq, cmd, payload, flags=cls.RESPONSE)
 
 
-def ace2_status_slot(index: int, status: str = "empty",
-                     slot_status: str = "unknown") -> Dict[str, Any]:
+def ace2_status_slot(index: int, status: str = "empty", slot_status: str = "unknown",
+                     rfid: int = 0) -> Dict[str, Any]:
     """
     One slot of a V1-shaped ACE 2 status, written out for expected values.
 
     :param index: 0-based slot
     :param status: "ready" (filament present) or "empty"
     :param slot_status: the slot's motor state name
+    :param rfid: 2 when the filament was identified, else 0
     :return dict: the slot entry
     """
-    # Uncomment below once RFID and spoolman creation support is added
-    # "sku": "", "type": "", "rfid": 0, "brand": "", "color": [0, 0, 0]
-    return {"index": index, "status": status, "slot_status": slot_status}
+    return {"index": index, "status": status, "slot_status": slot_status, "sku": "",
+            "type": "", "rfid": rfid, "brand": "", "color": [0, 0, 0]}
 
 
 def ace2_link(next_id: int = 0, **kwargs: Any) -> Tuple[AcePrinter, ACE2Connection]:
@@ -218,7 +224,7 @@ def ace2_jam_message(lane: str, what: str) -> str:
     """
     return (f"ACE2 Ace2_1 lane {lane}: {what}. The unit's filament encoder reports the "
             "spool is not moving with the motor, likely a jam or tangle at the unit. "
-            "Clear the snag, then resume. Run ACE_STUCK_SPOOL_DETECTION ENABLE=0 to "
+            "Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION ENABLE=0 to "
             "disable this check.")
 
 
@@ -633,9 +639,8 @@ class TestDecodeStatus:
         status = _decode_status({9: [(2, Ace2Wire.message((1, code), (2, 2)))]})
 
         assert status["status"] == overall
-        # Uncomment below once RFID and spoolman creation support is added
-        # # Filament state 2 (identified) is present and RFID-read.
-        assert status["slots"][0] == ace2_status_slot(0, "ready", name)
+        # Filament state 2 (identified) is present and RFID-read.
+        assert status["slots"][0] == ace2_status_slot(0, "ready", name, rfid=2)
 
     def test_unknown_filament_state_reads_empty(self):
         status = _decode_status({9: [(2, bytes([0x08, 0x00, 0x10, 0x09]))]})
@@ -698,10 +703,9 @@ class TestV2ResponseToV1:
         :param fields: values other than the empty-tag defaults
         :return dict: a whole filament-info result
         """
-        # Uncomment "rfid" below once RFID and spoolman creation support is added
         expected: Dict[str, Any] = {
             "index": 0, "version": 0, "sku": "", "type": "", "brand": "",
-            "color": [0, 0, 0], "colors_rgba": [], "diameter": 0.0,
+            "color": [0, 0, 0], "colors_rgba": [], "rfid": 0, "diameter": 0.0,
             "total_length": 0, "length": 0, "icon_type": 0,
             "extruder_temp": {}, "hotbed_temp": {}, "raw": {}}
         expected.update(fields)
@@ -794,7 +798,7 @@ class TestV2ResponseToV1:
                              "remain_time": 1800},
             "temp": 25, "humidity": 40, "enable_rfid": 1, "fan_speed": 0,
             "feed_assist_count": 9, "cont_assist_time": 12.0,
-            "slots": [ace2_status_slot(0, "ready", "feeding"),
+            "slots": [ace2_status_slot(0, "ready", "feeding", rfid=2),
                       ace2_status_slot(1, "empty", "ready"), ace2_status_slot(2),
                       ace2_status_slot(3)]})
         assert isinstance(ret["result"]["cont_assist_time"], float)
@@ -904,7 +908,7 @@ class TestV2ResponseToV1:
 
         assert ret == self._ok(13, 1, self._filament(
             index=2, sku="SKU9", type="PLA", color=[0x11, 0x22, 0x33],
-            colors_rgba=[0x11223344],
+            colors_rgba=[0x11223344], rfid=2,
             diameter=1.75, total_length=330000, extruder_temp={"min": 190, "max": 230},
             hotbed_temp={"min": 55, "max": 65},
             raw={1: 2, 3: "'SKU9'", 4: "'PLA'", 5: "hex:08c4e6888901", 6: "hex:08be0110e601",
@@ -937,7 +941,7 @@ class TestV2ResponseToV1:
     def test_filament_info_temp_range_non_message_skipped(self):
         ret, logs = self._convert(13, 1, Ace2Wire.message((4, "PETG"), (6, 5)))
 
-        assert ret == self._ok(13, 1, self._filament(type="PETG",
+        assert ret == self._ok(13, 1, self._filament(type="PETG", rfid=2,
                                                      raw={4: "'PETG'", 6: 5}))
         assert logs == []
 
@@ -959,7 +963,7 @@ class TestV2ResponseToV1:
         ret, logs = self._convert(68, 5, payload)
 
         assert ret == self._ok(68, 5, self._filament(
-            index=1, version=258, sku="SM0123ABCD", type="PLA Basic",
+            index=1, version=258, sku="SM0123ABCD", type="PLA Basic", rfid=2,
             raw={1: 1, 2: 258, 3: "'SM0123ABCD'", 4: "'PLA Basic'"}))
         assert logs == []
 
@@ -1198,6 +1202,94 @@ class TestDecodeFrames:
         assert buf == bytearray()
 
 
+class TestAce2ScanCandidates:
+    def test_resolves_real_paths_in_sorted_glob_order(self, monkeypatch):
+        # glob order is deliberately not sorted, to prove the sorted() wrapper
+        # (not glob's own order) decides the result order.
+        monkeypatch.setattr(afc_ace2_module.glob, "glob",
+                            lambda pattern: ["/dev/by-id/2", "/dev/by-id/1"])
+        monkeypatch.setattr(afc_ace2_module.os.path, "realpath",
+                            lambda p: p.replace("by-id", "real"))
+
+        assert _ace2_scan_candidates() == ["/dev/real/1", "/dev/real/2"]
+
+    def test_realpath_failure_falls_back_to_raw_path(self, monkeypatch):
+        monkeypatch.setattr(afc_ace2_module.glob, "glob", lambda pattern: ["/dev/by-id/0"])
+
+        def boom(path: str) -> str:
+            """
+            :param path: the candidate path
+            :return str: never; always raises
+            """
+            error_str = "no such path"
+            raise OSError(error_str)
+
+        monkeypatch.setattr(afc_ace2_module.os.path, "realpath", boom)
+
+        assert _ace2_scan_candidates() == ["/dev/by-id/0"]
+
+    def test_no_devices_returns_empty_list(self, monkeypatch):
+        monkeypatch.setattr(afc_ace2_module.glob, "glob", lambda pattern: [])
+
+        assert _ace2_scan_candidates() == []
+
+
+class TestAce2TopologyKey:
+    def test_matching_bypath_zero_pads_digit_runs(self, monkeypatch):
+        monkeypatch.setattr(
+            afc_ace2_module.glob, "glob",
+            lambda pattern: ["/dev/serial/by-path/a1b22c333"])
+        monkeypatch.setattr(afc_ace2_module.os.path, "realpath",
+                            lambda p: "/dev/ttyACM5")
+
+        # "1", "22" and "333" each zero-pad out to 6 digits.
+        assert _ace2_topology_key("/dev/ttyACM5") == "a000001b000022c000333"
+
+    def test_no_match_falls_back_to_zero_padded_real_tty(self, monkeypatch):
+        monkeypatch.setattr(
+            afc_ace2_module.glob, "glob",
+            lambda pattern: ["/dev/serial/by-path/other"])
+        monkeypatch.setattr(afc_ace2_module.os.path, "realpath", lambda p: "/dev/ttyACM9")
+
+        # No by-path entry resolves to the real tty, so bypath stays empty and
+        # the ternary falls back to the (zero-padded) real_tty argument.
+        assert _ace2_topology_key("/dev/ttyACM7") == "/dev/ttyACM000007"
+
+    def test_glob_exception_falls_back_to_zero_padded_real_tty(self, monkeypatch):
+        def boom(pattern: str) -> List[str]:
+            """
+            :param pattern: the glob pattern
+            :return list: never; always raises
+            """
+            error_str = "no /dev/serial/by-path"
+            raise OSError(error_str)
+
+        monkeypatch.setattr(afc_ace2_module.glob, "glob", boom)
+
+        assert _ace2_topology_key("/dev/ttyACM7") == "/dev/ttyACM000007"
+
+    def test_realpath_exception_on_one_entry_is_suppressed(self, monkeypatch):
+        # The first by-path entry's realpath blows up; contextlib.suppress
+        # swallows it and the loop still finds the second, matching entry.
+        monkeypatch.setattr(
+            afc_ace2_module.glob, "glob",
+            lambda pattern: ["/dev/serial/by-path/bad", "/dev/serial/by-path/a1b22c333"])
+
+        def realpath(path: str) -> str:
+            """
+            :param path: the by-path entry
+            :return str: the resolved tty, or raises for the first entry
+            """
+            if path.endswith("bad"):
+                error_str = "unreadable symlink"
+                raise OSError(error_str)
+            return "/dev/ttyACM5"
+
+        monkeypatch.setattr(afc_ace2_module.os.path, "realpath", realpath)
+
+        assert _ace2_topology_key("/dev/ttyACM5") == "a000001b000022c000333"
+
+
 class TestAce2ExtractUid:
     UID = (2403054933, 129011976, 892745291)
 
@@ -1247,6 +1339,171 @@ class TestAce2ExtractUid:
         frame = Ace2Wire.reply(0, 0, Ace2Wire.message((1, b"ab")))
 
         assert _ace2_extract_uid(bytearray(frame)) is None
+
+    def test_extract_uid_field1_none_returns_none(self, monkeypatch):
+        # _fval's own default (0) keeps field 1 from ever decoding to None in
+        # practice; this proves the defensive "u1 is None" guard still returns
+        # None on its own if that ever changed.
+        monkeypatch.setattr(
+            afc_ace2_module, "_fval",
+            lambda fields, num, default=0: None if num == 1 else default)
+
+        assert _ace2_extract_uid(bytearray(self._discover_reply())) is None
+
+
+class TestProbeAce2Uid:
+    class FakeSerialModule:
+        """pyserial module stand-in for sys.modules['serial']: Serial(...)
+        returns the given port, or raises open_error instead."""
+
+        def __init__(self, serial: Optional[FakeSerial] = None,
+                    open_error: Optional[BaseException] = None) -> None:
+            """
+            :param serial: the port object Serial() returns
+            :param open_error: raised by Serial() instead, when set
+            """
+            self.serial = serial if serial is not None else FakeSerial()
+            self.open_error = open_error
+            self.opened: List[Tuple[str, int]] = []
+
+        def Serial(self, port: str, baudrate: int, timeout: float,
+                  write_timeout: float) -> FakeSerial:
+            """
+            :param port: tty path
+            :param baudrate: baud rate
+            :param timeout: read timeout
+            :param write_timeout: write timeout
+            :return FakeSerial: the opened port
+            """
+            self.opened.append((port, baudrate))
+            if self.open_error is not None:
+                raise self.open_error
+            return self.serial
+
+    class ChunkedSerial(FakeSerial):
+        """A FakeSerial whose read() hands out one scripted chunk per call."""
+
+        def __init__(self, chunks: List[bytes]) -> None:
+            """
+            :param chunks: bytes returned by successive read() calls
+            """
+            super().__init__()
+            self._chunks = list(chunks)
+
+        def read(self, size: int = 1) -> bytes:
+            """
+            :param size: unused; scripted chunks ignore it
+            :return bytes: the next scripted chunk, b"" once exhausted
+            """
+            return self._chunks.pop(0) if self._chunks else b""
+
+    class PreloadedSerial(FakeSerial):
+        """A FakeSerial whose reset_input_buffer() leaves a pre-loaded .rx
+        alone, as a real port's would if the reply already arrived."""
+
+        def reset_input_buffer(self) -> None:
+            """No-op: keeps .rx intact instead of clearing it."""
+
+    class FlakySerial(FakeSerial):
+        """A FakeSerial whose reset_input_buffer() and close() both raise."""
+
+        def reset_input_buffer(self) -> None:
+            """Never succeeds."""
+            error_str = "reset failed"
+            raise OSError(error_str)
+
+        def close(self) -> None:
+            """Never succeeds."""
+            error_str = "close failed"
+            raise OSError(error_str)
+
+    class Clock:
+        """Stands in for the module's time: time() reads .now, sleep() moves it."""
+
+        def __init__(self, start: float = 1000.0) -> None:
+            """
+            :param start: initial clock value
+            """
+            self.now = start
+            self.sleeps: List[float] = []
+
+        def time(self) -> float:
+            """
+            :return float: the clock
+            """
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            """
+            :param seconds: how far to move the clock
+            """
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    @staticmethod
+    def _discover_reply(uid: Tuple[int, int, int] = (11, 22, 33)) -> bytes:
+        """
+        :param uid: the unit's STM32 UID words
+        :return bytes: the discover_device response frame carrying it
+        """
+        return Ace2Wire.reply(0, Ace2Wire.DISCOVER_DEVICE,
+                              Ace2Wire.message((1, uid[0]), (2, uid[1]), (3, uid[2])))
+
+    def test_pyserial_not_installed_returns_none(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "serial", None)
+
+        assert probe_ace2_uid("/dev/ttyACM0", 230400) is None
+
+    def test_open_failure_returns_none(self, monkeypatch):
+        module = self.FakeSerialModule(open_error=OSError("port busy"))
+        monkeypatch.setitem(sys.modules, "serial", module)
+
+        assert probe_ace2_uid("/dev/ttyACM0", 230400) is None
+
+        # Serial() was reached (and raised) before any ser.close() could run.
+        assert module.opened == [("/dev/ttyACM0", 230400)]
+
+    def test_success_on_first_chunk_writes_discover_and_closes(self, monkeypatch):
+        # PreloadedSerial: probe_ace2_uid resets the input buffer right after
+        # opening, which would wipe a plain FakeSerial's pre-loaded .rx.
+        serial = self.PreloadedSerial()
+        serial.rx += self._discover_reply()
+        module = self.FakeSerialModule(serial=serial)
+        monkeypatch.setitem(sys.modules, "serial", module)
+
+        assert probe_ace2_uid("/dev/ttyACM0", 230400) == (11, 22, 33)
+
+        assert serial.frames == [Ace2Wire.frame(0, Ace2Wire.DISCOVER_DEVICE)]
+        assert serial.closed is True
+
+    def test_partial_frame_then_completion_returns_uid(self, monkeypatch):
+        reply = self._discover_reply((5, 6, 7))
+        serial = self.ChunkedSerial([reply[:6], reply[6:]])
+        module = self.FakeSerialModule(serial=serial)
+        monkeypatch.setitem(sys.modules, "serial", module)
+
+        assert probe_ace2_uid("/dev/ttyACM0", 230400) == (5, 6, 7)
+
+    def test_no_data_times_out_and_returns_none(self, monkeypatch):
+        clock = self.Clock()
+        monkeypatch.setattr(afc_ace2_module, "time", clock)
+        serial = FakeSerial()
+        module = self.FakeSerialModule(serial=serial)
+        monkeypatch.setitem(sys.modules, "serial", module)
+
+        assert probe_ace2_uid("/dev/ttyACM0", 230400, timeout=0.05) is None
+
+        # Three empty reads sleep 0.02s each before the clock passes deadline.
+        assert clock.sleeps == [0.02, 0.02, 0.02]
+        assert serial.closed is True
+
+    def test_reset_and_close_exceptions_are_suppressed(self, monkeypatch):
+        serial = self.FlakySerial()
+        serial.rx += self._discover_reply((9, 8, 7))
+        module = self.FakeSerialModule(serial=serial)
+        monkeypatch.setitem(sys.modules, "serial", module)
+
+        assert probe_ace2_uid("/dev/ttyACM0", 230400) == (9, 8, 7)
 
 
 class TestResolveAce2Port:
@@ -1408,6 +1665,172 @@ class TestResolveAce2Port:
         assert logger.messages == [
             ("info", "ACE2 autodetect: /dev/ttyACM2 -> uid (11, 0, 0)"),
             ("info", "ACE2 autodetect: /dev/ttyACM9 -> uid (22, 33, 44)")]
+
+
+class TestACE2ConnectionResolveConnectPort:
+    def test_not_auto_returns_configured_port(self):
+        # ace2_link's default serial_port ("/dev/ttyACM0") is not "auto".
+        printer, conn = ace2_link()
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM0"
+
+    def test_auto_no_cached_port_resolves_fresh_with_default_logger(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = None
+        conn._ace_index = 3
+        conn._ace_uid = None
+        calls = []
+
+        def fake_resolve(ace_index, baud_rate, ace_uid=None, logger=None):
+            """
+            :param ace_index: unit index passed through
+            :param baud_rate: baud rate passed through
+            :param ace_uid: UID pin passed through
+            :param logger: logger passed through
+            :return str: a fixed resolved port
+            """
+            calls.append((ace_index, baud_rate, ace_uid, logger))
+            return "/dev/ttyACM7"
+
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port", fake_resolve)
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM7"
+        # No logger given, so the connection's own logger is passed through.
+        assert calls == [(3, conn._baud_rate, None, conn._logger)]
+
+    def test_logger_argument_overrides_connection_logger(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = None
+        calls = []
+        given_logger = AceLogger()
+
+        def fake_resolve(ace_index, baud_rate, ace_uid=None, logger=None):
+            """
+            :param ace_index: unit index, unused here
+            :param baud_rate: baud rate, unused here
+            :param ace_uid: UID pin, unused here
+            :param logger: logger passed through
+            :return str: a fixed resolved port
+            """
+            calls.append(logger)
+            return "/dev/ttyACM7"
+
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port", fake_resolve)
+
+        assert conn._resolve_connect_port(logger=given_logger) == "/dev/ttyACM7"
+        assert calls == [given_logger]
+        assert given_logger is not conn._logger
+
+    def test_auto_resolve_fails_raises_without_uid_in_message(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = None
+        conn._ace_index = 2
+        conn._ace_uid = None
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port", lambda *a, **k: None)
+
+        with pytest.raises(ACESerialError) as excinfo:
+            conn._resolve_connect_port()
+
+        assert str(excinfo.value) == (
+            "ACE2 autodetect: no unit found for ace_index 2 (serial_port: auto). "
+            "Is it plugged in / powered?")
+
+    def test_auto_resolve_fails_with_uid_in_message(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = None
+        conn._ace_index = 4
+        conn._ace_uid = (1, 2, 3)
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port", lambda *a, **k: None)
+
+        with pytest.raises(ACESerialError) as excinfo:
+            conn._resolve_connect_port()
+
+        assert str(excinfo.value) == (
+            "ACE2 autodetect: no unit found for ace_index 4 / ace_uid (1, 2, 3) "
+            "(serial_port: auto). Is it plugged in / powered?")
+
+    def test_auto_resolve_succeeds_returns_port(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = None
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: "/dev/ttyACM8")
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM8"
+
+    def test_cached_port_probe_exception_falls_through_to_resolve(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = "/dev/ttyACM2"
+        conn._ace_uid = None
+
+        def boom(port, baud):
+            """
+            :param port: probed port, unused here
+            :param baud: baud rate, unused here
+            :return None: never; always raises
+            """
+            error_str = "probe failed"
+            raise OSError(error_str)
+
+        monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", boom)
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: "/dev/ttyACM9")
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM9"
+
+    def test_cached_port_probe_returns_none_falls_through_to_resolve(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = "/dev/ttyACM2"
+        conn._ace_uid = None
+        monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: None)
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: "/dev/ttyACM9")
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM9"
+
+    def test_cached_port_uid_found_with_no_pin_reuses_cached_port(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = "/dev/ttyACM2"
+        conn._ace_uid = None
+        monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
+        resolve_calls = []
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: resolve_calls.append(1))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM2"
+        # The cheap cache hit short-circuits before the full scan ever runs.
+        assert resolve_calls == []
+
+    def test_cached_port_uid_matches_pin_reuses_cached_port(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = "/dev/ttyACM2"
+        conn._ace_uid = (1, 2, 3)
+        monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
+        resolve_calls = []
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: resolve_calls.append(1))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM2"
+        assert resolve_calls == []
+
+    def test_cached_port_uid_mismatch_falls_through_to_resolve(self, monkeypatch):
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = "/dev/ttyACM2"
+        conn._ace_uid = (9, 9, 9)
+        monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: "/dev/ttyACM9")
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM9"
 
 
 class TestACE2ConnectionPreInfoHandshake:
@@ -1826,56 +2249,95 @@ class TestACE2ConnectionParseFrames:
         assert printer.logger.messages == []
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestACE2ConnectionEnableRfid:
-    # def test_enables_every_slot(self):
-        # printer, conn = ace2_link()
+class TestACE2ConnectionEnableRfid:
+    def test_enables_every_slot(self):
+        printer, conn = ace2_link()
 
-        # conn.enable_rfid()
+        conn.enable_rfid()
 
-        # assert conn._serial.frames == [
-            # Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x01]))
-            # for slot in range(4)]
-        # assert list(conn._async_ids) == [0, 1, 2, 3]
-        # assert printer.logger.messages == [
-            # ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
+        assert conn._serial.frames == [
+            Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x01]))
+            for slot in range(4)]
+        assert list(conn._async_ids) == [0, 1, 2, 3]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
 
-    # def test_follows_slot_count(self):
-        # printer, conn = ace2_link()
-        # conn.slot_count = 2
+    def test_follows_slot_count(self):
+        printer, conn = ace2_link()
+        conn.slot_count = 2
 
-        # conn.enable_rfid()
+        conn.enable_rfid()
 
-        # assert conn._serial.frames == [
-            # Ace2Wire.frame(0, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x00, 0x10, 0x01])),
-            # Ace2Wire.frame(1, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x01, 0x10, 0x01]))]
-        # assert list(conn._async_ids) == [0, 1]
-        # assert printer.logger.messages == [
-            # ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=1 set_rfid_enable")]
-
+        assert conn._serial.frames == [
+            Ace2Wire.frame(0, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x00, 0x10, 0x01])),
+            Ace2Wire.frame(1, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x01, 0x10, 0x01]))]
+        assert list(conn._async_ids) == [0, 1]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=1 set_rfid_enable")]
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestACE2ConnectionDisableRfid:
-    # def test_disables_every_slot(self):
-        # printer, conn = ace2_link()
+class TestACE2ConnectionDisableRfid:
+    def test_disables_every_slot(self):
+        printer, conn = ace2_link()
 
-        # conn.disable_rfid()
+        conn.disable_rfid()
 
-        # assert conn._serial.frames == [
-            # Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x00]))
-            # for slot in range(4)]
-        # assert list(conn._async_ids) == [0, 1, 2, 3]
-        # assert printer.logger.messages == [
-            # ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
-            # ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
+        assert conn._serial.frames == [
+            Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x00]))
+            for slot in range(4)]
+        assert list(conn._async_ids) == [0, 1, 2, 3]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
+            ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
 
+
+class TestAfcACE2Init:
+    def test_ace_uid_non_integer_raises_config_error(self):
+        # "abc" cannot parse as int: the except ValueError branch leaves nums
+        # empty, which then also fails the length-3 check below it.
+        with pytest.raises(configparser.Error) as excinfo:
+            make_ace2_unit(values={"ace_uid": "11,abc,33"})
+
+        assert str(excinfo.value) == (
+            "[AFC_ACE2 Ace2_1] ace_uid must be three integers 'uid1,uid2,uid3' "
+            "(copy them from the discover line in AFC_ACE_serial.log); "
+            "got '11,abc,33'")
+
+    def test_ace_uid_wrong_count_raises_config_error(self):
+        # Two valid integers parse fine, but still fail the length-3 check
+        # without ever raising ValueError.
+        with pytest.raises(configparser.Error) as excinfo:
+            make_ace2_unit(values={"ace_uid": "11,22"})
+
+        assert str(excinfo.value) == (
+            "[AFC_ACE2 Ace2_1] ace_uid must be three integers 'uid1,uid2,uid3' "
+            "(copy them from the discover line in AFC_ACE_serial.log); "
+            "got '11,22'")
+
+
+class TestLoadConfigPrefix:
+    def test_returns_configured_afcace2_instance(self):
+        # Reuses the first unit's already-registered hub/extruder section
+        # names; load_config_prefix only constructs the instance, it does not
+        # dereference them (that happens later, on handle_connect).
+        unit = make_ace2_unit()
+        printer = unit.printer
+        cfg = {"serial_port": "/dev/ttyACM9", "hub": f"{unit.name}_hub",
+              "extruder": "extruder", "ace_index": 3}
+        config = AceConfig("AFC_ACE2 Ace2_2", printer, cfg)
+
+        result = load_config_prefix(config)
+
+        assert isinstance(result, afcACE2)
+        assert result.name == "Ace2_2"
+        assert result.serial_port == "/dev/ttyACM9"
+        assert result.ace_index == 3
 
 
 class TestAfcACE2ApplyFeedCheck:
@@ -2286,21 +2748,19 @@ class TestAfcACE2MakeConnection:
         assert printer.logger.messages == []
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACE2ReaderSiblingSlot:
-    # def test_pairs_within_range(self):
-        # # Two readers: slots 0 and 1 share one, slots 2 and 3 the other.
-        # unit = make_ace2_unit()
+class TestAfcACE2ReaderSiblingSlot:
+    def test_pairs_within_range(self):
+        # Two readers: slots 0 and 1 share one, slots 2 and 3 the other.
+        unit = make_ace2_unit()
 
-        # assert [unit._reader_sibling_slot(slot) for slot in range(4)] == [1, 0, 3, 2]
+        assert [unit._reader_sibling_slot(slot) for slot in range(4)] == [1, 0, 3, 2]
 
-    # def test_out_of_range_sibling_returns_none(self):
-        # unit = make_ace2_unit()
+    def test_out_of_range_sibling_returns_none(self):
+        unit = make_ace2_unit()
 
-        # assert unit._reader_sibling_slot(100) is None
-        # assert unit._reader_sibling_slot(4) is None
-        # assert unit._reader_sibling_slot(-1) is None
-
+        assert unit._reader_sibling_slot(100) is None
+        assert unit._reader_sibling_slot(4) is None
+        assert unit._reader_sibling_slot(-1) is None
 
 
 class TestAce2EncoderScale:
@@ -2320,18 +2780,16 @@ class TestAce2EncoderScale:
             "feed_error_length - feed_check_length / 1.2342).")
 
 
-# Uncomment below once RFID and spoolman creation support is added
-# class TestAfcACE2UsesFirmwareRfid:
-    # def test_v2_uses_firmware_rfid_false(self):
-        # # The ACE 2 reads tags host-side, so even on a live link with tag data
-        # # to give, the startup inventory sends no firmware get_filament_info.
-        # unit = make_ace2_unit(lanes=["lane1", "lane2"])
-        # unit._ace.set_reply("get_filament_info", {"index": 0, "sku": "PLA-1", "type": "PLA"})
+class TestAfcACE2UsesFirmwareRfid:
+    def test_v2_uses_firmware_rfid_false(self):
+        # The ACE 2 reads tags host-side, so even on a live link with tag data
+        # to give, the startup inventory sends no firmware get_filament_info.
+        unit = make_ace2_unit(lanes=["lane1", "lane2"])
+        unit._ace.set_reply("get_filament_info", {"index": 0, "sku": "PLA-1", "type": "PLA"})
 
-        # unit._sync_inventory()
+        unit._sync_inventory()
 
-        # assert unit._ace.connected is True
-        # assert unit._ace.commands == []
-        # assert unit._slot_inventory == [{}, {}, {}, {}]
-        # assert unit.printer.logger.messages == []
-
+        assert unit._ace.connected is True
+        assert unit._ace.commands == []
+        assert unit._slot_inventory == [{}, {}, {}, {}]
+        assert unit.printer.logger.messages == []

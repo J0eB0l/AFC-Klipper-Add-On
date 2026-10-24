@@ -1,6 +1,25 @@
 # Code Writing / Editing Rules
 
 - **Lines ≤100 characters** — break them up if they exceed that.
+- **Fill lines before wrapping** — when a statement doesn't fit on one line,
+   pack as much onto the first line as fits within the 100-character limit,
+   then wrap continuation lines aligned to the column right after the
+   opening parenthesis, not a generic 4-space hanging indent.
+
+   ```python
+   self.gcode.register_mux_command('AFC_ACE_DRY', "UNIT", self.name, self.cmd_AFC_ACE_DRY,
+                                   desc=self.cmd_AFC_ACE_DRY_help)
+   ```
+
+   Use judgment to break a line earlier than the limit when that's clearly
+   more readable (e.g. don't leave a single short token dangling alone after
+   a long filled line). Fall back to a plain hanging indent (current
+   indentation + 4 spaces) instead of full alignment when aligning to the
+   parenthesis would itself push a continuation line past 100 characters, or
+   would require splitting an atomic token (an f-string, a string literal)
+   that can't be broken without changing its content. This rule does not
+   apply to multi-condition boolean logic below, which always stays one
+   comparison per line even when it would fit filled onto one line.
 - **Multi-condition boolean logic**: one comparison per line; continuation
    lines start with the comparator (`and`/`or`, etc.), aligned with the
    content right after the opening parenthesis.

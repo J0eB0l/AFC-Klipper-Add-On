@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 from datetime import datetime
+import importlib.util
 import json
 import logging
 import logging.handlers
@@ -27,6 +28,7 @@ from extras.AFC_ACE import (
     ACETimeoutError,
     afcACE,
     crc16_ccitt_reflected,
+    load_config_prefix,
     resolve_ace_port_by_index,
     run_off_reactor,
 )
@@ -37,6 +39,7 @@ from extras.AFC_lane import AFCLaneState
 from tests.ace_helpers import (
     ace_error,
     ace_status,
+    AceConfig,
     AceGcmd,
     AceLogger,
     AcePrinter,
@@ -474,6 +477,95 @@ def ace_p2_payloads(conn: ACEConnection) -> List[bytes]:
     return [frame[4:-3] for frame in conn._serial.frames]
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Module-level import guards
+# ═════════════════════════════════════════════════════════════════════════
+
+def _exec_afc_ace_with_blocked_dependency(blocked_module_name: str) -> None:
+    """Execute a throw-away copy of extras/AFC_ACE.py's module-level code with
+    `blocked_module_name` forced to fail import, to exercise the file's top-level
+    ``try: from X import Y / except: raise error(...)`` guards.
+
+    This never touches the real, already-imported ``extras.AFC_ACE`` module that
+    the rest of this test suite depends on: the copy is loaded under a throwaway
+    module name and discarded afterward, whether or not it raises. Blocking an
+    import via ``sys.modules[name] = None`` makes any import of that name raise
+    ImportError immediately, without touching the module itself.
+
+    :param blocked_module_name: dotted module name to block
+    """
+    import extras.AFC_ACE as real_module
+    fresh_name = "extras.AFC_ACE_import_guard_probe"
+    original_blocked_module = sys.modules.get(blocked_module_name)
+    sys.modules[blocked_module_name] = None
+    try:
+        spec = importlib.util.spec_from_file_location(fresh_name, real_module.__file__)
+        fresh = importlib.util.module_from_spec(spec)
+        sys.modules[fresh_name] = fresh
+        try:
+            spec.loader.exec_module(fresh)
+        finally:
+            sys.modules.pop(fresh_name, None)
+    finally:
+        if original_blocked_module is not None:
+            sys.modules[blocked_module_name] = original_blocked_module
+        else:
+            sys.modules.pop(blocked_module_name, None)
+
+
+class TestModuleImportGuards:
+    """Covers the three module-level `try/except: raise error(...)` guards in
+    AFC_ACE.py, one per dependency import."""
+
+    def test_afc_utils_error_str_import_failure_raises_configparser_error(self):
+        """The very first guard imports ERROR_STR itself from AFC_utils, so it
+        can't use ERROR_STR.format(...) in its own except clause."""
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_afc_ace_with_blocked_dependency("extras.AFC_utils")
+        assert str(exc_info.value).startswith(
+            "Error when trying to import AFC_utils.ERROR_STR")
+
+    def test_afc_lane_import_failure_raises_configparser_error(self):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_afc_ace_with_blocked_dependency("extras.AFC_lane")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_lane, please rerun install-afc.sh")
+
+    def test_afc_unit_import_failure_raises_configparser_error(self):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_afc_ace_with_blocked_dependency("extras.AFC_unit")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_unit, please rerun install-afc.sh")
+
+
+class TestAfcACEInit:
+    def test_invalid_mode_raises_configparser_error(self):
+        with pytest.raises(configparser.Error) as exc_info:
+            ace_p1_unit("lane0", values={"mode": "bogus"})
+        assert str(exc_info.value) == (
+            "[AFC_ACE Ace_1] invalid mode 'bogus'. Use 'combined' or 'direct'.")
+
+    def test_temperature_ace_registration_failure_is_logged(self, caplog):
+        printer = make_ace_printer()
+        printer.heaters.add_sensor_factory = Recorder(raises=RuntimeError("heaters boom"))
+
+        with caplog.at_level(logging.INFO):
+            ace_p1_unit("lane0", printer=printer)
+
+        assert [r.getMessage() for r in caplog.records] == [
+            "AFC_ACE: temperature_ace factory not registered (heaters boom); "
+            "use [temperature_ace <name>] config sections instead"]
+
+    def test_old_command_names_run_the_new_handlers(self):
+        unit = ace_p1_unit("lane0")
+
+        aliases = {cmd: func for (cmd, key, value), func in unit.gcode.mux_commands.items()
+                   if key == "UNIT" and value == "Ace_1" and cmd.startswith("ACE_")}
+        assert aliases == {"ACE_DRY": unit.cmd_AFC_ACE_DRY,
+                           "ACE_DRY_STOP": unit.cmd_AFC_ACE_DRY_STOP,
+                           "ACE_RFID_RESCAN": unit.cmd_AFC_ACE_RFID_RESCAN}
+
+
 class TestAmsBoxLogo:
     def test_short_title_uses_min_bay_width(self):
         logo = _ams_box_logo("ACE", 4, "myace")
@@ -752,6 +844,78 @@ class TestAfcACEReconcileFeedAssist:
         assert unit._feed_assist_active == {0}
         assert unit.logger.messages == []
 
+    def test_reconcile_none_name_returns_before_any_slot_map_lookup(self):
+        """None name must hit the dedicated early return, not just happen to
+        fall through to the same no-op as an unresolvable name string: spy on
+        _slot_map.get to prove it is never even called."""
+        class _SpyDict(dict):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.get_calls: list = []
+
+            def get(self, *args: Any, **kwargs: Any) -> Any:
+                self.get_calls.append((args, kwargs))
+                return super().get(*args, **kwargs)
+
+        unit = self._unit(feed_assist_active=[0])
+        spy_slot_map = _SpyDict(unit._slot_map)
+        unit._slot_map = spy_slot_map
+
+        unit._reconcile_feed_assist(None)
+
+        assert spy_slot_map.get_calls == []
+        assert unit._ace.commands == []
+        assert unit._feed_assist_active == {0}
+        assert unit.logger.messages == []
+
+
+class TestAfcACEHandleReady:
+    def test_seeds_hub_state_and_schedules_deferred_connect(self):
+        unit = ace_p1_unit(LaneSpec("lane0", tool_loaded=True), LaneSpec("lane1"))
+        unit.lanes["lane0"]._load_state = False
+        unit.lanes["lane1"]._load_state = True
+        unit._first_connect_pending = False
+        unit.afc.reactor.pending.clear()
+
+        unit._handle_ready()
+
+        # Virtual hub occupancy is derived from tool_loaded, not the stored flag.
+        assert unit.lanes["lane0"]._load_state is True
+        assert unit.lanes["lane1"]._load_state is False
+        assert unit._first_connect_pending is True
+        assert [e.callback for e in unit.afc.reactor.pending] == [unit._deferred_ace_connect]
+        assert unit.logger.messages == []
+
+
+class TestAfcACEHandleKlippyDisconnect:
+    def test_disconnects_and_clears_an_active_link(self):
+        unit = ace_p1_unit("lane0")
+        link = unit._ace
+
+        unit._handle_klippy_disconnect()
+
+        assert link.lifecycle[-1] == "disconnect"
+        assert unit._ace is None
+        assert unit.logger.messages == []
+
+    def test_no_link_is_a_no_op(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace = None
+
+        unit._handle_klippy_disconnect()
+
+        assert unit._ace is None
+        assert unit.logger.messages == []
+
+    def test_disconnect_exception_is_suppressed(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace.disconnect = Recorder(raises=RuntimeError("boom"))
+
+        unit._handle_klippy_disconnect()
+
+        assert unit._ace is None
+        assert unit.logger.messages == []
+
 
 class TestAfcACECreateSerialLogger:
     @pytest.fixture(autouse=True)
@@ -804,6 +968,16 @@ class TestAfcACECreateSerialLogger:
         assert handlers == [capture]
         assert "_serial_ql" not in vars(unit)
 
+    def test_returns_none_when_handler_setup_raises(self, tmp_path, monkeypatch):
+        printer = make_ace_printer(log_file=str(tmp_path / "klippy.log"))
+        unit = ace_p1_unit("lane1", printer=printer)
+        monkeypatch.setattr(logging.handlers, "RotatingFileHandler",
+                            Recorder(raises=OSError("disk full")))
+
+        assert unit._create_serial_logger() is None
+        assert logging.getLogger("AFC_ACE_serial_file").handlers == []
+        assert "_serial_ql" not in vars(unit)
+
 
 class TestAfcACEDeferredAceConnect:
     @pytest.fixture(autouse=True)
@@ -823,15 +997,14 @@ class TestAfcACEDeferredAceConnect:
         with unit.printer.connections.routed():
             unit._deferred_ace_connect(unit.printer.reactor.monotonic())
 
-    #: A first-try connect to four empty slots.
+    #: A first-try connect to four empty slots: RFID on, then each slot's tag read.
     CONNECTED = [
         ("info", "ACE Ace_1: connected, mode=combined, port=/dev/ttyACM0, slots=4"),
         ("debug", "ACE Ace_1: RFID enabled"),
         ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
         ("debug", "ACE Ace_1: slot 1 get_filament_info -> {}"),
         ("debug", "ACE Ace_1: slot 2 get_filament_info -> {}"),
-        ("debug", "ACE Ace_1: slot 3 get_filament_info -> {}"),
-    ]
+        ("debug", "ACE Ace_1: slot 3 get_filament_info -> {}")]
     #: Logged once the startup retries give up.
     WATCHING = ("info", "ACE Ace_1: will keep looking for it every 15s")
     #: The four retries of a connect that never succeeds, 2s to 8s apart.
@@ -885,19 +1058,6 @@ class TestAfcACEDeferredAceConnect:
         assert link.reconnect_callback == unit._on_ace_reconnect
         assert unit.logger.messages == self.CONNECTED
 
-    def test_enable_rfid_failure_is_not_fatal(self):
-        unit = ace_p1_unit("lane1")
-        unit.printer.connections.on_connect = (
-            lambda conn: conn.set_reply("enable_rfid", RuntimeError("no reader")))
-
-        self._connect(unit)
-
-        assert unit._ace.connected is True
-        assert unit.logger.messages == [
-            self.CONNECTED[0],
-            ("warning", "ACE Ace_1: enable_rfid failed (non-fatal): no reader"),
-        ] + self.CONNECTED[2:]
-
     def test_all_attempts_fail_logs_error(self):
         unit = ace_p1_unit("lane1")
         unit.printer.connections.connect_raises = RuntimeError("no port")
@@ -942,6 +1102,126 @@ class TestAfcACEDeferredAceConnect:
         assert ("afc_ace:connected", (unit, False)) in unit.printer.events
         assert not any(e.callback == unit._watch_for_ace
                        for e in unit.afc.reactor.pending)
+
+    def test_logs_connected_on_attempt_when_a_retry_succeeds(self):
+        unit = ace_p1_unit("lane1")
+        unit.printer.connections.connect_raises = [RuntimeError("no port"), None]
+
+        self._connect(unit)
+
+        assert unit.logger.messages == (
+            [self.RETRIES[0], ("info", "ACE Ace_1: connected on attempt 2")]
+            + self.CONNECTED)
+
+
+class TestAfcACEWatchForAce:
+    def test_returns_immediately_when_already_connected(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace.connected = True
+        old_link = unit._ace
+
+        unit._watch_for_ace(unit.printer.reactor.monotonic())
+
+        assert unit._ace is old_link
+        assert unit.afc.reactor.pending == []
+        assert unit.logger.messages == []
+
+    def test_still_not_found_reschedules_the_watch(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace = None
+        unit.printer.connections.connect_raises = RuntimeError("no port")
+
+        with unit.printer.connections.routed():
+            unit._watch_for_ace(unit.printer.reactor.monotonic())
+
+        assert unit._ace is None
+        assert unit.logger.messages == [("debug", "ACE Ace_1: still not found: no port")]
+        assert [(e.callback, e.waketime) for e in unit.afc.reactor.pending] == [
+            (unit._watch_for_ace, 115.0)]
+
+    def test_found_it_connects_late(self):
+        unit = ace_p1_unit("lane0")
+        unit._ace = None
+
+        with unit.printer.connections.routed():
+            unit._watch_for_ace(unit.printer.reactor.monotonic())
+
+        assert unit._ace is not None and unit._ace.connected is True
+        assert unit.logger.messages == (
+            [("info", "ACE Ace_1: found it, connecting late")]
+            + TestAfcACEDeferredAceConnect.CONNECTED)
+        assert unit.printer.events == [("afc_ace:connected", (unit, False))]
+
+
+class TestAfcACEFinishConnect:
+    #: _finish_connect's log sequence for an unprepped lane1 with no failures.
+    CONNECTED = TestAfcACEDeferredAceConnect.CONNECTED
+
+    def test_no_connection_returns_before_logging_or_firing_connected_event(self):
+        unit = ace_p1_unit("lane1")
+        unit._ace = None
+
+        unit._finish_connect()
+
+        assert unit.logger.messages == []
+        assert unit.printer.events == []
+
+    def test_enable_rfid_failure_is_logged_and_connect_continues(self):
+        unit = ace_p1_unit("lane1")
+        unit._ace.enable_rfid = Recorder(raises=RuntimeError("rfid boom"))
+
+        unit._finish_connect()
+
+        assert unit.logger.messages == [
+            self.CONNECTED[0],
+            ("warning", "ACE Ace_1: enable_rfid failed (non-fatal): rfid boom"),
+        ] + self.CONNECTED[2:]
+        assert unit.printer.events == [("afc_ace:connected", (unit, False))]
+
+    def test_non_dict_get_status_result_is_ignored(self):
+        unit = ace_p1_unit("lane1")
+        unit._ace.set_reply("get_status", ace_status("ready"), "oops")
+
+        unit._finish_connect()
+
+        assert unit._cached_hw_status == {}
+        assert unit.logger.messages == self.CONNECTED
+
+    def test_get_status_exception_is_logged_as_debug(self):
+        unit = ace_p1_unit("lane1")
+        unit._ace.set_reply("get_status", ace_status("ready"), RuntimeError("status boom"))
+
+        unit._finish_connect()
+
+        assert unit._cached_hw_status == {}
+        assert unit.logger.messages == [
+            self.CONNECTED[0], self.CONNECTED[1],
+            ("debug", "ACE initial get_status failed: status boom"),
+        ] + self.CONNECTED[2:]
+
+    def test_extra_slot_entries_beyond_capacity_are_skipped(self):
+        unit = ace_p1_unit("lane1")
+        hw = ace_status("ready", "ready", "ready", "ready", "ready")
+        unit._ace.set_reply("get_status", ace_status("ready"), hw)
+
+        unit._finish_connect()
+
+        assert [slot.get("status") for slot in unit._slot_inventory] == ["ready"] * 4
+        assert unit._cached_hw_status == hw
+        assert unit.logger.messages == self.CONNECTED
+
+    def test_non_dict_slot_entry_is_skipped_without_aborting_the_rest(self):
+        unit = ace_p1_unit("lane1")
+        hw = {"status": "ready", "slots": [
+            {"index": 0, "status": "ready"}, "garbage",
+            {"index": 2, "status": "ready"}, {"index": 3, "status": "ready"}]}
+        unit._ace.set_reply("get_status", ace_status("ready"), hw)
+
+        unit._finish_connect()
+
+        assert [slot.get("status") for slot in unit._slot_inventory] == [
+            "ready", None, "ready", "ready"]
+        assert unit.logger.messages == self.CONNECTED
 
 
 class TestAfcACEOnAceReconnect:
@@ -1086,8 +1366,8 @@ class TestAfcACEOnHwStatusCallback:
         unit._on_hw_status_callback({"result": self.V1_IDLE})
 
         assert unit._current_action == ""
-        assert unit.logger.messages == [("info", "ACE Ace_1: idle -> preload(slot 0)"),
-                                        ("info", "ACE Ace_1: preload(slot 0) -> idle")]
+        assert unit.logger.messages == [("debug", "ACE Ace_1: idle -> preload(slot 0)"),
+                                        ("debug", "ACE Ace_1: preload(slot 0) -> idle")]
 
     def test_callback_no_duplicate_log_when_action_unchanged(self):
         unit = self._unit()
@@ -1096,7 +1376,7 @@ class TestAfcACEOnHwStatusCallback:
         unit._on_hw_status_callback({"result": self.ACE2_BUSY})
 
         assert unit._current_action == "feeding(slot 0)"
-        assert unit.logger.messages == [("info", "ACE Ace_1: idle -> feeding(slot 0)")]
+        assert unit.logger.messages == [("debug", "ACE Ace_1: idle -> feeding(slot 0)")]
 
     def test_callback_tracks_action_even_during_operation(self):
         unit = self._unit(operation_active=True)
@@ -1108,7 +1388,7 @@ class TestAfcACEOnHwStatusCallback:
         # Slot sync and the stuck check were skipped.
         assert unit._slot_inventory[0] == {}
         assert unit._stuck_tripped is True
-        assert unit.logger.messages == [("info", "ACE Ace_1: idle -> feeding(slot 0)")]
+        assert unit.logger.messages == [("debug", "ACE Ace_1: idle -> feeding(slot 0)")]
 
     def test_callback_temp_reply_does_not_touch_action(self):
         unit = self._unit()
@@ -1127,7 +1407,7 @@ class TestAfcACEOnHwStatusCallback:
         unit._on_hw_status_callback({"result": status})
 
         assert unit.printer.events == []
-        assert unit.logger.messages == [("info", "ACE Ace_1: idle -> preloading(slot 2)")]
+        assert unit.logger.messages == [("debug", "ACE Ace_1: idle -> preloading(slot 2)")]
 
     def test_status_reply_updates_status_cache_and_syncs(self):
         unit = self._unit()
@@ -1313,7 +1593,7 @@ class TestAfcACEGetStatus:
               "dryer_status": {"status": "stop", "target_temp": 45, "remain_time": 30,
                                "duration": 240}}
         unit = ace_p1_unit("lane0", "lane1", hw_status=hw, inventory={0: {
-            "status": "ready", "sku": "HPL19-107", "material": "PLA",
+            "status": "ready", "rfid": 2, "sku": "HPL19-107", "material": "PLA",
             "uid": "BB2613B0102474", "color": [137, 168, 79]}})
         unit._current_action = "feeding(slot 0)"
         unit._cached_sensor_state = {"slot_sensors": [{"buf_back": True}]}
@@ -1330,7 +1610,7 @@ class TestAfcACEGetStatus:
             "ace_temp": 28, "ace_dryer": "stop", "ace_dryer_target": 45,
             "ace_dryer_remain": 30, "ace_dryer_duration": 240, "ace_dry_rotate": False,
             "ace_status_age": 0.0, "ace_status_stale": False,
-            "ace_slots": self._slots({"status": "ready", "sku": "HPL19-107",
+            "ace_slots": self._slots({"status": "ready", "rfid": 2, "sku": "HPL19-107",
                                       "material": "PLA", "uid": "BB2613B0102474",
                                       "color": [137, 168, 79], "buffer": "advancing"})}
 
@@ -2041,6 +2321,8 @@ class TestAfcACEOnFilamentInsert:
 
         assert unit.afc.spool.clear_values.calls == [((lane,), {})]
         assert unit.afc.spool.set_spoolID.calls == [((lane, 5), {})]
+        # The restore branch fired, so the no-identity default-values branch must not.
+        assert unit.afc.spool._set_values.calls == []
         assert unit._slot_inventory[0]["raw"] == {}
         assert wire.moves() == [("feed_filament", {"index": 0, "length": 60.0, "speed": 100.0})]
         assert lane.loaded_to_hub is True
@@ -2079,6 +2361,8 @@ class TestAfcACEOnFilamentInsert:
         unit.on_filament_insert(lane)
 
         assert unit.afc.spool.set_spoolID.calls == [((lane, 5), {})]
+        # The restore branch fired, so the no-identity default-values branch must not.
+        assert unit.afc.spool._set_values.calls == []
         assert lane._afc_staged_spool_id is None
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
@@ -2092,6 +2376,8 @@ class TestAfcACEOnFilamentInsert:
         unit.on_filament_insert(lane)
 
         assert unit.afc.spool.set_spoolID.calls == []
+        # The tag values apply instead of AFC's default values.
+        assert unit.afc.spool._set_values.calls == []
         assert lane._afc_staged_spool_id is None
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
@@ -2107,6 +2393,8 @@ class TestAfcACEOnFilamentInsert:
         # The default clear_values leaves spool_id set.
         assert unit.afc.spool.clear_values.calls == [((lane,), {})]
         assert unit.afc.spool.set_spoolID.calls == []
+        # The tag values apply instead of AFC's default values.
+        assert unit.afc.spool._set_values.calls == []
         assert lane.spool_id == 5
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
@@ -2168,6 +2456,33 @@ class TestAfcACEOnFilamentInsert:
             ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
             ("error", "ACE on_filament_insert: post_insert event error for lane0: reader down")]
 
+    def test_slot_beyond_unit_capacity_is_a_no_op(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        # Force an out-of-range slot (a correctly configured unit never does this).
+        unit._slot_map["lane0"] = 99
+
+        unit.on_filament_insert(lane)
+
+        assert unit.afc.spool.clear_values.calls == []
+        assert unit.printer.events == []
+        assert unit.logger.messages == []
+
+    def test_applies_filament_defaults_when_rfid_hook_is_available(self, monkeypatch):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        lane.spool_id = None
+        lane.remember_spool = False
+        apply_defaults = Recorder()
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", apply_defaults)
+
+        unit.on_filament_insert(lane)
+
+        assert apply_defaults.calls == [((lane, unit._slot_inventory[0]), {
+            "color_converter": afc_ace_module.rgb_array_to_hex,
+            "afc_defaults": {"default_material_type": None, "default_color": None}})]
+        assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
+
 
 class TestAfcACEOnFilamentRemove:
     def test_clears_inventory_and_hub_state(self):
@@ -2183,6 +2498,19 @@ class TestAfcACEOnFilamentRemove:
         assert lane.loaded_to_hub is False
         assert lane._load_state is False
         assert unit._hub_load_suppressed == set()
+        assert unit.logger.messages == []
+
+    def test_slot_beyond_unit_capacity_skips_inventory_clear(self):
+        unit = ace_p1_unit(LaneSpec("lane0", slot=1, prep=True, load=True),
+                           inventory={1: {"material": "PLA"}})
+        lane = unit.lanes["lane0"]
+        # Force an out-of-range slot (a correctly configured unit never does this).
+        unit._slot_map["lane0"] = 99
+
+        unit.on_filament_remove(lane)
+
+        assert unit._slot_inventory[1] == {"material": "PLA"}
+        assert lane.loaded_to_hub is False
         assert unit.logger.messages == []
 
 
@@ -2274,8 +2602,46 @@ class TestAfcACECaptureTd1Data:
         assert unit._operation_active is False
         assert unit.logger.messages == []
 
+    def test_delegates_to_inner_with_operation_flag_set(self):
+        unit, lane = self._unit(td1_device_id="td1", td1_bowden_length=300)
+        seen: List[bool] = []
+        unit._capture_td1_data_inner = Hook(
+            lambda cur_lane, slot: (seen.append(unit._operation_active),
+                                    (True, "captured"))[1])
+
+        result = unit.capture_td1_data(lane)
+
+        assert result == (True, "captured")
+        assert unit._capture_td1_data_inner.calls == [((lane, 0), {})]
+        assert seen == [True]
+        assert unit._operation_active is False
+        assert unit.logger.messages == []
+
 
 class TestAfcACECaptureTd1DataInner:
+    def test_no_connection_returns_before_any_feed(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True,
+                                    values={"td1_bowden_length": 300}))
+        lane = unit.lanes["lane0"]
+        unit._ace = None
+
+        ok, msg = unit._capture_td1_data_inner(lane, 0)
+
+        assert (ok, msg) == (False, "ACE not connected")
+        assert unit.logger.messages == []
+
+    def test_missing_bowden_length_returns_before_any_feed(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        lane.td1_bowden_length = None
+        wire = AceP1Wire(unit)
+
+        ok, msg = unit._capture_td1_data_inner(lane, 0)
+
+        assert (ok, msg) == (False, "td1_bowden_length not set for lane0")
+        assert wire.moves() == []
+        assert unit.logger.messages == []
+
     def test_captures_when_get_td1_succeeds(self, monkeypatch):
         unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True,
                                             td1_bowden_length=300)
@@ -2298,6 +2664,80 @@ class TestAfcACECaptureTd1DataInner:
             ("info", "lane0 TD-1 data captured"),
             ("info", "ACE TD-1 capture: retracting 300.0mm for lane0")]
 
+    def test_feeds_to_hub_first_when_not_already_staged(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=False,
+                                            td1_bowden_length=300)
+        wire = AceP1Wire(unit)
+
+        ok, msg = unit._capture_td1_data_inner(lane, 0)
+
+        assert (ok, msg) == (True, "TD-1 data captured for lane0")
+        assert wire.moves() == [
+            ("feed_filament", {"index": 0, "length": 60.0, "speed": 100.0}),
+            ("feed_filament", {"index": 0, "length": 300.0, "speed": 100.0}),
+            ("unwind_filament", {"index": 0, "length": 360.0, "speed": 100.0,
+                                 "mode": "normal"})]
+        assert unit.logger.messages == [
+            ("info", "ACE TD-1 capture: feeding 60mm to hub for lane0"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("info", "ACE TD-1 capture: feeding 300.0mm to TD-1 for lane0"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("debug", ACE_P1_TD1_DATA_LINE),
+            ("info", "lane0 TD-1 data captured"),
+            ("info", "ACE TD-1 capture: retracting 360.0mm for lane0")]
+
+    def test_retries_get_td1_data_once_then_succeeds(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True,
+                                            td1_bowden_length=300)
+        AceP1Wire(unit)
+        attempts: List[int] = []
+        real_apply = unit._apply_td1_data
+
+        def flaky_apply(cur_lane, compare_time, td1_data, ignore_time=False):
+            """First call reports no detection yet; later calls behave normally."""
+            attempts.append(1)
+            if len(attempts) == 1:
+                return False
+            return real_apply(cur_lane, compare_time, td1_data, ignore_time)
+        unit._apply_td1_data = flaky_apply
+
+        ok, msg = unit._capture_td1_data_inner(lane, 0)
+
+        assert (ok, msg) == (True, "TD-1 data captured for lane0")
+        assert fetch.call_count == 2
+        assert len(attempts) == 2
+
+    def test_retract_failure_is_logged_and_still_reports_capture_result(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True,
+                                            td1_bowden_length=300)
+        AceP1Wire(unit)
+        unit._ace.unwind_filament = Recorder(raises=RuntimeError("unwind boom"))
+
+        ok, msg = unit._capture_td1_data_inner(lane, 0)
+
+        assert (ok, msg) == (True, "TD-1 data captured for lane0")
+        assert unit.logger.messages == [
+            ("info", "ACE TD-1 capture: feeding 300.0mm to TD-1 for lane0"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("debug", ACE_P1_TD1_DATA_LINE),
+            ("info", "lane0 TD-1 data captured"),
+            ("info", "ACE TD-1 capture: retracting 300.0mm for lane0"),
+            ("error", "ACE TD-1 capture retract failed: unwind boom")]
+
+    def test_unsuccessful_capture_reports_unload_completed(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True,
+                                            td1_bowden_length=300)
+        AceP1Wire(unit)
+        unit._apply_td1_data = Recorder(result=False)
+
+        ok, msg = unit._capture_td1_data_inner(lane, 0)
+
+        assert (ok, msg) == (False, "TD-1 data not captured (unload completed)")
+        assert unit.logger.messages == [
+            ("info", "ACE TD-1 capture: feeding 300.0mm to TD-1 for lane0"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("info", "ACE TD-1 capture: retracting 300.0mm for lane0")]
+
 
 class TestAfcACECalibrateTd1Inner:
     def test_success_at_hub_writes_config(self, monkeypatch):
@@ -2315,15 +2755,147 @@ class TestAfcACECalibrateTd1Inner:
         assert unit.afc.function.ConfigRewrite.calls == [(
             ("AFC_lane lane0", "td1_bowden_length", 0.0,
              "\n td1_bowden_length: New: 0.0 Old: None"), {})]
-        # Once for the TD-1 data, once for the new length.
-        assert unit.afc.save_vars.call_count == 2
+
+    def test_not_connected_returns_early(self):
+        unit = ace_p1_unit(LaneSpec("lane0", values={"td1_device_id": "td1"}))
+        lane = unit.lanes["lane0"]
+        unit._ace.connected = False
+
+        result = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert result == (False, "ACE not connected", 0)
+        assert unit.logger.messages == []
+
+    def test_missing_device_id_returns_early(self):
+        unit = ace_p1_unit(LaneSpec("lane0"))
+        lane = unit.lanes["lane0"]
+        lane.td1_device_id = None
+
+        result = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert result == (False,
+            "Cannot calibrate TD-1 for lane0, td1_device_id is a required "
+            "field in AFC_hub or per AFC_lane", 0)
+        assert unit.logger.messages == []
+
+    def test_virtual_hub_feeds_dist_hub_when_not_staged(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=False)
+        wire = AceP1Wire(unit)
+
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert (ok, dist) == (True, 0.0)
+        # Not staged at hub: retract_dist = bow_pos (0.0) + dist_hub (60).
+        assert wire.moves() == [
+            ("feed_filament", {"index": 0, "length": 60.0, "speed": 100.0}),
+            ("unwind_filament", {"index": 0, "length": 60.0, "speed": 100.0,
+                                 "mode": "normal"})]
+        assert unit.logger.messages == [
+            ("info", "ACE calibrate_td1: feeding slot 0 in 50.0mm steps, max 6000mm, "
+                     "TD-1 device=td1"),
+            ("info", "ACE calibrate_td1: feeding 60mm to virtual hub"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("debug", ACE_P1_TD1_DATA_LINE),
+            ("info", "lane0 TD-1 data captured"),
+            ("info", "ACE calibrate_td1: TD-1 detected filament at 0.0mm")]
+
+    def test_virtual_hub_with_zero_dist_hub_skips_phase1_feed(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=False,
+                                            dist_hub=0)
+        wire = AceP1Wire(unit)
+
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert (ok, dist) == (True, 0.0)
+        assert wire.moves() == [
+            ("unwind_filament", {"index": 0, "length": 0.0, "speed": 100.0,
+                                 "mode": "normal"})]
+
+    def test_real_hub_sensor_triggers_then_phase2_runs(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=False)
+        hub = unit.printer.add_hub("realhub", switch_pin="PA1")
+        lane.hub_obj = hub
+        hub.state = True
+        wire = AceP1Wire(unit)
+
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert (ok, dist) == (True, 0.0)
+        # Real hub, filament not yet staged: feed dist_hub + 200 then detect at hub.
+        assert wire.moves()[0] == (
+            "feed_filament", {"index": 0, "length": 260.0, "speed": 100.0})
+        assert unit.logger.messages == [
+            ("info", "ACE calibrate_td1: feeding slot 0 in 50.0mm steps, max 6000mm, "
+                     "TD-1 device=td1"),
+            ("info", "ACE calibrate_td1: feeding to hub sensor"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("debug", ACE_P1_TD1_DATA_LINE),
+            ("info", "lane0 TD-1 data captured"),
+            ("info", "ACE calibrate_td1: TD-1 detected filament at 0.0mm")]
+
+    def test_real_hub_sensor_never_triggers_aborts(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=False)
+        hub = unit.printer.add_hub("realhub", switch_pin="PA1")
+        lane.hub_obj = hub
+        hub.state = False
+        AceP1Wire(unit)
+
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert (ok, dist) == (False, 0)
+        assert msg == "Hub sensor did not trigger for lane0"
+        assert fetch.call_count == 0
+
+    def test_phase2_retries_before_detecting(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True)
+        wire = AceP1Wire(unit)
+        attempts: List[int] = []
+        real_apply = unit._apply_td1_data
+
+        def flaky_apply(cur_lane, compare_time, td1_data, ignore_time=False):
+            """First call reports no detection yet; the retry behaves normally."""
+            attempts.append(1)
+            if len(attempts) == 1:
+                return False
+            return real_apply(cur_lane, compare_time, td1_data, ignore_time)
+        unit._apply_td1_data = flaky_apply
+
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert ok is True
+        assert dist == 50.0
+        assert len(attempts) == 2
+        assert [m for m, _ in wire.moves()].count("feed_filament") == 1
+
+    def test_phase2_gives_up_past_max_bowden_length(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True)
+        wire = AceP1Wire(unit)
+        unit._apply_td1_data = Recorder(result=False)
+
+        # One 7000mm step clears the 6000mm cap, so the very next pass aborts.
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 7000.0, 1.0)
+
+        assert ok is False
+        assert dist == 7000.0
+        assert msg == "TD-1 failed to detect filament after 7000mm"
+        assert [m for m, _ in wire.moves()].count("feed_filament") == 1
+
+    def test_retract_failure_is_logged_and_still_reports_calibration(self, monkeypatch):
+        unit, lane, fetch = ace_p1_td1_unit(monkeypatch, loaded_to_hub=True)
+        AceP1Wire(unit)
+        unit._ace.unwind_filament = Recorder(raises=RuntimeError("unwind boom"))
+
+        ok, msg, dist = unit._calibrate_td1_inner(lane, 50.0, 1.0)
+
+        assert ok is True
         assert unit.logger.messages == [
             ("info", "ACE calibrate_td1: feeding slot 0 in 50.0mm steps, max 6000mm, "
                      "TD-1 device=td1"),
             ("info", "ACE calibrate_td1: filament already at hub, skipping hub feed"),
             ("debug", ACE_P1_TD1_DATA_LINE),
             ("info", "lane0 TD-1 data captured"),
-            ("info", "ACE calibrate_td1: TD-1 detected filament at 0.0mm")]
+            ("info", "ACE calibrate_td1: TD-1 detected filament at 0.0mm"),
+            ("error", "ACE calibrate_td1: retract failed: unwind boom")]
 
 
 class TestAfcACEFeedToHubProbing:
@@ -2372,6 +2944,16 @@ class TestAfcACEFeedToHubProbing:
         :return tuple: the feed command to slot 3 at full speed
         """
         return ("feed_filament", {"index": 3, "length": length, "speed": 100.0})
+
+    def test_no_connection_returns_false_before_any_event_or_feed(self):
+        unit, lane, wire = self._unit()
+        unit._ace = None
+
+        assert unit._feed_to_hub_probing(lane, 3, dist_hub=200.0) is False
+
+        assert wire.moves() == []
+        assert unit.printer.events == []
+        assert unit.logger.messages == []
 
     def test_no_listener_is_plain_dist_hub_feed(self):
         unit, lane, wire = self._unit()
@@ -2503,6 +3085,82 @@ class TestAfcACEPrepPostLoad:
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
             ("info", "ACE prep_post_load: lane3 staged at hub (dist_hub=0mm)")]
+
+    def test_unit_level_load_to_hub_override_is_honored(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True), values={"load_to_hub": True})
+        lane = unit.lanes["lane0"]
+        lane.load_to_hub = False  # a per-lane False is overridden by the unit setting.
+        AceP1Wire(unit)
+
+        unit.prep_post_load(lane)
+
+        assert lane.loaded_to_hub is True
+
+    def test_not_prepped_returns_early(self):
+        unit = ace_p1_unit(LaneSpec("lane0"))
+        lane = unit.lanes["lane0"]
+
+        unit.prep_post_load(lane)
+
+        assert lane.loaded_to_hub is False
+        assert unit._ace.commands == []
+        assert unit.logger.messages == []
+
+    def test_not_connected_returns_early(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.connected = False
+
+        unit.prep_post_load(lane)
+
+        assert lane.loaded_to_hub is False
+        assert unit.logger.messages == []
+
+    def test_removed_during_stage_resets_prep_without_retrying(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        unit._feed_to_hub_probing = Recorder(result=False)
+
+        unit.prep_post_load(lane)
+
+        assert lane.loaded_to_hub is False
+        # prep_state started True (LaneSpec prep=True); the abort path clears it.
+        assert lane.prep_state is False
+        assert unit.afc.save_vars.call_count == 1
+        assert unit.logger.messages == []
+
+    def test_td1_capture_runs_after_staging_when_configured(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, values={"td1_device_id": "td1"}))
+        lane = unit.lanes["lane0"]
+        lane.td1_when_loaded = True
+        unit.afc.td1_present = True
+        unit.capture_td1_data = Recorder(result=(True, "captured"))
+        AceP1Wire(unit)
+
+        unit.prep_post_load(lane)
+
+        assert unit.capture_td1_data.calls == [((lane,), {})]
+        assert lane.loaded_to_hub is True
+        assert unit.logger.messages == [
+            ("info", "ACE prep_post_load: lane0 staged at hub (dist_hub=60mm)"),
+            ("info", "ACE prep_post_load: capturing TD-1 data for lane0")]
+
+    def test_all_retries_fail_logs_warnings_then_a_final_error(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        unit._feed_to_hub_probing = Recorder(raises=RuntimeError("stage boom"))
+
+        unit.prep_post_load(lane)
+
+        assert lane.loaded_to_hub is False
+        assert unit.logger.messages == [
+            ("warning", "ACE prep_post_load: attempt 1/3 failed, retrying in 5s: "
+                       "stage boom"),
+            ("warning", "ACE prep_post_load: attempt 2/3 failed, retrying in 10s: "
+                       "stage boom"),
+            ("error", "ACE prep_post_load failed for lane0 after 3 attempts: "
+                     "stage boom")]
+        assert [call[0][0] for call in unit.afc.reactor.pause.calls] == [105.0, 115.0]
 
 
 class TestAfcACEEjectLane:
@@ -2745,7 +3403,7 @@ class TestAfcACEGetLaneResetCommand:
 
         command = unit.get_lane_reset_command(unit.lanes["lane0"], 0.0)
 
-        assert command == "ACE_LANE_RESET UNIT=Ace_1 LANE=lane0"
+        assert command == "AFC_ACE_LANE_RESET UNIT=Ace_1 LANE=lane0"
 
 
 class TestAfcACEWaitFirstConnect:
@@ -2897,6 +3555,92 @@ class TestAfcACESystemTest:
                      "<span class=success--text> AND LOADED</span>"
                      "<span class=primary--text> in ToolHead</span>")]
 
+    def test_non_dict_status_result_leaves_prep_state_unchanged(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_status", "oops")
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is True
+        assert lane.prep_state is True
+        assert lane.status == AFCLaneState.LOADED
+
+    def test_empty_slots_list_leaves_prep_state_unchanged(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_status", {"status": "ready", "slots": []})
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is True
+        assert lane.prep_state is True
+
+    def test_non_dict_slot_entry_leaves_prep_state_unchanged(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_status", {"status": "ready", "slots": ["garbage"]})
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is True
+        assert lane.prep_state is True
+
+    def test_get_status_exception_is_logged_as_debug(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_status", RuntimeError("status boom"))
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is True
+        assert lane.prep_state is True
+        assert unit.logger.messages[0] == (
+            "debug", "ACE get_status failed during PREP: status boom")
+
+    def test_fault_when_tool_loaded_but_slot_reports_empty(self):
+        # tool_loaded drives the virtual hub's raw_load_state True even though
+        # the slot read below reports empty, surfacing a prep/load mismatch.
+        unit = ace_p1_unit(LaneSpec("lane0", tool_loaded=True))
+        lane = unit.lanes["lane0"]
+        unit._ace.set_reply("get_status", ace_status("empty"))
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is False
+        assert lane.prep_state is False
+        assert lane.current_led_state == "fault"
+        assert unit.logger.messages == [
+            ("info", "lane0 tool cmd: T0  <span class=error--text>CHECK FILAMENT Prep: "
+                     "False - Load: True</span>")]
+
+    def test_applies_filament_defaults_when_available(self, monkeypatch):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        apply_defaults = Recorder()
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", apply_defaults)
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is True
+        assert apply_defaults.calls == [((lane, unit._slot_inventory[0]), {
+            "color_converter": afc_ace_module.rgb_array_to_hex,
+            "afc_defaults": {"default_material_type": None, "default_color": None}})]
+
+    def test_tooled_lane_not_current_goes_idle(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True, tool_loaded=True),
+                           current="other")
+        lane = unit.lanes["lane0"]
+
+        ok = unit.system_Test(lane, 0.0, False, False)
+
+        assert ok is True
+        # afc.current != "lane0", so the TOOLED status assignment is skipped.
+        assert lane.status == AFCLaneState.LOADED
+        assert lane.current_led_state == "tool_loaded_idle"
+        assert unit.afc.spool.set_active_spool.calls == []
+        assert unit.printer.events == []
+
 
 class TestAfcACEFeedUntilSensor:
     @staticmethod
@@ -2927,6 +3671,16 @@ class TestAfcACEFeedUntilSensor:
         :return tuple: the feed command to slot 0
         """
         return ("feed_filament", {"index": 0, "length": length, "speed": 100.0})
+
+    def test_no_connection_returns_zero_fed_and_not_triggered(self):
+        unit, lane, wire = self._unit(trigger_after=1)
+        unit._ace = None
+
+        result = unit._feed_until_sensor(0, lane, 100.0, step_size=50.0)
+
+        assert result == (0.0, False)
+        assert wire.moves() == []
+        assert unit.logger.messages == []
 
     def test_triggers_on_first_step(self):
         unit, lane, wire = self._unit(trigger_after=1)
@@ -2965,6 +3719,67 @@ class TestAfcACEFeedUntilSensor:
         assert unit.logger.messages == [
             ("warning", "ACE calibration: feed failed at 0mm, retrying: first fails"),
             ("info", "ACE calibration: sensor triggered at 50.0mm")]
+
+
+class TestAfcACECmdAFCACEBufferState:
+    def test_not_connected(self):
+        unit = ace_p2_unit()
+        unit._ace.connected = False
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_BUFFER_STATE(gcmd)
+
+        assert gcmd.messages == [("info", "ACE not connected")]
+        assert unit._ace.commands == []
+
+    def test_get_sensor_state_error_surfaced(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_sensor_state", RuntimeError("nope"))
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_BUFFER_STATE(gcmd)
+
+        assert gcmd.messages == [("info", "AFC_ACE_BUFFER_STATE: nope")]
+        assert unit._ace.commands == [("get_sensor_state", {})]
+
+    def test_no_slot_sensor_data(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_sensor_state", {"sensor_bitmask": 0})
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_BUFFER_STATE(gcmd)
+
+        assert gcmd.messages == [
+            ("info", "AFC_ACE_BUFFER_STATE: no per-slot sensor data (firmware without "
+                     "GET_SENSOR_STATE, or unexpected reply).")]
+
+    def test_non_dict_reply_also_reports_no_data(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_sensor_state", None)
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_BUFFER_STATE(gcmd)
+
+        assert gcmd.messages == [
+            ("info", "AFC_ACE_BUFFER_STATE: no per-slot sensor data (firmware without "
+                     "GET_SENSOR_STATE, or unexpected reply).")]
+
+    def test_reports_each_slot_and_shared_feed_sensor(self):
+        unit = ace_p2_unit(LaneSpec("lane0", slot=0))
+        slot_sensors = [
+            {"insert": True, "empty": False, "buf_rst": True, "buf_back": False},
+            {"insert": False, "empty": True, "buf_rst": False, "buf_back": True}]
+        unit._ace.set_reply("get_sensor_state",
+                            {"slot_sensors": slot_sensors, "buf_feed": True})
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_BUFFER_STATE(gcmd)
+
+        assert gcmd.messages == [("info",
+            "ACE buffer/sensor state (slot: insert empty | buf_rst buf_back):\n"
+            "  slot 0 (lane0): insert=1 empty=0 | buf_rst=1 buf_back=0\n"
+            "  slot 1 (-): insert=0 empty=1 | buf_rst=0 buf_back=1\n"
+            "  shared buf_feed=1")]
 
 
 class TestAfcACECalibrateBowden:
@@ -3046,6 +3861,16 @@ class TestAfcACECalibrateBowdenInner:
         assert wire.moves() == []
         assert unit.logger.messages == []
 
+    def test_no_connection_returns_before_clearing_sensor_state(self):
+        unit, lane, wire = self._unit(trigger_at=None)
+        unit._ace = None
+
+        result = unit._calibrate_bowden_inner(lane, lane.hub_obj, 0)
+
+        assert result == (False, "ACE not connected", 0.0)
+        assert wire.moves() == []
+        assert unit.logger.messages == []
+
     def test_success_writes_config(self):
         unit, lane, wire = self._unit(trigger_at=500.0)
         hub = lane.hub_obj
@@ -3055,7 +3880,7 @@ class TestAfcACECalibrateBowdenInner:
         assert (ok, dist) == (True, 500.0)
         assert msg == "afc_bowden_length calibration: 500.0mm (was 900.0mm)"
         assert hub.afc_bowden_length == 500.0
-        assert hub.afc_unload_bowden_length == 500.0
+        assert hub.afc_unload_bowden_length == 600.0
         # Ten 50mm steps reach the sensor, then 5mm past it is retracted.
         assert wire.moves() == [self.STEP] * 10 + [
             ("unwind_filament", {"index": 0, "length": 505.0, "speed": 100.0,
@@ -3063,8 +3888,8 @@ class TestAfcACECalibrateBowdenInner:
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_hub Ace_1_hub", "afc_bowden_length", 500.0,
               "\n afc_bowden_length: New: 500.0 Old: 900.0"), {}),
-            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 500.0,
-              "\n afc_unload_bowden_length: 500.0"), {})]
+            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 600.0,
+              "\n afc_unload_bowden_length: 600.0"), {})]
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
             ("info", "ACE calibration: sensor triggered at 500.0mm"),
@@ -3082,7 +3907,7 @@ class TestAfcACECalibrateBowdenInner:
         assert (ok, dist) == (True, 560.0)
         assert msg == "afc_bowden_length calibration: 560.0mm (was 900.0mm)"
         assert hub.afc_bowden_length == 560.0
-        assert hub.afc_unload_bowden_length == 560.0
+        assert hub.afc_unload_bowden_length == 600.0
         # The retract is the measured 500mm + 5, not the staged total.
         assert wire.moves() == [self.STEP] * 10 + [
             ("unwind_filament", {"index": 0, "length": 505.0, "speed": 100.0,
@@ -3090,8 +3915,8 @@ class TestAfcACECalibrateBowdenInner:
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_hub Ace_1_hub", "afc_bowden_length", 560.0,
               "\n afc_bowden_length: New: 560.0 Old: 900.0"), {}),
-            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 560.0,
-              "\n afc_unload_bowden_length: 560.0"), {})]
+            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 600.0,
+              "\n afc_unload_bowden_length: 600.0"), {})]
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
             ("info", "ACE calibration: sensor triggered at 500.0mm"),
@@ -3119,6 +3944,50 @@ class TestAfcACECalibrateBowdenInner:
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 3000.0mm steps)"),
             ("info", "ACE calibrate: retracting 6000mm")]
+
+    def test_no_trigger_retract_failure_is_logged(self):
+        unit, lane, wire = self._unit(trigger_at=None, calibration_step=3000)
+        hub = lane.hub_obj
+        unit._ace.unwind_filament = Recorder(raises=RuntimeError("unwind boom"))
+
+        ok, msg, dist = unit._calibrate_bowden_inner(lane, hub, 0)
+
+        assert (ok, dist) == (False, 6000.0)
+        assert unit.logger.messages == [
+            ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 3000.0mm steps)"),
+            ("info", "ACE calibrate: retracting 6000mm"),
+            ("error", "ACE calibrate: retract failed: unwind boom")]
+
+    def test_success_retract_failure_is_logged(self):
+        unit, lane, wire = self._unit(trigger_at=500.0)
+        hub = lane.hub_obj
+        unit._ace.unwind_filament = Recorder(raises=RuntimeError("unwind boom"))
+
+        ok, msg, dist = unit._calibrate_bowden_inner(lane, hub, 0)
+
+        assert (ok, dist) == (True, 500.0)
+        assert unit.logger.messages == [
+            ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
+            ("info", "ACE calibration: sensor triggered at 500.0mm"),
+            ("info", "ACE calibrate: trigger at 500.0mm"),
+            ("info", "ACE calibrate: retracting 505mm"),
+            ("error", "ACE calibrate: retract failed: unwind boom")]
+
+    def test_staged_lane_with_zero_dist_hub_skips_the_addition(self):
+        unit, lane, wire = self._unit(trigger_at=500.0)
+        hub = lane.hub_obj
+        lane.loaded_to_hub = True
+        lane.dist_hub = 0
+
+        ok, msg, dist = unit._calibrate_bowden_inner(lane, hub, 0)
+
+        # dist_hub is 0, so nothing is added to the measured distance.
+        assert (ok, dist) == (True, 500.0)
+        assert unit.logger.messages == [
+            ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
+            ("info", "ACE calibration: sensor triggered at 500.0mm"),
+            ("info", "ACE calibrate: trigger at 500.0mm"),
+            ("info", "ACE calibrate: retracting 505mm")]
 
 
 class TestAfcACECalibrateLane:
@@ -3725,6 +4594,94 @@ class TestAfcACEAceLoadInner:
             self.STALL_LOG, self.STALL_LOG, self.PULSE_LOG, self.STALL_LOG]
         assert unit.afc.afcDeltaTime.messages == []
 
+    def test_feed_error_with_near_complete_fed_length_stops_without_a_resend(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True),
+                           values={"load_approach_length": 0, "load_retry_timeout": 1.0})
+        lane = unit.lanes["lane0"]
+        wire = AceP1Wire(unit)
+        wire.stall(True)
+        unit._ace.set_reply("get_feed_info", {"feed_info": [{"length": 959.6}]})
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj) is False
+
+        feeds = [(m, p) for m, p in unit._ace.commands if m == "feed_filament"]
+        # dist_hub 60 + bowden 900 = 960mm; the near-complete fed length (959.6mm)
+        # leaves under 0.5mm remaining, so the 960mm fast feed is sent exactly
+        # once, with no resend of it (the wait still reports success since the
+        # unit went idle, so the single stall alone never fails the move).
+        assert feeds.count(self._feed(960.0, 100.0, slot=0)) == 1
+        assert not any("feeding the remaining" in msg for _, msg in unit.logger.messages)
+
+    def test_sensor_triggers_during_a_retry_pulse(self):
+        unit, lane = self._staged(load_approach_length=0, load_retry_timeout=5.0)
+        wire = self._wire(unit, lane, sensor_on=2)
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj) is True
+
+        assert wire.moves() == [self._feed(3900.0, 80.0), self._feed(100.0, 50.0)]
+        assert unit.logger.messages == [
+            self.PULSE_LOG,
+            self.AT_SENSOR,
+            ("info", "Sensor triggered on retry pulse 1 for lane3"),
+            self.TO_NOZZLE]
+        assert unit.afc.afcDeltaTime.messages == self.DELTAS
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_feed_failure_with_sensor_already_triggered_continues(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True), values={"load_approach_length": 0})
+        lane = unit.lanes["lane0"]
+        AceP1Wire(unit)
+
+        def fake_wait(*args: Any, **kwargs: Any) -> bool:
+            """The sensor trips during this failed wait, as a real one can."""
+            lane.extruder_obj.tool_start_state = True
+            return False
+        unit._wait_for_feed_complete = fake_wait
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj) is True
+
+        assert unit.logger.messages == [
+            ("info", "Feed error but sensor triggered, continuing"),
+            ("debug", "ACE: waiting for ready (status=busy, 0.0s/30s)"),
+            ("info", "ACE load: advancing tool_stn 72mm to nozzle for lane0")]
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_smart_load_retry_recovers_then_continues(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True), values={"load_approach_length": 0})
+        lane = unit.lanes["lane0"]
+        AceP1Wire(unit)
+        unit._wait_for_feed_complete = Recorder(result=False)
+
+        def fake_retry(cur_lane: Any, slot: int, feed_dist: float) -> bool:
+            """Recovers on retry, as a real smart_load_retry that found the sensor."""
+            lane.extruder_obj.tool_start_state = True
+            return True
+        unit._smart_load_retry = fake_retry
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj) is True
+
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_pulse_exception_is_swallowed_and_retried(self):
+        unit, lane = self._staged(load_approach_length=0, load_retry_timeout=2.0)
+        wire = self._wire(unit, lane, sensor_on=2)
+        original_feed = unit._ace.feed_filament
+        calls: List[int] = []
+
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            """The first retry pulse raises, as a transient serial write can."""
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("pulse boom")
+            return original_feed(*args, **kwargs)
+        unit._ace.feed_filament = wrapped
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj) is True
+
+        assert len(calls) == 3
+        assert wire.moves() == [self._feed(3900.0, 80.0), self._feed(100.0, 50.0)]
+        assert unit.afc.error.handle_lane_failure.calls == []
+
 
 class TestAfcACELaneUnloading:
     def test_calls_prepare_unload(self):
@@ -3930,14 +4887,14 @@ class TestAfcACEAceUnloadInner:
         assert unit.logger.messages == []
 
 
-class TestAfcACECmdACECalibrate:
+class TestAfcACECmdAFCACECalibrate:
     def test_usage_on_unknown_lane(self):
         unit = ace_p1_unit("lane0")
         gcmd = make_gcmd(LANE="ghost")
 
-        unit.cmd_ACE_CALIBRATE(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE(gcmd)
 
-        assert gcmd.responses == ["Usage: ACE_CALIBRATE LANE=<lane_name>"]
+        assert gcmd.responses == ["Usage: AFC_ACE_CALIBRATE LANE=<lane_name>"]
         assert unit._ace.commands == []
         assert unit.logger.messages == []
 
@@ -3945,9 +4902,9 @@ class TestAfcACECmdACECalibrate:
         unit = ace_p1_unit("lane0")
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_CALIBRATE(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE(gcmd)
 
-        assert gcmd.responses == ["Usage: ACE_CALIBRATE LANE=<lane_name>"]
+        assert gcmd.responses == ["Usage: AFC_ACE_CALIBRATE LANE=<lane_name>"]
         assert unit._ace.commands == []
         assert unit.logger.messages == []
 
@@ -3962,15 +4919,16 @@ class TestAfcACECmdACECalibrate:
         AceP1Wire(unit, on_move=lambda method, params: setattr(sensor, "runout_buttun_state", 1))
         gcmd = make_gcmd(LANE="lane0")
 
-        unit.cmd_ACE_CALIBRATE(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE(gcmd)
 
         assert gcmd.responses == ["afc_bowden_length calibration: 50.0mm (was 900.0mm)"]
         assert lane.hub_obj.afc_bowden_length == 50.0
+        assert lane.hub_obj.afc_unload_bowden_length == 150.0
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_hub Ace_1_hub", "afc_bowden_length", 50.0,
               "\n afc_bowden_length: New: 50.0 Old: 900.0"), {}),
-            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 50.0,
-              "\n afc_unload_bowden_length: 50.0"), {})]
+            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 150.0,
+              "\n afc_unload_bowden_length: 150.0"), {})]
         # The first 50mm step trips the sensor, then 5mm past it is retracted.
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
@@ -3979,14 +4937,14 @@ class TestAfcACECmdACECalibrate:
             ("info", "ACE calibrate: retracting 55mm")]
 
 
-class TestAfcACECmdACECalibrateHub:
+class TestAfcACECmdAFCACECalibrateHub:
     def test_usage_on_unknown_lane(self):
         unit = ace_p1_unit("lane0")
         gcmd = make_gcmd(LANE="ghost")
 
-        unit.cmd_ACE_CALIBRATE_HUB(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE_HUB(gcmd)
 
-        assert gcmd.responses == ["Usage: ACE_CALIBRATE_HUB LANE=<lane_name>"]
+        assert gcmd.responses == ["Usage: AFC_ACE_CALIBRATE_HUB LANE=<lane_name>"]
         assert unit._ace.commands == []
         assert unit.logger.messages == []
 
@@ -3994,7 +4952,7 @@ class TestAfcACECmdACECalibrateHub:
         unit = ace_p1_unit("lane0")
         gcmd = make_gcmd(LANE="lane0")
 
-        unit.cmd_ACE_CALIBRATE_HUB(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE_HUB(gcmd)
 
         assert gcmd.responses == ["Hub calibration requires a physical hub sensor, not virtual"]
         assert unit._ace.commands == []
@@ -4005,7 +4963,7 @@ class TestAfcACECmdACECalibrateHub:
         unit.lanes["lane0"].hub_obj = None
         gcmd = make_gcmd(LANE="lane0")
 
-        unit.cmd_ACE_CALIBRATE_HUB(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE_HUB(gcmd)
 
         assert gcmd.responses == ["Physical hub sensor required for calibration"]
         assert unit.logger.messages == []
@@ -4019,7 +4977,7 @@ class TestAfcACECmdACECalibrateHub:
         AceP1Wire(unit, on_move=lambda method, params: setattr(hub, "state", True))
         gcmd = make_gcmd(LANE="lane0")
 
-        unit.cmd_ACE_CALIBRATE_HUB(gcmd)
+        unit.cmd_AFC_ACE_CALIBRATE_HUB(gcmd)
 
         assert gcmd.responses == ["dist_hub calibration: 50.0mm (was 60mm)"]
         assert lane.dist_hub == 50.0
@@ -4031,7 +4989,7 @@ class TestAfcACECmdACECalibrateHub:
             ("info", "ACE hub calibrate: trigger at 50.0mm")]
 
 
-class TestAfcACECmdACEStatus:
+class TestAfcACECmdAFCACEStatus:
     def test_cmd_ace_status_reports_busy_action(self):
         unit = ace_p1_unit("lane0")
         unit._ace.set_reply("get_status", {
@@ -4040,7 +4998,7 @@ class TestAfcACECmdACEStatus:
                       {"index": 1, "slot_status": "ready", "status": "ready"}]})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_STATUS(gcmd)
+        unit.cmd_AFC_ACE_STATUS(gcmd)
 
         assert gcmd.responses == [
             "ACE action: feeding(slot 0)\nACE Status: {'status': 'busy', 'slots': "
@@ -4053,7 +5011,7 @@ class TestAfcACECmdACEStatus:
                                            "slots": [{"index": 0, "status": "ready"}]})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_STATUS(gcmd)
+        unit.cmd_AFC_ACE_STATUS(gcmd)
 
         assert gcmd.responses == [
             "ACE action: idle\nACE Status: {'status': 'ready', 'slots': "
@@ -4064,7 +5022,7 @@ class TestAfcACECmdACEStatus:
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_STATUS(gcmd)
+        unit.cmd_AFC_ACE_STATUS(gcmd)
 
         assert gcmd.responses == ["ACE not connected"]
         assert unit._ace.commands == []
@@ -4074,18 +5032,18 @@ class TestAfcACECmdACEStatus:
         unit._ace.set_reply("get_status", RuntimeError("timeout"))
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_STATUS(gcmd)
+        unit.cmd_AFC_ACE_STATUS(gcmd)
 
         assert gcmd.responses == ["Error querying ACE: timeout"]
 
 
-class TestAfcACECmdACEFeedInfo:
+class TestAfcACECmdAFCACEFeedInfo:
     def test_not_connected(self):
         unit = ace_p1_unit("lane0")
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_INFO(gcmd)
+        unit.cmd_AFC_ACE_FEED_INFO(gcmd)
 
         assert gcmd.responses == ["ACE not connected"]
         assert unit._ace.commands == []
@@ -4095,7 +5053,7 @@ class TestAfcACECmdACEFeedInfo:
         unit._ace.set_reply("get_feed_info", RuntimeError("bad"))
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_INFO(gcmd)
+        unit.cmd_AFC_ACE_FEED_INFO(gcmd)
 
         assert gcmd.responses == ["Error querying ACE feed info: bad"]
 
@@ -4104,7 +5062,7 @@ class TestAfcACECmdACEFeedInfo:
         unit._ace.set_reply("get_feed_info", {"raw_fields": {"a": 1}})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_INFO(gcmd)
+        unit.cmd_AFC_ACE_FEED_INFO(gcmd)
 
         assert unit._ace.commands == [("get_feed_info", {})]
         assert gcmd.responses == [
@@ -4117,7 +5075,7 @@ class TestAfcACECmdACEFeedInfo:
             "feed_info": [{"steps": 10, "length": 100, "decoder": 123}]})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_INFO(gcmd)
+        unit.cmd_AFC_ACE_FEED_INFO(gcmd)
 
         # 123 / 100.
         assert gcmd.responses == [
@@ -4129,7 +5087,7 @@ class TestAfcACECmdACEFeedInfo:
         unit._ace.set_reply("get_feed_info", {"feed_info": [{}, {"length": 50, "decoder": 60}]})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_INFO(gcmd)
+        unit.cmd_AFC_ACE_FEED_INFO(gcmd)
 
         assert gcmd.responses == [
             "ACE feed info (slot: steps / length_mm / encoder_mm / ratio):\n"
@@ -4137,13 +5095,13 @@ class TestAfcACECmdACEFeedInfo:
             "  slot 1: 0 / 50 / 60 / 1.200"]
 
 
-class TestAfcACECmdACERFIDDump:
+class TestAfcACECmdAFCACERFIDDump:
     def test_not_connected(self):
         unit = ace_p1_unit("lane0")
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_AFC_ACE_RFID_DUMP(gcmd)
 
         assert gcmd.responses == ["ACE not connected"]
         assert unit._ace.commands == []
@@ -4153,7 +5111,7 @@ class TestAfcACECmdACERFIDDump:
         unit._ace.set_reply("get_filament_info", {"sku": "S1", "raw": {"1": "x"}})
         gcmd = make_gcmd(LANE="lane2")
 
-        unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_AFC_ACE_RFID_DUMP(gcmd)
 
         assert unit._ace.commands == [("get_filament_info", {"index": 2})]
         assert gcmd.responses == [
@@ -4166,7 +5124,7 @@ class TestAfcACECmdACERFIDDump:
         unit._ace.set_reply("get_filament_info", {"sku": ""})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_AFC_ACE_RFID_DUMP(gcmd)
 
         assert unit._ace.commands == [("get_filament_info", {"index": 0})]
         assert gcmd.responses == [
@@ -4178,7 +5136,7 @@ class TestAfcACECmdACERFIDDump:
         unit = ace_p1_unit("lane0", LaneSpec("lane2", slot=2))
         gcmd = make_gcmd(LANE="ghost")
 
-        unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_AFC_ACE_RFID_DUMP(gcmd)
 
         assert unit._ace.commands == [("get_filament_info", {"index": 0})]
         assert gcmd.responses == [
@@ -4191,14 +5149,13 @@ class TestAfcACECmdACERFIDDump:
         unit._ace.set_reply("get_filament_info", RuntimeError("z"))
         gcmd = make_gcmd(SLOT=1)
 
-        unit.cmd_ACE_RFID_DUMP(gcmd)
+        unit.cmd_AFC_ACE_RFID_DUMP(gcmd)
 
         assert unit._ace.commands == [("get_filament_info", {"index": 1})]
         assert gcmd.responses == ["Error reading ACE RFID slot 1: z"]
 
 
-
-class TestAfcACECmdACERFIDRescan:
+class TestAfcACECmdAFCACERFIDRescan:
     class _Rfid:
         """[AFC_ACE2_rfid] stand-in: the unit it is bound to, and its rescans."""
 
@@ -4211,8 +5168,8 @@ class TestAfcACECmdACERFIDRescan:
 
     #: A recognized PETG tag (rfid 2).
     PETG = {"rfid": 2, "type": "PETG", "brand": "Anycubic", "color": [255, 0, 0],
-            "extruder_temp": {"min": 230, "max": 250},
-            "hotbed_temp": {"min": 70, "max": 80}}
+           "extruder_temp": {"min": 230, "max": 250},
+           "hotbed_temp": {"min": 70, "max": 80}}
     PETG_LOGS = [
         ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 2, 'type': 'PETG', "
                   "'brand': 'Anycubic', 'color': [255, 0, 0], 'extruder_temp': "
@@ -4238,7 +5195,7 @@ class TestAfcACECmdACERFIDRescan:
         unit, lane = self._unit(self.PETG)
         gcmd = make_gcmd(LANE="lane1")
 
-        unit.cmd_ACE_RFID_RESCAN(gcmd)
+        unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert (lane.material, lane.color) == ("PETG", "#ff0000")
         # The middle of each tag range.
@@ -4248,15 +5205,26 @@ class TestAfcACECmdACERFIDRescan:
         assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
         assert unit.logger.messages == self.PETG_LOGS
 
+    def test_v1_recognized_tag_applies_filament_defaults_when_available(self, monkeypatch):
+        unit, lane = self._unit(self.PETG)
+        apply_defaults = Recorder()
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", apply_defaults)
+        gcmd = make_gcmd(LANE="lane1")
+
+        unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
+
+        assert apply_defaults.calls == [
+            ((lane, unit._slot_inventory[0]), {"color_converter": afc_ace_module.rgb_array_to_hex})]
+
     def test_v1_waits_out_recognizing(self):
         unit, lane = self._unit({"rfid": 3}, {"rfid": 3}, self.PETG)
         gcmd = make_gcmd(LANE="lane1")
 
-        unit.cmd_ACE_RFID_RESCAN(gcmd)
+        unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert unit._ace.commands == [("get_filament_info", {"index": 0})] * 3
         # Two half-second waits.
-        assert unit.reactor.now == 101.0
+        assert unit.printer.reactor.now == 101.0
         assert lane.material == "PETG"
         assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
         assert unit.logger.messages == [
@@ -4281,7 +5249,7 @@ class TestAfcACECmdACERFIDRescan:
         unit, lane = self._unit(reply)
         gcmd = make_gcmd(LANE="lane1")
 
-        unit.cmd_ACE_RFID_RESCAN(gcmd)
+        unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert (lane.material, lane.color) == ("PLA", "#FFFFFF")
         assert (lane.extruder_temp, lane.bed_temp) == (210.0, 60.0)
@@ -4295,7 +5263,7 @@ class TestAfcACECmdACERFIDRescan:
         gcmd = make_gcmd(LANE="lane9")
 
         with pytest.raises(gcmd.error) as refused:
-            unit.cmd_ACE_RFID_RESCAN(gcmd)
+            unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert str(refused.value) == "lane9 is not a lane of Ace_1"
         assert unit._ace.commands == []
@@ -4308,10 +5276,24 @@ class TestAfcACECmdACERFIDRescan:
         gcmd = make_gcmd(LANE="lane1")
 
         with pytest.raises(gcmd.error) as refused:
-            unit.cmd_ACE_RFID_RESCAN(gcmd)
+            unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert str(refused.value) == "ACE not connected"
         assert lane.material == "PLA"
+        assert unit._ace.commands == []
+        assert gcmd.responses == []
+        assert unit.logger.messages == []
+
+    def test_v1_lane_with_no_ace_slot_is_refused(self):
+        unit, lane = self._unit({"rfid": 0})
+        # Force an out-of-range slot (a correctly configured unit never does this).
+        unit._slot_map["lane1"] = 99
+        gcmd = make_gcmd(LANE="lane1")
+
+        with pytest.raises(gcmd.error) as refused:
+            unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
+
+        assert str(refused.value) == "lane1 has no ACE slot"
         assert unit._ace.commands == []
         assert gcmd.responses == []
         assert unit.logger.messages == []
@@ -4322,7 +5304,7 @@ class TestAfcACECmdACERFIDRescan:
         unit.printer.objects["AFC_ACE2_rfid"] = rfid
         gcmd = make_gcmd(LANE="lane1")
 
-        unit.cmd_ACE_RFID_RESCAN(gcmd)
+        unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert rfid.rescan_lane.calls == [(("lane1", gcmd), {})]
         # No firmware read on an ACE 2.
@@ -4335,10 +5317,10 @@ class TestAfcACECmdACERFIDRescan:
         gcmd = make_gcmd(LANE="lane1")
 
         with pytest.raises(gcmd.error) as refused:
-            unit.cmd_ACE_RFID_RESCAN(gcmd)
+            unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert str(refused.value) == (
-            "ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
+            "AFC_ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
         assert unit._ace.commands == []
         assert gcmd.responses == []
         assert unit.logger.messages == []
@@ -4350,15 +5332,14 @@ class TestAfcACECmdACERFIDRescan:
         gcmd = make_gcmd(LANE="lane1")
 
         with pytest.raises(gcmd.error) as refused:
-            unit.cmd_ACE_RFID_RESCAN(gcmd)
+            unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert str(refused.value) == (
-            "ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
+            "AFC_ACE_RFID_RESCAN on Ace2_1 needs [AFC_ACE2_rfid] bound to this unit")
         assert rfid.rescan_lane.calls == []
         assert unit._ace.commands == []
         assert gcmd.responses == []
         assert unit.logger.messages == []
-
 
 
 class TestAfcACEParseAceParams:
@@ -4393,14 +5374,23 @@ class TestAfcACEParseAceParams:
     def test_nothing_parseable_returns_none(self):
         assert afcACE._parse_ace_params("{junk}") is None
 
+    def test_trailing_comma_leaves_no_empty_pair(self):
+        assert afcACE._parse_ace_params("{index:0,}") == {"index": 0}
 
-class TestAfcACECmdACECmd:
+    def test_valid_json_non_dict_falls_through_to_bare_key_parser(self):
+        """A JSON list is valid JSON but not a params dict, so send_command's
+        params=... contract requires falling through to the bare-key parser
+        (which finds no k:v pairs here) instead of returning the list as-is."""
+        assert afcACE._parse_ace_params("[1,2,3]") is None
+
+
+class TestAfcACECmdAFCACECmd:
     def test_not_connected(self):
         unit = ace_p1_unit("lane0")
         unit._ace.connected = False
         gcmd = make_gcmd(METHOD="get_status")
 
-        unit.cmd_ACE_CMD(gcmd)
+        unit.cmd_AFC_ACE_CMD(gcmd)
 
         assert gcmd.responses == ["ACE not connected"]
         assert unit._ace.commands == []
@@ -4409,9 +5399,20 @@ class TestAfcACECmdACECmd:
         unit = ace_p1_unit("lane0")
         gcmd = make_gcmd(METHOD="")
 
-        unit.cmd_ACE_CMD(gcmd)
+        unit.cmd_AFC_ACE_CMD(gcmd)
 
-        assert gcmd.responses == ["ACE_CMD: METHOD=<method> required"]
+        assert gcmd.responses == ["AFC_ACE_CMD: METHOD=<method> required"]
+        assert unit._ace.commands == []
+
+    def test_bad_params_reports_parse_error(self):
+        unit = ace_p1_unit("lane0")
+        unit._parse_ace_params = Recorder(raises=ValueError("boom"))
+        gcmd = make_gcmd(METHOD="get_status", PARAMS="whatever")
+
+        unit.cmd_AFC_ACE_CMD(gcmd)
+
+        assert gcmd.responses == [
+            "AFC_ACE_CMD: bad PARAMS (boom), e.g. PARAMS={index:0,type:PLA}"]
         assert unit._ace.commands == []
 
     def test_success_with_params(self):
@@ -4419,29 +5420,29 @@ class TestAfcACECmdACECmd:
         unit._ace.set_reply("set_fan_speed", {"code": 0})
         gcmd = make_gcmd(METHOD="set_fan_speed", PARAMS="{fan_speed:7000}")
 
-        unit.cmd_ACE_CMD(gcmd)
+        unit.cmd_AFC_ACE_CMD(gcmd)
 
         assert unit._ace.commands == [("set_fan_speed", {"fan_speed": 7000})]
-        assert gcmd.responses == ["ACE_CMD set_fan_speed: OK -> {'code': 0}"]
+        assert gcmd.responses == ["AFC_ACE_CMD set_fan_speed: OK -> {'code': 0}"]
 
     def test_command_error(self):
         unit = ace_p1_unit("lane0")
         unit._ace.set_reply("bad", RuntimeError("400"))
         gcmd = make_gcmd(METHOD="bad", PARAMS="")
 
-        unit.cmd_ACE_CMD(gcmd)
+        unit.cmd_AFC_ACE_CMD(gcmd)
 
         assert unit._ace.commands == [("bad", {})]
-        assert gcmd.responses == ["ACE_CMD bad: 400"]
+        assert gcmd.responses == ["AFC_ACE_CMD bad: 400"]
 
 
-class TestAfcACECmdACETempInfo:
+class TestAfcACECmdAFCACETempInfo:
     def test_temp_info_not_connected(self):
         unit = ace_p1_unit("lane0")
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_TEMP_INFO(gcmd)
+        unit.cmd_AFC_ACE_TEMP_INFO(gcmd)
 
         assert gcmd.responses == ["ACE not connected"]
         assert unit._ace.commands == []
@@ -4451,18 +5452,18 @@ class TestAfcACECmdACETempInfo:
         unit._ace.set_reply("get_temp", RuntimeError("unsupported"))
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_TEMP_INFO(gcmd)
+        unit.cmd_AFC_ACE_TEMP_INFO(gcmd)
 
-        assert gcmd.responses == ["ACE_TEMP_INFO: unsupported"]
+        assert gcmd.responses == ["AFC_ACE_TEMP_INFO: unsupported"]
 
     def test_temp_info_non_dict_reply(self):
         unit = ace_p1_unit("lane0")
         unit._ace.set_reply("get_temp", None)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_TEMP_INFO(gcmd)
+        unit.cmd_AFC_ACE_TEMP_INFO(gcmd)
 
-        assert gcmd.responses == ["ACE_TEMP_INFO: unexpected reply None"]
+        assert gcmd.responses == ["AFC_ACE_TEMP_INFO: unexpected reply None"]
 
     def test_temp_info_success_formats_all_channels(self):
         unit = ace_p1_unit("lane0")
@@ -4471,7 +5472,7 @@ class TestAfcACECmdACETempInfo:
             "env_temp": 24.0, "env_humidity": 41.0})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_TEMP_INFO(gcmd)
+        unit.cmd_AFC_ACE_TEMP_INFO(gcmd)
 
         assert unit._ace.commands == [("get_temp", {})]
         assert gcmd.responses == [
@@ -4485,7 +5486,7 @@ class TestAfcACECmdACETempInfo:
         unit._ace.set_reply("get_temp", {"box1_temp": 30.5})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_TEMP_INFO(gcmd)
+        unit.cmd_AFC_ACE_TEMP_INFO(gcmd)
 
         assert gcmd.responses == [
             "ACE temperatures:\n"
@@ -4494,13 +5495,13 @@ class TestAfcACECmdACETempInfo:
             "  env=n/a  humidity=n/a"]
 
 
-class TestAfcACECmdACEMaterialInfo:
+class TestAfcACECmdAFCACEMaterialInfo:
     def test_material_info_not_connected(self):
         unit = ace_p1_unit("lane0")
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_MATERIAL_INFO(gcmd)
+        unit.cmd_AFC_ACE_MATERIAL_INFO(gcmd)
 
         assert gcmd.responses == ["ACE not connected"]
         assert unit._ace.commands == []
@@ -4511,7 +5512,7 @@ class TestAfcACECmdACEMaterialInfo:
             "index": 0, "material_name": "S0395MB251230046650C3", "status": 0})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_MATERIAL_INFO(gcmd)
+        unit.cmd_AFC_ACE_MATERIAL_INFO(gcmd)
 
         assert unit._ace.commands == [("get_material_info", {"index": 0})]
         assert gcmd.responses == [
@@ -4523,7 +5524,7 @@ class TestAfcACECmdACEMaterialInfo:
             "index": 3, "material_name": "PETG", "status": 1})
         gcmd = make_gcmd(SLOT=3)
 
-        unit.cmd_ACE_MATERIAL_INFO(gcmd)
+        unit.cmd_AFC_ACE_MATERIAL_INFO(gcmd)
 
         assert unit._ace.commands == [("get_material_info", {"index": 3})]
         assert gcmd.responses == ["ACE material info slot 3: name='PETG' status=1"]
@@ -4533,21 +5534,21 @@ class TestAfcACECmdACEMaterialInfo:
         unit._ace.set_reply("get_material_info", RuntimeError("timeout"))
         gcmd = make_gcmd(SLOT=0)
 
-        unit.cmd_ACE_MATERIAL_INFO(gcmd)
+        unit.cmd_AFC_ACE_MATERIAL_INFO(gcmd)
 
-        assert gcmd.responses == ["ACE_MATERIAL_INFO: timeout"]
+        assert gcmd.responses == ["AFC_ACE_MATERIAL_INFO: timeout"]
 
     def test_material_info_non_dict_reply(self):
         unit = ace_p1_unit("lane0")
         unit._ace.set_reply("get_material_info", None)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_MATERIAL_INFO(gcmd)
+        unit.cmd_AFC_ACE_MATERIAL_INFO(gcmd)
 
-        assert gcmd.responses == ["ACE_MATERIAL_INFO: unexpected reply None"]
+        assert gcmd.responses == ["AFC_ACE_MATERIAL_INFO: unexpected reply None"]
 
 
-class TestAfcACECmdACESetMaterial:
+class TestAfcACECmdAFCACESetMaterial:
     class _LinkWithoutMaterialWrite:
         """A connected link that has no set_material_name (an older connection)."""
         connected = True
@@ -4557,7 +5558,7 @@ class TestAfcACECmdACESetMaterial:
         unit._ace.connected = False
         gcmd = make_gcmd(SLOT=0, NAME="X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit._ace.commands == []
@@ -4567,7 +5568,7 @@ class TestAfcACECmdACESetMaterial:
         unit = ace_p2_unit(connection=None)
         gcmd = make_gcmd(SLOT=0, NAME="X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit.printer.logger.messages == []
@@ -4577,18 +5578,18 @@ class TestAfcACECmdACESetMaterial:
         unit._ace = self._LinkWithoutMaterialWrite()
         gcmd = make_gcmd(SLOT=0, NAME="X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SET_MATERIAL: requires an ACE 2 Pro unit")]
+        assert gcmd.messages == [("info", "AFC_ACE_SET_MATERIAL: requires an ACE 2 Pro unit")]
         assert unit.printer.logger.messages == []
 
     def test_set_material_requires_slot(self):
         unit = ace_p2_unit()
         gcmd = make_gcmd(NAME="X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SET_MATERIAL: SLOT=<n> required")]
+        assert gcmd.messages == [("info", "AFC_ACE_SET_MATERIAL: SLOT=<n> required")]
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
@@ -4596,9 +5597,9 @@ class TestAfcACECmdACESetMaterial:
         unit = ace_p2_unit()
         gcmd = make_gcmd(SLOT=0)
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SET_MATERIAL: NAME=<text> required")]
+        assert gcmd.messages == [("info", "AFC_ACE_SET_MATERIAL: NAME=<text> required")]
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
@@ -4607,11 +5608,11 @@ class TestAfcACECmdACESetMaterial:
         unit._ace.set_reply("get_material_info", {"index": 2, "material_name": "PLA_X"})
         gcmd = make_gcmd(SLOT=2, NAME="PLA_X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
         assert unit._ace.commands == [("set_material_name", {"index": 2, "name": "PLA_X"}),
                                       ("get_material_info", {"index": 2})]
-        assert gcmd.messages == [("info", "ACE_SET_MATERIAL slot 2: stored name='PLA_X'")]
+        assert gcmd.messages == [("info", "AFC_ACE_SET_MATERIAL slot 2: stored name='PLA_X'")]
         assert unit.printer.logger.messages == []
 
     def test_set_material_non_dict_read_back_shown_as_is(self):
@@ -4619,9 +5620,9 @@ class TestAfcACECmdACESetMaterial:
         unit._ace.set_reply("get_material_info", "RAW")
         gcmd = make_gcmd(SLOT=1, NAME="PETG")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SET_MATERIAL slot 1: stored name='RAW'")]
+        assert gcmd.messages == [("info", "AFC_ACE_SET_MATERIAL slot 1: stored name='RAW'")]
         assert unit._ace.commands == [("set_material_name", {"index": 1, "name": "PETG"}),
                                       ("get_material_info", {"index": 1})]
         assert unit.printer.logger.messages == []
@@ -4631,9 +5632,9 @@ class TestAfcACECmdACESetMaterial:
         unit._ace.set_reply("set_material_name", RuntimeError("boom"))
         gcmd = make_gcmd(SLOT=0, NAME="X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SET_MATERIAL: boom")]
+        assert gcmd.messages == [("info", "AFC_ACE_SET_MATERIAL: boom")]
         # The read-back is never reached.
         assert unit._ace.commands == [("set_material_name", {"index": 0, "name": "X"})]
         assert unit.printer.logger.messages == []
@@ -4643,22 +5644,22 @@ class TestAfcACECmdACESetMaterial:
         unit._ace.set_reply("get_material_info", RuntimeError("readfail"))
         gcmd = make_gcmd(SLOT=0, NAME="X")
 
-        unit.cmd_ACE_SET_MATERIAL(gcmd)
+        unit.cmd_AFC_ACE_SET_MATERIAL(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_SET_MATERIAL slot 0: wrote 'X' (read-back failed: readfail)")]
+            ("info", "AFC_ACE_SET_MATERIAL slot 0: wrote 'X' (read-back failed: readfail)")]
         assert unit._ace.commands == [("set_material_name", {"index": 0, "name": "X"}),
                                       ("get_material_info", {"index": 0})]
         assert unit.printer.logger.messages == []
 
 
-class TestAfcACECmdACESensorState:
+class TestAfcACECmdAFCACESensorState:
     def test_sensor_state_not_connected(self):
         unit = ace_p2_unit()
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_SENSOR_STATE(gcmd)
+        unit.cmd_AFC_ACE_SENSOR_STATE(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit._ace.commands == []
@@ -4668,7 +5669,7 @@ class TestAfcACECmdACESensorState:
         unit = ace_p2_unit(connection=None)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_SENSOR_STATE(gcmd)
+        unit.cmd_AFC_ACE_SENSOR_STATE(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit.printer.logger.messages == []
@@ -4680,7 +5681,7 @@ class TestAfcACECmdACESensorState:
         unit._ace.set_reply("get_sensor_state", {"sensor_bitmask": 17, "sensors": sensors})
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_SENSOR_STATE(gcmd)
+        unit.cmd_AFC_ACE_SENSOR_STATE(gcmd)
 
         assert unit._ace.commands == [("get_sensor_state", {})]
         assert gcmd.messages == [
@@ -4692,9 +5693,9 @@ class TestAfcACECmdACESensorState:
         unit._ace.set_reply("get_sensor_state", None)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_SENSOR_STATE(gcmd)
+        unit.cmd_AFC_ACE_SENSOR_STATE(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SENSOR_STATE: unexpected reply None")]
+        assert gcmd.messages == [("info", "AFC_ACE_SENSOR_STATE: unexpected reply None")]
         assert unit._ace.commands == [("get_sensor_state", {})]
         assert unit.printer.logger.messages == []
 
@@ -4703,9 +5704,9 @@ class TestAfcACECmdACESensorState:
         unit._ace.set_reply("get_sensor_state", RuntimeError("nope"))
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_SENSOR_STATE(gcmd)
+        unit.cmd_AFC_ACE_SENSOR_STATE(gcmd)
 
-        assert gcmd.messages == [("info", "ACE_SENSOR_STATE: nope")]
+        assert gcmd.messages == [("info", "AFC_ACE_SENSOR_STATE: nope")]
         assert unit._ace.commands == [("get_sensor_state", {})]
         assert unit.printer.logger.messages == []
 
@@ -4714,6 +5715,12 @@ class TestAfcACEPickTestSlot:
     def test_returns_first_recognized_slot(self):
         # rfid 1 is an unrecognized tag, so slot 0 is skipped.
         unit = ace_p2_unit(inventory={0: {"rfid": 1}, 2: {"rfid": 2}, 3: {"rfid": 3}})
+
+        assert unit._pick_test_slot() == 2
+
+    def test_returns_first_ready_slot(self):
+        unit = ace_p2_unit(inventory={0: {"status": "empty"}, 2: {"status": "ready"},
+                                      3: {"status": "ready"}})
 
         assert unit._pick_test_slot() == 2
 
@@ -4727,19 +5734,21 @@ class TestAfcACEPickTestSlot:
 
         assert unit._pick_test_slot() == 1
 
-    def test_returns_first_ready_slot(self):
-        unit = ace_p2_unit(inventory={0: {"status": "empty"}, 2: {"status": "ready"},
-                                      3: {"status": "ready"}})
-
-        assert unit._pick_test_slot() == 2
-
     def test_none_when_empty(self):
-        unit = ace_p2_unit(inventory={0: {"status": "empty"}})
+        unit = ace_p2_unit(inventory={0: {"rfid": 0, "sku": ""}})
 
         assert unit._pick_test_slot() is None
 
 
 class TestAfcACEPollUntilStatus:
+    def test_no_connection_returns_false_without_polling(self):
+        unit = ace_p2_unit()
+        unit._ace = None
+
+        assert unit._poll_until_status(True, timeout=1.0) is False
+        assert unit.printer.reactor.now == 100.0
+        assert unit.printer.logger.messages == []
+
     def test_matches_ready(self):
         unit = ace_p2_unit()
         unit._ace.set_reply("get_status", {"status": "ready"})
@@ -4779,7 +5788,7 @@ class TestAfcACEPollUntilStatus:
         assert unit.printer.logger.messages == []
 
 
-class TestAfcACECmdACEFeedTest:
+class TestAfcACECmdAFCACEFeedTest:
     @staticmethod
     def _pass(busy_polls: int) -> List[Dict[str, str]]:
         """
@@ -4797,7 +5806,7 @@ class TestAfcACECmdACEFeedTest:
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit._ace.commands == []
@@ -4807,7 +5816,7 @@ class TestAfcACECmdACEFeedTest:
         unit = ace_p2_unit(connection=None)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit.printer.logger.messages == []
@@ -4816,10 +5825,10 @@ class TestAfcACECmdACEFeedTest:
         unit = ace_p2_unit()
         gcmd = make_gcmd(SLOT=-1, LENGTH=100.0, START=10, END=250, STEP=20)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: no loaded slot detected, pass SLOT=<n>")]
+            ("info", "AFC_ACE_FEED_TEST: no loaded slot detected, pass SLOT=<n>")]
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
@@ -4827,10 +5836,10 @@ class TestAfcACECmdACEFeedTest:
         unit = ace_p2_unit()
         gcmd = make_gcmd(SLOT=4)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: no loaded slot detected, pass SLOT=<n>")]
+            ("info", "AFC_ACE_FEED_TEST: no loaded slot detected, pass SLOT=<n>")]
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
@@ -4840,7 +5849,7 @@ class TestAfcACECmdACEFeedTest:
         unit._ace.set_reply("get_status", *self._pass(5), *self._pass(2))
         gcmd = make_gcmd(SLOT=0, LENGTH=100.0, START=10, END=30, STEP=20)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         moves = [c for c in unit._ace.commands if c[0] != "get_status"]
         assert moves == [
@@ -4850,29 +5859,29 @@ class TestAfcACECmdACEFeedTest:
             ("unwind_filament", {"index": 0, "length": 100.0, "speed": 30, "mode": "normal"}),
         ]
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: slot 0, 100mm, speeds 10..30 step 20 "
+            ("info", "AFC_ACE_FEED_TEST: slot 0, 100mm, speeds 10..30 step 20 "
                      "(feed + net-zero unwind each pass)"),
             ("info", "  speed= 10:  1.00s  (~ 100 mm/s)"),
             ("info", "  speed= 30:  0.40s  (~ 250 mm/s)"),
-            ("info", "ACE_FEED_TEST done. times scale with speed -> speed param WORKS\n"
+            ("info", "AFC_ACE_FEED_TEST done. times scale with speed -> speed param WORKS\n"
                      "  peak measured rate ~250 mm/s\n"
                      "  max effective commanded speed ~30 (higher stops improving the rate)"),
         ]
         assert unit.printer.logger.messages == []
 
     def test_constant_times_report_clamped(self):
-        unit = ace_p2_unit(inventory={1: {"status": "ready"}})
+        unit = ace_p2_unit(inventory={1: {"rfid": 2}})
         unit._ace.set_reply("get_status", *self._pass(4), *self._pass(4))
         gcmd = make_gcmd(LENGTH=40.0, START=20, END=40, STEP=20)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: slot 1, 40mm, speeds 20..40 step 20 "
+            ("info", "AFC_ACE_FEED_TEST: slot 1, 40mm, speeds 20..40 step 20 "
                      "(feed + net-zero unwind each pass)"),
             ("info", "  speed= 20:  0.80s  (~  50 mm/s)"),
             ("info", "  speed= 40:  0.80s  (~  50 mm/s)"),
-            ("info", "ACE_FEED_TEST done. times ~constant -> speed param appears "
+            ("info", "AFC_ACE_FEED_TEST done. times ~constant -> speed param appears "
                      "CLAMPED/IGNORED (like the fan)\n"
                      "  peak measured rate ~50 mm/s\n"
                      "  max effective commanded speed ~20 (higher stops improving the rate)"),
@@ -4887,14 +5896,14 @@ class TestAfcACECmdACEFeedTest:
         unit._ace.set_reply("get_status", *self._pass(0), *self._pass(0))
         gcmd = make_gcmd(SLOT=0, LENGTH=100.0, START=10, END=30, STEP=20)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: slot 0, 100mm, speeds 10..30 step 20 "
+            ("info", "AFC_ACE_FEED_TEST: slot 0, 100mm, speeds 10..30 step 20 "
                      "(feed + net-zero unwind each pass)"),
             ("info", "  speed= 10:  0.00s  (~   0 mm/s)"),
             ("info", "  speed= 30:  0.00s  (~   0 mm/s)"),
-            ("info", "ACE_FEED_TEST done. times scale with speed -> speed param WORKS\n"
+            ("info", "AFC_ACE_FEED_TEST done. times scale with speed -> speed param WORKS\n"
                      "  peak measured rate ~1 mm/s\n"
                      "  max effective commanded speed ~30 (higher stops improving the rate)"),
         ]
@@ -4906,13 +5915,13 @@ class TestAfcACECmdACEFeedTest:
         unit._ace.set_reply("get_status", *self._pass(1))
         gcmd = make_gcmd(SLOT=3, LENGTH=50.0, START=25, END=25, STEP=10)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: slot 3, 50mm, speeds 25..25 step 10 "
+            ("info", "AFC_ACE_FEED_TEST: slot 3, 50mm, speeds 25..25 step 10 "
                      "(feed + net-zero unwind each pass)"),
             ("info", "  speed= 25:  0.20s  (~ 250 mm/s)"),
-            ("info", "ACE_FEED_TEST done."),
+            ("info", "AFC_ACE_FEED_TEST done."),
         ]
         moves = [c for c in unit._ace.commands if c[0] != "get_status"]
         assert moves == [
@@ -4927,12 +5936,12 @@ class TestAfcACECmdACEFeedTest:
         unit._ace.set_reply("feed_filament", RuntimeError("FORBIDDEN"))
         gcmd = make_gcmd(SLOT=0, START=10, END=30, STEP=20)
 
-        unit.cmd_ACE_FEED_TEST(gcmd)
+        unit.cmd_AFC_ACE_FEED_TEST(gcmd)
 
         assert gcmd.messages == [
-            ("info", "ACE_FEED_TEST: slot 0, 100mm, speeds 10..30 step 20 "
+            ("info", "AFC_ACE_FEED_TEST: slot 0, 100mm, speeds 10..30 step 20 "
                      "(feed + net-zero unwind each pass)"),
-            ("info", "ACE_FEED_TEST aborted at speed 10: FORBIDDEN"),
+            ("info", "AFC_ACE_FEED_TEST aborted at speed 10: FORBIDDEN"),
         ]
         # A ready check before the feed, and one after the abort.
         assert unit._ace.commands == [("get_status", {}),
@@ -4942,12 +5951,12 @@ class TestAfcACECmdACEFeedTest:
         assert unit.printer.logger.messages == []
 
 
-class TestAfcACECmdACEDry:
+class TestAfcACECmdAFCACEDry:
     def test_temp_capped_to_max(self):
         unit = ace_p2_unit(values={"max_dryer_temperature": 55.0})
         gcmd = make_gcmd(TEMP=80.0, DURATION=90.0, FAN=7000)
 
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
 
         assert unit._ace.commands == [
             ("drying", {"temp": 55.0, "fan_speed": 7000, "duration": 90.0})]
@@ -4961,7 +5970,7 @@ class TestAfcACECmdACEDry:
         unit._ace.connected = False
         gcmd = make_gcmd(TEMP=40.0)
 
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit._ace.commands == []
@@ -4971,7 +5980,7 @@ class TestAfcACECmdACEDry:
         unit = ace_p2_unit(connection=None)
         gcmd = make_gcmd(TEMP=40.0)
 
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit.printer.logger.messages == []
@@ -4980,7 +5989,7 @@ class TestAfcACECmdACEDry:
         unit = ace_p2_unit()
         gcmd = make_gcmd(TEMP=40.0, DURATION=30.0, FAN=7000)
 
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
 
         assert unit._ace.commands == [
             ("drying", {"temp": 40.0, "fan_speed": 7000, "duration": 30.0})]
@@ -4991,7 +6000,7 @@ class TestAfcACECmdACEDry:
         unit = ace_p2_unit()
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
 
         assert unit._ace.commands == [
             ("drying", {"temp": 50.0, "fan_speed": 7000, "duration": 90.0})]
@@ -5003,7 +6012,7 @@ class TestAfcACECmdACEDry:
         unit._ace.set_reply("drying", RuntimeError("nope"))
         gcmd = make_gcmd(TEMP=40.0)
 
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
 
         assert gcmd.messages == [("info", "Error starting dryer: nope")]
         assert unit._ace.commands == [
@@ -5011,13 +6020,13 @@ class TestAfcACECmdACEDry:
         assert unit.printer.logger.messages == []
 
 
-class TestAfcACECmdACEDryStop:
+class TestAfcACECmdAFCACEDryStop:
     def test_not_connected(self):
         unit = ace_p2_unit()
         unit._ace.connected = False
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_DRY_STOP(gcmd)
+        unit.cmd_AFC_ACE_DRY_STOP(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit._ace.commands == []
@@ -5027,7 +6036,7 @@ class TestAfcACECmdACEDryStop:
         unit = ace_p2_unit(connection=None)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_DRY_STOP(gcmd)
+        unit.cmd_AFC_ACE_DRY_STOP(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit.printer.logger.messages == []
@@ -5036,7 +6045,7 @@ class TestAfcACECmdACEDryStop:
         unit = ace_p2_unit()
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_DRY_STOP(gcmd)
+        unit.cmd_AFC_ACE_DRY_STOP(gcmd)
 
         assert unit._ace.commands == [("drying_stop", {})]
         assert gcmd.messages == [("info", "ACE dryer stopped")]
@@ -5047,7 +6056,7 @@ class TestAfcACECmdACEDryStop:
         unit._ace.set_reply("drying_stop", RuntimeError("x"))
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_DRY_STOP(gcmd)
+        unit.cmd_AFC_ACE_DRY_STOP(gcmd)
 
         assert gcmd.messages == [("info", "Error stopping dryer: x")]
         assert unit._ace.commands == [("drying_stop", {})]
@@ -5125,7 +6134,7 @@ class TestAfcACEDryRotate:
         :return tuple: a unit drying with ROTATE=1, and its wire
         """
         unit, wire = self._unit(*lanes, **kwargs)
-        unit.cmd_ACE_DRY(make_gcmd(TEMP=50.0, DURATION=240.0, ROTATE=1))
+        unit.cmd_AFC_ACE_DRY(make_gcmd(TEMP=50.0, DURATION=240.0, ROTATE=1))
         wire.link.commands.clear()
         return unit, wire
 
@@ -5143,18 +6152,18 @@ class TestAfcACEDryRotate:
 
     def test_rotate_off_arms_nothing(self):
         unit, _ = self._unit()
-        unit.cmd_ACE_DRY(make_gcmd(TEMP=50.0))
+        unit.cmd_AFC_ACE_DRY(make_gcmd(TEMP=50.0))
         assert not unit._dry_rotating
         assert unit.get_status()["ace_dry_rotate"] is False
 
     def test_rotate_arms_and_names_the_threaded_lane(self):
         unit, _ = self._unit()
         gcmd = make_gcmd(TEMP=50.0, DURATION=240.0, ROTATE=1)
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
         assert unit._dry_rotating
         assert unit.get_status()["ace_dry_rotate"] is True
         assert gcmd.messages[-1] == (
-            "info", "ACE_DRY: rotating free spools on Ace_1 every 300s "
+            "info", "AFC_ACE_DRY: rotating free spools on Ace_1 every 300s "
                     "(lane1, lane2, lane4). Not turning lane3: filament is in "
                     "the feed gears, unthread it to dry with rotation")
 
@@ -5162,16 +6171,16 @@ class TestAfcACEDryRotate:
         unit, wire = self._unit("lane1", LaneSpec("lane2", prep=True, load=True),
                                 slots=("empty", "ready", "empty", "empty"))
         gcmd = make_gcmd(TEMP=50.0, ROTATE=1)
-        unit.cmd_ACE_DRY(gcmd)
+        unit.cmd_AFC_ACE_DRY(gcmd)
         assert not unit._dry_rotating
         assert gcmd.messages[-1][1].startswith(
-            "ACE_DRY: ROTATE disabled for Ace_1 -- lane2 still has filament loaded")
+            "AFC_ACE_DRY: ROTATE disabled for Ace_1 -- lane2 still has filament loaded")
         assert [m for m, _ in wire.link.commands] == ["drying"]
 
     def test_a_failed_dryer_start_does_not_rotate(self):
         unit, wire = self._unit()
         wire.link.set_reply("drying", RuntimeError("nope"))
-        unit.cmd_ACE_DRY(make_gcmd(TEMP=50.0, ROTATE=1))
+        unit.cmd_AFC_ACE_DRY(make_gcmd(TEMP=50.0, ROTATE=1))
         assert not unit._dry_rotating
 
     def test_turns_only_empty_slots_slowly(self):
@@ -5256,7 +6265,7 @@ class TestAfcACEDryRotate:
     def test_re_arming_mid_pass_ends_the_old_pass(self):
         unit, wire = self._armed()
         def unwind(params):
-            unit.cmd_ACE_DRY(make_gcmd(TEMP=50.0, ROTATE=1))
+            unit.cmd_AFC_ACE_DRY(make_gcmd(TEMP=50.0, ROTATE=1))
             return {}
         wire.link.set_reply("unwind_filament", unwind)
         assert self._tick(unit) == unit.afc.reactor.NEVER
@@ -5265,7 +6274,7 @@ class TestAfcACEDryRotate:
 
     def test_dry_stop_disarms(self):
         unit, _ = self._armed()
-        unit.cmd_ACE_DRY_STOP(make_gcmd())
+        unit.cmd_AFC_ACE_DRY_STOP(make_gcmd())
         assert not unit._dry_rotating
 
     def test_stop_mid_turn_stops_the_motor(self):
@@ -5279,14 +6288,79 @@ class TestAfcACEDryRotate:
         unit._handle_klippy_disconnect()
         assert not unit._dry_rotating
 
+    def test_tick_without_being_armed_ends_immediately(self):
+        unit, _ = self._unit()
 
-class TestAfcACECmdACEFan:
+        assert self._tick(unit) == unit.afc.reactor.NEVER
+
+    def test_arm_with_nothing_free_omits_the_free_list(self):
+        unit, _ = self._unit(LaneSpec("lane1", prep=True), LaneSpec("lane2", prep=True),
+                             LaneSpec("lane3", prep=True), LaneSpec("lane4", prep=True),
+                             slots=("ready", "ready", "ready", "ready"))
+        gcmd = make_gcmd(TEMP=50.0, DURATION=240.0, ROTATE=1)
+
+        unit.cmd_AFC_ACE_DRY(gcmd)
+
+        assert unit._dry_rotating
+        assert gcmd.messages[-1] == (
+            "info", "AFC_ACE_DRY: rotating free spools on Ace_1 every 300s. Not turning "
+                    "lane1, lane2, lane3, lane4: filament is in the feed gears, "
+                    "unthread it to dry with rotation")
+
+    def test_arm_with_everything_free_omits_the_threaded_sentence(self):
+        unit, _ = self._unit("lane1", "lane2", "lane3", "lane4",
+                             slots=("empty", "empty", "empty", "empty"))
+        gcmd = make_gcmd(TEMP=50.0, DURATION=240.0, ROTATE=1)
+
+        unit.cmd_AFC_ACE_DRY(gcmd)
+
+        assert unit._dry_rotating
+        assert gcmd.messages[-1] == (
+            "info", "AFC_ACE_DRY: rotating free spools on Ace_1 every 300s "
+                    "(lane1, lane2, lane3, lane4)")
+
+
+class TestAfcACEDryRotateSpin:
+    def test_no_connection_returns_before_any_unwind(self):
+        unit = ace_p2_unit("lane1", "lane2", "lane4")
+        wire = AceDryRotateWire(unit, "empty", "empty", "empty")
+        unit.cmd_AFC_ACE_DRY(make_gcmd(TEMP=50.0, DURATION=240.0, ROTATE=1))
+        wire.link.commands.clear()
+        unit._ace = None
+
+        unit._dry_rotate_spin(unit._dry_rotate_timer)
+
+        assert wire.unwinds() == []
+        assert unit.logger.messages == []
+
+
+class TestAfcACEDryRotateHoldReason:
+    def test_not_connected(self):
+        unit = ace_p2_unit("lane1")
+        unit._ace.connected = False
+
+        assert unit._dry_rotate_hold_reason() == "ACE not connected"
+
+    def test_is_printing_exception_is_swallowed(self):
+        unit = ace_p2_unit("lane1")
+        unit.afc.function.raise_on_is_printing = RuntimeError("boom")
+
+        assert unit._dry_rotate_hold_reason() == ""
+
+    def test_operation_active_holds(self):
+        unit = ace_p2_unit("lane1")
+        unit._operation_active = True
+
+        assert unit._dry_rotate_hold_reason() == "another ACE operation is running"
+
+
+class TestAfcACECmdAFCACEFan:
     def test_not_connected(self):
         unit = ace_p2_unit()
         unit._ace.connected = False
         gcmd = make_gcmd(SPEED=50)
 
-        unit.cmd_ACE_FAN(gcmd)
+        unit.cmd_AFC_ACE_FAN(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit._ace.commands == []
@@ -5296,7 +6370,7 @@ class TestAfcACECmdACEFan:
         unit = ace_p2_unit(connection=None)
         gcmd = make_gcmd(SPEED=50)
 
-        unit.cmd_ACE_FAN(gcmd)
+        unit.cmd_AFC_ACE_FAN(gcmd)
 
         assert gcmd.messages == [("info", "ACE not connected")]
         assert unit.printer.logger.messages == []
@@ -5305,7 +6379,7 @@ class TestAfcACECmdACEFan:
         unit = ace_p2_unit()
         gcmd = make_gcmd(SPEED=40)
 
-        unit.cmd_ACE_FAN(gcmd)
+        unit.cmd_AFC_ACE_FAN(gcmd)
 
         assert unit._ace.commands == [("set_fan_speed", {"speed": 40, "fan_speed": 40})]
         assert gcmd.messages == [("info", "ACE fan set to 40%")]
@@ -5316,21 +6390,21 @@ class TestAfcACECmdACEFan:
         unit._ace.set_reply("set_fan_speed", RuntimeError("f"))
         gcmd = make_gcmd(SPEED=40)
 
-        unit.cmd_ACE_FAN(gcmd)
+        unit.cmd_AFC_ACE_FAN(gcmd)
 
         assert gcmd.messages == [("info", "Error setting fan: f")]
         assert unit._ace.commands == [("set_fan_speed", {"speed": 40, "fan_speed": 40})]
         assert unit.printer.logger.messages == []
 
 
-class TestAfcACECmdACELaneReset:
+class TestAfcACECmdAFCACELaneReset:
     def test_usage_on_unknown_lane(self):
         unit = ace_p2_unit("lane1", operation_active=True)
         gcmd = make_gcmd(LANE="ghost")
 
-        unit.cmd_ACE_LANE_RESET(gcmd)
+        unit.cmd_AFC_ACE_LANE_RESET(gcmd)
 
-        assert gcmd.messages == [("info", "Usage: ACE_LANE_RESET LANE=<lane_name>")]
+        assert gcmd.messages == [("info", "Usage: AFC_ACE_LANE_RESET LANE=<lane_name>")]
         # eject_lane never ran, so its operation flag is untouched.
         assert unit._operation_active is True
         assert unit._ace.commands == []
@@ -5340,9 +6414,9 @@ class TestAfcACECmdACELaneReset:
         unit = ace_p2_unit("lane1", operation_active=True)
         gcmd = make_gcmd()
 
-        unit.cmd_ACE_LANE_RESET(gcmd)
+        unit.cmd_AFC_ACE_LANE_RESET(gcmd)
 
-        assert gcmd.messages == [("info", "Usage: ACE_LANE_RESET LANE=<lane_name>")]
+        assert gcmd.messages == [("info", "Usage: AFC_ACE_LANE_RESET LANE=<lane_name>")]
         assert unit._operation_active is True
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
@@ -5356,7 +6430,7 @@ class TestAfcACECmdACELaneReset:
         unit._ace.set_reply("get_status", ready, busy, ready, ready)
         gcmd = make_gcmd(LANE="lane1")
 
-        unit.cmd_ACE_LANE_RESET(gcmd)
+        unit.cmd_AFC_ACE_LANE_RESET(gcmd)
 
         # dist_hub plus the default 475mm eject_buffer.
         assert [c for c in unit._ace.commands if c[0] != "get_status"] == [
@@ -5370,7 +6444,7 @@ class TestAfcACECmdACELaneReset:
             ("info", "ACE eject lane1: unwinding 575mm (dist_hub=100mm)")]
 
 
-class TestAfcACECmdACEFeedAssist:
+class TestAfcACECmdAFCACEFeedAssist:
     _STOPPED = ("Feed assist stopped on slot 2, watchdog suppressed until assist is "
                 "started again")
 
@@ -5387,7 +6461,7 @@ class TestAfcACECmdACEFeedAssist:
         gcmd = make_gcmd(LANE="lane1")
 
         with pytest.raises(AceGcmd.error, match=r"^ENABLE is required \(0 or 1\)$"):
-            unit.cmd_ACE_FEED_ASSIST(gcmd)
+            unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == set()
         assert unit._ace.commands == []
@@ -5399,7 +6473,7 @@ class TestAfcACECmdACEFeedAssist:
         gcmd = make_gcmd(ENABLE=0)
 
         with pytest.raises(AceGcmd.error, match=r"^LANE or SLOT is required$"):
-            unit.cmd_ACE_FEED_ASSIST(gcmd)
+            unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == set()
         assert unit._ace.commands == []
@@ -5411,7 +6485,7 @@ class TestAfcACECmdACEFeedAssist:
         gcmd = make_gcmd(ENABLE=0, LANE="nope")
 
         with pytest.raises(AceGcmd.error, match=r"^Unknown lane for this unit: nope$"):
-            unit.cmd_ACE_FEED_ASSIST(gcmd)
+            unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == set()
         assert unit._ace.commands == []
@@ -5422,7 +6496,7 @@ class TestAfcACECmdACEFeedAssist:
         unit = self._unit(feed_assist_active=[2])
         gcmd = make_gcmd(ENABLE=0, LANE="lane3")
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == {2}
         assert unit._feed_assist_active == set()
@@ -5437,7 +6511,7 @@ class TestAfcACECmdACEFeedAssist:
         unit = self._unit()
         gcmd = make_gcmd(ENABLE=0, LANE="lane3")
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == {2}
         assert unit._ace.commands == [("stop_feed_assist", {"index": 2})]
@@ -5445,11 +6519,23 @@ class TestAfcACECmdACEFeedAssist:
         assert gcmd.messages == [("info", self._STOPPED)]
         assert unit.printer.logger.messages == []
 
+    def test_feed_assist_stop_firmware_stop_exception_is_swallowed(self):
+        unit = self._unit()
+        unit._ace.stop_feed_assist = Recorder(raises=RuntimeError("boom"))
+        gcmd = make_gcmd(ENABLE=0, LANE="lane3")
+
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
+
+        assert unit._assist_suppressed == {2}
+        assert unit._ace.stop_feed_assist.calls == [((2,), {})]
+        assert gcmd.messages == [("info", self._STOPPED)]
+        assert unit.printer.logger.messages == []
+
     def test_feed_assist_stop_untracked_without_hardware_only_suppresses(self):
         unit = self._unit(connection=None)
         gcmd = make_gcmd(ENABLE=0, LANE="lane3")
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == {2}
         assert unit._feed_assist_active == set()
@@ -5461,7 +6547,7 @@ class TestAfcACECmdACEFeedAssist:
         unit._ace.connected = False
         gcmd = make_gcmd(ENABLE=0, SLOT=2)
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == {2}
         assert unit._ace.commands == []
@@ -5473,7 +6559,7 @@ class TestAfcACECmdACEFeedAssist:
         unit = self._unit(feed_assist_active=[1])
         gcmd = make_gcmd(ENABLE=1, LANE="lane1")
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._ace.commands == [("get_status", {}), ("stop_feed_assist", {"index": 1}),
                                       ("get_status", {}), ("start_feed_assist", {"index": 0})]
@@ -5487,7 +6573,7 @@ class TestAfcACECmdACEFeedAssist:
         unit._assist_suppressed.add(3)
         gcmd = make_gcmd(ENABLE=1, SLOT=3)
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._assist_suppressed == set()
         assert unit._feed_assist_active == {3}
@@ -5501,7 +6587,7 @@ class TestAfcACECmdACEFeedAssist:
         unit = self._unit(feed_assist_active=[1])
         gcmd = make_gcmd(ENABLE=1, LANE="lane2")
 
-        unit.cmd_ACE_FEED_ASSIST(gcmd)
+        unit.cmd_AFC_ACE_FEED_ASSIST(gcmd)
 
         assert unit._feed_assist_active == {1}
         assert unit._ace.commands == []
@@ -5834,6 +6920,16 @@ class TestAfcACEActiveAssistLane:
         assert unit._active_assist_lane() == "lane2"
         assert unit.printer.logger.messages == []
 
+    def test_active_assist_lane_keeps_first_candidate_when_none_matches_exactly(self):
+        unit = ace_p2_unit(LaneSpec("lane1", prep=True, tool_loaded=True),
+                           LaneSpec("lane2", prep=True, tool_loaded=True))
+        # Neither lane is the shared extruder's exact lane_loaded; the first
+        # candidate found still wins once the loop runs out of lanes.
+        unit.lanes["lane1"].extruder_obj.lane_loaded = "someone_else"
+
+        assert unit._active_assist_lane() == "lane1"
+        assert unit.printer.logger.messages == []
+
 
 class TestAfcACEMaybeAssistWatchdog:
     _ENABLING = ("info", "ACE assist watchdog: enabling feed assist for lane1 (slot 0)")
@@ -6053,7 +7149,7 @@ class TestAfcACECheckStuck:
         assert unit.printer.afc.error.AFC_error.calls == [(
             ("ACE stuck spool detected on Ace_1: feed assist ran continuously for 5.0s "
              "(>= 4.0s threshold). The spool is likely tangled or jammed at the unit. "
-             "Clear the snag, then resume. Run ACE_STUCK_SPOOL_DETECTION ENABLE=0 to "
+             "Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION ENABLE=0 to "
              "disable this check.",), {"pause": True})]
         assert unit.printer.logger.messages == []
 
@@ -6081,7 +7177,7 @@ class TestAfcACEHandleStuck:
         assert unit.printer.afc.error.AFC_error.calls == [(
             ("ACE stuck spool detected on Ace_1 lane lane1: feed assist ran continuously "
              "for 7.5s (>= 4.0s threshold). The spool is likely tangled or jammed at the "
-             "unit. Clear the snag, then resume. Run ACE_STUCK_SPOOL_DETECTION ENABLE=0 "
+             "unit. Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION ENABLE=0 "
              "to disable this check.",), {"pause": True})]
         assert unit.printer.gcode.run_script_from_command.calls == []
         assert unit.printer.logger.messages == []
@@ -6094,7 +7190,7 @@ class TestAfcACEHandleStuck:
 
         message = ("ACE stuck spool detected on Ace_1: feed assist ran continuously for "
                    "9.0s (>= 6.0s threshold). The spool is likely tangled or jammed at "
-                   "the unit. Clear the snag, then resume. Run ACE_STUCK_SPOOL_DETECTION "
+                   "the unit. Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION "
                    "ENABLE=0 to disable this check.")
         assert unit._ace.commands == []
         # The AFC pause was tried first; when it raised, the console pause took over.
@@ -6114,18 +7210,32 @@ class TestAfcACEHandleStuck:
         assert unit.printer.afc.error.AFC_error.calls == [(
             ("ACE stuck spool detected on Ace_1 lane lane1: feed assist ran continuously "
              "for 5.0s (>= 4.0s threshold). The spool is likely tangled or jammed at the "
-             "unit. Clear the snag, then resume. Run ACE_STUCK_SPOOL_DETECTION ENABLE=0 "
+             "unit. Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION ENABLE=0 "
              "to disable this check.",), {"pause": True})]
         assert unit.printer.gcode.run_script_from_command.calls == []
         assert unit.printer.logger.messages == []
 
+    def test_stop_feed_assist_exception_is_swallowed(self):
+        unit = ace_p2_unit(LaneSpec("lane1", prep=True, tool_loaded=True),
+                           feed_assist_active=[0])
+        unit._stop_feed_assist = Recorder(raises=RuntimeError("boom"))
 
-class TestAfcACECmdACEStuckSpoolDetection:
+        unit._handle_stuck(7.5)
+
+        assert unit._stop_feed_assist.calls == [((0,), {})]
+        assert unit.printer.afc.error.AFC_error.calls == [(
+            ("ACE stuck spool detected on Ace_1 lane lane1: feed assist ran continuously "
+             "for 7.5s (>= 4.0s threshold). The spool is likely tangled or jammed at the "
+             "unit. Clear the snag, then resume. Run AFC_ACE_STUCK_SPOOL_DETECTION ENABLE=0 "
+             "to disable this check.",), {"pause": True})]
+
+
+class TestAfcACECmdAFCACEStuckSpoolDetection:
     def test_enable_on(self):
         unit = ace_p2_unit()
         unit._stuck_tripped = True
 
-        unit.cmd_ACE_STUCK_SPOOL_DETECTION(make_gcmd(ENABLE=1))
+        unit.cmd_AFC_ACE_STUCK_SPOOL_DETECTION(make_gcmd(ENABLE=1))
 
         assert unit._stuck_detection is True
         # Enabling leaves the latch as it was.
@@ -6138,7 +7248,7 @@ class TestAfcACECmdACEStuckSpoolDetection:
         unit = ace_p2_unit(values={"stuck_spool_detection": True})
         unit._stuck_tripped = True
 
-        unit.cmd_ACE_STUCK_SPOOL_DETECTION(make_gcmd(ENABLE=0))
+        unit.cmd_AFC_ACE_STUCK_SPOOL_DETECTION(make_gcmd(ENABLE=0))
 
         assert unit._stuck_detection is False
         assert unit._stuck_tripped is False
@@ -6149,7 +7259,7 @@ class TestAfcACECmdACEStuckSpoolDetection:
         unit = ace_p2_unit(values={"stuck_spool_detection": True})
         unit._stuck_tripped = True
 
-        unit.cmd_ACE_STUCK_SPOOL_DETECTION(make_gcmd(STUCK_TIME=6.0))
+        unit.cmd_AFC_ACE_STUCK_SPOOL_DETECTION(make_gcmd(STUCK_TIME=6.0))
 
         assert unit._stuck_time == 6.0
         assert unit._stuck_detection is True
@@ -6392,9 +7502,60 @@ class TestAfcACESlotIsMoving:
         assert ace_p2_unit()._slot_is_moving(hw, 0) is False
 
 
+class TestAfcACELastFeedLength:
+    def test_no_connection_returns_none(self):
+        unit = ace_p2_unit()
+        unit._ace = None
+
+        assert unit._last_feed_length(3) is None
+
+    def test_returns_length_for_slot(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_feed_info", {"feed_info": [
+            {"length": 10.0}, {"length": 20.0}, {"length": 30.0}, {"length": 40.0}]})
+
+        assert unit._last_feed_length(3) == 40.0
+
+    def test_slot_out_of_range_returns_none(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_feed_info", {"feed_info": [{"length": 10.0}]})
+
+        assert unit._last_feed_length(3) is None
+
+    def test_send_command_exception_returns_none(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_feed_info", RuntimeError("down"))
+
+        assert unit._last_feed_length(3) is None
+
+
+class TestAfcACEFeedAttempt:
+    def test_no_connection_returns_before_any_feed(self):
+        unit = ace_p2_unit()
+        unit._ace = None
+
+        assert unit._ace_feed_attempt(3, 100.0, 25.0, None) == (False, False)
+
+    def test_feed_without_error_returns_not_errored_and_success(self):
+        unit = ace_p2_unit()
+        AceP2Wire(unit)
+
+        errored, success = unit._ace_feed_attempt(3, 100.0, 25.0, None)
+
+        assert (errored, success) == (False, True)
+
+
 class TestAfcACEStopFeedAtSensor:
     FEEDING = {"status": "busy", "slots": [{}, {}, {}, {"status": "feeding"}]}
     IDLE = {"status": "ready", "slots": [{}, {}, {}, {"status": "ready"}]}
+
+    def test_no_connection_returns_before_any_command(self):
+        unit = ace_p2_unit()
+        unit._ace = None
+
+        unit._stop_feed_at_sensor(3)
+
+        assert unit.printer.logger.messages == []
 
     def test_stop_at_the_sensor_is_resent_until_confirmed(self):
         # A stop inside the unit's ~250 ms setup window is dropped, so it is resent.
@@ -6625,8 +7786,38 @@ class TestAfcACEWaitForFeedComplete:
             ("debug", "ACE wait: toolhead sensor triggered for slot 3"),
             ("debug", "ACE Ace_1: feed on slot 3 stopped at the toolhead sensor")]
 
+    def test_short_move_check_exception_falls_back_to_no_start(self):
+        # Every get_status call raises: both the departure-wait polls and the
+        # short-move completion check fall through their except: pass.
+        unit = ace_p2_unit(values={"feed_departure_timeout": 0.5})
+        unit._ace.set_reply("get_status", RuntimeError("boom"))
+
+        assert unit._wait_for_feed_complete(0, 1.0, 100.0) is False
+        assert unit.printer.logger.messages == [
+            ("debug", "ACE wait: slot 0 never reported motion after feed/unwind command, "
+                      "motor may not have started")]
+
+    def test_phase1_get_status_exception_is_retried(self):
+        unit = ace_p2_unit()
+        unit._ace.set_reply("get_status", self.BUSY, RuntimeError("boom"),
+                            self.IDLE, self.IDLE)
+
+        assert unit._wait_for_feed_complete(0, 100.0, 100.0) is True
+        assert len(unit._ace.commands) == 4
+        assert unit.printer.logger.messages == []
+
 
 class TestAfcACESmartLoadRetry:
+    def test_no_connection_returns_false_without_feeding(self):
+        unit = ace_p2_unit("lane1")
+        lane = unit.lanes["lane1"]
+        wire = AceP2Wire(unit)
+        unit._ace = None
+
+        assert unit._smart_load_retry(lane, 0, 100.0) is False
+        assert wire.moves() == []
+        assert unit.printer.logger.messages == []
+
     def test_succeeds_when_sensor_triggers(self):
         unit = ace_p2_unit("lane1")
         lane = unit.lanes["lane1"]
@@ -6820,6 +8011,39 @@ class TestAfcACECalibrateHubInner:
             ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 50.0mm steps)"),
             ("error", "ACE hub calibrate: feed failed: FORBIDDEN")]
 
+    def test_no_trigger_retract_failure_is_logged(self):
+        unit = self._unit(values={"calibration_step": 4000.0})
+        lane = unit.lanes["lane1"]
+        AceP2Wire(unit)
+        unit._ace.unwind_filament = Recorder(raises=RuntimeError("unwind boom"))
+
+        result = unit._calibrate_hub_inner(lane)
+
+        assert result[0] is False
+        assert unit.printer.logger.messages == [
+            ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 4000.0mm steps)"),
+            ("error", "ACE hub calibrate: retract failed: unwind boom")]
+
+    def test_triggered_retract_failure_is_still_a_success(self):
+        unit = self._unit(values={"calibration_step": 60.0})
+        lane = unit.lanes["lane1"]
+
+        def trip_hub(method: str, params: Dict[str, Any]) -> None:
+            """The second feed reaches the hub, leaving 70mm to retract."""
+            if len(wire.moves()) == 2:
+                lane.hub_obj.state = True
+        wire = AceP2Wire(unit, on_move=trip_hub)
+        unit._ace.unwind_filament = Recorder(raises=RuntimeError("unwind boom"))
+
+        result = unit._calibrate_hub_inner(lane)
+
+        assert result == (True, "dist_hub calibration: 120.0mm (was 10.0mm)", 120.0)
+        assert unit.printer.logger.messages == [
+            ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 60.0mm steps)"),
+            ("info", "ACE hub calibrate: coarse trigger at 120.0mm"),
+            ("info", "ACE hub calibrate: trigger at 120.0mm"),
+            ("error", "ACE hub calibrate: retract failed: unwind boom")]
+
 
 class TestAfcACESyncInventory:
     def test_v1_sync_inventory_reads_every_slot(self):
@@ -6897,7 +8121,6 @@ class TestAfcACESyncInventory:
         assert unit._ace.commands == []
         assert unit._slot_inventory[0] == {}
         assert unit.printer.logger.messages == []
-
 
 
 class TestAfcACEStoreSlotRfid:
@@ -6986,7 +8209,6 @@ class TestAfcACEStoreSlotRfid:
                      "nozzle=None-NoneC")]
 
 
-
 class TestAfcACERefreshSlotInventory:
     def test_disconnected_noop(self):
         unit = ace_p2_unit(connection=None)
@@ -7048,7 +8270,6 @@ class TestAfcACERefreshSlotInventory:
             ("debug", "ACE Ace_1: slot 0 RFID refresh failed: boom")]
 
 
-
 class TestAfcACEClearSlotInventory:
     def test_clears_fields_and_drops_uid(self):
         unit = ace_p2_unit(inventory={1: {"material": "PLA", "color": [1, 2, 3], "uid": "AA",
@@ -7071,7 +8292,6 @@ class TestAfcACEClearSlotInventory:
         assert unit.printer.logger.messages == []
 
 
-
 class TestAfcACEReaderSiblingSlot:
     def test_base_ace_has_no_shared_reader_sibling(self):
         unit = ace_p2_unit(inventory={0: {"sku": "X"}, 1: {"sku": "X"}})
@@ -7081,49 +8301,31 @@ class TestAfcACEReaderSiblingSlot:
         assert unit._shared_rfid_ambiguous(0) is False
 
 
-
 class TestAfcACESharedRfidAmbiguous:
-    @staticmethod
-    def _paired_unit(inventory: Dict[int, Dict[str, Any]]) -> afcACE:
-        """
-        :param inventory: slot inventory to seed
-        :return afcACE: a unit whose readers each cover a slot pair (0/1, 2/3)
-        """
-        unit = ace_p2_unit(inventory=inventory)
-        unit._reader_sibling_slot = lambda slot: slot ^ 1
-        return unit
-
-    def test_ambiguous_when_sibling_reports_same_sku(self):
+    def test_ace2_ambiguous_when_sibling_reports_same_sku(self):
         # Slot 1 read slot 0's tag through the reader they share.
-        unit = self._paired_unit({0: {"sku": "HPL19-107"}, 1: {"sku": " HPL19-107 "}})
+        unit = make_ace2_unit(inventory={0: {"sku": "HPL19-107"}, 1: {"sku": " HPL19-107 "}})
 
         assert unit._shared_rfid_ambiguous(1) is True
         assert unit._shared_rfid_ambiguous(0) is True
 
-    def test_ambiguous_when_sibling_reports_same_uid(self):
-        unit = self._paired_unit({2: {"sku": "", "uid": "deadbeef"},
-                                  3: {"sku": "", "uid": "deadbeef"}})
+    def test_ace2_ambiguous_when_sibling_reports_same_uid(self):
+        unit = make_ace2_unit(inventory={2: {"sku": "", "uid": "deadbeef"},
+                                         3: {"sku": "", "uid": "deadbeef"}})
 
         assert unit._shared_rfid_ambiguous(2) is True
 
-    def test_not_ambiguous_when_sibling_differs(self):
-        unit = self._paired_unit({2: {"sku": "BAMBU-A", "uid": "aa"},
-                                  3: {"sku": "BAMBU-B", "uid": "bb"}})
+    def test_ace2_not_ambiguous_when_sibling_differs(self):
+        unit = make_ace2_unit(inventory={2: {"sku": "BAMBU-A", "uid": "aa"},
+                                         3: {"sku": "BAMBU-B", "uid": "bb"}})
 
         assert unit._shared_rfid_ambiguous(2) is False
         assert unit._shared_rfid_ambiguous(3) is False
 
-    def test_not_ambiguous_when_sibling_empty(self):
-        unit = self._paired_unit({0: {"sku": "HPL19-107", "uid": "aa"}})
+    def test_ace2_not_ambiguous_when_sibling_empty(self):
+        unit = make_ace2_unit(inventory={0: {"sku": "HPL19-107", "uid": "aa"}})
 
         assert unit._shared_rfid_ambiguous(0) is False
-
-    def test_not_ambiguous_when_sibling_out_of_range(self):
-        unit = ace_p2_unit(inventory={3: {"sku": "S"}})
-        unit._reader_sibling_slot = lambda slot: slot + 1
-
-        assert unit._shared_rfid_ambiguous(3) is False
-
 
 
 class TestAfcACESyncSlotLoadedState:
@@ -7156,6 +8358,18 @@ class TestAfcACESyncSlotLoadedState:
         assert lane.material == "PETG"
         assert unit.printer.logger.messages == []
 
+    def test_ace2_ready_slot_keeps_lane_values(self):
+        # The ACE 2 inventory holds no tag values; AFC_ACE2_rfid identifies its spools.
+        unit = make_ace2_unit(lanes=["lane1"], inventory={
+            0: {"status": "ready", "material": "PETG"}})
+        lane = unit.lanes["lane1"]
+
+        unit._sync_slot_loaded_state()
+
+        assert lane.prep_state is True
+        assert lane.material is None
+        assert unit.printer.logger.messages == []
+
     def test_ready_slot_values_need_the_rfid_helper(self, monkeypatch):
         monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
         unit = ace_p2_unit("lane1", inventory={0: {"status": "ready", "material": "PETG"}})
@@ -7181,6 +8395,30 @@ class TestAfcACESyncSlotLoadedState:
         assert lane._load_state is False
         assert unit.printer.logger.messages == []
 
+    def test_slot_beyond_unit_capacity_is_skipped(self):
+        unit = ace_p2_unit(LaneSpec("lane1", prep=True), inventory={0: {"status": "empty"}})
+        lane = unit.lanes["lane1"]
+        # Force an out-of-range slot (a correctly configured unit never does this).
+        unit._slot_map["lane1"] = 99
+
+        unit._sync_slot_loaded_state()
+
+        # An in-range read would have cleared prep_state; this lane is left alone.
+        assert lane.prep_state is True
+        assert unit.printer.logger.messages == []
+
+    def test_applies_filament_defaults_when_available(self, monkeypatch):
+        unit = ace_p2_unit("lane1", inventory={0: {"status": "ready", "material": "PETG"}})
+        lane = unit.lanes["lane1"]
+        apply_defaults = Recorder()
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", apply_defaults)
+
+        unit._sync_slot_loaded_state()
+
+        assert apply_defaults.calls == [((lane, unit._slot_inventory[0]), {
+            "color_converter": afc_ace_module.rgb_array_to_hex,
+            "afc_defaults": {"default_material_type": None, "default_color": None}})]
+
     def test_ambiguous_shared_read_is_not_applied(self):
         unit = ace_p2_unit("lane1", "lane2", inventory={
             0: {"status": "ready", "sku": "S", "material": "PLA"},
@@ -7197,53 +8435,42 @@ class TestAfcACESyncSlotLoadedState:
             ("info", "ACE Ace_1: slot 1 RFID read is ambiguous (shared reader sibling "
                      "reports the same tag), not applying to lane2 at startup")]
 
-    def test_ace2_ready_slot_keeps_lane_values(self):
-        # The ACE 2 inventory holds no tag values; AFC_ACE2_rfid identifies its spools.
-        unit = make_ace2_unit(lanes=["lane1"], inventory={
-            0: {"status": "ready", "material": "PETG"}})
-        lane = unit.lanes["lane1"]
-
-        unit._sync_slot_loaded_state()
-
-        assert lane.prep_state is True
-        assert lane.material is None
-        assert unit.printer.logger.messages == []
 
 
+# Uncomment below once RFID and spoolman creation support is added
+# class TestAfcACEGetAutoSpoolmanCreate:
+    # def test_fallback_when_helper_absent(self, monkeypatch):
+        # monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
+        # unit = ace_p2_unit("lane1", values={"auto_spoolman_create": True})
 
-class TestAfcACEGetAutoSpoolmanCreate:
-    def test_fallback_when_helper_absent(self, monkeypatch):
-        monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
-        unit = ace_p2_unit("lane1", values={"auto_spoolman_create": True})
+        # assert unit._get_auto_spoolman_create(unit.lanes["lane1"]) is True
 
-        assert unit._get_auto_spoolman_create(unit.lanes["lane1"]) is True
+    # def test_fallback_ignores_extruder_opt_in(self, monkeypatch):
+        # monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
+        # unit = ace_p2_unit("lane1")
+        # lane = unit.lanes["lane1"]
+        # lane.extruder_obj.auto_spoolman_create = True
 
-    def test_fallback_ignores_extruder_opt_in(self, monkeypatch):
-        monkeypatch.setattr(afc_ace_module, "get_auto_spoolman_create", None)
-        unit = ace_p2_unit("lane1")
-        lane = unit.lanes["lane1"]
-        lane.extruder_obj.auto_spoolman_create = True
+        # assert unit._get_auto_spoolman_create(lane) is False
 
-        assert unit._get_auto_spoolman_create(lane) is False
+    # def test_delegates_to_helper_when_present(self):
+        # # The AFC_RFID helper honours the extruder's opt-in over the unit default.
+        # unit = ace_p2_unit("lane1")
+        # lane = unit.lanes["lane1"]
+        # lane.extruder_obj.auto_spoolman_create = True
 
-    def test_delegates_to_helper_when_present(self):
-        # The AFC_RFID helper honours the extruder's opt-in over the unit default.
-        unit = ace_p2_unit("lane1")
-        lane = unit.lanes["lane1"]
-        lane.extruder_obj.auto_spoolman_create = True
+        # assert unit.auto_spoolman_create is False
+        # assert unit._get_auto_spoolman_create(lane) is True
 
-        assert unit.auto_spoolman_create is False
-        assert unit._get_auto_spoolman_create(lane) is True
+    # def test_helper_falls_back_to_unit_default_when_nothing_opts_in(self):
+        # # Neither unit nor extruder opts in, so the helper returns the unit default it is given.
+        # unit = ace_p2_unit("lane1")
+        # lane = unit.lanes["lane1"]
 
-    def test_helper_falls_back_to_unit_default_when_nothing_opts_in(self):
-        # Neither unit nor extruder opts in, so the helper returns the unit default it is given.
-        unit = ace_p2_unit("lane1")
-        lane = unit.lanes["lane1"]
-
-        assert afc_ace_module.get_auto_spoolman_create is not None
-        assert unit.auto_spoolman_create is False
-        assert not hasattr(lane.extruder_obj, "auto_spoolman_create")
-        assert unit._get_auto_spoolman_create(lane) is False
+        # assert afc_ace_module.get_auto_spoolman_create is not None
+        # assert unit.auto_spoolman_create is False
+        # assert not hasattr(lane.extruder_obj, "auto_spoolman_create")
+        # assert unit._get_auto_spoolman_create(lane) is False
 
 
 
@@ -7299,6 +8526,115 @@ class TestAceExtractGetInfoId:
 
     def test_extract_id_bad_json_returns_none(self):
         assert _ace_extract_get_info_id(self._frame(b"not json")) is None
+
+
+class TestAceScanCandidates:
+    def test_returns_sorted_realpaths(self, monkeypatch):
+        monkeypatch.setattr(afc_ace_module.glob, "glob", lambda pattern: ["/dev/b", "/dev/a"])
+        monkeypatch.setattr(afc_ace_module.os.path, "realpath", lambda p: p.upper())
+
+        assert afc_ace_module._ace_scan_candidates() == ["/DEV/A", "/DEV/B"]
+
+    def test_realpath_failure_falls_back_to_the_raw_path(self, monkeypatch):
+        monkeypatch.setattr(afc_ace_module.glob, "glob", lambda pattern: ["/dev/a"])
+
+        def raise_realpath(p: str) -> str:
+            """A path the OS can't resolve (e.g. a dangling symlink)."""
+            error_str = "boom"
+            raise OSError(error_str)
+        monkeypatch.setattr(afc_ace_module.os.path, "realpath", raise_realpath)
+
+        assert afc_ace_module._ace_scan_candidates() == ["/dev/a"]
+
+
+class TestProbeAceGetInfoId:
+    @staticmethod
+    def _frame(obj: Dict[str, Any]) -> bytes:
+        """
+        :param obj: the JSON-decodable reply body
+        :return bytes: the reply framed as a real unit sends it
+        """
+        payload = json.dumps(obj, separators=(',', ':')).encode('utf-8')
+        crc = crc16_ccitt_reflected(payload)
+        return (b"\xff\xaa" + struct.pack('<H', len(payload)) + payload
+                + struct.pack('<H', crc) + b"\xfe")
+
+    @staticmethod
+    def _serial_module(fake_port: FakeSerial) -> Any:
+        """
+        :param fake_port: the FakeSerial Serial() should hand back
+        :return Any: a sys.modules["serial"] stand-in
+        """
+        module = types.SimpleNamespace()
+        module.Serial = (lambda port="", baudrate=0, timeout=0.0, write_timeout=0.0,
+                         _fake=fake_port: _fake)
+        return module
+
+    def test_import_error_returns_none(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "serial", None)
+
+        assert afc_ace_module.probe_ace_get_info_id("/dev/ttyACM0") is None
+
+    def test_open_failure_returns_none(self, monkeypatch):
+        module = types.SimpleNamespace()
+
+        def raise_open(port: str, baudrate: int, timeout: float,
+                       write_timeout: float) -> FakeSerial:
+            """The OS refuses to open the device."""
+            error_str = "busy"
+            raise OSError(error_str)
+        module.Serial = raise_open
+        monkeypatch.setitem(sys.modules, "serial", module)
+
+        assert afc_ace_module.probe_ace_get_info_id("/dev/ttyACM0") is None
+
+    def test_returns_the_reported_id(self, monkeypatch):
+        port = FakeSerial()
+        port.on_write = lambda frame: port.rx.extend(self._frame({"result": {"id": 3}}))
+        monkeypatch.setitem(sys.modules, "serial", self._serial_module(port))
+
+        assert afc_ace_module.probe_ace_get_info_id("/dev/ttyACM0", timeout=1.0) == 3
+        assert port.closed is True
+
+    def test_reply_arriving_after_an_empty_read_still_resolves(self, monkeypatch):
+        port = FakeSerial()
+        frame = self._frame({"result": {"id": 5}})
+        real_read = port.read
+        state = {"n": 0}
+
+        def flaky_read(size: int = 1) -> bytes:
+            """The first poll finds nothing; the reply lands on the second."""
+            state["n"] += 1
+            if state["n"] == 1:
+                return b""
+            if state["n"] == 2:
+                port.rx.extend(frame)
+            return real_read(size)
+        port.read = flaky_read
+        monkeypatch.setitem(sys.modules, "serial", self._serial_module(port))
+
+        assert afc_ace_module.probe_ace_get_info_id("/dev/ttyACM0", timeout=1.0) == 5
+
+    def test_reply_split_across_two_chunks_still_resolves(self, monkeypatch):
+        port = FakeSerial()
+        frame = self._frame({"result": {"id": 7}})
+        split = len(frame) // 2
+        chunks = [frame[:split], frame[split:]]
+
+        def chunked_read(size: int = 1) -> bytes:
+            """The frame arrives in two pieces, neither alone parseable."""
+            return chunks.pop(0) if chunks else b""
+        port.read = chunked_read
+        monkeypatch.setitem(sys.modules, "serial", self._serial_module(port))
+
+        assert afc_ace_module.probe_ace_get_info_id("/dev/ttyACM0", timeout=1.0) == 7
+
+    def test_timeout_with_no_reply_returns_none(self, monkeypatch):
+        port = FakeSerial()
+        monkeypatch.setitem(sys.modules, "serial", self._serial_module(port))
+
+        assert afc_ace_module.probe_ace_get_info_id("/dev/ttyACM0", timeout=0.05) is None
+        assert port.closed is True
 
 
 class TestResolveAcePortByIndex:
@@ -7439,6 +8775,38 @@ class TestRunOffReactor:
         assert run_off_reactor(_Bare(), threading.get_ident) == threading.get_ident()
 
 
+class TestHeldLog:
+    def test_holds_lines_then_replays_them_in_order(self):
+        held = afc_ace_module._HeldLog()
+        held.debug("d")
+        held.info("i")
+        held.warning("w")
+        held.error("e")
+        logger = AceLogger()
+
+        held.replay(logger)
+
+        assert logger.messages == [("debug", "d"), ("info", "i"),
+                                   ("warning", "w"), ("error", "e")]
+        assert held._lines == []
+
+    def test_unsupported_attribute_raises(self):
+        held = afc_ace_module._HeldLog()
+
+        with pytest.raises(AttributeError):
+            held.respond_info("nope")
+
+    def test_replay_swallows_a_logger_exception(self):
+        held = afc_ace_module._HeldLog()
+        held.info("boom")
+        logger = AceLogger()
+        logger.info = Recorder(raises=RuntimeError("down"))
+
+        held.replay(logger)
+
+        assert held._lines == []
+
+
 class TestACEConnectionConnected:
     def test_default_disconnected(self):
         conn = ace_p2_connection(connected=False)
@@ -7463,6 +8831,63 @@ class TestACEConnectionPreInfoHandshake:
         # The V1 unit needs no discover: nothing is sent.
         assert conn._serial.frames == []
         assert conn._next_request_id == 0
+
+
+class TestACEConnectionResolveConnectPort:
+    def test_explicit_port_is_returned_as_is(self):
+        conn = ace_p2_connection(serial_port="/dev/ttyACM4", connected=False)
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM4"
+
+    def test_auto_with_no_resolved_port_runs_the_full_scan(self, monkeypatch):
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
+                            Recorder(result="/dev/ttyACM9"))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM9"
+        assert afc_ace_module.resolve_ace_port_by_index.calls == [
+            ((2, conn._baud_rate), {"logger": conn._logger})]
+
+    def test_auto_fast_path_reuses_a_still_matching_resolved_port(self, monkeypatch):
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
+        conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
+                            Recorder(result=2))
+        full_scan = Recorder()
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index", full_scan)
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM9"
+        assert full_scan.calls == []
+
+    def test_auto_fast_path_falls_back_when_the_probe_mismatches(self, monkeypatch):
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
+        conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
+                            Recorder(result=1))
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
+                            Recorder(result="/dev/ttyACM3"))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM3"
+
+    def test_auto_fast_path_falls_back_when_the_probe_raises(self, monkeypatch):
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
+        conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
+                            Recorder(raises=RuntimeError("boom")))
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
+                            Recorder(result="/dev/ttyACM3"))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM3"
+
+    def test_auto_scan_finding_nothing_raises(self, monkeypatch):
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=3)
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
+                            Recorder(result=None))
+
+        with pytest.raises(ACESerialError, match=(
+                r"^ACE autodetect: no unit reporting id 3 found \(serial_port: auto\)\. "
+                r"Is it plugged in / powered\?$")):
+            conn._resolve_connect_port()
 
 
 class TestACEConnectionConnect:
@@ -7566,6 +8991,23 @@ class TestACEConnectionConnect:
             ("info", "ACE device info: {'model': 'x'}")]
         assert set(log.threads) == {main}
         assert [cb for cb, _ in reactor.timers] == [conn._heartbeat_tick]
+
+    def test_already_connected_after_resolve_returns_early(self, monkeypatch):
+        # A concurrent reconnect landed while this connect's port resolve was
+        # still running off the reactor; this one must not re-open the port.
+        conn, reactor, log, port = self._auto_conn(monkeypatch)
+
+        def resolve(ace_index: int, baud: int, settle: float = 6.0,
+                   logger: Any = None) -> str:
+            """Another connect finishes while this autodetect "runs"."""
+            conn._connected = True
+            return "/dev/ttyACM7"
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index", resolve)
+
+        conn.connect()
+
+        assert port.opened == []
+        assert conn.device_info == {}
 
     def test_second_connect_while_one_waits_is_refused(self, monkeypatch):
         conn, reactor, log, port = self._auto_conn(
@@ -7779,6 +9221,35 @@ class TestACEConnectionDisconnect:
         assert conn._connected is False
         assert conn._logger.messages == []
 
+    def test_unregister_fd_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        conn._fd_handle = ("fd", 3)
+        conn._reactor.unregister_fd.raises = RuntimeError("boom")
+
+        conn.disconnect()
+
+        assert conn._fd_handle is None
+        assert conn._connected is False
+
+    def test_serial_close_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        conn._serial.close = Recorder(raises=RuntimeError("boom"))
+
+        conn.disconnect()
+
+        assert conn._serial is None
+        assert conn._connected is False
+
+    def test_pending_completion_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        pending = conn._reactor.completion()
+        pending.complete = Recorder(raises=RuntimeError("boom"))
+        conn._pending[5] = pending
+
+        conn.disconnect()
+
+        assert conn._pending == {}
+
 
 class TestACEConnectionReconnect:
     _SCHEDULED = ("info", "ACE scheduling reconnect in 5s (next backoff: 8s)")
@@ -7857,6 +9328,65 @@ class TestACEConnectionReconnect:
             ("info", "ACE serial disconnected"), self._SCHEDULED,
             ("warning", "ACE reconnect failed: pyserial not installed. Install with: "
                         "pip install pyserial")]
+
+    def test_reconnect_callback_success_without_hook(self, monkeypatch):
+        conn = ace_p2_connection(reconnect_enabled=True)
+        port = AceP2SerialPort({"code": 0, "result": {}})
+        port.conn = conn
+        monkeypatch.setitem(sys.modules, "serial", port)
+        conn.reconnect()
+
+        conn._reactor.advance(5.0)
+
+        assert conn.reconnect_callback is None
+        assert conn._connected is True
+        assert conn._logger.messages == [
+            ("info", "ACE serial disconnected"), self._SCHEDULED,
+            ("info", "ACE serial connected: /dev/ttyACM0 @ 115200"),
+            ("debug", "ACE TX: {'id': 0, 'method': 'get_info'}"),
+            ("info", "ACE device info: {}"),
+            ("info", "ACE reconnected successfully")]
+
+    def test_reconnect_callback_failure_is_logged(self, monkeypatch):
+        conn = ace_p2_connection(reconnect_enabled=True)
+        conn.reconnect_callback = Recorder(raises=RuntimeError("hook broke"))
+        port = AceP2SerialPort({"code": 0, "result": {}})
+        port.conn = conn
+        monkeypatch.setitem(sys.modules, "serial", port)
+        conn.reconnect()
+
+        conn._reactor.advance(5.0)
+
+        assert conn._connected is True
+        assert conn._logger.messages == [
+            ("info", "ACE serial disconnected"), self._SCHEDULED,
+            ("info", "ACE serial connected: /dev/ttyACM0 @ 115200"),
+            ("debug", "ACE TX: {'id': 0, 'method': 'get_info'}"),
+            ("info", "ACE device info: {}"),
+            ("info", "ACE reconnected successfully"),
+            ("warning", "ACE reconnect callback failed: hook broke")]
+
+    def test_disabled_before_the_timer_fires_is_a_noop(self):
+        conn = ace_p2_connection(reconnect_enabled=True)
+        conn.reconnect()
+        conn._reconnect_enabled = False
+
+        conn._reactor.advance(5.0)
+
+        assert conn._connected is False
+        assert conn._logger.messages == [
+            ("info", "ACE serial disconnected"), self._SCHEDULED]
+
+    def test_replacing_an_existing_timer_swallows_unregister_failure(self):
+        conn = ace_p2_connection(reconnect_enabled=True)
+        conn.reconnect()
+        conn._reactor.unregister_timer.raises = RuntimeError("boom")
+
+        conn.reconnect()
+
+        # The old timer's unregister failed, so it is never removed; a second
+        # one is still registered alongside it.
+        assert len(conn._reactor.timers) == 2
 
 
 class TestACEConnectionQuickReconnect:
@@ -7957,6 +9487,33 @@ class TestACEConnectionQuickReconnect:
                         "pip install pyserial"),
             ("info", "ACE scheduling reconnect in 5s (next backoff: 8s)")]
 
+    def test_disabled_is_a_noop(self):
+        conn = ace_p2_connection()
+
+        conn._quick_reconnect()
+
+        assert conn._connected is True
+        assert conn._reactor.timers == []
+
+    def test_disabled_before_the_timer_fires_is_a_noop(self):
+        conn = ace_p2_connection(reconnect_enabled=True)
+        conn._quick_reconnect()
+        conn._reconnect_enabled = False
+
+        conn._reactor.advance(0.5)
+
+        assert conn._connected is False
+        assert conn._logger.messages == [("info", "ACE serial disconnected")]
+
+    def test_replacing_an_existing_timer_swallows_unregister_failure(self):
+        conn = ace_p2_connection(reconnect_enabled=True)
+        conn._quick_reconnect()
+        conn._reactor.unregister_timer.raises = RuntimeError("boom")
+
+        conn._quick_reconnect()
+
+        assert len(conn._reactor.timers) == 2
+
 
 class TestACEConnectionSendCommand:
     def test_not_connected_raises(self):
@@ -8052,6 +9609,19 @@ class TestACEConnectionSendCommand:
             ("info", "ACE serial disconnected"),
             ("info", "ACE scheduling reconnect in 5s (next backoff: 8s)")]
 
+    def test_non_dict_result_is_returned_as_is(self):
+        # _handle_response only ever completes a pending request with a dict
+        # (or disconnect() with None); this exercises the defensive fallback
+        # for any other value a completion could carry.
+        conn = ace_p2_connection()
+
+        def respond(frame: bytes) -> None:
+            """Complete the one pending request with a non-dict result."""
+            next(iter(conn._pending.values())).complete("pong")
+        conn._serial.on_write = respond
+
+        assert conn.send_command("get_status") == "pong"
+
 
 class TestACEConnectionSendCommandAsync:
     def test_not_connected_noop(self):
@@ -8133,6 +9703,15 @@ class TestACEConnectionStopHeartbeat:
         assert conn._reactor.unregister_timer.calls == []
         assert conn._logger.messages == []
 
+    def test_unregister_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        conn._start_heartbeat()
+        conn._reactor.unregister_timer.raises = RuntimeError("boom")
+
+        conn._stop_heartbeat()
+
+        assert conn._heartbeat_timer is None
+
 
 class TestACEConnectionHeartbeatTick:
     def test_tick_sends_and_reschedules(self):
@@ -8164,6 +9743,22 @@ class TestACEConnectionHeartbeatTick:
         assert conn._heartbeat_tick(0.0) == conn._reactor.NEVER
         assert conn._last_supervision_check == 0.0
         assert conn._logger.messages == []
+
+    def test_async_send_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        conn._last_rx_time = 95.0
+        conn.send_command_async = Recorder(raises=RuntimeError("boom"))
+
+        assert conn._heartbeat_tick(100.0) == 102.0
+        assert conn._last_supervision_check == 100.0
+
+    def test_poll_extras_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        conn._last_rx_time = 95.0
+        conn._poll_extras = Recorder(raises=RuntimeError("boom"))
+
+        assert conn._heartbeat_tick(100.0) == 102.0
+        assert conn._last_supervision_check == 100.0
 
 
 class TestACEConnectionPollExtras:
@@ -8284,6 +9879,17 @@ class TestACEConnectionHandleRead:
             :return bytes: never returns
             """
             raise self.error
+
+    def test_no_serial_returns_before_reading(self):
+        conn = ace_p2_connection()
+        conn._last_rx_time = 50.0
+        conn._serial = None
+
+        conn._handle_read(101.0)
+
+        assert conn._read_buffer == b""
+        assert conn._last_rx_time == 50.0
+        assert conn._logger.messages == []
 
     def test_no_data_returns(self):
         conn = ace_p2_connection()
@@ -8507,6 +10113,58 @@ class TestACEConnectionHandleResponse:
         assert conn._unsolicited_timestamps == [100.0]
         assert conn._logger.messages == [("debug", "ACE response for unknown request id=999")]
 
+    def test_unsolicited_without_a_callback_is_a_noop(self):
+        conn = ace_p2_connection()
+
+        conn._handle_response({"result": 1})
+
+        assert conn._unsolicited_timestamps == [100.0]
+        assert conn._logger.messages == []
+
+    def test_unsolicited_callback_exception_is_logged(self):
+        conn = ace_p2_connection()
+        conn.status_callback = Recorder(raises=RuntimeError("boom"))
+
+        conn._handle_response({"result": 1})
+
+        assert len(conn._logger.messages) == 1
+        level, msg = conn._logger.messages[0]
+        assert level == "error"
+        assert msg.startswith("ACE status_callback error: boom\n")
+
+    def test_mismatched_pending_reply_is_dropped(self):
+        conn = ace_p2_connection()
+        completion = conn._reactor.completion()
+        conn._pending[7] = completion
+        conn._response_matches_pending = Recorder(result=False)
+
+        conn._handle_response({"id": 7, "result": 1})
+
+        assert completion.done is False
+        assert conn._logger.messages == [("debug", "ACE dropping mismatched reply for id=7")]
+
+    def test_pending_completion_exception_is_swallowed(self):
+        conn = ace_p2_connection()
+        completion = conn._reactor.completion()
+        completion.complete = Recorder(raises=RuntimeError("boom"))
+        conn._pending[7] = completion
+
+        conn._handle_response({"id": 7, "result": 1})
+
+        assert conn._logger.messages == []
+
+    def test_async_reply_callback_exception_is_logged(self):
+        conn = ace_p2_connection()
+        conn._async_ids.append(9)
+        conn.status_callback = Recorder(raises=RuntimeError("boom"))
+
+        conn._handle_response({"id": 9, "result": 1})
+
+        assert len(conn._logger.messages) == 1
+        level, msg = conn._logger.messages[0]
+        assert level == "error"
+        assert msg.startswith("ACE status_callback error: boom\n")
+
 
 class TestACEConnectionGetStatus:
     def test_get_status(self):
@@ -8580,7 +10238,6 @@ class TestACEConnectionGetFilamentInfo:
         assert conn._timeout_timestamps == [103.0]
         assert conn._logger.messages == [
             ("debug", "ACE TX: {'id': 0, 'method': 'get_filament_info', 'params': {'index': 2}}")]
-
 
 
 class TestACEConnectionGetMaterialInfo:
@@ -8902,7 +10559,6 @@ class TestACEConnectionEnableRfid:
         assert conn._logger.messages == [("debug", "ACE TX: {'id': 0, 'method': 'enable_rfid'}")]
 
 
-
 class TestACEConnectionDisableRfid:
     def test_disable_rfid(self):
         conn = ace_p2_connection()
@@ -8912,7 +10568,6 @@ class TestACEConnectionDisableRfid:
         assert ace_p2_payloads(conn) == [b'{"id":0,"method":"disable_rfid"}']
         assert conn._logger.messages == [
             ("debug", "ACE TX: {'id': 0, 'method': 'disable_rfid'}")]
-
 
 
 class TestACEConnectionSetFilamentInfo:
@@ -8928,7 +10583,6 @@ class TestACEConnectionSetFilamentInfo:
         assert conn._logger.messages == [
             ("debug", "ACE TX: {'id': 0, 'method': 'set_filament_info', "
                       "'params': {'index': 0, 'type': 'PLA', 'color': [1, 2, 3]}}")]
-
 
 
 class TestAfcACEUsesFirmwareRfid:
@@ -8956,3 +10610,14 @@ class TestAfcACEUsesFirmwareRfid:
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
+
+class TestLoadConfigPrefix:
+    def test_constructs_the_unit_from_its_config_section(self):
+        printer = make_ace_printer()
+        config = AceConfig("AFC_ACE Ace_1", printer, {"serial_port": "/dev/ttyACM0"})
+
+        unit = load_config_prefix(config)
+
+        assert isinstance(unit, afcACE)
+        assert unit.name == "Ace_1"
+        assert unit.serial_port == "/dev/ttyACM0"

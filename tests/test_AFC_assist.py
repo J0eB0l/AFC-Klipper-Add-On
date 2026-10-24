@@ -780,7 +780,7 @@ class TestHandleReady:
         espooler.handle_ready()
 
         espooler.reactor.update_timer.assert_not_called()
-        assert espooler.logger.messages == [("info", "Not starting timer for lane1")]
+        assert espooler.logger.messages == [("debug", "Not starting timer for lane1")]
 
 
 # ── Espooler.handle_connect ─────────────────────────────────────────────────

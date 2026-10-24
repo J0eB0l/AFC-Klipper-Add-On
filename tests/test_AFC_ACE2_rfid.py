@@ -2457,7 +2457,7 @@ class TestAFCACE2RFIDRescanLane:
 
 
 class TestAFCACE2RFIDStageWriteAround:
-    """A tag write with LANE= turns the spool the way ACE_RFID_RESCAN does and
+    """A tag write with LANE= turns the spool the way AFC_ACE_RFID_RESCAN does and
     writes where the tag comes to rest. A blank tag answers but has nothing to
     decode, so at rest an answer is enough."""
 

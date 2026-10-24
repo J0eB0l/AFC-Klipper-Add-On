@@ -1432,6 +1432,26 @@ class AceExtruder:
             buffer_obj.clear_advance_latch()
         self.reactor.pause(self.reactor.monotonic() + 0.5)
 
+    def prep_on_shuttle_check(self, lane: Any) -> str:
+        """
+        AFC_extruder.prep_on_shuttle_check stand-in: same real logic, ported
+        here so ACE tests exercise the production method. tool_obj isn't
+        modeled by this stand-in, so it's read defensively.
+
+        :param lane: AFCLane for current extruder to easily set leds though its unit object
+        :return str: Message string if lane is loaded to toolhead or in toolhead and on shuttle
+        """
+        msg = ""
+        on_shuttle = ""
+        if (getattr(self, "tool_obj", None)
+            and getattr(self, "tc_unit_name", None)):
+            lane.unit_obj.lane_tool_loaded_idle(lane)
+            if self.on_shuttle():
+                on_shuttle = " and toolhead on shuttle"
+                lane.unit_obj.lane_tool_loaded(lane)
+        msg += f"<span class=primary--text> in ToolHead{on_shuttle}</span>"
+        return msg
+
 
 class FakeHeaters:
     """heaters stand-in recording sensor factories by type name."""
