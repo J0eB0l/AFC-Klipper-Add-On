@@ -32,14 +32,12 @@ import pytest
 from gcode import CommandError
 
 import extras.AFC_ACE as afc_ace_module
-import extras.temperature_ace as temperature_ace_module
 from extras.AFC_ACE import (MAX_PAYLOAD_SIZE, REQUEST_TIMEOUT, ACEConnection, ACESerialError,
                             ACETimeoutError, afcACE)
 from extras.AFC_ACE2 import ACE2Connection, afcACE2
 # Uncomment below once RFID and spoolman creation support is added
 # from extras.AFC_ACE2_rfid import AFC_ACE2_RFID, Ace2Link, _Ace2RegLink
 from extras.AFC_lane import AFCLane, AFCLaneState
-from extras.temperature_ace import TemperatureACE
 
 
 class Recorder:
@@ -312,8 +310,8 @@ class FakeAce2(FakeAce):
 # ══ Real-construction builders ═══════════════════════════════════════════════
 # Everything below builds through the real __init__, never __new__. One
 # AcePrinter is the registry a test's objects share, as Klipper's printer is:
-# a unit, its lanes, the ACE2 RFID reader and a temperature_ace sensor find
-# each other through it.
+# a unit, its lanes, the ACE2 RFID reader and the unit's temperature card
+# find each other through it.
 #
 # Builders:
 #   make_ace_printer()            the shared printer, reactor, AFC core, gcode, toolhead
@@ -322,7 +320,6 @@ class FakeAce2(FakeAce):
 #   make_ace_connection()         real ACEConnection / ACE2Connection on FakeSerial
 #   (make_ace2_rfid/make_ace2_reg_link/make_ace2_link are commented out below,
 #    pending RFID and spoolman creation support)
-#   make_temperature_ace()        TemperatureACE linked to a unit
 #   make_gcmd()                   a g-code command with Klipper's get semantics
 #   reset_ace_globals() / ace_isolation   reset the ACE modules' process-wide state
 #
@@ -339,15 +336,15 @@ class FakeAce2(FakeAce):
 #   printer.invoke_shutdown                   -> printer.shutdowns
 #   Python loggers, through capture_log(name): "AFC_ACE_serial" (a connection
 #     given no logger), "AFC_ACE2" (V2 codec helpers), "AFC_ACE_serial_file"
-#     (the serial log file), "temperature_ace" (a sensor before handle_ready)
-#     and the root logger (afcACE.__init__ when heaters cannot load).
+#     (the serial log file) and the root logger (afcACE.__init__ when
+#     heaters cannot load).
 # One ordered record across the fakes, for interleaving: printer.timeline
 #   (connection commands and lifecycle, afc.move_e_pos, gcode scripts, events,
 #   AFC_error and handle_lane_failure; see AcePrinter).
 #
-# Events: a builder runs klippy:connect (units) or klippy:ready (rfid bind,
-# temperature_ace ready) for the object it builds and then drops that
-# object's handler, as Klipper fires each once. A unit's klippy:ready handlers
+# Events: a builder runs klippy:connect (units) or klippy:ready (rfid bind)
+# for the object it builds and then drops that object's handler, as Klipper
+# fires each once. A unit's klippy:ready handlers
 # stay: printer.send_event("klippy:ready") runs afcACE._handle_ready, which
 # queues _deferred_ace_connect, and reactor.run_callbacks() then connects
 # through the real _make_connection, routed to a scripted transport (see
@@ -357,9 +354,9 @@ class FakeAce2(FakeAce):
 # test sees only what its own calls produced. Pending reactor callbacks and
 # timers are state and stay; clear_records(pending=True) drops the callbacks.
 #
-# Process-wide state (the "AFC_ACE_serial_file" logger, the claimed-port set,
-# temperature_ace's factory flag) outlives a test; use the ace_isolation
-# fixture, or reset_ace_globals(), in any test that connects or logs to file.
+# Process-wide state (the "AFC_ACE_serial_file" logger, the claimed-port set)
+# outlives a test; use the ace_isolation fixture, or reset_ace_globals(), in
+# any test that connects or logs to file.
 
 
 class _Default:
@@ -518,7 +515,7 @@ def capture_log(name: str = "") -> Iterator[LogCapture]:
     is attached to "AFC_ACE_serial_file" that logger has a handler, so
     afcACE._create_serial_logger takes its early return and hands it out.
 
-    :param name: logger name, e.g. "AFC_ACE2" or "temperature_ace"
+    :param name: logger name, e.g. "AFC_ACE2" or "AFC_ACE_serial"
     :return Iterator[LogCapture]: the handler; read its .messages
     """
     logger = logging.getLogger(name)
@@ -1454,20 +1451,24 @@ class AceExtruder:
 
 
 class FakeHeaters:
-    """heaters stand-in recording sensor factories by type name."""
+    """heaters stand-in listing the sensors registered with it, as Klipper's
+    available_sensors does, and keeping the wrapper each came with."""
 
     def __init__(self) -> None:
         """
-        Start with no factories.
+        Start with no sensors.
         """
-        self.factories: Dict[str, Any] = {}
+        self.available_sensors: List[str] = []
+        self.registered: List[Tuple[Any, Any]] = []
 
-    def add_sensor_factory(self, sensor_type: str, factory: Any) -> None:
+    def register_sensor(self, config: Any, sensor: Any, gcode_id: Any = None) -> None:
         """
-        :param sensor_type: sensor_type name
-        :param factory: sensor class
+        :param config: the sensor's section wrapper; its name is listed
+        :param sensor: the sensor object
+        :param gcode_id: M105 id, unused
         """
-        self.factories[sensor_type] = factory
+        self.available_sensors.append(config.get_name())
+        self.registered.append((config, sensor))
 
 
 class FakeMcu:
@@ -1567,6 +1568,9 @@ class AceConfig:
         self._values: Dict[str, Any] = {k: v for k, v in (values or {}).items()
                                         if v is not None}
         self.fileconfig = AceFileConfig(printer)
+        # Klipper's wrappers share the printer's option-access dict, which
+        # configfile.settings is built from.
+        self.access_tracking: Dict[Tuple[str, str], Any] = {}
 
     def get_printer(self) -> "AcePrinter":
         """
@@ -3112,62 +3116,6 @@ def make_ace2_unit(name: str = "Ace2_1", *, lanes: Iterable[Union[str, LaneSpec]
                              # slot=slot, ftype=ftype)
 
 
-# ── temperature_ace ───────────────────────────────────────────────────────────
-
-def make_temperature_ace(sensor_name: str = "ace_temp", *, unit: Optional[afcACE] = None,
-                         values: Optional[Mapping[str, Any]] = None,
-                         printer: Optional[AcePrinter] = None, min_temp: float = 0.0,
-                         max_temp: float = 70.0, callback: Any = DEFAULT,
-                         debug_output: bool = False, ready: bool = True,
-                         clear_records: bool = True,
-                         cls: Optional[type] = None) -> TemperatureACE:
-    """
-    Build TemperatureACE through its real __init__ as [temperature_sensor
-    <sensor_name>], then do what Klipper's sensor wrapper does: setup_minmax and
-    setup_callback. It registers itself as "aht10 <sensor_name>" (or
-    "temperature_ace <sensor_name>").
-
-    Before handle_ready its lines go to the "temperature_ace" Python logger
-    (capture_log); after it, to the AFC logger. ready runs its klippy:ready
-    handler (handle_ready) once and drops it; that arms the sample timer at
-    NOW, so the next advance() takes a sample. Shutdowns land in
-    printer.shutdowns; with the default callback, samples land in
-    sensor._callback.calls as ((print_time, temp), {}).
-
-    :param sensor_name: sensor name
-    :param unit: ACE unit to read; sets ace_unit and the printer
-    :param values: section options (ace_unit, channel, ...)
-    :param printer: shared printer, defaults to unit's or a new one
-    :param min_temp: setup_minmax lower limit
-    :param max_temp: setup_minmax upper limit
-    :param callback: heaters callback; DEFAULT is a Recorder, None sets none
-    :param debug_output: start in Klipper's debug-output mode (no timer)
-    :param ready: run handle_ready
-    :param clear_records: clear every record once wiring is done
-    :param cls: sensor class to build, e.g. a module copy's TemperatureACE
-    :return TemperatureACE: the sensor
-    """
-    if printer is None:
-        printer = unit.printer if unit is not None else AcePrinter()
-    cfg: Dict[str, Any] = {"ace_unit": unit.name} if unit is not None else {}
-    cfg.update(values or {})
-    if debug_output:
-        printer.start_args["debugoutput"] = "/dev/null"
-    sensor = (cls or TemperatureACE)(
-        AceConfig(f"temperature_sensor {sensor_name}", printer, cfg))
-    sensor.setup_minmax(min_temp, max_temp)
-    if callback is DEFAULT:
-        callback = Recorder()
-    if callback is not None:
-        sensor.setup_callback(callback)
-    if ready:
-        sensor.handle_ready()
-        printer.remove_event_handler("klippy:ready", sensor.handle_ready)
-    if clear_records:
-        printer.clear_records()
-    return sensor
-
-
 # ── Process-wide state ────────────────────────────────────────────────────────
 
 _SERIAL_FILE_LOGGER = "AFC_ACE_serial_file"
@@ -3180,8 +3128,8 @@ def reset_ace_globals() -> None:
     removed and closed, propagate and level restored; with a handler left,
     every later _deferred_ace_connect logs to the earlier test's file), the
     serial-log queue listener of every unit on a printer these builders made
-    (stopped and taken off atexit), AFC_ACE._ACE_CLAIMED_PORTS (cleared in
-    place, so AFC_ACE2's reference sees it) and temperature_ace._REGISTERED.
+    (stopped and taken off atexit) and AFC_ACE._ACE_CLAIMED_PORTS (cleared in
+    place, so AFC_ACE2's reference sees it).
     """
     for printer in list(_BUILT_PRINTERS):
         for obj in list(printer.objects.values()):
@@ -3200,7 +3148,6 @@ def reset_ace_globals() -> None:
     logger.propagate = True
     logger.setLevel(logging.NOTSET)
     afc_ace_module._ACE_CLAIMED_PORTS.clear()
-    temperature_ace_module._REGISTERED = False
 
 
 @pytest.fixture

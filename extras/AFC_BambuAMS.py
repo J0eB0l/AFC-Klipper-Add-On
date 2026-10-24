@@ -235,6 +235,11 @@ except:
 
 from extras import AFC_BambuAMS_bridge as _bridge_mod  # noqa: E402
 
+try: from extras import AFC_temperature
+except:
+    err_str = ERROR_STR.format(import_lib="AFC_temperature", trace=traceback.format_exc())
+    raise error(err_str)
+
 try: from extras.AFC_unit import afcUnit
 except:
     err_str = ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc())
@@ -1874,40 +1879,14 @@ class afcBambuAMS(afcUnit):
         self.gcode = self.printer.lookup_object('gcode')
         self._register_gcode_commands()
 
-        # Register the temperature_bambu sensor factory, so humidity and
-        # chamber temperature show on the Mainsail/Fluidd card like OpenAMS and
-        # ACE.
-        try:
-            from extras.temperature_bambu import TemperatureBambu
-            pheaters = self.printer.load_object(config, "heaters")
-            pheaters.add_sensor_factory("temperature_bambu", TemperatureBambu)
-            # Fluidd shows humidity only for sensor types it knows, and reads
-            # aht2x and aht3x from the "aht10 <name>" object. Wrap those
-            # factories: a section with bambu_unit is ours, anything else goes
-            # to the previous owner.
-            for _alias in ("aht3x", "aht2x"):
-                _prev = getattr(pheaters, "sensor_factories", {}).get(_alias)
-
-                def _dispatch(cfg: Any, _prev: Any = _prev) -> Any:
-                    """
-                    Route an aht sensor section to its rightful owner.
-
-                    :param cfg: the sensor section's config wrapper
-                    :param _prev: the factory this wrap displaced, if any
-                    :return Any: our sensor for bambu_unit sections, else
-                        whatever the previous factory builds
-                    """
-                    if cfg.get("bambu_unit", None) is not None:
-                        return TemperatureBambu(cfg)
-                    if _prev is not None:
-                        return _prev(cfg)
-                    return TemperatureBambu(cfg)
-
-                pheaters.add_sensor_factory(_alias, _dispatch)
-        except Exception as e:
-            self.logger.warning(
-                f"AFC_BambuAMS: temperature_bambu factory not registered ({e}); "
-                "use a [temperature_bambu <name>] section instead")
+        # The unit's Mainsail/Fluidd temperature card: humidity off every
+        # AMS's reply, chamber temperature while drying. A spare pool bay (no
+        # uid) gets none, so it shows nothing until a unit is recorded on it
+        # and a restart builds its card.
+        self.temperature_card = None
+        if not self.pool or self.unit_uid:
+            self.temperature_card = AFC_temperature.add_card(
+                config, self.name, self._card_reading, self.logger)
     # ── lifecycle ──
 
 
@@ -10413,6 +10392,17 @@ class afcBambuAMS(afcUnit):
             fw, wifi = None, None
         return {"bridge_fw": fw, "bridge_wifi": wifi,
                 "bridge_port": getattr(self, "serial_port", None) or None}
+
+    def _card_reading(self, eventtime: float) -> Tuple[Optional[float], Optional[float]]:
+        """
+        The temperature card's reading, off the published status: the humidity
+        every AMS reports and the chamber temperature while drying.
+
+        :param eventtime: reactor time, forwarded to get_status
+        :return tuple: (temperature, humidity), None for a value not reported
+        """
+        status = self.get_status(eventtime)
+        return status.get("temperature"), status.get("humidity")
 
     def get_status(self, eventtime: Any = None) -> dict:
         """

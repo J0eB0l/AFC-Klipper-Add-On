@@ -971,7 +971,7 @@ class ACE2Connection(ACEConnection):
     def _poll_extras(self) -> None:
         """
         Poll GET_TEMP and GET_SENSOR_STATE each heartbeat so the unit caches
-        the box/PTC/env thermal channels (for temperature_ace sensors) and the
+        the box/PTC/env thermal channels (env feeds the temperature card) and the
         per-lane buffer/filament sensor state (for get_status). Fire-and-forget:
         the replies are routed to the unit's caches by _on_hw_status_callback.
         ACE2 only (the V1 firmware has neither command).

@@ -545,16 +545,41 @@ class TestAfcACEInit:
         assert str(exc_info.value) == (
             "[AFC_ACE Ace_1] invalid mode 'bogus'. Use 'combined' or 'direct'.")
 
-    def test_temperature_ace_registration_failure_is_logged(self, caplog):
+    def test_builds_the_units_temperature_card(self):
+        unit = ace_p1_unit("lane0")
+        card = unit.temperature_card
+        assert card is unit.printer.objects["temperature_sensor Ace_1"]
+        assert unit.printer.objects["aht10 Ace_1"] is card.humidity_view
+        assert card.reader == unit._card_reading
+        assert unit.printer.heaters.available_sensors == ["temperature_sensor Ace_1"]
+
+    def test_temperature_card_failure_is_logged_and_leaves_none(self):
         printer = make_ace_printer()
-        printer.heaters.add_sensor_factory = Recorder(raises=RuntimeError("heaters boom"))
+        printer.heaters.register_sensor = Recorder(raises=RuntimeError("heaters boom"))
 
-        with caplog.at_level(logging.INFO):
-            ace_p1_unit("lane0", printer=printer)
+        unit = ace_p1_unit("lane0", printer=printer, clear_records=False)
 
-        assert [r.getMessage() for r in caplog.records] == [
-            "AFC_ACE: temperature_ace factory not registered (heaters boom); "
-            "use [temperature_ace <name>] config sections instead"]
+        assert unit.temperature_card is None
+        assert ("warning", "AFC_ACE Ace_1: no temperature card (heaters boom)"
+                ) in printer.logger.messages
+
+
+class TestAfcACECardReading:
+    def test_a_v1_reports_temperature_and_humidity_in_its_status(self):
+        unit = ace_p1_unit(hw_status={"status": "ready", "temp": 26, "humidity": 31},
+                           temp_info={"env_temp": 99, "env_humidity": 98})
+        assert unit._card_reading(100.0) == (26, 31)
+
+    def test_an_ace2_answers_from_the_env_channel(self):
+        unit = ace_p1_unit(hw_status={"status": "ready"},
+                           temp_info={"env_temp": 27.5, "env_humidity": 40})
+        assert unit._card_reading(100.0) == (27.5, 40)
+
+    def test_nothing_reported_yet_is_none(self):
+        unit = ace_p1_unit()
+        unit._cached_hw_status = {}
+        unit._cached_temp_info = {}
+        assert unit._card_reading(100.0) == (None, None)
 
 
 class TestAmsBoxLogo:

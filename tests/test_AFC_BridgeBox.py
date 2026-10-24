@@ -1875,7 +1875,6 @@ class TestAfcBridgeBoxInit:
             "AFC_BambuAMS Bambu_AMS_HT_1",
             "AFC_lane lane24",
             "AFC_hub Bambu_AMS_HT_1",
-            "temperature_sensor Bambu_AMS_HT_1",
         ]
         assert m.units == [{"model": "ht", "uid": HT_UID}]
         assert m._lane_map == {HT_UID: (24, 1)}
@@ -1889,7 +1888,6 @@ class TestAfcBridgeBoxInit:
             "AFC_lane lane24", "AFC_lane lane25",
             "AFC_lane lane26", "AFC_lane lane27",
             "AFC_hub Bambu_AMS_1",
-            "temperature_sensor Bambu_AMS_1",
         ]
         assert _bbx_keys(m, "AFC_lane lane27") == {"unit": "Bambu_AMS_1:4",
                                                    "unassigned": "True"}
@@ -2513,8 +2511,7 @@ class TestAfcBridgeBoxInit:
         m = _bbx_boot(tmp_path, buffer=None)
         assert _bbx_loaded(m) == [
             "AFC_BambuAMS Bambu_AMS_HT_1", "AFC_lane lane24",
-            "AFC_hub Bambu_AMS_HT_1", "temperature_sensor Bambu_AMS_HT_1",
-            "AFC_buffer Bambu_AMS_Buffer"]
+            "AFC_hub Bambu_AMS_HT_1", "AFC_buffer Bambu_AMS_Buffer"]
         assert m.buffer == "Bambu_AMS_Buffer"
         assert m._fabricate_buffer is True
         _bbx_quiet(m.printer)
@@ -2876,8 +2873,8 @@ class TestAfcBridgeBoxInit:
         _bbx_boot(tmp_path, printer)
         assert [section for section, _t in seen] == [
             "AFC_BambuAMS Bambu_AMS_HT_1", "AFC_lane lane24",
-            "AFC_hub Bambu_AMS_HT_1", "temperature_sensor Bambu_AMS_HT_1"]
-        assert [tracking is live for _s, tracking in seen] == [True] * 4
+            "AFC_hub Bambu_AMS_HT_1"]
+        assert [tracking is live for _s, tracking in seen] == [True] * 3
         _bbx_quiet(printer)
 
     @pytest.mark.parametrize("opts", [
@@ -4910,12 +4907,6 @@ class TestAfcBridgeBoxRosterSections:
     HUB = {"switch_pin": "virtual", "afc_bowden_length": 2100.0,
            "afc_unload_bowden_length": 2100.0, "td1_bowden_length": 850.0}
 
-    @staticmethod
-    def _sensor(unit: str) -> Dict[str, Any]:
-        """:return dict: the keys of ``unit``'s temperature card sensor"""
-        return {"sensor_type": "aht2x", "bambu_unit": unit, "min_temp": 0,
-                "max_temp": 90}
-
     #: The buffer a chain fabricates, but for its type and chip.
     FPS = {"deadband": 0.48, "filament_error_sensitivity": 0}
 
@@ -4984,14 +4975,11 @@ class TestAfcBridgeBoxRosterSections:
             "switch_pin": "virtual", "afc_bowden_length": 1900.0,
             "afc_unload_bowden_length": 1900.0, "td1_bowden_length": 700.0}
 
-    def test_every_unit_gets_a_temperature_card_sensor(self, tmp_path):
+    def test_no_temperature_sensor_section_is_fabricated(self, tmp_path):
+        # The unit builds its own card (AFC_temperature) from its unit_uid.
         m = _bbx_boot(tmp_path, roster=f"ht:{A}, boxed:{B}")
-        sections = self._sections(m)
-        assert {s: keys for s, keys in sections.items()
-                if s.startswith("temperature_sensor ")} == {
-            "temperature_sensor Bambu_AMS_1": self._sensor("Bambu_AMS_1"),
-            "temperature_sensor Bambu_AMS_HT_1": self._sensor(
-                "Bambu_AMS_HT_1")}
+        assert [s for s in self._sections(m)
+                if s.startswith("temperature_sensor ")] == []
 
     def test_an_ams2_pin_gets_its_own_ceiling_not_the_hts(self, tmp_path):
         # The generation steers heater and ceiling but not the name.
@@ -5047,9 +5035,9 @@ class TestAfcBridgeBoxRosterSections:
         _bbx_quiet(b.printer)
         assert list(self._sections(a)) == [
             "AFC_BambuAMS Bambu_AMS_1", *_bbx_lanes_span(24, 27),
-            "AFC_hub Bambu_AMS_1", "temperature_sensor Bambu_AMS_1",
+            "AFC_hub Bambu_AMS_1",
             "AFC_BambuAMS Bambu_AMS_HT_1", "AFC_lane lane28",
-            "AFC_hub Bambu_AMS_HT_1", "temperature_sensor Bambu_AMS_HT_1"]
+            "AFC_hub Bambu_AMS_HT_1"]
 
     # fixed bands: AMS low, HT high, no collapse
 
@@ -5166,7 +5154,7 @@ class TestAfcBridgeBoxRosterSections:
         m2 = _bbx_boot(tmp_path, roster=f"boxed:{B}")
         assert list(self._sections(m2)) == [
             "AFC_BambuAMS Bambu_AMS_2", *_bbx_lanes_span(28, 31),
-            "AFC_hub Bambu_AMS_2", "temperature_sensor Bambu_AMS_2"]
+            "AFC_hub Bambu_AMS_2"]
         assert self._lane_units(m2) == self._slots((28, 4, "Bambu_AMS_2"))
         assert m2._lane_map == {A: (24, 4), B: (28, 4)}
         assert m2._name_map == {A: "Bambu_AMS_1", B: "Bambu_AMS_2"}
@@ -5209,7 +5197,7 @@ class TestAfcBridgeBoxRosterSections:
         sections = self._sections(m2)
         assert list(sections) == [
             "AFC_BambuAMS Bambu_AMS_1", *_bbx_lanes_span(24, 27),
-            "AFC_hub Bambu_AMS_1", "temperature_sensor Bambu_AMS_1"]
+            "AFC_hub Bambu_AMS_1"]
         assert sections["AFC_BambuAMS Bambu_AMS_1"] == self._unit(
             "Bambu_AMS_1", A, "ams2", heater=True, dry_max_temp=65)
         assert sections["AFC_lane lane24"] == self._lane("Bambu_AMS_1", 1)
@@ -6475,8 +6463,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert [name for name, _config in m.printer.loaded] == [
             "AFC_BambuAMS Bambu_AMS_HT_1",
             "AFC_lane lane24",
-            "AFC_hub Bambu_AMS_HT_1",
-            "temperature_sensor Bambu_AMS_HT_1"]
+            "AFC_hub Bambu_AMS_HT_1"]
         _p3_quiet(m)
         cmd = _p3_cmd(UID="0123456789ABCDEF00003331")
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
