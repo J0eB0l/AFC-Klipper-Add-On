@@ -71,6 +71,8 @@ emu_num_lanes_options=("1" "2" "3" "4" "5" "6" "7" "8")
 emu_num_lanes_index=4
 emu_board_types=("EBB" "SLB")
 emu_board_type="EBB"
+ace_unit_types=("V1" "V2_Pro")
+ace_unit_type="V1"
 # BridgeBox: AMS / AMS 2 Pro and AMS HT units on a chain (pool_ams, pool_ht)
 bridgebox_pool_ams=4
 bridgebox_pool_ht=8

@@ -29,7 +29,7 @@ cycle_in_list() {
 additional_system_menu() {
   local message
   local choice
-  local counter board_counter nightowl_board_counter qb_board_counter qb_motor_counter
+  local counter board_counter nightowl_board_counter qb_board_counter qb_motor_counter ace_counter
   local previous_installation_type
   if ! check_existing_unit_installed; then
     echo ""
@@ -61,6 +61,7 @@ additional_system_menu() {
   qb_board_counter=0
   qb_motor_counter=0
   motor=0
+  ace_counter=0
   while true; do
     clear
     print_unit_art "$installation_type"
@@ -162,6 +163,9 @@ additional_system_menu() {
         fi ;;
       J)
         cycle_array nightowl_board_types nightowl_board_counter nightowl_board_type "NightOwl Board Type" ;;
+      K)
+        cycle_array ace_unit_types ace_counter ace_unit_type "ACE Unit Type"
+        export message ;;
       1)
         name_additional_unit
         export message ;;

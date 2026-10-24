@@ -32,6 +32,7 @@ buffer_type_label() {
   case "$1" in
     "TurtleNeck2Remastered") echo "TurtleNeck 2 Remastered" ;;
     "FPS_PSF") echo "Proportional Sync-Feedback(PSF)" ;;
+    "Internal") echo "Internal buffer" ;;
     *) echo "$1" ;;
   esac
 }
@@ -58,12 +59,13 @@ toggle_option() {
 }
 
 install_menu() {
-  local message choice counter board_counter nightowl_board_counter motor index i
+  local message choice counter board_counter nightowl_board_counter motor ace_counter index i
   local toggle_items toggle_labels
   counter=0
   board_counter=0
   nightowl_board_counter=$(index_of nightowl_board_types "$nightowl_board_type")
   motor=0
+  ace_counter=0
 
   toggle_items=("afc_includes" "tip_forming" "toolhead_cutter" "hub_cutter" "kick_macro" "park_macro" "poop_macro" "wipe_macro")
   toggle_labels=("Add AFC includes?" "Enable tip-forming?" "Enable toolhead cutter?" "Enable hub cutter?" "Enable kick macro?" "Enable park macro?" "Enable poop macro?" "Enable wipe macro?")
@@ -94,6 +96,11 @@ install_menu() {
         printf "9. Use a toolhead sensor or ramming with a TurtleNeck buffer? : %s \n" "$toolhead_sensor"
       elif [ "$installation_type" == "OpenAMS" ]; then
         printf "9. Use a toolhead sensor or ramming with an FPS Board? : %s \n" "$toolhead_sensor"
+      elif [ "$installation_type" != "ACE" ]; then
+        # ACE's load sequence pulses filament until the toolhead sensor
+        # triggers -- ramming (no sensor) isn't a supported strategy for it,
+        # so it's always Sensor and doesn't get this toggle.
+        printf "9. Use a toolhead sensor or ramming with a TurtleNeck buffer? : %s \n" "$toolhead_sensor"
       fi
       if [ "$toolhead_sensor" == "Sensor" ]; then
         if [ "$toolhead_sensor_pin" == "Unknown" ]; then
@@ -135,6 +142,11 @@ install_menu() {
           else
             buffer_type="None"
           fi
+        elif [ "$installation_type" == "ACE" ]; then
+          # ACE's load sequence requires a toolhead sensor (ramming isn't
+          # supported), and it buffers internally by default.
+          toolhead_sensor="Sensor"
+          buffer_type="Internal"
         elif [ "$installation_type" == "BridgeBox" ]; then
           # The AMS's own buffer is built into each chain and can't be swapped.
           buffer_type="Bambu"
@@ -144,23 +156,29 @@ install_menu() {
         index=$((choice - 1))
         toggle_option "${toggle_items[$index]}" "${toggle_labels[$index]}" ;;
       9)
-        toolhead_sensor=$([ "$toolhead_sensor" == "Sensor" ] && echo "Ramming" || echo "Sensor")
-        if [ "$toolhead_sensor" == "Sensor" ]; then
-          message="Using toolhead sensor"
-          # A buffer is optional with a sensor, don't leave it unselected.
-          [ "$buffer_type" == "Unknown" ] && buffer_type="None"
-          [ "$installation_type" == "OpenAMS" ] && buffer_type="None"
-        elif [ "$installation_type" == "OpenAMS" ]; then
-          message="Using ramming with an FPS board"
-          buffer_type="FPS_PSF"
-        elif [ "$installation_type" == "BridgeBox" ]; then
-          message="Using ramming with the Bambu AMS buffer"
+        if [ "$installation_type" == "ACE" ]; then
+          # ACE's load sequence requires a toolhead sensor; ramming isn't
+          # offered for it (see the "T" case), so this key is a no-op.
+          message="ACE requires a toolhead sensor; ramming is not supported"
         else
-          message="Using ramming with a TurtleNeck buffer"
-          if [ "$installation_type" != "ViViD" ]; then
-            # None isn't valid with ramming, force a fresh selection.
-            [ "$buffer_type" == "None" ] && buffer_type="Unknown"
-            [ "$buffer_type" == "Unknown" ] && message="$message. Select a buffer type with B"
+          toolhead_sensor=$([ "$toolhead_sensor" == "Sensor" ] && echo "Ramming" || echo "Sensor")
+          if [ "$toolhead_sensor" == "Sensor" ]; then
+            message="Using toolhead sensor"
+            # A buffer is optional with a sensor, don't leave it unselected.
+            [ "$buffer_type" == "Unknown" ] && buffer_type="None"
+            [ "$installation_type" == "OpenAMS" ] && buffer_type="None"
+          elif [ "$installation_type" == "OpenAMS" ]; then
+            message="Using ramming with an FPS board"
+            buffer_type="FPS_PSF"
+          elif [ "$installation_type" == "BridgeBox" ]; then
+            message="Using ramming with the Bambu AMS buffer"
+          else
+            message="Using ramming with a TurtleNeck buffer"
+            if [ "$installation_type" != "ViViD" ]; then
+              # None isn't valid with ramming, force a fresh selection.
+              [ "$buffer_type" == "None" ] && buffer_type="Unknown"
+              [ "$buffer_type" == "Unknown" ] && message="$message. Select a buffer type with B"
+            fi
           fi
         fi ;;
       A)
@@ -170,6 +188,11 @@ install_menu() {
         if [ "$installation_type" == "ViViD" ] || [ "$installation_type" == "OpenAMS" ] || [ "$installation_type" == "BridgeBox" ]; then
           # Buffer type isn't a user choice for these currently.
           message="Buffer type is not selectable for $installation_type"
+        elif [ "$installation_type" == "ACE" ]; then
+          # Ramming is never active for ACE (see the "9" case), so FPS_PSF
+          # always falls back to None here, unlike the generic cycle below.
+          buffer_type=$(case "$buffer_type" in "Internal") echo "TurtleNeck";; "TurtleNeck") echo "TurtleNeckV2";; "TurtleNeckV2") echo "TurtleNeck2Remastered";; "TurtleNeck2Remastered") echo "FPS_PSF";; "FPS_PSF") echo "None";; "None"|*) echo "Internal";; esac)
+          message="Buffer Type: $(buffer_type_label "$buffer_type")"
         else
           buffer_type=$(case "$buffer_type" in "TurtleNeck") echo "TurtleNeckV2";; "TurtleNeckV2") echo "TurtleNeck2Remastered";; "TurtleNeck2Remastered") echo "FPS_PSF";; "FPS_PSF") [ "$toolhead_sensor" == "Ramming" ] && echo "TurtleNeck" || echo "None";; "None"|*) echo "TurtleNeck";; esac)
           message="Buffer Type: $(buffer_type_label "$buffer_type")"
@@ -196,6 +219,8 @@ install_menu() {
         elif  [ "$installation_type" == "Claymore" ]; then
           cycle_array htlf2_board_types board_counter htlf2_board_type "Claymore Board Type"
         fi ;;
+      K)
+        cycle_array ace_unit_types ace_counter ace_unit_type "ACE Unit Type" ;;
       P)
         if [ "$installation_type" == "BridgeBox" ]; then
           bridgebox_ask_pool

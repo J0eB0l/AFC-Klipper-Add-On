@@ -58,6 +58,7 @@ UNIT_TYPE_ORDER=(
   "Claymore"
   "QuattroBox"
   "OpenAMS"
+  "ACE"
   "BridgeBox"
   "ViViD"
   "EMU"
@@ -73,6 +74,7 @@ declare -A UNIT_KEY=(
   ["Claymore"]="Claymore"
   ["QuattroBox"]="QuattroBox"
   ["OpenAMS"]="OpenAMS"
+  ["ACE"]="ACE"
   ["BridgeBox"]="BridgeBox"
   ["ViViD"]="ViViD"
   ["EMU"]="EMU"
@@ -87,6 +89,7 @@ declare -A UNIT_ADDITIONAL_DEFAULT_NAME=(
   ["Claymore"]="Claymore_1"
   ["QuattroBox"]="QuattroBox_1"
   ["OpenAMS"]="AMS_1"
+  ["ACE"]="Ace_2"
   ["BridgeBox"]="chain1"
   ["ViViD"]="Vivid_1"
   ["EMU"]="EMU_1"
@@ -102,6 +105,7 @@ UNIT_ADDITIONAL_BUFFER_SAFE=(
   "HTLF"
   "QuattroBox"
   "OpenAMS"
+  "ACE"
 )
 
 unit_additional_buffer_supported() {
@@ -117,6 +121,9 @@ unit_additional_buffer_supported() {
 unit_additional_buffer_options() {
   case "$1" in
     "OpenAMS") printf 'None FPS_PSF' ;;
+    # ACE already buffers internally; Internal sits alongside the mechanical
+    # options for anyone who still wants to attach an external buffer.
+    "ACE") printf 'None Internal TurtleNeck TurtleNeckV2 TurtleNeck2Remastered FPS_PSF' ;;
     *) printf 'None TurtleNeck TurtleNeckV2 TurtleNeck2Remastered FPS_PSF' ;;
   esac
 }
@@ -126,6 +133,7 @@ unit_additional_buffer_default() {
   # of type $1 to "own buffer" as (see unit_additional_buffer_options).
   case "$1" in
     "OpenAMS") printf 'FPS_PSF' ;;
+    "ACE") printf 'Internal' ;;
     *) printf 'TurtleNeck' ;;
   esac
 }
@@ -143,6 +151,14 @@ unit_additional_buffer_type_after_transition() {
   local old_type="$1" new_type="$2" current="$3"
   if ! unit_additional_buffer_supported "$(unit_key_for_type "$new_type")"; then
     printf 'None'
+    return
+  fi
+  # ACE's options overlap with the generic TurtleNeck/TurtleNeckV2/FPS_PSF
+  # list, so a value carried over from another type can look "valid" for
+  # ACE without ever having been chosen for it. Always reset to ACE's own
+  # default on arrival instead of carrying that over.
+  if [ "$new_type" == "ACE" ] && [ "$old_type" != "ACE" ]; then
+    unit_additional_buffer_default "$new_type"
     return
   fi
   if ! unit_additional_buffer_supported "$(unit_key_for_type "$old_type")" \
@@ -170,8 +186,18 @@ unit_additional_default_name() {
     "$fn"
     return
   fi
-  template="${UNIT_ADDITIONAL_DEFAULT_NAME[$1]:-Unit_1}"
-  prefix="${template%_*}"
+  if [ "$1" == "ACE" ]; then
+    # ACE_1/ACE2's own default name depends on which version is selected,
+    # not a static UNIT_ADDITIONAL_DEFAULT_NAME entry (see unit_copy_files_ACE).
+    if [ "$ace_unit_type" == "V2_Pro" ]; then
+      prefix="Ace2"
+    else
+      prefix="Ace"
+    fi
+  else
+    template="${UNIT_ADDITIONAL_DEFAULT_NAME[$1]:-Unit_1}"
+    prefix="${template%_*}"
+  fi
   n=1
   while true; do
     if [ "$1" == "HTLF" ]; then
@@ -688,6 +714,77 @@ unit_additional_menu_row_OpenAMS() {
     boxturtle_name="$(unit_additional_default_name "$installation_type")"
   fi
   printf "1. OpenAMS Name: %s \n" "$boxturtle_name"
+}
+
+# ─── ACE ─────────────────────────────────────────────────────────────────────
+# ACE is not an MCU: no board/motor type, no pins or steppers file. V1
+# (AFC_ACE) and V2_Pro (AFC_ACE2) are separate Python unit classes with their
+# own templates/default names, toggled by ace_unit_type (cycled with "J" in
+# install_menu.sh / additional_system_menu.sh), not a second menu entry.
+
+unit_copy_files_ACE() {
+  safe_copy "${afc_path}/templates/AFC_Hardware-AFC.cfg" "${afc_config_dir}/AFC_Hardware.cfg"
+  if [ "$ace_unit_type" == "V2_Pro" ]; then
+    safe_copy "${afc_path}/templates/AFC_ACE2_1.cfg" "${afc_config_dir}/AFC_ACE2_1.cfg"
+  else
+    safe_copy "${afc_path}/templates/AFC_ACE_1.cfg" "${afc_config_dir}/AFC_ACE_1.cfg"
+  fi
+}
+
+unit_install_additional_ACE() {
+  if [ "$ace_unit_type" == "V2_Pro" ]; then
+    safe_copy "${afc_path}/templates/AFC_ACE2_1.cfg" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+    sed -i "s/Ace2_1/$boxturtle_name/g" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  else
+    safe_copy "${afc_path}/templates/AFC_ACE_1.cfg" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+    sed -i "s/Ace_1/$boxturtle_name/g" "${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+  fi
+}
+
+unit_buffer_target_ACE() {
+  local default_name
+  if [ "$ace_unit_type" == "V2_Pro" ]; then
+    buffer_unit_section_prefix="AFC_ACE2"
+    default_name="Ace2_1"
+  else
+    buffer_unit_section_prefix="AFC_ACE"
+    default_name="Ace_1"
+  fi
+  if [ "$is_additional_unit" == "True" ]; then
+    buffer_unit_name="$boxturtle_name"
+    buffer_extruder_file="${afc_config_dir}/AFC_${boxturtle_name}.cfg"
+    buffer_section_name="$boxturtle_name"
+  else
+    buffer_unit_name="$default_name"
+    buffer_extruder_file="${afc_config_dir}/AFC_${default_name}.cfg"
+    buffer_section_name="$default_name"
+  fi
+}
+
+unit_message_ACE() {
+  if [ "$ace_unit_type" == "V2_Pro" ]; then
+    message+="""
+- Ensure you check the serial_port and ace_index settings in the ${afc_config_dir}/AFC_ACE2_1.cfg file.
+
+- Review the [AFC_ACE2_rfid] section if your unit has an RFID reader.
+  """
+  else
+    message+="""
+- Ensure you check the serial_port and ace_index settings in the ${afc_config_dir}/AFC_ACE_1.cfg file.
+  """
+  fi
+}
+
+unit_install_menu_options_ACE() {
+  printf "K. ACE Unit Type : %s \n" "$ace_unit_type"
+}
+
+unit_additional_menu_row_ACE() {
+  if [ "$turtle_renamed" != "True" ]; then
+    boxturtle_name="$(unit_additional_default_name "$installation_type")"
+  fi
+  printf "1. ACE Name: %s \n" "$boxturtle_name"
+  printf "K. ACE Unit Type : %s \n" "$ace_unit_type"
 }
 
 # ─── BridgeBox ───────────────────────────────────────────────────────────────
