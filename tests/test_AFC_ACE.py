@@ -556,15 +556,6 @@ class TestAfcACEInit:
             "AFC_ACE: temperature_ace factory not registered (heaters boom); "
             "use [temperature_ace <name>] config sections instead"]
 
-    def test_old_command_names_run_the_new_handlers(self):
-        unit = ace_p1_unit("lane0")
-
-        aliases = {cmd: func for (cmd, key, value), func in unit.gcode.mux_commands.items()
-                   if key == "UNIT" and value == "Ace_1" and cmd.startswith("ACE_")}
-        assert aliases == {"ACE_DRY": unit.cmd_AFC_ACE_DRY,
-                           "ACE_DRY_STOP": unit.cmd_AFC_ACE_DRY_STOP,
-                           "ACE_RFID_RESCAN": unit.cmd_AFC_ACE_RFID_RESCAN}
-
 
 class TestAmsBoxLogo:
     def test_short_title_uses_min_bay_width(self):

@@ -450,14 +450,6 @@ class afcACE(afcUnit):
         self.afc.function.register_mux_command(self.afc.show_macros, 'AFC_ACE_DRY_STOP', "UNIT",
                                                self.name, self.cmd_AFC_ACE_DRY_STOP,
                                                self.cmd_AFC_ACE_DRY_STOP_help)
-        # Old names for callers that still send them (OrcaSlicer's AFC plugin and
-        # the BridgeBox display). Drop them once those send AFC_ACE_*.
-        for old_cmd, handler, desc in (
-                ('ACE_DRY', self.cmd_AFC_ACE_DRY, self.cmd_AFC_ACE_DRY_help),
-                ('ACE_DRY_STOP', self.cmd_AFC_ACE_DRY_STOP, self.cmd_AFC_ACE_DRY_STOP_help),
-                ('ACE_RFID_RESCAN', self.cmd_AFC_ACE_RFID_RESCAN,
-                 self.cmd_AFC_ACE_RFID_RESCAN_help)):
-            self.gcode.register_mux_command(old_cmd, "UNIT", self.name, handler, desc=desc)
 
         # Register the temperature_ace sensor factory for [temperature_sensor]
         # sections using sensor_type: temperature_ace.
