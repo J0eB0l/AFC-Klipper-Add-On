@@ -1881,13 +1881,10 @@ class afcBambuAMS(afcUnit):
             from extras.temperature_bambu import TemperatureBambu
             pheaters = self.printer.load_object(config, "heaters")
             pheaters.add_sensor_factory("temperature_bambu", TemperatureBambu)
-            # Fluidd alias (it maps to the "aht10 <name>" object) so Fluidd
-            # shows humidity; distinct from OpenAMS's aht3x and ACE's aht2x.
-            pheaters.add_sensor_factory("aht4x", TemperatureBambu)
-            # Fluidd shows humidity only for its fixed sensor list, which has
-            # aht2x and aht3x but not aht4x. Wrap those factories: a section
-            # with bambu_unit is ours, anything else goes to the previous
-            # owner.
+            # Fluidd shows humidity only for sensor types it knows, and reads
+            # aht2x and aht3x from the "aht10 <name>" object. Wrap those
+            # factories: a section with bambu_unit is ours, anything else goes
+            # to the previous owner.
             for _alias in ("aht3x", "aht2x"):
                 _prev = getattr(pheaters, "sensor_factories", {}).get(_alias)
 

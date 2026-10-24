@@ -286,7 +286,7 @@ class TestTemperatureBambuInit:
         assert bambu_temp_log.record_tuples == []
 
     @pytest.mark.parametrize("stype, key", [
-        ("aht4x", "aht4x Bambu_AMS_1"),
+        ("aht2x", "aht2x Bambu_AMS_1"),
         (" sht3x ", "sht3x Bambu_AMS_1"),
         ("temperature_bambu", "temperature_bambu Bambu_AMS_1"),
     ])
@@ -313,7 +313,7 @@ class TestTemperatureBambuInit:
 
     def test_no_simulation_registers_under_temperature_bambu(self, bambu_temp_log):
         sensor = build_temperature_bambu({"simulate_supported_sensor_mainsail": False,
-                                          "sensor_type": "aht4x"})
+                                          "sensor_type": "aht2x"})
         assert sensor.simulate_aht is False
         assert sensor.printer.adds == ["temperature_bambu Bambu_AMS_1"]
         assert sensor.printer.objects["temperature_bambu Bambu_AMS_1"] is sensor
@@ -730,16 +730,13 @@ class TestLoadConfig:
             """
             self.factories.append((sensor_type, sensor_factory))
 
-    def test_registers_both_sensor_factories(self, bambu_temp_log):
+    def test_registers_the_sensor_factory(self, bambu_temp_log):
         printer = BambuTempPrinter()
         heaters = self._Heaters()
         printer.objects["heaters"] = heaters
         config = BambuTempConfig("temperature_bambu", printer)
         assert load_config(config) is None
-        assert heaters.factories == [
-            ("temperature_bambu", TemperatureBambu),
-            ("aht4x", TemperatureBambu),
-        ]
+        assert heaters.factories == [("temperature_bambu", TemperatureBambu)]
         assert printer.lookups == ["heaters"]
         assert bambu_temp_log.record_tuples == []
 

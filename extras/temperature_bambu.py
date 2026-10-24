@@ -216,6 +216,3 @@ def load_config(config: "ConfigWrapper") -> None:
     """
     pheaters = config.get_printer().lookup_object("heaters")
     pheaters.add_sensor_factory("temperature_bambu", TemperatureBambu)
-    # aht4x for Fluidd: a name no Klipper driver uses, so a real driver cannot
-    # overwrite the factory (aht3x for OpenAMS and aht2x for ACE work the same way).
-    pheaters.add_sensor_factory("aht4x", TemperatureBambu)
