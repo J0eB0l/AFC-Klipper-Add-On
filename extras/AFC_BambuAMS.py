@@ -1686,6 +1686,10 @@ class afcBambuAMS(afcUnit):
         # Lanes whose spool ran out (handle_runout): their next unload cannot
         # reel the tail back, so it skips the AMS retract.
         self._runout_empty: Set[str] = set()
+        # The lane an unload left half done: the AMS reeled it home, but the
+        # toolhead sensor still saw filament. Once the toolhead is cleared, the
+        # next unload of it only closes it out (unit_unload_lane).
+        self._reeled_home_lane: Optional[str] = None
         # The AMS's words for the fault that ended the current load, kept
         # because _ams_declared_fault consumes the sequence. Cleared at the
         # start of each load.
@@ -12389,6 +12393,11 @@ class afcBambuAMS(afcUnit):
         `if not loaded`, so a stale cache reading "filament" would make
         _feed_until_sensor return True and skip the retry.
 
+        A Snapmaker U1's toolhead motion sensor is read by its raw switch
+        state, ``runout_buttun_state``, as AFC_lane does: while printing, the
+        U1 keeps ``filament_present`` True after the switch opens until the
+        extruder has fed its detection length, which an unload never does.
+
         Falls back to the lane accessor, which is the right answer for a
         ``tool_start = buffer`` setup (no pin to read) and for anything not
         exposing the switch.
@@ -12399,6 +12408,8 @@ class afcBambuAMS(afcUnit):
         try:
             ext = getattr(cur_lane, "extruder_obj", None)
             sw = getattr(ext, "fila_tool_start", None)
+            if sw is not None and hasattr(sw, "runout_buttun_state"):
+                return bool(sw.runout_buttun_state)
             helper = getattr(sw, "runout_helper", None)
             if helper is not None:
                 return bool(helper.filament_present)
@@ -12563,6 +12574,43 @@ class afcBambuAMS(afcUnit):
             return int(getf(unit=getattr(self, "ams_index", None))[0] or 0)
         except Exception:
             return 0
+
+    def _tray_release_seq(self) -> int:
+        """
+        This unit's tray-release sequence, to mark before a retract.
+
+        :return int: the current sequence, or 0 when unavailable
+        """
+        getr = (getattr(self._bridge, "last_tray_release", None)
+                if self._bridge else None)
+        if not callable(getr):
+            return 0
+        try:
+            return int(getr(unit=getattr(self, "ams_index", None))[0] or 0)
+        except Exception:
+            return 0
+
+    def _tray_released_since(self, mark: int, lane: Any) -> bool:
+        """
+        Whether the unit has released the lane's tray since ``mark``.
+
+        A release is the AMS 2 saying the filament is back past its tray
+        switch, so whatever still holds the toolhead sensor is not on the reel.
+
+        :param mark: a sequence from _tray_release_seq
+        :param lane: the lane whose tray was retracting
+        :return bool: True if that tray was released after the mark
+        """
+        getr = (getattr(self._bridge, "last_tray_release", None)
+                if self._bridge else None)
+        if not callable(getr):
+            return False
+        try:
+            seq, tray = getr(unit=getattr(self, "ams_index", None))
+        except Exception:
+            return False
+        slot = self._slot_of(lane)
+        return slot is not None and int(seq or 0) > mark and tray == slot
 
     def _ams_fault_since(self, mark: int,
                          consume: bool = True) -> Optional[str]:
@@ -12993,6 +13041,10 @@ class afcBambuAMS(afcUnit):
         :return bool: True on a verified load, False on failure
         """
         self._load_in_progress = True
+        # A fresh load puts filament back on the AMS side, so its next unload
+        # reels again.
+        if getattr(self, "_reeled_home_lane", None) == getattr(cur_lane, "name", None):
+            self._reeled_home_lane = None
         if getattr(self, "_runout_drain", None) is not None:
             afcBambuAMS._end_runout_drain(
                 self, f"{getattr(cur_lane, 'name', 'a lane')} is loading")
@@ -13986,6 +14038,23 @@ class afcBambuAMS(afcUnit):
         afc = self.afc
         if cur_extruder is None:
             cur_extruder = getattr(cur_lane, "extruder_obj", None)
+        # An earlier unload left this lane half done: the AMS reeled it home and
+        # only the toolhead held on. Nothing is left to reel, so the toolhead
+        # sensor alone decides.
+        if getattr(self, "_reeled_home_lane", None) == cur_lane.name:
+            if self._toolhead_sensor_triggered(cur_lane):
+                in_print = afc.function.in_print()
+                afc.error.handle_lane_failure(
+                    cur_lane,
+                    f"AFC bambu unload of {cur_lane.name}: the AMS already "
+                    f"reeled it home, but the toolhead sensor still sees "
+                    f"filament. {self._clear_toolhead_hint(in_print)}",
+                    pause=in_print)
+                return False
+            self.logger.info(
+                f"AFC bambu {self.name}: the toolhead sensor is clear and the "
+                f"AMS already reeled {cur_lane.name} home, so it is unloaded")
+            return self._finish_unload(cur_lane)
         if self._bridge is None:
             self.logger.warning(
                 f"AFC bambu {self.name}: bridge not connected, cannot unload "
@@ -14066,6 +14135,7 @@ class afcBambuAMS(afcUnit):
             # Mark before the first retract: anything past this is a fault this
             # unload provoked, not one left over from the preceding load.
             fault0 = self._ams_fault_seq()
+            tray0 = self._tray_release_seq()
             # Re-check: the unit can latch again during the STN retracts.
             # Only a status read when it is healthy.
             self._clear_latched_error(cur_lane, "the unload retract")
@@ -14179,11 +14249,22 @@ class afcBambuAMS(afcUnit):
                                f"{self.get_lane_reset_command(cur_lane, 0.0)}"
                                f" then LANE_UNLOAD to finish the reel.\n"
                                f"AMS said: {_fault_reason(latched)}")
+                elif self._tray_released_since(tray0, cur_lane):
+                    # The AMS finished its part; a piece is left in the
+                    # toolhead or the sensor is stuck. The next unload of this
+                    # lane only waits for the sensor to clear.
+                    self._reeled_home_lane = cur_lane.name
+                    msg = (f"AFC bambu unload of {cur_lane.name}: the AMS "
+                           f"reeled it home, but the toolhead sensor still "
+                           f"sees filament, so a piece is left in the "
+                           f"toolhead or the sensor is stuck. "
+                           f"{self._clear_toolhead_hint(afc.function.in_print())}")
                 else:
                     msg = (f"AFC bambu unload failed for {cur_lane.name}: "
                            f"filament still at the toolhead sensor after "
-                           f"retract retries, AMS did not reel; run "
-                           f"LANE_UNLOAD (eject) or check the unit")
+                           f"retract retries, and the AMS did not report "
+                           f"reeling it home; run LANE_UNLOAD (eject) or "
+                           f"check the unit")
                 afc.error.handle_lane_failure(
                     cur_lane, msg, pause=afc.function.in_print())
                 return False
@@ -14201,6 +14282,18 @@ class afcBambuAMS(afcUnit):
         finally:
             self._unload_in_progress = False
 
+    @staticmethod
+    def _clear_toolhead_hint(in_print: bool) -> str:
+        """
+        What to do after an unload the toolhead sensor held up.
+
+        :param in_print: whether the failure pauses a print
+        :return str: the closing sentence of the failure message
+        """
+        if in_print:
+            return "Clear the toolhead, then resume."
+        return "Clear the toolhead, then run the unload again."
+
     def _finish_unload(self, cur_lane: Any) -> bool:
         """
         Close out an unload whose filament has left the toolhead.
@@ -14212,6 +14305,8 @@ class afcBambuAMS(afcUnit):
         if afc.post_unload_macro is not None:
             self.gcode.run_script_from_command(afc.post_unload_macro)
 
+        if getattr(self, "_reeled_home_lane", None) == cur_lane.name:
+            self._reeled_home_lane = None
         cur_lane.set_tool_unloaded(normal_toolchange=True)
         cur_lane.status = AFCLaneState.NONE
         # Tip is staged near the hub, ready for a fast reload.

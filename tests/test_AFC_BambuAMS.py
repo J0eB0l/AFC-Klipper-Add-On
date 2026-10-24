@@ -24372,6 +24372,17 @@ class TestAfcBambuAMSToolheadSensorTriggered:
         assert unit._toolhead_sensor_triggered(lane) is False
         assert unit.logger.messages == []
 
+    @pytest.mark.parametrize("switch", [False, True])
+    def test_a_u1_motion_sensor_reads_its_switch(self, monkeypatch, switch):
+        # While printing, the U1 keeps filament_present True after the switch
+        # opens, until the extruder feeds its detection length.
+        unit, lane = self._lane(monkeypatch)
+        lane.extruder_obj.fila_tool_start.runout_buttun_state = switch
+        lane.extruder_obj.sensor.present = not switch
+        assert unit._toolhead_sensor_triggered(lane) is switch
+        assert lane.extruder_obj.sensor.reads == 0
+        assert unit.logger.messages == []
+
 
 class TestAfcBambuAMSAmsFaultSince:
     @staticmethod
@@ -24425,6 +24436,113 @@ class TestAfcBambuAMSAmsFaultSince:
         assert unit._ams_fault_since(0) is None
         assert unit._fault_seen == 0
         assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSClearToolheadHint:
+    def test_a_paused_print_resumes(self):
+        assert afcBambuAMS._clear_toolhead_hint(True) == (
+            "Clear the toolhead, then resume.")
+
+    def test_otherwise_the_unload_runs_again(self):
+        assert afcBambuAMS._clear_toolhead_hint(False) == (
+            "Clear the toolhead, then run the unload again.")
+
+
+class TestAfcBambuAMSTrayReleaseSeq:
+    def test_it_reads_this_units_sequence(self, monkeypatch):
+        bridge = FakeBridge()
+        bridge.tray_release = {0: (7, 2), 1: (9, 0)}
+        unit = _bambu_p5_unit(monkeypatch, bridge=bridge)
+        assert unit._tray_release_seq() == 7
+        assert unit.logger.messages == []
+
+    def test_no_release_yet_is_zero(self, monkeypatch):
+        bridge = FakeBridge()
+        bridge.tray_release = {0: (None, None)}
+        unit = _bambu_p5_unit(monkeypatch, bridge=bridge)
+        assert unit._tray_release_seq() == 0
+
+    def test_no_bridge_is_zero(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, offline=True)
+        assert unit._tray_release_seq() == 0
+
+    def test_an_older_bridge_without_the_accessor_is_zero(self, monkeypatch):
+        monkeypatch.delattr(FakeBridge, "last_tray_release")
+        unit = _bambu_p5_unit(monkeypatch)
+        assert unit._tray_release_seq() == 0
+
+    def test_a_raising_accessor_is_zero(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch)
+
+        def broken(unit: Optional[int] = None) -> Tuple[int, Optional[int]]:
+            raise RuntimeError("bridge went away")
+
+        monkeypatch.setattr(unit._bridge, "last_tray_release", broken)
+        assert unit._tray_release_seq() == 0
+
+
+class TestAfcBambuAMSTrayReleasedSince:
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch,
+              release: Tuple[Optional[int], Optional[int]]
+              ) -> Tuple[afcBambuAMS, Any]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param release: the bridge's last tray release for chain index 0
+        :return tuple: (the unit, lane1 on slot 0)
+        """
+        bridge = FakeBridge()
+        bridge.tray_release = {0: release, 1: (9, 0)}
+        unit = _bambu_p5_unit(monkeypatch, bridge=bridge,
+                              lanes=[LaneSpec("lane1", 0)])
+        return unit, unit.lanes["lane1"]
+
+    def test_a_new_release_of_the_lanes_tray(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, (4, 0))
+        assert unit._tray_released_since(3, lane) is True
+        assert unit.logger.messages == []
+
+    def test_a_release_at_the_mark_is_old(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, (3, 0))
+        assert unit._tray_released_since(3, lane) is False
+
+    def test_a_new_release_of_another_tray(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, (4, 2))
+        assert unit._tray_released_since(3, lane) is False
+
+    def test_no_release_yet(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, (None, None))
+        assert unit._tray_released_since(0, lane) is False
+
+    def test_an_unmapped_lane(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, (4, 0))
+        unit._slot_map = {}
+        assert unit._tray_released_since(3, lane) is False
+
+    def test_an_unmapped_lane_and_a_release_with_no_tray(self, monkeypatch):
+        # Without the slot check, None == None would read as this lane's tray
+        unit, lane = self._unit(monkeypatch, (4, None))
+        unit._slot_map = {}
+        assert unit._tray_released_since(3, lane) is False
+
+    def test_no_bridge(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, offline=True,
+                              lanes=[LaneSpec("lane1", 0)])
+        assert unit._tray_released_since(0, unit.lanes["lane1"]) is False
+
+    def test_an_older_bridge_without_the_accessor(self, monkeypatch):
+        monkeypatch.delattr(FakeBridge, "last_tray_release")
+        unit, lane = self._unit(monkeypatch, (4, 0))
+        assert unit._tray_released_since(3, lane) is False
+
+    def test_a_raising_accessor(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch, (4, 0))
+
+        def broken(unit: Optional[int] = None) -> Tuple[int, Optional[int]]:
+            raise RuntimeError("bridge went away")
+
+        monkeypatch.setattr(unit._bridge, "last_tray_release", broken)
+        assert unit._tray_released_since(3, lane) is False
 
 
 class TestAfcBambuAMSAmsDeclaredFault:
@@ -25276,6 +25394,21 @@ class TestAfcBambuAMSUnitLoadLane:
         assert unit.unit_load_lane(lane, lane.extruder_obj) is True
         assert unit._bridge.sent[0] == {"cmd": "select", "unit": 0, "slot": 0}
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
+        assert unit.logger.messages == self.LOADED
+
+    def test_a_load_ends_the_lanes_reeled_home_unload(self, monkeypatch):
+        # Filament is back on the AMS side, so the next unload reels again.
+        unit, lane, _ = self._rig(monkeypatch)
+        unit._reeled_home_lane = "lane1"
+        assert unit.unit_load_lane(lane, lane.extruder_obj) is True
+        assert unit._reeled_home_lane is None
+        assert unit.logger.messages == self.LOADED
+
+    def test_a_load_keeps_another_lanes_reeled_home_unload(self, monkeypatch):
+        unit, lane, _ = self._rig(monkeypatch)
+        unit._reeled_home_lane = "lane2"
+        assert unit.unit_load_lane(lane, lane.extruder_obj) is True
+        assert unit._reeled_home_lane == "lane2"
         assert unit.logger.messages == self.LOADED
 
 
@@ -27405,8 +27538,9 @@ class TestAfcBambuAMSUnitUnloadLane:
                           "a spool goes into its bay, a lane on Bambu_AMS_1 "
                           "loads, or AFC_BAMBU_FOLLOWER LANE=lane1 ENABLE=0.")
     STUCK = ("AFC bambu unload failed for lane1: filament still at the "
-             "toolhead sensor after retract retries, AMS did not reel; run "
-             "LANE_UNLOAD (eject) or check the unit")
+             "toolhead sensor after retract retries, and the AMS did not "
+             "report reeling it home; run LANE_UNLOAD (eject) or check the "
+             "unit")
     #: The unit's give-up, said in answer to the unload's retract.
     LATCH = (7, "[AMS_COMMON]en:1,mode:3 [AMS_LED]TIMEOUT error 2", 0.0)
     RECOVER = "AFC_BAMBU_RECOVER UNIT=Bambu_AMS_1 LANE=lane1"
@@ -27980,6 +28114,104 @@ class TestAfcBambuAMSUnitUnloadLane:
             ("handle_lane_failure", (lane, self.LITE_STUCK),
              {"pause": False})]
         assert unit.logger.messages == [self.ISSUED]
+
+
+    # the AMS reeled it home but the toolhead still holds on
+
+    #: The failure when the AMS released the tray and the sensor still sees
+    #: filament.
+    REELED_STUCK = ("AFC bambu unload of lane1: the AMS reeled it home, but "
+                    "the toolhead sensor still sees filament, so a piece is "
+                    "left in the toolhead or the sensor is stuck. Clear the "
+                    "toolhead, then run the unload again.")
+    #: The failure when the toolhead is still not clear on the next unload.
+    STILL_HELD = ("AFC bambu unload of lane1: the AMS already reeled it "
+                  "home, but the toolhead sensor still sees filament. Clear "
+                  "the toolhead, then run the unload again.")
+
+    def _reeled_but_held(self, monkeypatch: pytest.MonkeyPatch,
+                         tray: int = 0) -> Tuple[afcBambuAMS, Any]:
+        """
+        An unload whose retract the AMS finished (tray released) while the
+        toolhead sensor kept reading filament.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param tray: the tray the AMS released
+        :return tuple: (the unit, lane1) after the failed unload
+        """
+        unit, lane, _ = self._rig(monkeypatch, sensor=[True])
+        bridge = unit._bridge
+        _p6_at(unit, 100.05, lambda: bridge.tray_release.__setitem__(
+            0, (1, tray)))
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        return unit, lane
+
+    def test_a_release_with_the_sensor_held_says_the_ams_is_done(
+            self, monkeypatch):
+        unit, lane = self._reeled_but_held(monkeypatch)
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure", (lane, self.REELED_STUCK),
+             {"pause": False})]
+        assert unit._reeled_home_lane == "lane1"
+        assert lane.status == AFCLaneState.ERROR
+        released = ("debug", "AFC bambu Bambu_AMS_1: move ended on the TRAY "
+                             "RELEASE after 0.1s -- tray 0 -> none")
+        assert unit.logger.messages == [
+            self.ISSUED, released, self._rekicked(1), self.DEADLINE,
+            self._rekicked(2), self.DEADLINE]
+
+    def test_a_release_of_another_tray_is_not_the_ams_finishing(
+            self, monkeypatch):
+        unit, lane = self._reeled_but_held(monkeypatch, tray=2)
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure", (lane, self.STUCK), {"pause": False})]
+        assert unit._reeled_home_lane is None
+        assert unit.logger.messages == self._stuck_logs()
+
+    def test_a_release_before_the_unload_is_not_counted(self, monkeypatch):
+        # Only an edge after the unload's own mark counts.
+        unit, lane, _ = self._rig(monkeypatch, sensor=[True])
+        unit._bridge.tray_release[0] = (5, 0)
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure", (lane, self.STUCK), {"pause": False})]
+        assert unit._reeled_home_lane is None
+        assert unit.logger.messages == self._stuck_logs()
+
+    def test_the_next_unload_with_the_toolhead_cleared_only_closes_it_out(
+            self, monkeypatch):
+        unit, lane = self._reeled_but_held(monkeypatch)
+        sent = list(unit._bridge.sent)
+        moves = list(unit.afc.e_moves)
+        lane.extruder_obj.fila_tool_start.runout_helper.script = [False]
+        unit.logger.messages.clear()
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        # Nothing more is said to the AMS and the extruder does not move
+        assert unit._bridge.sent == sent
+        assert unit.afc.e_moves == moves
+        assert lane.tool_loaded is False
+        assert lane.status == AFCLaneState.NONE
+        assert lane.loaded_to_hub is True
+        assert unit._reeled_home_lane is None
+        assert unit.logger.messages == [
+            ("info", "AFC bambu Bambu_AMS_1: the toolhead sensor is clear and "
+                     "the AMS already reeled lane1 home, so it is unloaded")]
+
+    def test_the_next_unload_with_the_toolhead_still_held_fails_again(
+            self, monkeypatch):
+        unit, lane = self._reeled_but_held(monkeypatch)
+        sent = list(unit._bridge.sent)
+        moves = list(unit.afc.e_moves)
+        unit.afc.error.calls.clear()
+        unit.logger.messages.clear()
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit._bridge.sent == sent
+        assert unit.afc.e_moves == moves
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure", (lane, self.STILL_HELD), {"pause": False})]
+        assert unit._reeled_home_lane == "lane1"
+        assert lane.tool_loaded is True
+        assert unit.logger.messages == []
 
 
 class TestAfcBambuAMSPrepPostLoad:
@@ -28662,6 +28894,20 @@ class TestAfcBambuAMSFinishUnload:
         assert unit._finish_unload(lane) is True
         assert lane._load_state is True
         assert unit.reactor.pauses == []
+        assert unit.logger.messages == []
+
+    def test_it_ends_the_lanes_reeled_home_unload(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch)
+        unit._reeled_home_lane = "lane1"
+        assert unit._finish_unload(lane) is True
+        assert unit._reeled_home_lane is None
+        assert unit.logger.messages == []
+
+    def test_it_keeps_another_lanes_reeled_home_unload(self, monkeypatch):
+        unit, lane = self._unit(monkeypatch)
+        unit._reeled_home_lane = "lane2"
+        assert unit._finish_unload(lane) is True
+        assert unit._reeled_home_lane == "lane2"
         assert unit.logger.messages == []
 
 
@@ -29535,3 +29781,4 @@ class TestOpenSerial:
         unit._open_serial()
         assert opened == [(("/dev/ttyACM3", 115200),
                            {"timeout": 0.1, "write_timeout": 0.5})]
+
