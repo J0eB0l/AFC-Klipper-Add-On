@@ -14,7 +14,6 @@
 #   serial_port: /dev/serial/by-id/usb-Raspberry_Pi_Pico_XXXX-if00
 #   extruder: extruder
 #   buffer: Bamb_1
-#   lane_base: 24
 #   roster: ht:0123456789ABCDEF00003331
 #
 # The roster comes from config plus a persisted roster file, since sections
