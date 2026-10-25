@@ -674,6 +674,11 @@ class afcAMS(afcUnit):
         # some 35 on a 1.75 click/mm encoder, while a filament jammed short of
         # the extruder gears turns a few as the follower compresses the buffer.
         self._engagement_min_clicks = config.getint("engagement_min_clicks", 10, minval=1)
+        # FPS drop that also proves engagement: a load ends with the buffer
+        # compressed, so the gears pull the 20 mm out of it (FPS 1.0 -> 0.6) and
+        # the encoder may not turn at all; a jammed filament leaves it near flat.
+        self._engagement_min_fps_drop = config.getfloat(
+            "engagement_min_fps_drop", 0.25, minval=0.0, maxval=1.0)
         self._engagement_params: Dict[str, tuple[float, float]] = {}
         # Why the last load failed, for the pause message.
         self._load_failure = ""
@@ -1212,6 +1217,7 @@ class afcAMS(afcUnit):
             encoder_before = 0
             if self.oams and hasattr(self.oams, 'encoder_clicks'):
                 encoder_before = self.oams.encoder_clicks or 0
+            fps_before = self._oams_fps_value()
 
             # Two-phase extrude: prime then main
             prime_length = min(5.0, engagement_length)
@@ -1235,6 +1241,15 @@ class afcAMS(afcUnit):
                     f"Engagement verified: encoder moved {encoder_delta} clicks")
                 return True
 
+            fps_after = self._oams_fps_value()
+            if (self._engagement_min_fps_drop > 0
+                    and fps_before is not None and fps_after is not None
+                    and fps_before - fps_after >= self._engagement_min_fps_drop):
+                self.logger.info(
+                    f"Engagement verified: FPS fell {fps_before:.2f} -> {fps_after:.2f} "
+                    f"(encoder moved {encoder_delta} clicks)")
+                return True
+
             # Brief retry
             self.afc.reactor.pause(self.afc.reactor.monotonic() + 0.3)
             encoder_retry = 0
@@ -1247,12 +1262,21 @@ class afcAMS(afcUnit):
 
             self._load_failure = (f"encoder moved only {encoder_delta} clicks of the "
                                   f"{min_movement} needed")
+            if fps_before is not None and fps_after is not None:
+                self._load_failure += f", FPS {fps_before:.2f} -> {fps_after:.2f}"
             self.logger.error(f"Engagement verification failed: {self._load_failure}")
             return False
 
         finally:
             if self._monitor:
                 self._monitor.notify_engagement_end()
+
+    def _oams_fps_value(self) -> Optional[float]:
+        """
+        Last FPS reading the OAMS reported, or None when it has none.
+        """
+        value = getattr(self.oams, 'fps_value', None) if self.oams else None
+        return value if isinstance(value, (int, float)) else None
 
     def _oams_extrude(self, length: float, speed: float, label: str = "") -> None:
         """

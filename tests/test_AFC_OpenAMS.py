@@ -2241,6 +2241,37 @@ class TestVerifyEngagement:
 
         assert ams._verify_engagement(lane) is False
 
+    def _fps_case(self, fps_before, fps_after, min_drop=0.25):
+        # A load ends with the buffer compressed: the gears pull the engagement move out
+        # of it and the encoder does not turn (printer 3, lane6, 2026-10-25)
+        class _FakeOams:
+            def __init__(self):
+                self.encoder_clicks = 2513
+                self.fps_value = fps_before
+
+        oams = _FakeOams()
+        ams, afc, printer, reactor = _make_ams(oams=oams)
+        ams._engagement_min_clicks = 10
+        ams._engagement_min_fps_drop = min_drop
+
+        def extrude(length, speed, label=""):
+            oams.fps_value = fps_after
+        ams._oams_extrude = extrude
+        return ams._verify_engagement(_make_lane("lane1")), ams
+
+    def test_an_fps_drop_proves_engagement_without_encoder_clicks(self):
+        ok, ams = self._fps_case(0.996, 0.622)
+        assert ok is True
+
+    def test_a_small_fps_drop_still_fails(self):
+        ok, ams = self._fps_case(0.776, 0.639)
+        assert ok is False
+        assert "FPS 0.78 -> 0.64" in ams._load_failure
+
+    def test_fps_drop_check_off_at_zero(self):
+        ok, ams = self._fps_case(0.996, 0.2, min_drop=0.0)
+        assert ok is False
+
     def test_encoder_moved_enough_on_retry_returns_true(self):
         class _FakeOams:
             def __init__(self):
