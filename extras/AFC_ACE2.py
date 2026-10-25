@@ -352,6 +352,13 @@ def method_to_v2(method: str, params: Optional[Dict[str, Any]]) -> Tuple[int, by
         speed = int(params.get('speed', 10))
         return Cmd.FEED_OR_ROLLBACK, (pb_uint32(1, slot) + pb_uint32(2, speed) + pb_uint32(3, 0)
                                       + pb_uint32(4, FEED_MODE_ASSIST))
+    if method == 'start_rollback_assist':
+        # Assist in reverse: the ACE reels in what the extruder pushes back into
+        # its buffer. STOP_FEED_OR_ROLLBACK (stop_feed_assist) ends it.
+        slot = int(params.get('index', 0))
+        speed = int(params.get('speed', 10))
+        return Cmd.FEED_OR_ROLLBACK, (pb_uint32(1, slot) + pb_uint32(2, speed) + pb_uint32(3, 0)
+                                      + pb_uint32(4, FEED_MODE_ROLLBACK_ASSIST))
     if method == 'stop_feed_assist':
         return Cmd.STOP_FEED_OR_ROLLBACK, pb_uint32(1, int(params.get('index', 0)))
     if method == 'feed_filament':
@@ -1138,6 +1145,17 @@ class ACE2Connection(ACEConnection):
     # The Pro 2 enables RFID per-slot (V1's global enable_rfid/disable_rfid don't
     # exist). Best-effort enable/disable all slots; fire-and-forget so connect
     # never blocks on it.
+    def start_rollback_assist(self, slot_index: int, timeout: float = 2.0) -> Any:
+        """
+        Enable rollback assist for a slot and wait for ACK.
+
+        :param slot_index: 0-based slot index.
+        :param timeout: Seconds to wait for the ACK.
+        :return Any: The response result payload.
+        """
+        return self.send_command("start_rollback_assist", params={"index": slot_index},
+                                 timeout=timeout)
+
     def enable_rfid(self) -> None:
         """
         Best-effort enable per-slot RFID identification on every slot.
@@ -1224,6 +1242,8 @@ class afcACE2(afcACE):
         # Stuck/tangle detection defaults on for the ACE2: its encoder reports a
         # per-slot jam state, so _check_stuck reacts to that instead of assist duration.
         self._stuck_detection = config.getboolean("stuck_spool_detection", True)
+        # Slots running rollback assist for an unload (see _start_unload_assist).
+        self._rollback_assist_active: set[int] = set()
         # Staging: skip_factory_autostage turns the factory identify off on
         # every slot, which skips the ACE's slow (~30-45 s) factory autostage;
         # AFC then stages an insert itself, stage_initial_dist mm into the unit
@@ -1367,6 +1387,42 @@ class afcACE2(afcACE):
         except Exception:
             self.logger.error(msg)
             self.gcode.run_script_from_command("PAUSE")
+
+    def _start_unload_assist(self, slot: int) -> None:
+        """
+        Run rollback assist through the cut and tip forming of an unload.
+
+        A stopped ACE holds the filament, so the tip forming's long retracts
+        stall the extruder against it; in rollback assist the ACE reels in what
+        the extruder pushes back. _stop_feed_assist ends it before the unwind.
+
+        :param slot: 0-based ACE slot index of the lane being unloaded.
+        """
+        if not (self._ace and self._ace.connected):
+            return
+        try:
+            self._wait_for_ace_ready()
+            self._ace.start_rollback_assist(slot)
+            self._rollback_assist_active.add(slot)
+            self.logger.debug(f"ACE {self.name}: rollback assist on slot {slot} for the unload")
+        except Exception as e:
+            self.logger.warning(f"ACE {self.name}: rollback assist on slot {slot} failed: {e}")
+
+    def _stop_feed_assist(self, slot: int) -> None:
+        """
+        Disable feed assist on a slot, ending a rollback assist there first.
+
+        :param slot: 0-based ACE slot index.
+        """
+        if slot in self._rollback_assist_active:
+            self._rollback_assist_active.discard(slot)
+            if self._ace and self._ace.connected:
+                try:
+                    self._wait_for_ace_ready()
+                    self._ace.stop_feed_assist_sync(slot)
+                except Exception as e:
+                    self.logger.error(f"Failed to stop rollback assist slot {slot}: {e}")
+        super()._stop_feed_assist(slot)
 
     def _make_connection(self, reactor: Reactor, serial_port: str, logger: logging.Logger,
                          baud_rate: int) -> ACE2Connection:

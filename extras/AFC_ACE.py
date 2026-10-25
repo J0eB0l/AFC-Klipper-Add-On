@@ -2309,6 +2309,8 @@ class afcACE(afcUnit):
             afc.save_vars()
             return True
         finally:
+            # An unload that stops before the unwind leaves the unload assist on
+            self._stop_feed_assist(self._get_slot(cur_lane.name))
             self._operation_active = False
             self._prev_states_stale = True
 
@@ -2571,6 +2573,15 @@ class afcACE(afcUnit):
         self._operation_active = True
         slot = self._get_slot(cur_lane.name)
         self._stop_feed_assist(slot)
+        self._start_unload_assist(slot)
+
+    def _start_unload_assist(self, slot: int) -> None:
+        """
+        Assist the cut and tip forming of an unload. The V1 ACE has no reverse
+        assist, so its slot stays stopped; the ACE 2 runs rollback assist.
+
+        :param slot: 0-based ACE slot index of the lane being unloaded.
+        """
 
     def _ace_unload_sequence(self, cur_lane: AFCLane, cur_extruder: Any) -> bool:
         """

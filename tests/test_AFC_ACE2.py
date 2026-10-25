@@ -408,6 +408,11 @@ class TestMethodToV2:
     def test_stop_feed_assist(self):
         assert self._map("stop_feed_assist", {"index": 3}) == ((9, bytes([0x08, 0x03])), [])
 
+    def test_start_rollback_assist(self):
+        # slot 1, speed 10, length 0, mode 3 (rollback assist).
+        assert self._map("start_rollback_assist", {"index": 1}) == (
+            (8, bytes([0x08, 0x01, 0x10, 0x0A, 0x18, 0x00, 0x20, 0x03])), [])
+
     def test_feed_filament(self):
         # slot 1, speed 60, length 40, mode 0 (feed).
         assert self._map("feed_filament", {"index": 1, "length": 40, "speed": 60}) == (
@@ -2870,3 +2875,34 @@ class TestAfcACE2UsesFirmwareRfid:
         assert unit._ace.commands == []
         assert unit._slot_inventory == [{}, {}, {}, {}]
         assert unit.printer.logger.messages == []
+
+
+class TestAfcACE2UnloadRollbackAssist:
+    """A stopped ACE 2 holds the filament against the tip forming's retracts, so the
+    unload runs rollback assist from its start until the unwind."""
+
+    @staticmethod
+    def _unit() -> afcACE2:
+        return make_ace2_unit(lanes=[LaneSpec("lane1", prep=True, tool_loaded=True)],
+                              feed_assist_active=[0])
+
+    @staticmethod
+    def _methods(unit: afcACE2) -> List[str]:
+        return [method for method, _params in unit._ace.commands]
+
+    def test_prepare_unload_stops_assist_then_starts_rollback_assist(self):
+        unit = self._unit()
+        unit.prepare_unload(unit.lanes["lane1"], None, None)
+        methods = self._methods(unit)
+        assert methods.index("stop_feed_assist") < methods.index("start_rollback_assist")
+        assert unit._rollback_assist_active == {0}
+        assert unit._feed_assist_active == set()
+
+    def test_stopping_assist_ends_rollback_assist(self):
+        unit = self._unit()
+        unit.prepare_unload(unit.lanes["lane1"], None, None)
+        unit._ace.commands.clear()
+        unit._stop_feed_assist(0)
+        assert [m for m in self._methods(unit) if m != "get_status"] == ["stop_feed_assist"]
+        assert unit._rollback_assist_active == set()
+
