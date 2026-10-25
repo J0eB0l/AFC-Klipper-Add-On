@@ -148,6 +148,15 @@ class AFCSpool:
                 tmp_config['filament_sub_type'][extruder_num] = (
                     getattr(lane, "sub_type", "") or "NONE"
                 )
+                # The U1's tip forming (CONTROL_RETRACT_ACTION) uses this flag to pick
+                # its sequence for soft filament such as TPU
+                filament_parameters = self.printer.lookup_object('filament_parameters', None)
+                if filament_parameters is not None:
+                    soft = filament_parameters.get_is_soft(
+                        tmp_config['filament_vendor'][extruder_num],
+                        tmp_config['filament_type'][extruder_num],
+                        tmp_config['filament_sub_type'][extruder_num])
+                    tmp_config['filament_soft'][extruder_num] = bool(soft)
 
                 tmp_config['filament_color'][extruder_num] = int("FFFFFFFF", 16)
                 tmp_config['filament_color_rgba'][extruder_num] = "FFFFFFFF"
