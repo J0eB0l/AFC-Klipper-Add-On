@@ -2651,7 +2651,9 @@ class afc:
         """
         Change to the given lane: unload the lane that is loaded, then load this one.
         A failed unload or load during a print is recorded so that AFC_RESUME can
-        finish the change.
+        finish the change. A change made while the print is paused leaves the head
+        where the load parked it and keeps the pause's saved position for AFC_RESUME,
+        since the user's RESUME returns to the Z that AFC_PAUSE raised.
 
         :param cur_lane: Lane to change to
         :param purge_length: Purge length for the load, None for the default
@@ -2661,6 +2663,7 @@ class afc:
         """
         try:
             self.afcDeltaTime.set_start_time()
+            paused = self.function.is_paused()
             # Check if the bypass filament sensor detects filament; if so, abort the tool change.
             if self._check_bypass(unload=False):
                 return
@@ -2773,7 +2776,7 @@ class afc:
                 # Load the new lane and restore the toolhead position if successful.
                 if self.TOOL_LOAD(cur_lane, purge_length, set_start_time=False) and not self.error_state:
                     self.resume_toolchange = None
-                    if restore_pos:
+                    if restore_pos and not paused:
                         self.restore_pos()
                     total_time = self.afcDeltaTime.log_total_time("Total change time:")
                     self.afc_stats.average_toolchange_time.average_time(total_time)

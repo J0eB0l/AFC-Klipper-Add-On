@@ -1529,6 +1529,14 @@ class TestChangeTool_LoadPath:
         obj.CHANGE_TOOL(cur_lane, restore_pos=False)
         obj.restore_pos.assert_not_called()
 
+    def test_restore_pos_not_called_while_paused(self):
+        """A change made during a pause keeps the pause's saved position for AFC_RESUME."""
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.function.is_paused.return_value = True
+        obj.CHANGE_TOOL(cur_lane)
+        obj.TOOL_LOAD.assert_called_once()
+        obj.restore_pos.assert_not_called()
+
     def test_restore_pos_suppressed_when_error_state_set_during_load(self):
         """If TOOL_LOAD sets error_state=True, restore_pos is not called."""
         obj, cur_lane, _ = _make_afc_for_change_tool()
