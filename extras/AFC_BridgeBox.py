@@ -1392,9 +1392,9 @@ class afcBridgeBox:
         are named, e.g. [AFC_extruder e1] map: T1, not laneN), the T# an
         [AFC_extruder] maps and the number an [AFC_extruder eN] section
         carries count too, so the fabricated pool continues the tool sequence
-        with lane# == T# (T1/T2/T3 in use -> base 4 -> lane4/T4). The 24 is
-        only a last resort, when the config cannot be seen at all (no
-        fileconfig) or nothing at all is numbered or mapped.
+        with lane# == T# (T1/T2/T3 in use -> base 4 -> lane4/T4). With
+        nothing numbered or mapped at all, or no config to see (no
+        fileconfig), the chain is alone and starts at lane0 (T0).
 
         A stored base is checked against the same numbers once the bays are
         laid out (see _renumber_step).
@@ -1408,11 +1408,11 @@ class afcBridgeBox:
             try:
                 base = int(stored)
             except Exception:
-                base = 0
-            if base:
+                base = -1
+            if base >= 0:
                 self._base_stored = True
                 return base
-        base = 24
+        base = 0
         try:
             nums = self._others_numbers(config)
             if not self._declared_lane_numbers(config):
@@ -3983,7 +3983,7 @@ class afcBridgeBox:
         changed = self._sweep_orphans(config, autov) or changed
         # A freshly computed auto base is remembered alongside the learned
         # values, so it survives config growth.
-        if getattr(self, "_resolved_base", None):
+        if getattr(self, "_resolved_base", None) is not None:
             updates.setdefault(self._BASE_SECTION + " " + self.name, {})[
                 "lane_base"] = self._resolved_base
         if getattr(self, "_resolved_prefix", None):

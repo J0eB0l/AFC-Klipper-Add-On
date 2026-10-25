@@ -3120,22 +3120,33 @@ class TestAfcBridgeBoxInit:
         assert m.lane_base == 7
         _bbx_quiet(printer)
 
-    def test_a_single_unnumbered_extruder_keeps_the_fallback(self, tmp_path):
+    def test_a_single_unnumbered_extruder_starts_at_lane0(self, tmp_path):
         printer = make_printer()
         self._declare(printer, "AFC_extruder extruder")
         m = _bbx_boot(tmp_path, printer, lane_base=0)
-        assert m.lane_base == 24
-        assert m._resolved_base == 24
+        assert m.lane_base == 0
+        assert m._resolved_base == 0
+        assert m._state_get(SEC, "lane_base") == "0"
         _bbx_quiet(printer)
 
-    def test_no_visible_config_falls_back_to_24(self, tmp_path):
+    def test_a_lone_chains_zero_base_is_remembered(self, tmp_path):
+        printer = make_printer()
+        self._declare(printer, "AFC_extruder extruder")
+        _bbx_boot(tmp_path, printer, lane_base=0)
+        m2 = _bbx_boot(tmp_path, make_printer(), lane_base=0)
+        assert m2.lane_base == 0
+        assert m2._base_stored is True
+        assert not hasattr(m2, "_resolved_base")
+        _bbx_quiet(m2.printer)
+
+    def test_no_visible_config_starts_at_lane0(self, tmp_path):
         m = self._direct(tmp_path, self._BlindConfig, lane_base=0,
                          buffer="Bamb_1")
-        assert m.lane_base == 24
-        assert m._resolved_base == 24
+        assert m.lane_base == 0
+        assert m._resolved_base == 0
         assert m._declared_lanes == set()
         assert m._later_lanes == {}
-        assert _bbx_loaded(m)[1] == "AFC_lane lane24"
+        assert _bbx_loaded(m)[1] == "AFC_lane lane0"
         _bbx_quiet(m.printer)
 
     # the automatic lane base: the T#s AFC's PREP gives the other lanes
@@ -9296,7 +9307,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         first = make_bridgebox(tmp_path, printer=make_printer(),
                                roster=f"ht:{A}", lane_base=0, pool_ams=1,
                                pool_ht=2)
-        assert first._state_get(SEC, "lane_base") == "24"
+        assert first._state_get(SEC, "lane_base") == "0"
         first._state_set({SEC: {"roster": f"ht:{A}"},
                           "AFC_BridgeBox chain2": {"roster": f"ht:{B}"}})
         printer = make_printer(monkeypatch=monkeypatch, fabricate=True)
@@ -9305,7 +9316,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         m2 = make_bridgebox(tmp_path, "chain2", printer=printer,
                             unit_prefix="Bambu_AMS_B", **chain)
         printer.connect()
-        assert (m1.lane_base, m2._family_of_uid(B)) == (24, "ht")
+        assert (m1.lane_base, m2._family_of_uid(B)) == (0, "ht")
         refusal = _p3_refused(m1, tmp_path, "REPLACE",
                               _p3_cmd(UID=B, OLD=A))
         assert refusal == "AFC_BRIDGEBOX_REPLACE: BBBB is not on chain chain1"
