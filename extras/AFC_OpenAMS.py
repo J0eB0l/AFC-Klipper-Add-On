@@ -678,7 +678,7 @@ class afcAMS(afcUnit):
         # compressed, so the gears pull the 20 mm out of it (FPS 1.0 -> 0.6) and
         # the encoder may not turn at all; a jammed filament leaves it near flat.
         self._engagement_min_fps_drop = config.getfloat(
-            "engagement_min_fps_drop", 0.25, minval=0.0, maxval=1.0)
+            "engagement_min_fps_drop", 0.15, minval=0.0, maxval=1.0)
         self._engagement_params: Dict[str, tuple[float, float]] = {}
         # Why the last load failed, for the pause message.
         self._load_failure = ""
@@ -2064,21 +2064,23 @@ class afcAMS(afcUnit):
                 self.logger.info(
                     f"Engagement failed attempt {attempt+1}, cleaning up")
 
-                # Disable the follower (enable=0) — do NOT run it in reverse.
-                # The extruder still grips the loaded filament; driving the
-                # follower backward here makes the two motors fight and grinds
-                # the gears (constant tension). The original oams_manager used
-                # set_oams_follower(0, 0) here. The extruder retract below and
-                # the hardware unload_spool_with_retry() handle backing the
-                # filament out, not the follower.
-                if self._follower:
-                    self._follower.set_follower_state(
-                        self._get_monitor_state(), self.oams, 0, 0,
-                        "engagement cleanup — stop follower", force=True)
-
                 # Retract from extruder using tool_stn distance so
-                # filament clears the extruder gears before AMS unload.
+                # filament clears the extruder gears before AMS unload. The
+                # follower runs in reverse with the retract, as in
+                # _oams_unload: stopped, it holds the AMS motor locked and the
+                # gears cannot push the filament back past it. With no retract
+                # it only stops, since reversing alone would fight the gears.
                 retract_dist = getattr(cur_lane.extruder_obj, 'tool_stn_unload', 0)
+                if self._follower:
+                    if retract_dist and retract_dist > 0:
+                        self._follower.enable_follower(
+                            self._get_monitor_state(), self.oams, 0,
+                            "engagement cleanup — reverse follower", force=True)
+                        self.afc.reactor.pause(self.afc.reactor.monotonic() + 0.5)
+                    else:
+                        self._follower.set_follower_state(
+                            self._get_monitor_state(), self.oams, 0, 0,
+                            "engagement cleanup — stop follower", force=True)
                 if retract_dist and retract_dist > 0:
                     unload_length = retract_dist + 10.0
                     retract_speed = getattr(cur_lane.extruder_obj, 'tool_unload_speed', 25.0) * 60.0

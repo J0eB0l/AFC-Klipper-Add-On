@@ -2241,7 +2241,7 @@ class TestVerifyEngagement:
 
         assert ams._verify_engagement(lane) is False
 
-    def _fps_case(self, fps_before, fps_after, min_drop=0.25):
+    def _fps_case(self, fps_before, fps_after, min_drop=0.15):
         # A load ends with the buffer compressed: the gears pull the engagement move out
         # of it and the encoder does not turn (printer 3, lane6, 2026-10-25)
         class _FakeOams:
@@ -5488,16 +5488,20 @@ class TestOamsLoad:
         assert any(
             lvl == "info" and "Engagement failed attempt 1, cleaning up" in m
             for lvl, m in ams.logger.messages)
-        # Follower is stopped 3x: before the load attempt starts, during
-        # engagement cleanup, and again before hardware cleanup.
+        # Follower is stopped before the load attempt and before hardware
+        # cleanup; during the cleanup retract it runs in reverse, since a stopped
+        # follower holds the AMS motor locked against the retract.
         cleanup_calls = follower.set_follower_state.call_args_list
-        assert len(cleanup_calls) == 3
+        assert len(cleanup_calls) == 2
         assert all(c[0][2] == 0 for c in cleanup_calls)
+        reverse = [c for c in follower.enable_follower.call_args_list
+                   if "engagement cleanup" in c[0][3]]
+        assert len(reverse) == 1 and reverse[0][0][2] == 0
         # wait_for_idle: start, before-attempt, then 4x during cleanup.
         assert ams._wait_for_idle.call_count == 6
-        # "stop before load" + "before load" enable + "stop before cleanup"
-        # (no retry-reenable pause since max_retries=1 means no next attempt).
-        assert afc.reactor.pause.call_count == 3
+        # "stop before load" + "before load" enable + reverse spin-up +
+        # "stop before cleanup" (no retry-reenable pause since max_retries=1).
+        assert afc.reactor.pause.call_count == 4
 
     def test_engagement_failure_no_retract_when_tool_stn_unload_zero(self):
         oams = MagicMock()
