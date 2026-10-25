@@ -1153,9 +1153,6 @@ class ACE2Connection(ACEConnection):
             self._logger.debug(f"ACE2 RX: {response}")
             self._handle_response(response)
 
-    # The Pro 2 enables RFID per-slot (V1's global enable_rfid/disable_rfid don't
-    # exist). Best-effort enable/disable all slots; fire-and-forget so connect
-    # never blocks on it.
     def start_rollback_assist(self, slot_index: int, timeout: float = 2.0) -> Any:
         """
         Enable rollback assist for a slot and wait for ACK.
@@ -1169,17 +1166,21 @@ class ACE2Connection(ACEConnection):
 
     def enable_rfid(self) -> None:
         """
-        Best-effort enable per-slot RFID identification on every slot.
+        Nothing to turn on: the ACE 2 has no firmware tag reader (AFC_ACE2_rfid
+        reads tags host-side). Its per-slot "RFID enable" is the factory
+        identify, see set_identify.
         """
-        for slot in range(self.slot_count):
-            self.send_command_async("set_rfid_enable", {"index": slot, "enable": True})
 
-    def disable_rfid(self) -> None:
+    def set_identify(self, enable: bool) -> None:
         """
-        Best-effort disable per-slot RFID identification on every slot.
+        Turn the factory identify on or off on every slot, fire-and-forget.
+        On, an insert runs the unit's own slow identify cycle, which feeds and
+        stages the filament; off, AFC stages it.
+
+        :param enable: True for on.
         """
         for slot in range(self.slot_count):
-            self.send_command_async("set_rfid_enable", {"index": slot, "enable": False})
+            self.send_command_async("set_rfid_enable", {"index": slot, "enable": enable})
 
 
 # ── Unit: the V1 ACE unit with the V2 transport swapped in ───────────
@@ -1263,10 +1264,14 @@ class afcACE2(afcACE):
         self.skip_factory_autostage = config.getboolean(
             "skip_factory_autostage",
             legacy.getboolean("skip_factory_autostage", True) if legacy else True)
-        self.stage_initial_dist = config.getfloat(
+        stage_dist = config.getfloat(
             "stage_initial_dist",
             legacy.getfloat("stage_initial_dist", 500.0, minval=0.0) if legacy else 500.0,
             minval=0.0)
+        self.stage_initial_dist = stage_dist if self.skip_factory_autostage else 0.0
+        # The unit turns the identify back on across a reset, so set it on every
+        # connect and reconnect.
+        self.printer.register_event_handler("afc_ace:connected", self._handle_ace_connected)
 
     def _apply_feed_check(self) -> None:
         """
@@ -1286,34 +1291,23 @@ class afcACE2(afcACE):
         except Exception as e:
             self.logger.warning(f"ACE2 {self.name}: set_feed_check failed (non-fatal): {e}")
 
-    def _apply_identify(self) -> None:
+    def _handle_ace_connected(self, unit: Any, reconnected: bool) -> None:
         """
-        Set the factory identify on every slot: off for skip_factory_autostage,
-        so an insert is left to AFC's staging, else on so the unit's firmware
-        stages it. The unit turns it back on across a reset, so this is sent on
-        connect and reconnect.
+        ``afc_ace:connected`` handler: set this unit's factory identify, off for
+        skip_factory_autostage, else on.
+
+        :param unit: the ACE unit that connected.
+        :param reconnected: True after a reset (unused).
         """
-        if self._ace is None:
+        if unit is not self or self._ace is None:
             return
-        enable = not self.skip_factory_autostage
-        state = "on" if enable else "off"
+        state = "off" if self.skip_factory_autostage else "on"
         try:
-            for slot in range(self.SLOTS_PER_UNIT):
-                self._ace.send_command_async(
-                    "set_rfid_enable", {"index": slot, "enable": enable})
+            self._ace.set_identify(not self.skip_factory_autostage)
             self.logger.info(f"ACE2 {self.name}: factory identify {state} for every slot")
         except Exception as e:
             self.logger.warning(
                 f"ACE2 {self.name}: factory identify {state} failed (non-fatal): {e}")
-
-    def stage_initial_load(self) -> float:
-        """
-        Distance fed into the unit ahead of dist_hub when an insert is staged:
-        stage_initial_dist when the factory autostage is skipped, else none.
-
-        :return float: the distance in mm
-        """
-        return self.stage_initial_dist if self.skip_factory_autostage else 0.0
 
     # ACE2 slot states that mean the encoder/odometer disagrees with the
     # commanded motor move, a real upstream jam, tangle, slip, or motor fault.

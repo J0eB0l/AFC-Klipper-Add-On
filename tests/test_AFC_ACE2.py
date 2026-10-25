@@ -2323,10 +2323,21 @@ class TestACE2ConnectionParseFrames:
 
 
 class TestACE2ConnectionEnableRfid:
-    def test_enables_every_slot(self):
+    def test_sends_nothing(self):
+        # The ACE 2 has no firmware tag reader; opcode 14 is set_identify's.
         printer, conn = ace2_link()
 
         conn.enable_rfid()
+
+        assert conn._serial.frames == []
+        assert printer.logger.messages == []
+
+
+class TestACE2ConnectionSetIdentify:
+    def test_on_for_every_slot(self):
+        printer, conn = ace2_link()
+
+        conn.set_identify(True)
 
         assert conn._serial.frames == [
             Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x01]))
@@ -2342,32 +2353,22 @@ class TestACE2ConnectionEnableRfid:
         printer, conn = ace2_link()
         conn.slot_count = 2
 
-        conn.enable_rfid()
+        conn.set_identify(True)
 
         assert conn._serial.frames == [
             Ace2Wire.frame(0, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x00, 0x10, 0x01])),
             Ace2Wire.frame(1, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, 0x01, 0x10, 0x01]))]
         assert list(conn._async_ids) == [0, 1]
-        assert printer.logger.messages == [
-            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=1 set_rfid_enable")]
 
-
-class TestACE2ConnectionDisableRfid:
-    def test_disables_every_slot(self):
+    def test_off_for_every_slot(self):
         printer, conn = ace2_link()
 
-        conn.disable_rfid()
+        conn.set_identify(False)
 
         assert conn._serial.frames == [
             Ace2Wire.frame(slot, Ace2Wire.SET_RFID_ENABLE, bytes([0x08, slot, 0x10, 0x00]))
             for slot in range(4)]
         assert list(conn._async_ids) == [0, 1, 2, 3]
-        assert printer.logger.messages == [
-            ("debug", "ACE2 TX (async): id=0 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=1 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=2 set_rfid_enable"),
-            ("debug", "ACE2 TX (async): id=3 set_rfid_enable")]
 
 
 class TestAfcACE2Init:
@@ -2469,19 +2470,25 @@ class TestAfcACE2Staging:
     def test_defaults_skip_the_factory_autostage(self):
         unit = make_ace2_unit()
         assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (True, 500.0)
-        assert unit.stage_initial_load() == 500.0
 
     def test_factory_staging_has_no_initial_load(self):
         unit = make_ace2_unit(values={"skip_factory_autostage": False,
                                       "stage_initial_dist": 300.0})
-        assert unit.stage_initial_load() == 0.0
+        assert unit.stage_initial_dist == 0.0
 
     def test_the_rfid_section_still_sets_them_for_the_unit(self):
         printer = AcePrinter()
         printer.add_section("AFC_ACE2_rfid", object(), {"skip_factory_autostage": False,
                                                         "stage_initial_dist": 300.0})
         unit = make_ace2_unit(printer=printer)
-        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (False, 300.0)
+        # Its skip_factory_autostage False leaves staging to the firmware, so no distance.
+        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (False, 0.0)
+
+    def test_the_rfid_sections_distance_when_the_unit_skips(self):
+        printer = AcePrinter()
+        printer.add_section("AFC_ACE2_rfid", object(), {"stage_initial_dist": 300.0})
+        unit = make_ace2_unit(printer=printer)
+        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (True, 300.0)
 
     def test_the_unit_wins_over_the_rfid_section(self):
         printer = AcePrinter()
@@ -2494,7 +2501,7 @@ class TestAfcACE2Staging:
     def test_identify_off_on_every_slot(self):
         unit = make_ace2_unit()
 
-        unit._apply_identify()
+        unit._handle_ace_connected(unit, False)
 
         assert unit._ace.async_commands == self.OFF
         assert unit.printer.logger.messages == [
@@ -2503,7 +2510,7 @@ class TestAfcACE2Staging:
     def test_factory_staging_turns_identify_on(self):
         unit = make_ace2_unit(values={"skip_factory_autostage": False})
 
-        unit._apply_identify()
+        unit._handle_ace_connected(unit, False)
 
         assert unit._ace.async_commands == [
             ("set_rfid_enable", {"index": s, "enable": True}) for s in range(4)]
@@ -2513,7 +2520,7 @@ class TestAfcACE2Staging:
     def test_identify_left_alone_while_disconnected(self):
         unit = make_ace2_unit(connection=None)
 
-        unit._apply_identify()
+        unit._handle_ace_connected(unit, False)
 
         assert unit._ace is None
         assert unit.printer.logger.messages == []
@@ -2525,12 +2532,19 @@ class TestAfcACE2Staging:
         link.error = RuntimeError("serial down")
         unit = make_ace2_unit(printer=printer, connection=link)
 
-        unit._apply_identify()
+        unit._handle_ace_connected(unit, False)
 
         # The first send raised, so the rest of the slots were not sent.
         assert link.async_commands == [self.OFF[0]]
         assert printer.logger.messages == [
             ("warning", "ACE2 Ace2_1: factory identify off failed (non-fatal): serial down")]
+
+    def test_another_units_connect_is_left_alone(self):
+        unit = make_ace2_unit()
+
+        unit._handle_ace_connected(object(), False)
+
+        assert unit._ace.async_commands == []
 
     def test_connect_turns_identify_off(self):
         unit = make_ace2_unit(connect=False)

@@ -2077,7 +2077,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :return float: the distance to wind back, mm
         """
         staged = float(getattr(lane, "dist_hub", 0.0) or 0.0)
-        staged += float(self.ace2.stage_initial_load())
+        staged += float(getattr(self.ace2, "stage_initial_dist", 0.0))
         if staged > 0:
             dist = min(dist, staged - self.RESCAN_MARGIN_MM)
         if dist < 10.0:
