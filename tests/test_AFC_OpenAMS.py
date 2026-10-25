@@ -2222,6 +2222,25 @@ class TestVerifyEngagement:
         assert pauses == [101.5, 101.0]
         assert ("info", "Engagement verified: encoder moved 30 clicks") in ams.logger.messages
 
+    def test_clicks_from_the_load_itself_do_not_count(self):
+        class _FakeOams:
+            def __init__(self):
+                self.encoder_clicks = 2486
+
+        oams = _FakeOams()
+        ams, afc, printer, reactor = _make_ams(oams=oams)
+        ams._oams_extrude = MagicMock()
+        ams._engagement_min_clicks = 10
+
+        def pause(t):
+            if t == 101.5:
+                # The status with the load's last clicks lands during the first wait.
+                oams.encoder_clicks = 2519
+        reactor.pause = pause
+        lane = _make_lane("lane1")
+
+        assert ams._verify_engagement(lane) is False
+
     def test_encoder_moved_enough_on_retry_returns_true(self):
         class _FakeOams:
             def __init__(self):

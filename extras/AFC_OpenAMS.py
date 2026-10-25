@@ -1203,13 +1203,15 @@ class afcAMS(afcUnit):
                     self._get_monitor_state(), self.oams, 1,
                     "engagement verification", force=True)
 
-            # Record encoder before
+            # Wait for FPS pressure to normalize
+            self.afc.reactor.pause(self.afc.reactor.monotonic() + 1.5)
+
+            # Record encoder before, after the wait: the status read at the end of the
+            # load can still be missing the load's last clicks, which would count as
+            # engagement
             encoder_before = 0
             if self.oams and hasattr(self.oams, 'encoder_clicks'):
                 encoder_before = self.oams.encoder_clicks or 0
-
-            # Wait for FPS pressure to normalize
-            self.afc.reactor.pause(self.afc.reactor.monotonic() + 1.5)
 
             # Two-phase extrude: prime then main
             prime_length = min(5.0, engagement_length)
