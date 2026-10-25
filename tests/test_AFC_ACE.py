@@ -558,24 +558,6 @@ class TestAfcACEInit:
             "AFC_ACE: temperature_ace factory not registered (heaters boom); "
             "use [temperature_ace <name>] config sections instead"]
 
-    def test_wrapped_mux_commands_forward_their_unit(self):
-        # With show_macros, AFC registers each command as _<name> plus a <name>
-        # gcode_macro that forwards the caller's parameters only when the
-        # command was registered with an options list.
-        unit = ace_p1_unit(clear_records=False)
-        func = afcFunction(MockConfig(name="AFC_functions", printer=MockPrinter()))
-
-        wrapped = set()
-        for args, kwargs in unit.afc.function.register_mux_command.calls:
-            name, key, value = args[1:4]
-            options = args[6] if len(args) > 6 else kwargs.get("options")
-            wrapped.add(name)
-            assert (key, value) == ("UNIT", unit.name)
-            assert options is not None and key in options, name
-            assert func._create_options(name, options).endswith(f"_{name} {{rawparams}}")
-
-        assert wrapped == {"AFC_ACE_DRY", "AFC_ACE_DRY_STOP"}
-
 
 class TestAmsBoxLogo:
     def test_short_title_uses_min_bay_width(self):

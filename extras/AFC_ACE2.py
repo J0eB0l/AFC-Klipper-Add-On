@@ -373,7 +373,7 @@ def method_to_v2(method: str, params: Optional[Dict[str, Any]]) -> Tuple[int, by
         speed = int(params.get('speed', 50))
         return Cmd.FEED_OR_ROLLBACK, (pb_uint32(1, slot) + pb_uint32(2, speed)
                                       + pb_uint32(3, length) + pb_uint32(4, FEED_MODE_ROLLBACK))
-    if method == 'stop_feed_filament':
+    if method in ('stop_feed_filament', 'stop_unwind_filament'):
         return Cmd.STOP_FEED_OR_ROLLBACK, pb_uint32(1, int(params.get('index', 0)))
     if method == 'update_feeding_speed':
         slot = int(params.get('index', 0))
@@ -894,7 +894,11 @@ def resolve_ace2_port(ace_index: int, baud: int, ace_uid: Optional[Tuple[int, in
     The tty for the ACE 2 this section wants. Probes CH34x devices over a
     settle window (rides the watchdog re-enumeration). With ace_uid, binds to
     the box reporting that UID; otherwise binds ace_index (1-based) by
-    USB-topology (cable) order. Claimed ports are skipped.
+    USB-topology (cable) order.
+
+    A claimed port is never re-probed (another unit's connection already has it open),
+    but still occupies its topology position so other units' indices don't shift;
+    resolving to a claimed port itself returns None rather than handing out a port in use.
 
     :param ace_index: 1-based unit index in cable order
     :param baud: baud rate for the probe
@@ -925,10 +929,17 @@ def resolve_ace2_port(ace_index: int, baud: int, ace_uid: Optional[Tuple[int, in
         time.sleep(0.5)
     if ace_uid is not None:
         return next((p for p, u in found.items() if u == tuple(ace_uid)), None)
-    if found:
-        ordered = sorted(found, key=_ace2_topology_key)
+    # A currently-claimed candidate is a known-real ACE2 (claiming only ever
+    # follows a successful connect), so it counts toward topology position
+    # even though this pass couldn't re-probe it.
+    claimed_candidates = {p for p in _ace2_scan_candidates() if p in _ACE_CLAIMED_PORTS}
+    known = set(found) | claimed_candidates
+    if known:
+        ordered = sorted(known, key=_ace2_topology_key)
         if 1 <= ace_index <= len(ordered):
-            return ordered[ace_index - 1]
+            candidate = ordered[ace_index - 1]
+            if candidate not in _ACE_CLAIMED_PORTS:
+                return candidate
     return None
 
 

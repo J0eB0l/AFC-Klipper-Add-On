@@ -3356,10 +3356,8 @@ class afcACE(afcUnit):
                 self._start_dry_rotate(gcmd)
 
     cmd_AFC_ACE_DRY_STOP_help = "Stop ACE filament dryer"
-    # Without an options list the show_macros wrapper calls _AFC_ACE_DRY_STOP
-    # with no parameters, and the mux command then has no UNIT to route on.
     cmd_AFC_ACE_DRY_STOP_options = {
-        "UNIT": {"type": "string", "default": ""},
+        "UNIT": {"type": "string", "default": ""}
     }
     def cmd_AFC_ACE_DRY_STOP(self, gcmd: GCodeCommand) -> None:
         """
