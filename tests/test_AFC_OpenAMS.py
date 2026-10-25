@@ -3172,6 +3172,18 @@ class TestUnitUnloadLane:
         assert result is False
         afc.save_vars.assert_not_called()
 
+    def test_monitor_stops_before_the_tip_is_formed(self):
+        ams, afc, printer, reactor = _make_ams()
+        ams._oams_unload_sequence = MagicMock(return_value=True)
+        afc.post_unload_macro = None
+        afc.move_e_pos = MagicMock()
+        calls = []
+        ams._monitor = MagicMock()
+        ams._monitor.stop.side_effect = lambda: calls.append("stop")
+        afc.do_tool_cut_tip_form = MagicMock(side_effect=lambda *a: calls.append("tip"))
+        ams.unit_unload_lane(_make_lane("lane1"), MagicMock())
+        assert calls == ["stop", "tip"]
+
     def test_runs_post_unload_macro_when_configured(self):
         ams, afc, printer, reactor = _make_ams()
         ams._oams_unload_sequence = MagicMock(return_value=True)

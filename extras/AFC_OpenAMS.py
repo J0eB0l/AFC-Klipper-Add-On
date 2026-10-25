@@ -1753,6 +1753,10 @@ class afcAMS(afcUnit):
         cur_lane.disable_buffer()
         cur_lane.sync_to_extruder()
         cur_lane.select_lane()
+        # The cut and tip forming push and pull filament inside the buffer, out of the
+        # encoder's sight, which the clog check reads as a clog
+        if self._monitor:
+            self._monitor.stop()
         self.afc.do_tool_cut_tip_form(cur_lane, cur_extruder)
         success = self._oams_unload_sequence(cur_lane, cur_extruder)
         if not success:
