@@ -1695,6 +1695,17 @@ class TestPauseOnError:
         buf.pause_on_error("Something went wrong", pause=False)
         buf.afc.error.AFC_error.assert_not_called()
 
+    def test_a_fault_outside_a_print_reports_without_pausing(self):
+        buf = _make_buffer()
+        buf.enable = True
+        buf.min_event_systime = 0.0
+        buf.afc.error = MagicMock()
+        buf.afc.function.is_paused.return_value = False
+        buf.afc.function.in_print.return_value = False
+        buf.last_state = ADVANCING_STATE_NAME
+        buf.pause_on_error("Base message", pause=True)
+        assert buf.afc.error.AFC_error.call_args[0][1] is False
+
     def test_clog_message_appended_when_trailing(self):
         buf = _make_buffer()
         buf.enable = True
@@ -1868,6 +1879,7 @@ class TestExtruderPosUpdateEvent:
         buf.afc.error = MagicMock()
         buf.afc.function.is_paused.return_value = False
         buf.afc.function.is_printing.return_value = True
+        buf.afc.function.in_print.return_value = True
         buf.get_extruder_pos = MagicMock(return_value=55.0)  # > 50.0
         buf.update_filament_error_pos = MagicMock()
         buf.extruder_pos_update_event(100.0)
@@ -1884,6 +1896,7 @@ class TestExtruderPosUpdateEvent:
         buf.afc.error = MagicMock()
         buf.afc.function.is_paused.return_value = False
         buf.afc.function.is_printing.return_value = True
+        buf.afc.function.in_print.return_value = True
         buf.get_extruder_pos = MagicMock(return_value=55.0)  # > 50.0
         buf.update_filament_error_pos = MagicMock()
         lane.unit_obj.stepperless_drive = None
@@ -1901,6 +1914,7 @@ class TestExtruderPosUpdateEvent:
         buf.afc.error = MagicMock()
         buf.afc.function.is_paused.return_value = False
         buf.afc.function.is_printing.return_value = True
+        buf.afc.function.in_print.return_value = True
         buf.get_extruder_pos = MagicMock(return_value=55.0)  # > 50.0
         buf.update_filament_error_pos = MagicMock()
         lane.unit_obj.stepperless_drive = True

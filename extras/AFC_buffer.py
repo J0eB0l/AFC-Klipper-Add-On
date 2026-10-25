@@ -304,7 +304,9 @@ class AFCBuffer:
                 msg += '\nCLOG DETECTED'
             if self.last_state == ADVANCING_STATE_NAME:
                 msg += '\nAFC NOT FEEDING'
-            self.afc.error.AFC_error( msg, True )
+            # Only a print can be paused; a PAUSE outside one raises on some printers
+            # (Snapmaker U1), and from this timer that shuts Klipper down
+            self.afc.error.AFC_error( msg, self.afc.function.in_print() )
 
     def enable_buffer(self, lane: AFCLane):
         """
