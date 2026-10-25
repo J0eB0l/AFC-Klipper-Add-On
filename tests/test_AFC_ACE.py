@@ -57,6 +57,7 @@ from tests.ace_helpers import (
     reset_ace_globals,
     TIMEOUT,
 )
+from tests.conftest import MockConfig, MockPrinter
 
 
 def ace_p1_unit(*lanes: Any, printer: Optional[AcePrinter] = None, **kwargs: Any) -> afcACE:
@@ -556,6 +557,26 @@ class TestAfcACEInit:
         assert [r.getMessage() for r in caplog.records] == [
             "AFC_ACE: temperature_ace factory not registered (heaters boom); "
             "use [temperature_ace <name>] config sections instead"]
+
+    def test_wrapped_mux_commands_forward_their_unit(self):
+        # With show_macros, AFC registers each command as _<name> plus a <name>
+        # gcode_macro that forwards the caller's parameters only when the
+        # command was registered with an options list.
+        unit = ace_p1_unit(clear_records=False)
+        config = MockConfig(name="AFC_functions", printer=MockPrinter())
+        config.access_tracking = {}
+        func = afcFunction(config)
+
+        wrapped = set()
+        for args, kwargs in unit.afc.function.register_mux_command.calls:
+            name, key, value = args[1:4]
+            options = args[6] if len(args) > 6 else kwargs.get("options")
+            wrapped.add(name)
+            assert (key, value) == ("UNIT", unit.name)
+            assert options is not None and key in options, name
+            assert func._create_options(name, options).endswith(f"_{name} {{rawparams}}")
+
+        assert wrapped == {"AFC_ACE_DRY", "AFC_ACE_DRY_STOP"}
 
 
 class TestAmsBoxLogo:
@@ -6047,27 +6068,6 @@ class TestAfcACECmdAFCACEDryStop:
         assert gcmd.messages == [("info", "Error stopping dryer: x")]
         assert unit._ace.commands == [("drying_stop", {})]
         assert unit.printer.logger.messages == []
-
-
-class TestAfcACEWrappedMuxCommands:
-    """With show_macros, AFC registers each command as _<name> and adds a
-    <name> gcode_macro calling it, which forwards the caller's parameters only
-    when the command was registered with an options list."""
-
-    def test_every_wrapped_command_forwards_its_unit(self):
-        unit = ace_p2_unit(clear_records=False)
-        func = afcFunction.__new__(afcFunction)
-
-        wrapped = {}
-        for args, kwargs in unit.afc.function.register_mux_command.calls:
-            name, key, value = args[1:4]
-            options = args[6] if len(args) > 6 else kwargs.get("options")
-            wrapped[name] = options
-            assert (key, value) == ("UNIT", unit.name)
-            assert options is not None and key in options, name
-            assert func._create_options(name, options).endswith(f"_{name} {{rawparams}}")
-
-        assert set(wrapped) == {"AFC_ACE_DRY", "AFC_ACE_DRY_STOP"}
 
 
 class AceDryRotateWire:
