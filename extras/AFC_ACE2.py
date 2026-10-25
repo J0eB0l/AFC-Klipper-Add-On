@@ -1000,7 +1000,7 @@ class ACE2Connection(ACEConnection):
     def _poll_extras(self) -> None:
         """
         Poll GET_TEMP and GET_SENSOR_STATE each heartbeat so the unit caches
-        the box/PTC/env thermal channels (env feeds the temperature card) and the
+        the box/PTC/env thermal channels (for temperature_ace sensors) and the
         per-lane buffer/filament sensor state (for get_status). Fire-and-forget:
         the replies are routed to the unit's caches by _on_hw_status_callback.
         ACE2 only (the V1 firmware has neither command).
@@ -1186,8 +1186,6 @@ class afcACE2(afcACE):
     # (AFC_ACE2_rfid), not through the firmware's get_filament_info, so it must
     # not do the V1 firmware inventory sweep at startup prep.
     _uses_firmware_rfid = False
-    # The ACE 2 reports humidity with its temperature (GET_TEMP env channel).
-    _reports_humidity = True
 
     def __init__(self, config: ConfigWrapper) -> None:
         """

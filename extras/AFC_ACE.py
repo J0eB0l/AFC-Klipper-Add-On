@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from gcode import GCodeCommand, GCodeDispatch
     from reactor import SelectReactor as Reactor
     from extras.AFC_lane import AFCLane
+    from extras.heaters import PrinterHeaters
 
 try: from extras.AFC_utils import ERROR_STR
 except:
@@ -54,11 +55,6 @@ except:
 try: from extras.AFC_unit import afcUnit
 except:
     error_str = ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc())
-    raise error(error_str)
-
-try: from extras import AFC_temperature
-except:
-    error_str = ERROR_STR.format(import_lib="AFC_temperature", trace=traceback.format_exc())
     raise error(error_str)
 
 try:
@@ -264,9 +260,6 @@ class afcACE(afcUnit):
     # V1 ACE reads tags through the firmware (get_filament_info); AFC_ACE2 sets
     # this False since it reads them host-side (AFC_ACE2_rfid).
     _uses_firmware_rfid = True
-    # V1 ACE has no humidity sensor; AFC_ACE2 sets this True so its temperature
-    # card publishes humidity from the start.
-    _reports_humidity = False
 
     def __init__(self, config: ConfigWrapper) -> None:
         """
@@ -276,7 +269,7 @@ class afcACE(afcUnit):
             serial port, mode, feed/retract speeds, dryer and stuck-detection
             limits, feed-assist options, calibration step sizes and FPS
             thresholds, then registers the per-unit and base AFC_ACE_* gcode
-            commands and builds the unit's temperature card.
+            commands and the temperature_ace sensor factory.
         """
         super().__init__(config)
         self.type = config.get('type', 'ACE')
@@ -371,8 +364,8 @@ class afcACE(afcUnit):
         self._dry_rotate_slot: Optional[int] = None
         self._dry_rotate_hold = ""
         self._cached_hw_status: Dict[str, Any] = {}
-        # GET_TEMP channels (ACE2 only), polled each heartbeat; the env channel
-        # feeds the temperature card.
+        # GET_TEMP channels (ACE2 only), polled each heartbeat and read by
+        # temperature_ace sensors configured with a specific channel.
         self._cached_temp_info: Dict[str, Any] = {}
         # Last GET_SENSOR_STATE decode (ACE2 only), polled each heartbeat and
         # read by get_status for each lane's buffer state.
@@ -463,11 +456,18 @@ class afcACE(afcUnit):
                                                self.cmd_AFC_ACE_DRY_STOP_help,
                                                self.cmd_AFC_ACE_DRY_STOP_options)
 
-        # The unit's Mainsail/Fluidd temperature card: the ACE's temperature,
-        # and its humidity on an ACE 2.
-        self.temperature_card = AFC_temperature.add_card(
-            config, self.name, self._card_reading, self.logger,
-            humidity=self._reports_humidity)
+        # Register the temperature_ace sensor factory for [temperature_sensor]
+        # sections using sensor_type: temperature_ace.
+        try:
+            from extras.temperature_ace import TemperatureACE
+            pheaters: PrinterHeaters = self.printer.load_object(config, "heaters")
+            pheaters.add_sensor_factory("temperature_ace", TemperatureACE)
+            # Fluidd alias (aht2x -> aht10) so Fluidd shows ACE 2 humidity; distinct
+            # from OpenAMS's aht3x so the factories don't clobber each other.
+            pheaters.add_sensor_factory("aht2x", TemperatureACE)
+        except Exception as e:
+            logging.info("AFC_ACE: temperature_ace factory not registered (%s); "
+                         "use [temperature_ace <name>] config sections instead", e)
 
     def handle_connect(self) -> None:
         """
@@ -914,19 +914,6 @@ class afcACE(afcUnit):
                 return f"{st}(slot {idx})" if idx is not None else st
         # No busy slot, fall back to the V1 top-level action field if present.
         return str(result.get("action") or "").strip()
-
-    def _card_reading(self, eventtime: float) -> Tuple[Optional[float], Optional[float]]:
-        """
-        The temperature card's reading. The V1 carries temp and humidity in its
-        status reply; the ACE 2 answers GET_TEMP, cached as the env channel.
-
-        :param eventtime: reactor time (unused)
-        :return tuple: (temperature, humidity), None for a value not reported
-        """
-        hw = self._cached_hw_status or {}
-        temp_info = self._cached_temp_info or {}
-        return (hw.get("temp", temp_info.get("env_temp")),
-                hw.get("humidity", temp_info.get("env_humidity")))
 
     def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
         """

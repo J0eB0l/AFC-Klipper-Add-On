@@ -2062,7 +2062,7 @@ class TestAfcAMSInit:
         assert ams is not None
 
 
-    def test_temperature_card_failure_is_logged_and_leaves_none(self):
+    def test_temperature_sensor_factory_registration_failure_is_swallowed(self):
         config, printer, afc = self._config()
         real_load_object = printer.load_object
 
@@ -2073,24 +2073,22 @@ class TestAfcAMSInit:
         printer.load_object = load_object
 
         ams = self._build(config)  # must not raise
-        assert ams.temperature_card is None
-        assert afc.logger.messages == [
-            ("warning", "AFC_OpenAMS ams1: no temperature card (no heaters object)")]
+        assert ams is not None
 
-    def test_builds_the_units_temperature_card_off_its_hdc1080(self):
-        from extras.AFC_temperature import HDC1080
+    def test_registers_temperature_oams_sensor_factory(self):
+        from extras.temperature_oams import TemperatureOAMS
         config, printer, afc = self._config()
         heaters = MagicMock()
         printer._objects["heaters"] = heaters
-        ams = self._build(config)
-        card = ams.temperature_card
-        assert isinstance(ams.hdc1080, HDC1080)
-        assert card.reader == ams.hdc1080.read
-        assert printer._objects["temperature_sensor ams1"] is card
-        assert printer._objects["aht10 ams1"] is card.humidity_view
-        assert card.reports_humidity is True
-        wrapper, sensor = heaters.register_sensor.call_args[0]
-        assert (wrapper.get_name(), sensor) == ("temperature_sensor ams1", card)
+        self._build(config)
+        # Registers the temperature_oams factory plus the Fluidd aht3x alias
+        # (both map to TemperatureOAMS) so a temperature_sensor card can show
+        # humidity in Fluidd too.
+        heaters.add_sensor_factory.assert_has_calls([
+            call("temperature_oams", TemperatureOAMS),
+            call("aht3x", TemperatureOAMS),
+        ])
+        assert heaters.add_sensor_factory.call_count == 2
 
     def test_registers_mux_commands(self):
         config, printer, afc = self._config()

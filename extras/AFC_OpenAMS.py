@@ -48,9 +48,6 @@ except: raise error(ERROR_STR.format(import_lib="AFC_lane", trace=traceback.form
 try: from extras.AFC_unit import afcUnit
 except: raise error(ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc()))
 
-try: from extras import AFC_temperature
-except: raise error(ERROR_STR.format(import_lib="AFC_temperature", trace=traceback.format_exc()))
-
 # FollowerController, OAMSMonitor and FPSLoadState/FPSState are defined inline
 # at the bottom of this file so the OpenAMS unit is self-contained. The [oams]
 # hardware controller lives in its own AFC_OAMS.py because Klipper resolves the
@@ -641,7 +638,7 @@ class afcAMS(afcUnit):
         Initialize an OpenAMS unit from its config section.
         Reads the hardware name, stuck-spool/clog/engagement options, registers
         the unit's custom load/unload and calibration gcode commands, and wires
-        builds the unit's temperature card off the board's HDC1080.
+        up the ``temperature_oams`` sensor factory.
 
         :param config: ConfigWrapper for this unit's ``[AFC_OpenAMS ...]`` section.
         """
@@ -790,11 +787,15 @@ class afcAMS(afcUnit):
         self._rfid_scanned: set[str] = set()
         self._rfid_coord: Optional[AFC_OpenAMS_rfid] = None
 
-        # The unit's Mainsail/Fluidd temperature card, read off the board's
-        # HDC1080 over this section's i2c_* options.
-        self.hdc1080 = AFC_temperature.HDC1080(config, self.logger)
-        self.temperature_card = AFC_temperature.add_card(
-            config, self.name, self.hdc1080.read, self.logger)
+        # Register temperature_oams sensor factory during config parsing
+        try:
+            from extras.temperature_oams import TemperatureOAMS
+            pheaters = self.printer.load_object(config, "heaters")
+            pheaters.add_sensor_factory("temperature_oams", TemperatureOAMS)
+            # Alias under a sensor type Fluidd recognises, so it shows humidity.
+            pheaters.add_sensor_factory("aht3x", TemperatureOAMS)
+        except Exception:
+            pass
 
         # klippy:ready is registered by afcUnit.__init__ (upstream core) and
         # dispatches to our handle_ready override below — don't register it

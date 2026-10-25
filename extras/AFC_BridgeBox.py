@@ -1252,6 +1252,16 @@ class afcBridgeBox:
                 "afc_unload_bowden_length": self.afc_bowden_length,
                 "td1_bowden_length": self.td1_bowden_length,
             }))
+            # Known units get a Mainsail/Fluidd temperature card (humidity comes
+            # off every AMS's motion-long reply). A spare gets none, so it shows
+            # nothing until claimed.
+            if not b["spare"]:
+                sections.append((f"temperature_sensor {name}", {
+                    "sensor_type": "aht2x",
+                    "bambu_unit": name,
+                    "min_temp": 0,
+                    "max_temp": 90,
+                }))
             self._pool_units.append({
                 "name": name,
                 "lanes": [f"lane{lane_no + slot}" for slot in range(slots)],

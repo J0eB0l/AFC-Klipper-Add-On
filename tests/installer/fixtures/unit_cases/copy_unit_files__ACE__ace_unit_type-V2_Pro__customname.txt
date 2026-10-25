@@ -169,8 +169,16 @@ afc_bowden_length: 900      # mm from where a lane parks (dist_hub) to the
 #switch_pin: virtual
 #afc_bowden_length: 900
 
-# The ACE 2's temperature and humidity show on the Mainsail/Fluidd
-# temperature card as Ace2_1 with no [temperature_sensor] section.
+# Optional: the ACE 2's temperature and humidity on the Mainsail/Fluidd
+# card. Keep this after [AFC_ACE2 Ace2_1], which registers the sensor
+# type. Fluidd shows the humidity only with sensor_type: aht2x (the same
+# sensor).
+[temperature_sensor Ace2_1]
+sensor_type: aht2x
+ace_unit: Ace2_1            # the [AFC_ACE2] section name
+min_temp: 0
+max_temp: 85                # Klipper shuts down above this, so keep it
+                            # well above max_dryer_temperature
 
 
 # ---- RFID (optional) ----

@@ -40,12 +40,11 @@ dryer panel skip units with the `pool` flag. The lanes join no registry and get
 no `T#` until a unit claims the bay.
 
 Every bay has a real name from the start, whether or not a unit owns it (see
-[Names](#names)). A bay built for a recorded unit carries that unit's UID, and
-the unit puts its temperature card (`temperature_sensor <name>`) on
-Mainsail and Fluidd even while unplugged. Spare bays have no UID and no card,
-so a unit claimed live onto a spare gets its temperature card at the first
-restart that builds it a bay of its own, which needs it to be recorded (and
-listed in `roster:` while that option is set).
+[Names](#names)). A bay built for a recorded unit carries that unit's UID and
+a `temperature_sensor <name>`, even while the unit is unplugged. Spare bays
+have no UID and no sensor, so a unit claimed live onto a spare gets its
+temperature card at the first restart that builds it a bay of its own, which
+needs it to be recorded (and listed in `roster:` while that option is set).
 
 Every bay starts inert, recorded ones included. On a chain with a pool, the
 watch tick claims a unit once it reads online. At startup, claims wait for

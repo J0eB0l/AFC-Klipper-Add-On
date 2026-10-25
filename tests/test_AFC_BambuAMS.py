@@ -2334,29 +2334,6 @@ class TestAfcBambuAMSInit:
         return TestAfcBambuAMSInit._ReadTrackingConfig(
             "AFC_BambuAMS Bambu_AMS_1", printer, opts)
 
-    def test_a_configured_unit_builds_its_temperature_card(self):
-        config = unit_config()
-        printer = config.get_printer()
-        u = afcBambuAMS(config)
-        card = u.temperature_card
-        assert printer.lookup_object("temperature_sensor Bambu_AMS_1") is card
-        assert printer.lookup_object("aht10 Bambu_AMS_1") is card.humidity_view
-        assert card.reader == u._card_reading
-        assert card.reports_humidity is True
-
-    def test_a_recorded_pool_unit_builds_its_card(self):
-        config = unit_config(values={"pool": True, "unit_uid": "AAAABBBBCCCCDDDD"})
-        u = afcBambuAMS(config)
-        assert config.get_printer().lookup_object(
-            "temperature_sensor Bambu_AMS_1") is u.temperature_card
-
-    def test_a_spare_pool_bay_gets_no_card(self):
-        config = unit_config(values={"pool": True})
-        u = afcBambuAMS(config)
-        assert u.temperature_card is None
-        assert config.get_printer().lookup_object(
-            "temperature_sensor Bambu_AMS_1", None) is None
-
     def test_a_unit_klipper_builds_starts_with_an_empty_latch(self):
         u = afcBambuAMS(unit_config())
         assert (u._spoolman_latched, u._scanned_bays, u._removed_bays,
@@ -20482,20 +20459,6 @@ class TestAfcBambuAMSBridgeIdentity:
             "bridge_port": "/dev/serial/by-id/usb-pico"}
         assert diag.call_count == 1
         assert unit.logger.messages == []
-
-
-class TestAfcBambuAMSCardReading:
-    def test_the_published_humidity_and_chamber_temperature(self):
-        unit = make_bambu_unit()
-        unit.get_status = lambda eventtime: {"humidity": 41, "temperature": 55.5,
-                                             "slots": []}
-        assert unit._card_reading(100.0) == (55.5, 41)
-
-    def test_none_for_what_the_unit_has_not_reported(self):
-        unit = make_bambu_unit()
-        status = unit.get_status(100.0)
-        assert (status["temperature"], status["humidity"]) == (None, None)
-        assert unit._card_reading(100.0) == (None, None)
 
 
 class TestAfcBambuAMSGetStatus:

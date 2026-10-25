@@ -249,11 +249,6 @@ _kin_mod, _kin_ext_mod = _make_kinematics_mocks()
 sys.modules.setdefault("kinematics", _kin_mod)
 sys.modules.setdefault("kinematics.extruder", _kin_ext_mod)
 sys.modules.setdefault("extras.force_move", _make_force_move_mock())
-# Klipper core, not vendored here; AFC_temperature's HDC1080 asks it for the
-# unit's I2C bus.
-_bus_mod = types.ModuleType("extras.bus")
-_bus_mod.MCU_I2C_from_config = MagicMock()
-sys.modules.setdefault("extras.bus", _bus_mod)
 sys.modules.setdefault("klippy", _make_klippy_ready_mock())
 
 _led_mock = _make_led_mock()
@@ -681,16 +676,6 @@ class MockPrinter:
     def get_reactor(self):
         return self._reactor
 
-    def add_object(self, name, obj):
-        """
-        :param name: the object's name
-        :param obj: the object; a second add of one name raises, as klippy
-        """
-        if name in self._objects:
-            error_str = f"Printer object '{name}' already created"
-            raise configparser.Error(error_str)
-        self._objects[name] = obj
-
     def register_event_handler(self, event, callback):
         self._event_handlers.setdefault(event, []).append(callback)
 
@@ -724,9 +709,6 @@ class MockConfig:
         self.fileconfig = _make_fileconfig()
         self.section = "Test"
         self.fileconfig.add_section(self.section)
-        # Klipper's wrappers share the printer's option-access dict, which
-        # configfile.settings is built from.
-        self.access_tracking: dict = {}
 
     def get_printer(self):
         return self._printer

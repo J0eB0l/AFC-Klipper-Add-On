@@ -213,7 +213,8 @@ class TestRepoLayout:
         loaded = dict(master.printer.loaded)
         assert list(loaded) == [f"AFC_BambuAMS {self.HT_UNIT}",
                                 "AFC_lane lane24",
-                                f"AFC_hub {self.HT_UNIT}"]
+                                f"AFC_hub {self.HT_UNIT}",
+                                f"temperature_sensor {self.HT_UNIT}"]
         section = f"AFC_BambuAMS {self.HT_UNIT}"
         prefix = section.split()[0]
         module = importlib.import_module(f"extras.{prefix}")
