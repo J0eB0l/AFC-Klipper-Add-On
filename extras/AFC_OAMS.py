@@ -198,6 +198,9 @@ class AFC_OAMS:
         # Set while a load cancel's CANCEL acknowledgement is still due, so it
         # is not read as the result of a later operation.
         self._pending_cancel_ack: bool = False
+        # Set when a load starts while that ack is still due: it then belongs to
+        # the load given up on before, and must not end the new one.
+        self._cancel_ack_stale: bool = False
         # Set from a load or unload command until the firmware reports how it
         # ended, and kept after an ERROR_BUSY reply: only then can the unit be
         # moving with nothing tracked host-side. The firmware holds a cancel
@@ -480,6 +483,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.action_status_code = None
         self.action_status_value = None
         self._pending_cancel_ack = False
+        self._cancel_ack_stale = False
         self._unit_busy = False
         self.logger.info(f"OAMS[{self.oams_idx}]: Cleared software error states on ready")
 
@@ -512,6 +516,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
         self.action_status_code = None
         self.action_status_value = None
         self._pending_cancel_ack = False
+        self._cancel_ack_stale = False
         # All four LEDs are off now, so we hold no flags either.
         self._bay_flags().clear()
 
@@ -1326,6 +1331,9 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             :class:`OAMSOpCode` and ``message`` describes the outcome.
         """
         cmd = self._require_mcu_cmd(self.oams_load_spool_cmd, "load_spool")
+        # A stalled load's cancel can still be unanswered here, and its CANCEL
+        # would end this load at once, read as a load that went through.
+        self._cancel_ack_stale = self._pending_cancel_ack
         self.action_status = OAMSStatus.LOADING
         self._unit_busy = True
         cmd.send([spool_idx])
@@ -1588,6 +1596,7 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             # No operation is waiting, so any ack is dropped as a late reply;
             # a lingering flag would swallow a later real CANCEL.
             self._pending_cancel_ack = False
+            self._cancel_ack_stale = False
 
         if wait:
             self.logger.debug(
@@ -1736,10 +1745,12 @@ OAMS[%s]: current_spool=%s fps_value=%s f1s_hes_value_0=%d f1s_hes_value_1=%d f1
             self._unit_busy = code == OAMSOpCode.ERROR_BUSY
             if self._pending_cancel_ack and code == OAMSOpCode.CANCEL:
                 self._pending_cancel_ack = False
+                stale, self._cancel_ack_stale = self._cancel_ack_stale, False
                 # A load in flight is waiting on this ack, so let it finish.
                 # Otherwise the load was already given up on (e.g. the stall
-                # path's auto-unload has started) and the ack must not end it.
-                if self.action_status != OAMSStatus.LOADING:
+                # path's auto-unload has started, or a new load was sent
+                # before the ack came) and the ack must not end what runs now.
+                if self.action_status != OAMSStatus.LOADING or stale:
                     # The auto-unload may already be running.
                     self._unit_busy = self.action_status is not None
                     self.logger.debug(

@@ -2809,6 +2809,49 @@ class TestOamsActionStatus:
         assert oams._pending_cancel_ack is False
         assert oams.logger.messages == [("debug", "OAMS status received")]
 
+    def test_a_stalled_loads_ack_does_not_finish_the_next_load(self):
+        # Printer 3: the stall path cancelled a load and gave up, the next load
+        # went out before the ack came, and the ack read as that load passing.
+        oams = _make_oams()
+        oams.action_status = OAMSStatus.LOADING
+        oams.load_spool_cancel()
+        oams.action_status = None                       # stalled load given up on
+        sent = []
+        oams.oams_load_spool_cmd = MagicMock()
+        oams.oams_load_spool_cmd.send.side_effect = sent.append
+        replies = iter([{"action": OAMSStatus.LOADING, "code": OAMSOpCode.CANCEL},
+                        {"action": OAMSStatus.LOADING, "code": OAMSOpCode.SUCCESS}])
+        oams.load_stall_dwell = 0.0
+        oams.reactor.pause = lambda t: oams._oams_action_status(next(replies))
+
+        code, message = oams.load_spool(2)
+
+        assert sent == [[2]]
+        assert code == OAMSOpCode.SUCCESS
+        assert message == "Spool loaded successfully"
+        assert oams._pending_cancel_ack is False
+        assert oams._cancel_ack_stale is False
+        assert ("debug", "OAMS[0]: swallowed the cancel ack for the load "
+                         "that was just cancelled") in oams.logger.messages
+
+    def test_a_cancel_for_the_load_itself_still_ends_it(self):
+        oams = _make_oams()
+        oams.oams_load_spool_cmd = MagicMock()
+        oams.load_stall_dwell = 0.0
+
+        def pause(t):
+            if oams._pending_cancel_ack is False:
+                oams.load_spool_cancel()                # cancelled while it runs
+            else:
+                oams._oams_action_status({"action": OAMSStatus.LOADING,
+                                          "code": OAMSOpCode.CANCEL})
+
+        oams.reactor.pause = pause
+        code, message = oams.load_spool(1)
+
+        assert code == OAMSOpCode.CANCEL
+        assert message == "Spool loading cancelled"
+
     def test_pending_flag_alone_does_not_swallow_a_non_cancel_reply(self):
         # Flag set but the reply is not a CANCEL: it is a normal result.
         oams = _make_oams()
