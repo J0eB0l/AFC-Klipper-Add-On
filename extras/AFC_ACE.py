@@ -460,7 +460,8 @@ class afcACE(afcUnit):
                                                self.cmd_AFC_ACE_DRY_options)
         self.afc.function.register_mux_command(self.afc.show_macros, 'AFC_ACE_DRY_STOP', "UNIT",
                                                self.name, self.cmd_AFC_ACE_DRY_STOP,
-                                               self.cmd_AFC_ACE_DRY_STOP_help)
+                                               self.cmd_AFC_ACE_DRY_STOP_help,
+                                               self.cmd_AFC_ACE_DRY_STOP_options)
 
         # The unit's Mainsail/Fluidd temperature card: the ACE's temperature,
         # and its humidity on an ACE 2.
@@ -3357,6 +3358,11 @@ class afcACE(afcUnit):
                 self._start_dry_rotate(gcmd)
 
     cmd_AFC_ACE_DRY_STOP_help = "Stop ACE filament dryer"
+    # Without an options list the show_macros wrapper calls _AFC_ACE_DRY_STOP
+    # with no parameters, and the mux command then has no UNIT to route on.
+    cmd_AFC_ACE_DRY_STOP_options = {
+        "UNIT": {"type": "string", "default": ""},
+    }
     def cmd_AFC_ACE_DRY_STOP(self, gcmd: GCodeCommand) -> None:
         """
         Stop ACE filament dryer.
