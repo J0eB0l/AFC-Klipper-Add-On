@@ -261,6 +261,22 @@ class AFCBuffer:
         if current_pos is not None:
             self.filament_error_pos = current_pos + self.fault_sensitivity
 
+    def _lane_on_inactive_extruder(self):
+        """
+        True when this buffer's lane sits on a toolhead other than the active one. The
+        extruder position read is the active toolhead's, so on a toolchanger another
+        tool's moves would count against this buffer.
+        """
+        if self.current_lane is None:
+            return False
+        # This may be needed to be updated for IDEX machines
+        active_extruder = self.afc.toolhead.get_extruder()
+        lane_extruder_name = getattr(getattr(self.current_lane, 'extruder_obj', None),
+                                     'th_extruder_name', None)
+        return bool(lane_extruder_name
+                    and hasattr(active_extruder, 'name')
+                    and active_extruder.name != lane_extruder_name)
+
     def extruder_pos_update_event(self, eventtime):
         """
         Timer callback to check extruder position and trigger fault detection if threshold exceeded.
@@ -268,6 +284,9 @@ class AFCBuffer:
         :param eventtime: Current event time from reactor
         :return float: Next scheduled event time (eventtime + CHECK_RUNOUT_TIMEOUT)
         """
+        if self._lane_on_inactive_extruder():
+            return eventtime + CHECK_RUNOUT_TIMEOUT
+
         extruder_pos = self.get_extruder_pos()
 
         stepper_less_drive = False
@@ -1358,17 +1377,8 @@ class AFCFPSBuffer(AFCBuffer):
         :param eventtime: Reactor event time of the check.
         :return: The reactor time at which the timer should next fire.
         """
-        cur_lane = self.current_lane
-
-        if cur_lane is not None:
-            # This may be needed to be updated for IDEX machines
-            active_extruder = self.afc.toolhead.get_extruder()
-            lane_extruder_name = getattr(getattr(cur_lane, 'extruder_obj', None),
-                                         'th_extruder_name', None)
-            if (lane_extruder_name
-                and hasattr(active_extruder, 'name')
-                and active_extruder.name != lane_extruder_name):
-                return eventtime + CHECK_RUNOUT_TIMEOUT
+        if self._lane_on_inactive_extruder():
+            return eventtime + CHECK_RUNOUT_TIMEOUT
 
         extruder_pos = self.get_extruder_pos()
         if (self.afc.function.is_printing(check_movement=True)

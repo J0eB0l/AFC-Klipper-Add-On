@@ -1900,9 +1900,30 @@ class TestExtruderPosUpdateEvent:
         buf.get_extruder_pos = MagicMock(return_value=55.0)  # > 50.0
         buf.update_filament_error_pos = MagicMock()
         lane.unit_obj.stepperless_drive = None
+        lane.extruder_obj = MagicMock(th_extruder_name="extruder")
+        buf.afc.toolhead.get_extruder.return_value.name = "extruder"
         buf.extruder_pos_update_event(100.0)
         buf.afc.error.AFC_error.assert_called_once_with("AFC filament fault detected! Take necessary action.", True)
         buf.update_filament_error_pos.assert_called_once()
+
+    def test_lane_on_another_toolhead_is_not_checked(self):
+        # Toolchanger: TN's lane sits in a docked tool while another tool extrudes
+        buf = _make_buffer(error_sensitivity=5.0)
+        lane = _make_lane(buf)
+        buf.current_lane = lane
+        buf.enable = True
+        buf.filament_error_pos = 50.0
+        buf.afc.error = MagicMock()
+        buf.afc.function.is_paused.return_value = False
+        buf.afc.function.is_printing.return_value = True
+        buf.afc.function.in_print.return_value = True
+        buf.get_extruder_pos = MagicMock(return_value=55.0)  # > 50.0
+        lane.unit_obj.stepperless_drive = None
+        lane.extruder_obj = MagicMock(th_extruder_name="extruder")
+        buf.afc.toolhead.get_extruder.return_value.name = "extruder2"
+        result = buf.extruder_pos_update_event(100.0)
+        assert result == 100.0 + CHECK_RUNOUT_TIMEOUT
+        buf.afc.error.AFC_error.assert_not_called()
     
     def test_triggers_pause_when_extruder_pos_exceeds_threshold_stepperless_lane(self):
         buf = _make_buffer(error_sensitivity=5.0)
