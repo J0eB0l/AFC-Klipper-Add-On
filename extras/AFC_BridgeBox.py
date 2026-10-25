@@ -14,7 +14,6 @@
 #   serial_port: /dev/serial/by-id/usb-Raspberry_Pi_Pico_XXXX-if00
 #   extruder: extruder
 #   buffer: Bamb_1
-#   lane_base: 24
 #   roster: ht:0123456789ABCDEF00003331
 #
 # The roster comes from config plus a persisted roster file, since sections
@@ -1394,9 +1393,9 @@ class afcBridgeBox:
         Computed = one past the highest laneN outside this chain (see
         _declared_lane_numbers): every [AFC_lane] or [AFC_stepper], declared
         or fabricated by a chain master above this one, leaving any gap
-        below that top alone, and 1 when there is none. Only lane names
-        count: a claimed lane takes the next unused T# whatever its lane
-        number (see _next_tool).
+        below that top alone. With no laneN at all the chain is alone and
+        starts at lane0. Only lane names count: a claimed lane takes the next
+        unused T# whatever its lane number (see _next_tool).
 
         A stored base is checked against the same numbers once the bays are
         laid out (see _renumber_step).
@@ -1410,13 +1409,15 @@ class afcBridgeBox:
             try:
                 base = int(stored)
             except Exception:
-                base = 0
-            if base:
+                base = -1
+            if base >= 0:
                 self._base_stored = True
                 return base
-        base = 1
+        base = 0
         try:
-            base = max(self._declared_lane_numbers(config), default=0) + 1
+            nums = self._declared_lane_numbers(config)
+            if nums:
+                base = max(nums) + 1
         except Exception:
             pass
         self._resolved_base = base            # _fold_and_sweep persists it
@@ -3948,7 +3949,7 @@ class afcBridgeBox:
         changed = self._sweep_orphans(config, autov) or changed
         # A freshly computed auto base is remembered alongside the learned
         # values, so it survives config growth.
-        if getattr(self, "_resolved_base", None):
+        if getattr(self, "_resolved_base", None) is not None:
             updates.setdefault(self._BASE_SECTION + " " + self.name, {})[
                 "lane_base"] = self._resolved_base
         if getattr(self, "_resolved_prefix", None):

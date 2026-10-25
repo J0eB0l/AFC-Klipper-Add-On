@@ -140,8 +140,8 @@ number any other unit holds, so the Bambu lanes come after every other unit's.
 That counts the `laneN` of each `[AFC_lane]` / `[AFC_stepper]` section in the
 config or built by a chain above this one. A gap below the highest number is
 left alone: with lane0-lane3 and one more on lane11, the Bambu lanes start at
-lane12. `T#` numbers do not count, and with no `laneN` section at all the base
-is 1.
+lane12. `T#` numbers do not count, and with no `laneN` section at all the chain
+is alone and starts at lane0.
 
 Once resolved, the base is locked in the state file, so adding lanes
 elsewhere later does not move the Bambu lanes, unless another unit then holds

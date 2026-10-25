@@ -122,27 +122,28 @@ pool_ht: 8
 
 # ---- Lanes and T# ----
 # AMS bay N takes the four lanes from lane_base + 4 x (N - 1), and the HT
-# bays follow the AMS band, one lane each. With a base of 1 and the default
-# pools, Bambu_AMS_1 is lane1-lane4, Bambu_AMS_4 is lane13-lane16 and
-# Bambu_AMS_HT_1 is lane17.
+# bays follow the AMS band, one lane each. With a base of 0 and the default
+# pools, Bambu_AMS_1 is lane0-lane3, Bambu_AMS_4 is lane12-lane15 and
+# Bambu_AMS_HT_1 is lane16.
 #
 # T#s do not follow lane numbers. A claimed lane takes the next unused T#,
-# as AFC numbers any lane: beside a unit on T0-T3, the first AMS gets T4-T7.
-# A unit with a saved bay keeps its T#s while it is unplugged and across
-# restarts, until AFC_BRIDGEBOX_FORGET retires it. The next start then packs
-# the other Bambu T#s down into the freed ones, in order; lane numbers and
-# names stay. SET_MAP and AFC's other mapping commands change T#s like any
-# lane's, and the change is saved.
+# as AFC numbers any lane: alone, the first AMS gets T0-T3; beside a unit on
+# T0-T3, it gets T4-T7. A unit with a saved bay keeps its T#s while it is
+# unplugged and across restarts, until AFC_BRIDGEBOX_FORGET retires it. The
+# next start then packs the other Bambu T#s down into the freed ones, in
+# order; lane numbers and names stay. SET_MAP and AFC's other mapping
+# commands change T#s like any lane's, and the change is saved.
 #
 # lane_base 0 (the default) picks the base at the first start: one past the
-# highest laneN in your other [AFC_lane] / [AFC_stepper] sections, else 1.
-# Beside an ACE on lane0-lane3 that gives 4: Bambu_AMS_1 is lane4-lane7 and
-# the HT lanes start at lane20. The base is then saved, so lanes added
-# elsewhere later do not move the Bambu ones. If another unit later takes
-# one of their lane numbers, the Bambu lanes move up past it at the next
-# start and keep their saved details and T#s. To put the Bambu lanes
-# elsewhere, set lane_base before the first start: changing it later moves
-# every Bambu lane, and those lanes lose their saved details.
+# highest laneN in your other [AFC_lane] / [AFC_stepper] sections, else 0
+# when the BridgeBox is the only unit. Beside an ACE on lane0-lane3 that
+# gives 4: Bambu_AMS_1 is lane4-lane7 and the HT lanes start at lane20. The
+# base is then saved, so lanes added elsewhere later do not move the Bambu
+# ones. If another unit later takes one of their lane numbers, the Bambu
+# lanes move up past it at the next start and keep their saved details and
+# T#s. To put the Bambu lanes elsewhere, set lane_base before the first
+# start: changing it later moves every Bambu lane, and those lanes lose
+# their saved details.
 #lane_base: 0
 
 # ---- Known units ----
