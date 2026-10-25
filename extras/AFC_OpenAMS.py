@@ -929,7 +929,9 @@ class afcAMS(afcUnit):
                     on_stuck_spool=self._on_stuck_spool_detected,
                     on_clog=self._on_clog_detected,
                     on_stuck_cleared=self._on_stuck_spool_cleared,
-                    is_printing_fn=lambda: self.afc.function.in_print(),
+                    # Printing, not just in a print: a paused print's ticks would
+                    # count toward the clog window and fire it again on RESUME
+                    is_printing_fn=lambda: self.afc.function.is_printing(),
                     is_lane_loaded_fn=lambda: any(
                         getattr(lane, 'tool_loaded', False)
                         and getattr(lane, 'extruder_obj', None) is not None
@@ -4687,6 +4689,8 @@ class OAMSMonitor:
             # Reset clog tracking so it doesn't accumulate during non-print
             st.clog_start_time = None
             st.clog_start_extruder = None
+            st.clog_start_encoder = None
+            st.clog_active = False
             return eventtime + MONITOR_INTERVAL_IDLE
 
         # Don't monitor during engagement verification

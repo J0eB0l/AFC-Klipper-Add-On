@@ -1530,6 +1530,30 @@ class TestOAMSMonitorTick:
         assert result == 100.0 + MONITOR_INTERVAL_IDLE
         assert monitor.state.clog_start_time is None
 
+    def test_a_pause_ends_the_clog_window(self):
+        """A paused print's ticks never count toward the clog window, so a
+        RESUME starts a new one instead of firing at once on the old one."""
+        printing = {"on": True}
+        monitor, reactor, fps = _make_monitor(is_printing_fn=lambda: printing["on"])
+        monitor._running = True
+        monitor._oams = MagicMock(encoder_clicks=2618)
+        monitor.state.state = FPSLoadState.LOADED
+        monitor.state.toolhead_confirmed = True
+        monitor.state.clog_start_time = 5.0
+        monitor.state.clog_start_extruder = 0.0
+        monitor.state.clog_start_encoder = 2618
+        monitor.state.clog_active = True
+        printing["on"] = False
+        monitor._monitor_tick(100.0)
+        assert monitor.state.clog_start_time is None
+        assert monitor.state.clog_start_encoder is None
+        assert monitor.state.clog_active is False
+        printing["on"] = True
+        fps.extruder = MagicMock(last_position=24.2)
+        monitor._monitor_tick(300.0)
+        assert monitor.state.clog_start_time == 300.0
+        monitor._on_clog.assert_not_called()
+
     def test_engagement_in_progress_skips_detection(self):
         monitor, reactor, fps = _make_monitor()
         monitor._running = True
