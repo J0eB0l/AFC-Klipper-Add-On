@@ -3216,15 +3216,16 @@ class TestUnitUnloadLane:
 
 
 class TestLaneUnloadingAndPrepareUnload:
-    def test_prepare_unload_stops_follower(self):
+    def test_prepare_unload_reverses_follower(self):
+        # A stopped follower holds the AMS motor locked during tip forming
         ams, afc, printer, reactor = _make_ams()
         follower = MagicMock()
         ams._follower = follower
         lane = _make_lane("lane1")
         ams.prepare_unload(lane, None, None)
-        follower.set_follower_state.assert_called_once()
-        args = follower.set_follower_state.call_args[0]
-        assert args[2] == 0 and args[3] == 0  # enable=0, direction=0
+        follower.set_follower_state.assert_not_called()
+        follower.enable_follower.assert_called_once()
+        assert follower.enable_follower.call_args[0][2] == 0  # direction=0, reverse
 
     def test_prepare_unload_no_follower_is_noop(self):
         ams, afc, printer, reactor = _make_ams()

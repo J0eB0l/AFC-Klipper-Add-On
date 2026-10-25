@@ -1834,9 +1834,9 @@ class afcAMS(afcUnit):
         """
         Unload-start hook the upstream core actually calls.
         Upstream's unload invokes ``lane_unloading`` (for LEDs) but never
-        ``prepare_unload``, so stop the OAMS follower here too — otherwise it
+        ``prepare_unload``, so reverse the OAMS follower here too — otherwise it
         keeps feeding forward against the cut/park/tip before the hardware
-        unload reverses it.
+        unload.
 
         :param lane: the lane beginning to unload.
         """
@@ -1852,20 +1852,19 @@ class afcAMS(afcUnit):
         self, cur_lane: AFCLane, cur_hub: Optional[afc_hub], cur_extruder: AFCExtruder
     ) -> None:
         """
-        Stop the OAMS follower before AFC's unload begins.
-        We only STOP the forward-feeding follower here — the hardware unload
-        (unload_spool) drives the follower in reverse itself during the rewind.
-        Reversing it this early would pull filament back during the toolhead
-        cut/park/tip operations, before the tip is even formed.
+        Run the OAMS follower in reverse before AFC's unload begins.
+        A stopped follower holds the AMS motor locked, so the filament the
+        cut/park/tip pulls back piles up in the FPS buffer; in reverse the
+        follower takes it up.
 
         :param cur_lane: the lane being unloaded.
         :param cur_hub: the lane's hub object.
         :param cur_extruder: the lane's extruder object.
         """
         if self._follower:
-            self._follower.set_follower_state(
-                self._get_monitor_state(), self.oams, 0, 0,
-                "stop before unload", force=True)
+            self._follower.enable_follower(
+                self._get_monitor_state(), self.oams, 0,
+                "reverse before unload", force=True)
 
     def _oams_unload_inner(self, cur_lane: AFCLane, cur_extruder: AFCExtruder) -> bool:
         """
@@ -2119,9 +2118,6 @@ class afcAMS(afcUnit):
 
         spool_index = self._spool_map.get(cur_lane.name, 0)
 
-        # prepare_unload() only STOPS the follower; the hardware unload
-        # (unload_spool, below) drives it in reverse itself during the rewind.
-
         # Wait for idle
         self._wait_for_idle()
 
@@ -2131,8 +2127,8 @@ class afcAMS(afcUnit):
 
         # Drive the follower in REVERSE before retracting the extruder so it
         # pulls filament back toward the spool IN SYNC with the retract. The
-        # follower was stopped by prepare_unload / the form-tip purge; left
-        # stopped (or feeding forward) it fights the extruder pull-back and
+        # form-tip purge can leave it stopped; left stopped (or feeding
+        # forward) it fights the extruder pull-back and
         # shoves filament back into the gears. The brief reactor pause lets the
         # follower actually spin up reverse before the extruder pulls (an M400
         # only waits on toolhead moves, not the follower MCU). The hardware
