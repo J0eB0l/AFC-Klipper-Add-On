@@ -965,7 +965,7 @@ class TestBambuBridgeStart:
             # One failed reader attempt, then its 0.5 s backoff on the clock.
             assert reactor.now == pytest.approx(100.5)
             assert logger.messages == [
-                ("warning", "AFC bambu: bridge not reachable yet (no bridge "
+                ("info", "AFC bambu: bridge not reachable yet (no bridge "
                             "yet); the reader will keep trying"),
                 ("info", "AFC bambu: bridge reconnected"),
                 ("debug", "AFC bambu: bridge ack late (slot 0)")]
@@ -3275,8 +3275,9 @@ class TestBambuBridgeSend:
         bridge = make_bambu_bridge(monkeypatch, connected=False)
         bridge.send({"cmd": "stop"})                # no raise, nothing queued
         assert bridge._wq.empty()
+        # Never connected yet: the start, not an outage, so no warning
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: link is down -- dropped stop, and anything "
+            ("info", "AFC bambu: link is down -- dropped stop, and anything "
                         "else sent until it is back")]
 
     def test_first_dropped_command_says_so_once_per_outage(self, bambu_bridge):
@@ -5699,7 +5700,7 @@ class TestBambuBridgeReader:
         bridge.reactor.advance(40.25)
         bridge._thread.target()
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge not reachable yet (nothing is "
+            ("info", "AFC bambu: bridge not reachable yet (nothing is "
                         "listening); the reader will keep trying"),
             ("warning", "AFC bambu: bridge has been unreachable for 48s; "
                         "commands are being dropped")]
@@ -7238,7 +7239,7 @@ class TestBambuBridgeStartWifi:
         assert bridge.logger.messages == wifi_said(
             ("warning", "connection: wifi needs the BridgeBox on this "
                         "printer's USB once, to learn its WiFi address")) + [
-            ("warning", "AFC bambu: bridge not reachable yet (no such "
+            ("info", "AFC bambu: bridge not reachable yet (no such "
                         "port); the reader will keep trying")]
 
     def test_without_one_a_missing_usb_port_still_raises(self, monkeypatch):

@@ -1790,7 +1790,9 @@ class BambuBridge:
             if not defer_open and self.wifi is None:
                 raise
             self._serial = None
-            self.logger.warning(
+            # Not an error: a bridge still booting or on its way over WiFi is
+            # normal at start, and a warning would pop up in Mainsail/Fluidd
+            self.logger.info(
                 f"AFC bambu: bridge not reachable yet ({e}); the reader will "
                 f"keep trying")
         self._run = True
@@ -2698,7 +2700,11 @@ class BambuBridge:
             # is visible without flooding the log at poll rate.
             if self._drop_logged_epoch != self._down_epoch:
                 self._drop_logged_epoch = self._down_epoch
-                self.logger.warning(
+                # Before the first connection (epoch 0) this is the start, not
+                # an outage, so it stays off the Mainsail/Fluidd warnings.
+                log = self.logger.info if self._down_epoch == 0 \
+                    else self.logger.warning
+                log(
                     f"AFC bambu: link is down -- dropped "
                     f"{obj.get('cmd', '?')}, and anything else sent until it "
                     f"is back")
