@@ -16739,6 +16739,55 @@ class TestAfcBridgeBoxClaimPoolUnit:
         _p6_consistent(m)
 
     @staticmethod
+    def _stand_in(m: afcBridgeBox, pending: bool) -> _P6OtherLane:
+        """
+        e2's stand-in lane on T3, as PREP leaves an extruder whose lanes all
+        come from a pool.
+
+        :param m: the chain master
+        :param pending: whether e2 still waits for pool lanes
+        :return _P6OtherLane: the stand-in
+        """
+        stand_in = _p6_other(m, "e2", ["T3"])
+        stand_in.extruder_obj = types.SimpleNamespace(
+            tc_lane=stand_in, no_lanes=True, _lanes_pending=lambda: pending)
+        return stand_in
+
+    def test_a_saved_tool_comes_back_from_a_waiting_extruders_stand_in(
+            self, tmp_path, monkeypatch):
+        # e2 waits for chain3's claim; PREP gave its stand-in lane24's T3.
+        m = _p6_named(tmp_path, monkeypatch,
+                      var={"Alpha": {"lane24": _p6_rec("T3")}},
+                      owners=f"{A}:Alpha")
+        stand_in = self._stand_in(m, pending=True)
+        _p6_quiet(m)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        # The stand-in moves to the next T# after the claim's own lanes.
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T3"], "lane25": ["T0"], "lane26": ["T1"],
+            "lane27": ["T2"]}
+        assert (stand_in.map, stand_in.current_map) == (["T4"], "T4")
+        claim = _p6_claim_log(A, "Alpha")
+        assert _p6_log(m) == claim[:2] + [
+            ("info", "AFC_BridgeBox chain1: lane24 takes back its saved T3 "
+                     "from e2, which waits for its own pool lanes")
+        ] + claim[2:]
+        _p6_consistent(m)
+
+    def test_a_standalone_extruders_own_tool_stays_with_it(
+            self, tmp_path, monkeypatch):
+        # A real standalone extruder (no pool lanes to wait for) keeps it.
+        m = _p6_named(tmp_path, monkeypatch,
+                      var={"Alpha": {"lane24": _p6_rec("T3")}},
+                      owners=f"{A}:Alpha")
+        stand_in = self._stand_in(m, pending=False)
+        _p6_quiet(m)
+        assert m._claim_pool_unit(A, "boxed") is not None
+        assert self._maps(m, "lane24") == {"lane24": ["T0"]}
+        assert stand_in.map == ["T3"]
+        _p6_consistent(m)
+
+    @staticmethod
     def _pushes(monkeypatch: pytest.MonkeyPatch,
                 lane: Any) -> List[List[str]]:
         """

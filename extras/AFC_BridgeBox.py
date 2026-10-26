@@ -7248,6 +7248,7 @@ class afcBridgeBox:
                     f"failed: {ex}")
             (getattr(self, "_claim_plans", None) or {}).pop(lane.name, None)
 
+        stand_ins = self._take_back_from_stand_ins(afc, lanes, held)
         unmapped = []
         for lane in lanes:
             rec = held.get(lane.name) or {}
@@ -7265,6 +7266,56 @@ class afcBridgeBox:
                       f"{lane.name} has no T# -- T0-T98 are all held; use "
                       "SET_MAP")
             _assign(lane, [cmd] if cmd else ["NONE"], cmd or "")
+        # A stand-in left with no T# takes the next unused one, after this
+        # claim's lanes so it takes none of theirs.
+        for stand_in in stand_ins:
+            if not [m for m in stand_in.map if m != "NONE"]:
+                cmd = self._next_tool(afc)
+                _assign(stand_in, [cmd] if cmd else ["NONE"], cmd or "")
+
+    def _take_back_from_stand_ins(self, afc: Any, lanes: List[Any],
+                                  held: Dict[str, Dict[str, Any]]) -> List[Any]:
+        """
+        Free the saved T#s a waiting extruder's stand-in lane took at ready.
+
+        An extruder whose lanes all come from a pool looks standalone at ready
+        and registers itself as a lane, which PREP gives the next free T#
+        (AFC_extruder.handle_ready). When another chain claims first, that T#
+        can be one its lane saved, and the lane would come back on a new T#
+        at every restart. The stand-in only lasts until the extruder's own
+        claim drops it (AFC_extruder.check_lanes), so it gives the T# up; a
+        stand-in that is the current lane keeps it.
+
+        :param afc: the AFC object
+        :param lanes: the lanes the claim activated
+        :param held: lane name -> record handed to this claim
+        :return list: the stand-in lanes that gave up a T#
+        """
+        out: List[Any] = []
+        for lane in lanes:
+            rec = held.get(lane.name) or {}
+            for cmd in _parse_map(rec.get("map")):
+                holder = (getattr(afc, "lanes", None) or {}).get(
+                    _tcmd_holder(afc, cmd) or "")
+                ext = getattr(holder, "extruder_obj", None)
+                pending = getattr(ext, "_lanes_pending", None)
+                if (holder is None
+                    or getattr(ext, "tc_lane", None) is not holder
+                    or not getattr(ext, "no_lanes", False)
+                    or holder.name == getattr(afc, "current", None)
+                    or not callable(pending)
+                    or not pending()):
+                    continue
+                holder.map = [m for m in holder.map if m != cmd]
+                if holder.current_map == cmd:
+                    holder.current_map = holder.map[0] if holder.map else ""
+                afc.tool_cmds.pop(cmd, None)
+                self.logger.info(
+                    f"AFC_BridgeBox {self.name}: {lane.name} takes back its saved "
+                    f"{cmd} from {holder.name}, which waits for its own pool lanes")
+                if holder not in out:
+                    out.append(holder)
+        return out
 
     def _reserved_tools(self) -> Set[str]:
         """
