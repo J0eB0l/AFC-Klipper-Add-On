@@ -7892,7 +7892,7 @@ class afcBambuAMS(afcUnit):
             return None
         return raw > afcBambuAMS._hub_empty_max(self)
 
-    def _wait_hub_clear(self, lane: Any) -> bool:
+    def _wait_hub_clear(self, lane: Any, quiet: bool = False) -> bool:
         """
         Wait, after an unload, for the lane's bay hub sensor to read clear.
 
@@ -7900,6 +7900,7 @@ class afcBambuAMS(afcUnit):
         that shows it can trail the ack.
 
         :param lane: the lane just unloaded
+        :param quiet: skip the warning; the caller reports a full hub itself
         :return bool: True if the hub reads clear (or has no reading);
             False if it still reads filament after HUB_UNLOAD_WAIT_S
         """
@@ -7918,6 +7919,8 @@ class afcBambuAMS(afcUnit):
                 if reactor.monotonic() >= end:
                     break
                 reactor.pause(reactor.monotonic() + 0.1)
+            if quiet:
+                return False
             raw = slots[slot].get("hub_raw")
             self.logger.warning(
                 f"AFC bambu {self.name}: {lane.name} unloaded but bay "
@@ -12418,6 +12421,48 @@ class afcBambuAMS(afcUnit):
             return False
 
     @staticmethod
+    def _buffer_is_toolhead_sensor(cur_lane: Any) -> bool:
+        """
+        Whether the lane's extruder uses its buffer as the toolhead sensor
+        (``pin_tool_start: buffer``).
+
+        :param cur_lane: the lane whose extruder to ask
+        :return bool: True for a buffer in place of a toolhead switch
+        """
+        ext = getattr(cur_lane, "extruder_obj", None)
+        return getattr(ext, "tool_start", None) == "buffer"
+
+    def _unload_left_filament(self, cur_lane: Any) -> bool:
+        """
+        Whether filament is still in the path after the unload's reel.
+
+        The toolhead sensor answers, unless the buffer stands in for it: the
+        unload disables that buffer, so it reads empty whether or not the
+        filament left, and the bay's hub sensor decides instead (printer 3,
+        2026-10-26: lane13's pull stalled, AFC called it unloaded, and lane14's
+        load took the blame for the full hub).
+
+        :param cur_lane: the lane being unloaded
+        :return bool: True when filament is still at the toolhead or the hub
+        """
+        if self._toolhead_sensor_triggered(cur_lane):
+            return True
+        if not afcBambuAMS._buffer_is_toolhead_sensor(cur_lane):
+            return False
+        return not afcBambuAMS._wait_hub_clear(self, cur_lane, quiet=True)
+
+    def _left_filament_at(self, cur_lane: Any) -> str:
+        """
+        Where an unload found filament left behind, for its messages.
+
+        :param cur_lane: the lane being unloaded
+        :return str: "toolhead sensor" or "bay's hub sensor"
+        """
+        if afcBambuAMS._buffer_is_toolhead_sensor(cur_lane):
+            return "bay's hub sensor"
+        return "toolhead sensor"
+
+    @staticmethod
     def _has_toolhead_sensor(cur_lane: Any) -> bool:
         """
         Whether the lane's extruder has a toolhead sensor to end a load at.
@@ -14037,19 +14082,20 @@ class afcBambuAMS(afcUnit):
             cur_extruder = getattr(cur_lane, "extruder_obj", None)
         # An earlier unload left this lane half done: the AMS reeled it home and
         # only the toolhead held on. Nothing is left to reel, so the toolhead
-        # sensor alone decides.
+        # sensor alone decides (the hub sensor, when a buffer stands in for it).
         if getattr(self, "_reeled_home_lane", None) == cur_lane.name:
-            if self._toolhead_sensor_triggered(cur_lane):
+            sensor = self._left_filament_at(cur_lane)
+            if self._unload_left_filament(cur_lane):
                 in_print = afc.function.in_print()
                 afc.error.handle_lane_failure(
                     cur_lane,
                     f"AFC bambu unload of {cur_lane.name}: the AMS already "
-                    f"reeled it home, but the toolhead sensor still sees "
+                    f"reeled it home, but the {sensor} still sees "
                     f"filament. {self._clear_toolhead_hint(in_print)}",
                     pause=in_print)
                 return False
             self.logger.info(
-                f"AFC bambu {self.name}: the toolhead sensor is clear and the "
+                f"AFC bambu {self.name}: the {sensor} is clear and the "
                 f"AMS already reeled {cur_lane.name} home, so it is unloaded")
             return self._finish_unload(cur_lane)
         if self._bridge is None:
@@ -14171,10 +14217,10 @@ class afcBambuAMS(afcUnit):
             RETRIES = 2
             cleared = False
             latched = None
+            sensor = self._left_filament_at(cur_lane)
             for attempt in range(RETRIES + 1):
                 try:
-                    still_loaded = bool(
-                        self._toolhead_sensor_triggered(cur_lane))
+                    still_loaded = bool(self._unload_left_filament(cur_lane))
                 except Exception:
                     still_loaded = False
                 if not still_loaded:
@@ -14200,7 +14246,7 @@ class afcBambuAMS(afcUnit):
                 except Exception:
                     ams_state = "?"
                 self.logger.warning(
-                    f"AFC bambu {self.name}: toolhead sensor still sees "
+                    f"AFC bambu {self.name}: {sensor} still sees "
                     f"filament after retract for {cur_lane.name} (AMS slot "
                     f"state: {ams_state}), re-kicking (stop/select/retract, "
                     f"attempt {attempt + 1})")
@@ -14226,7 +14272,7 @@ class afcBambuAMS(afcUnit):
                     # "stalled reeling home" need different manual fixes.
                     try:
                         still_gripped = bool(
-                            self._toolhead_sensor_triggered(cur_lane))
+                            self._unload_left_filament(cur_lane))
                     except Exception:
                         still_gripped = True
                     if still_gripped:
@@ -14251,14 +14297,24 @@ class afcBambuAMS(afcUnit):
                     # toolhead or the sensor is stuck. The next unload of this
                     # lane only waits for the sensor to clear.
                     self._reeled_home_lane = cur_lane.name
-                    msg = (f"AFC bambu unload of {cur_lane.name}: the AMS "
-                           f"reeled it home, but the toolhead sensor still "
-                           f"sees filament, so a piece is left in the "
-                           f"toolhead or the sensor is stuck. "
-                           f"{self._clear_toolhead_hint(afc.function.in_print())}")
+                    if afcBambuAMS._buffer_is_toolhead_sensor(cur_lane):
+                        then = ("resume" if afc.function.in_print()
+                                else "run the unload again")
+                        msg = (f"AFC bambu unload of {cur_lane.name}: the AMS "
+                               f"says it reeled it home, but the bay's hub "
+                               f"sensor still sees filament, so it never left "
+                               f"the path (the buffer standing in for the "
+                               f"toolhead sensor cannot tell). Pull it back "
+                               f"to the bay by hand, then {then}.")
+                    else:
+                        msg = (f"AFC bambu unload of {cur_lane.name}: the AMS "
+                               f"reeled it home, but the toolhead sensor still "
+                               f"sees filament, so a piece is left in the "
+                               f"toolhead or the sensor is stuck. "
+                               f"{self._clear_toolhead_hint(afc.function.in_print())}")
                 else:
                     msg = (f"AFC bambu unload failed for {cur_lane.name}: "
-                           f"filament still at the toolhead sensor after "
+                           f"filament still at the {sensor} after "
                            f"retract retries, and the AMS did not report "
                            f"reeling it home; run LANE_UNLOAD (eject) or "
                            f"check the unit")

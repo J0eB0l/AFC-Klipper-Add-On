@@ -28213,6 +28213,86 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert lane.tool_loaded is True
         assert unit.logger.messages == []
 
+    # a buffer standing in for the toolhead sensor: the hub sensor decides
+
+    def _buffered(self, monkeypatch: pytest.MonkeyPatch, *,
+                  hubv: int) -> Tuple[afcBambuAMS, Any]:
+        """
+        lane1 on an extruder with ``pin_tool_start: buffer``: the unload
+        disables the buffer, so it reads empty whatever happened.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param hubv: bay 0's hub reading for the whole unload
+        :return tuple: (the unit, lane1)
+        """
+        unit, lane, _ = self._rig(monkeypatch)
+        unit._slots[0] = slot_info(0, material="PLA", state="idle", hubv=hubv)
+        ext = lane.extruder_obj
+        ext.tool_start = "buffer"
+        ext.fila_tool_start = None
+        monkeypatch.setattr(lane, "get_toolhead_pre_sensor_state",
+                            lambda: False, raising=False)
+        return unit, lane
+
+    def test_a_buffered_unload_with_the_hub_clear_is_unloaded(
+            self, monkeypatch):
+        unit, lane = self._buffered(monkeypatch, hubv=0xB1)
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert lane.tool_loaded is False
+        assert unit.afc.error.messages == []
+        assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
+
+    def test_a_buffered_unload_with_the_hub_full_fails_this_lane(
+            self, monkeypatch):
+        # Printer 3, 2026-10-26: lane13's pull stalled, the buffer read empty,
+        # AFC called it unloaded and lane14's load failed on the full hub.
+        unit, lane = self._buffered(monkeypatch, hubv=0xFD)
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, "AFC bambu unload failed for lane1: filament still at the "
+                    "bay's hub sensor after retract retries, and the AMS did "
+                    "not report reeling it home; run LANE_UNLOAD (eject) or "
+                    "check the unit"),
+             {"pause": False})]
+        assert lane.tool_loaded is True
+        assert unit._bridge.sent == (self.TO_RETRACT + self.REKICK
+                                     + self.REKICK)
+        rekick = [("warning", f"AFC bambu Bambu_AMS_1: bay's hub sensor still "
+                              f"sees filament after retract for lane1 (AMS "
+                              f"slot state: idle), re-kicking (stop/select/"
+                              f"retract, attempt {n})") for n in (1, 2)]
+        assert unit.logger.messages == [self.ISSUED, self.DEADLINE, rekick[0],
+                                        self.DEADLINE, rekick[1],
+                                        self.DEADLINE]
+
+    def test_a_buffered_unload_the_ams_calls_done_says_pull_it_back(
+            self, monkeypatch):
+        unit, lane = self._buffered(monkeypatch, hubv=0xFD)
+        bridge = unit._bridge
+        _p6_at(unit, 100.05, lambda: bridge.tray_release.__setitem__(0, (1, 0)))
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, "AFC bambu unload of lane1: the AMS says it reeled it "
+                    "home, but the bay's hub sensor still sees filament, so "
+                    "it never left the path (the buffer standing in for the "
+                    "toolhead sensor cannot tell). Pull it back to the bay by "
+                    "hand, then run the unload again."),
+             {"pause": False})]
+        assert unit._reeled_home_lane == "lane1"
+
+        # Pulled back by hand: the next unload only checks the hub.
+        unit._slots[0] = slot_info(0, material="PLA", state="idle", hubv=0xB1)
+        sent = list(bridge.sent)
+        unit.logger.messages.clear()
+        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert bridge.sent == sent
+        assert lane.tool_loaded is False
+        assert unit.logger.messages == [
+            ("info", "AFC bambu Bambu_AMS_1: the bay's hub sensor is clear and "
+                     "the AMS already reeled lane1 home, so it is unloaded")]
+
 
 class TestAfcBambuAMSPrepPostLoad:
     """After PREP: a present spool is staged at the hub, and a lane threaded
