@@ -2041,6 +2041,7 @@ class TestAfcAMSInit:
         assert ams._engagement_speed == 300.0
         assert ams._defer_engagement is False
         assert ams._engagement_min_clicks == 10
+        assert ams._engagement_min_fps_drop == 0.03
         assert ams._load_failure == ""
 
     def test_custom_engagement_params(self):
@@ -2263,7 +2264,7 @@ class TestVerifyEngagement:
 
         assert ams._verify_engagement(lane) is False
 
-    def _fps_case(self, fps_before, fps_after, min_drop=0.15):
+    def _fps_case(self, fps_before, fps_after, min_drop=0.03):
         # A load ends with the buffer compressed: the gears pull the engagement move out
         # of it and the encoder does not turn (printer 3, lane6, 2026-10-25)
         class _FakeOams:
@@ -2285,10 +2286,15 @@ class TestVerifyEngagement:
         ok, ams = self._fps_case(0.996, 0.622)
         assert ok is True
 
-    def test_a_small_fps_drop_still_fails(self):
-        ok, ams = self._fps_case(0.776, 0.639)
+    def test_the_small_drop_of_a_good_load_proves_engagement(self):
+        # A 20 mm pull takes only a little of the buffer's slack (printer 3, 2026-10-26)
+        ok, ams = self._fps_case(1.0, 0.91)
+        assert ok is True
+
+    def test_a_flat_fps_still_fails(self):
+        ok, ams = self._fps_case(0.99, 0.98)
         assert ok is False
-        assert "FPS 0.78 -> 0.64" in ams._load_failure
+        assert "FPS 0.99 -> 0.98" in ams._load_failure
 
     def test_fps_drop_check_off_at_zero(self):
         ok, ams = self._fps_case(0.996, 0.2, min_drop=0.0)

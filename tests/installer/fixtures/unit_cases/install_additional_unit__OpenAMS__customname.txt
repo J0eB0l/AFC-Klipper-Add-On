@@ -73,7 +73,7 @@ clog_sensitivity: medium   # off, low, medium, or high - medium is a good starti
 # whose filament stopped short of the extruder gears turns only a few).
 #engagement_min_clicks: 10
 # Or the FPS reading must fall this much during that move (0 turns it off).
-#engagement_min_fps_drop: 0.15
+#engagement_min_fps_drop: 0.03
 
 [AFC_lane lane0]
 unit: CustomName2:1

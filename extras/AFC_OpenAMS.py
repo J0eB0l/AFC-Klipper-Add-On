@@ -672,10 +672,11 @@ class afcAMS(afcUnit):
         # the extruder gears turns a few as the follower compresses the buffer.
         self._engagement_min_clicks = config.getint("engagement_min_clicks", 10, minval=1)
         # FPS drop that also proves engagement: a load ends with the buffer
-        # compressed, so the gears pull the 20 mm out of it (FPS 1.0 -> 0.6) and
-        # the encoder may not turn at all; a jammed filament leaves it near flat.
+        # compressed (FPS ~1.0, ~0.46 slack), so the gears pull the 20 mm out of
+        # it (good loads fell 0.05-0.16) and the encoder does not turn at all; a
+        # jammed filament leaves it flat.
         self._engagement_min_fps_drop = config.getfloat(
-            "engagement_min_fps_drop", 0.15, minval=0.0, maxval=1.0)
+            "engagement_min_fps_drop", 0.03, minval=0.0, maxval=1.0)
         self._engagement_params: Dict[str, tuple[float, float]] = {}
         # Why the last load failed, for the pause message.
         self._load_failure = ""
