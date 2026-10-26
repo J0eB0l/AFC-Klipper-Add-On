@@ -3595,6 +3595,40 @@ class TestAfcACESystemTest:
                      "<span class=success--text> AND LOADED</span>"
                      "<span class=primary--text> in ToolHead</span>")]
 
+    LOADED_LINE = ("<span class=success--text>LOCKED</span>"
+                   "<span class=success--text> AND LOADED</span>")
+    LEFT_BEHIND = ("<span class=warning--text> extruder's toolhead sensor sees filament but "
+                   "no lane is loaded</span>")
+
+    def test_filament_at_the_sensor_with_no_lane_loaded_warns_once(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True), LaneSpec("lane1", prep=True))
+        lane0, lane1 = unit.lanes["lane0"], unit.lanes["lane1"]
+        assert lane0.extruder_obj is lane1.extruder_obj
+        lane0.extruder_obj.tool_start_state = True
+
+        assert unit.system_Test(lane0, 0.0, False, False) is True
+        assert unit.system_Test(lane1, 0.0, False, False) is True
+
+        # Said on the extruder's first lane only.
+        assert unit.logger.messages == [
+            ("info", f"lane0 tool cmd: T0  {self.LOADED_LINE}{self.LEFT_BEHIND}"),
+            ("info", f"lane1 tool cmd: T1  {self.LOADED_LINE}")]
+
+    def test_no_warning_with_a_lane_loaded_or_buffer_ramming(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        lane.extruder_obj.tool_start_state = True
+        lane.extruder_obj.lane_loaded = "lane5"
+        assert unit.system_Test(lane, 0.0, False, False) is True
+
+        lane.extruder_obj.lane_loaded = None
+        lane.extruder_obj.tool_start = "buffer"
+        lane.buffer_obj = types.SimpleNamespace(advance_state=True)
+        assert unit.system_Test(lane, 0.0, False, False) is True
+
+        assert unit.logger.messages == [
+            ("info", f"lane0 tool cmd: T0  {self.LOADED_LINE}")] * 2
+
     def test_non_dict_status_result_leaves_prep_state_unchanged(self):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
         lane = unit.lanes["lane0"]
@@ -4911,6 +4945,114 @@ class TestAfcACEAceUnloadInner:
             ("debug", "ACE unwind complete")]
         assert unit.afc.error.handle_lane_failure.calls == []
         assert unit.logger.messages == []
+
+    def test_sensor_still_triggered_retracts_again_until_clear(self):
+        unit, lane, wire = self._unit()
+        lane.extruder_obj.tool_stn_unload = 60.0
+        lane.extruder_obj.tool_start_state = True
+
+        def retract(*args: Any, **kwargs: Any) -> None:
+            """The tip comes off the sensor on the first retry's retract."""
+            if len(unit.afc.move_e_pos.calls) == 3:
+                lane.extruder_obj.tool_start_state = False
+        unit.afc.move_e_pos.func = retract
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is True
+
+        assert unit.afc.move_e_pos.calls == [
+            ((-30.0, 25.0, "ACE STN unload"), {"wait_tool": True}),
+            ((-60.0, 25.0, "ACE STN unload"), {"wait_tool": False}),
+            ((-60.0, 25.0, "ACE STN unload"), {"wait_tool": True})]
+        # The freed tip is unwound the whole way again, back to the hub.
+        assert wire.moves() == [self.UNWIND, self.UNWIND]
+        assert unit._hub_load_suppressed == {"lane3"}
+        assert unit.afc.afcDeltaTime.messages == [
+            ("debug", "ACE unload: retracting tool_stn_unload/2 (pre-unwind)"),
+            ("debug", "ACE unload: retracting tool_stn_unload (overlaps unwind)"),
+            ("debug", "ACE unload: toolhead sensor still sees filament, Try:1"),
+            ("debug", "ACE unwind complete")]
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_sensor_that_never_clears_fails_the_unload(self):
+        unit, lane, wire = self._unit()
+        lane.extruder_obj.tool_stn_unload = 60.0
+        lane.extruder_obj.tool_start_state = True
+        lane.loaded_to_hub = False
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is False
+
+        # The two unload retracts and the unwind, then a retract and an unwind per
+        # attempt (tool_max_unload_attempts 4).
+        assert unit.afc.move_e_pos.calls[2:] == [
+            ((-60.0, 25.0, "ACE STN unload"), {"wait_tool": True})] * 4
+        assert wire.moves() == [self.UNWIND] * 5
+        # Never staged: AFC keeps the lane in the toolhead.
+        assert lane.loaded_to_hub is False
+        assert unit._hub_load_suppressed == set()
+        assert unit.afc.error.handle_lane_failure.calls == [
+            ((lane, "lane3 is still at extruder's toolhead sensor after the ACE unwind, so it "
+                    "never left the toolhead.\nRun TOOL_UNLOAD LANE=lane3 again, or clear the "
+                    "toolhead by hand."), {"pause": False})]
+        assert ("debug", "ACE unwind complete") not in unit.afc.afcDeltaTime.messages
+
+    def test_sensor_retry_without_tool_stn_unload_unwinds_again(self):
+        unit, lane, wire = self._unit()
+        lane.extruder_obj.tool_stn_unload = 0
+        lane.extruder_obj.tool_start_state = True
+
+        def clear(now: float) -> None:
+            """The second unwind frees the tip."""
+            if len(wire.moves()) == 2:
+                lane.extruder_obj.tool_start_state = False
+        unit.printer.reactor.on_pause = clear
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is True
+
+        assert unit.afc.move_e_pos.calls == []
+        assert wire.moves() == [self.UNWIND, self.UNWIND]
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_buffer_ramming_unwinds_until_trailing_first(self):
+        unit, lane, wire = self._unit()
+        lane.extruder_obj.tool_start = "buffer"
+        lane.extruder_obj.tool_stn_unload = 0
+        lane.buffer_obj = types.SimpleNamespace(trailing_state=False, advance_state=True)
+
+        def collapse(now: float) -> None:
+            """The buffer collapses after the first short unwind."""
+            if len(wire.moves()) == 1:
+                lane.buffer_obj.trailing_state = True
+        unit.printer.reactor.on_pause = collapse
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is True
+
+        # One short step, then the full unwind; the buffer is never read as a
+        # filament sensor after it.
+        assert wire.moves() == [
+            ("unwind_filament", {"index": 3, "length": 10.0, "speed": 100.0, "mode": "normal"}),
+            self.UNWIND]
+        assert unit.afc.afcDeltaTime.messages == [
+            ("debug", "ACE unload: retracting buffer, Try:1"),
+            ("debug", "ACE unwind complete")]
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_buffer_that_never_collapses_fails_before_the_unwind(self):
+        unit, lane, wire = self._unit()
+        lane.extruder_obj.tool_start = "buffer"
+        lane.extruder_obj.tool_stn_unload = 0
+        lane.buffer_obj = types.SimpleNamespace(trailing_state=False, advance_state=False)
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is False
+
+        assert wire.moves() == [(
+            "unwind_filament", {"index": 3, "length": 10.0, "speed": 100.0,
+                                "mode": "normal"})] * 4
+        assert unit._hub_load_suppressed == set()
+        assert unit.afc.error.handle_lane_failure.calls == [
+            ((lane, "Buffer did not collapse to trailing after 4 short ACE unwinds, so lane3 "
+                    "may not be held by the extruder.\nCheck the toolhead, then run "
+                    "TOOL_UNLOAD LANE=lane3 again. Raising tool_max_unload_attempts may "
+                    "help."), {"pause": False})]
 
     def test_no_retract_move_when_tool_stn_unload_zero_but_still_unwinds(self):
         unit, lane, wire = self._unit()

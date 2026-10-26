@@ -1973,6 +1973,19 @@ class afcACE(afcUnit):
                     if self._use_feed_assist(cur_lane):
                         self._start_feed_assist(slot, explicit=True)
 
+        # Filament at the sensor with no lane loaded is a tip an unload left behind
+        # (or one fed by hand); the next load would refuse it. Said on the
+        # extruder's first lane of this unit only, not once per lane.
+        extruder = cur_lane.extruder_obj
+        if (succeeded
+            and extruder.tool_start != "buffer"
+            and not extruder.lane_loaded
+            and next((lane for lane in extruder.lanes.values()
+                      if lane.unit_obj is self), None) is cur_lane
+            and cur_lane.get_toolhead_pre_sensor_state()):
+            msg += (f"<span class=warning--text> {extruder.name}'s toolhead sensor sees "
+                    f"filament but no lane is loaded</span>")
+
         if assignTcmd:
             self.afc.function.TcmdAssign(cur_lane)
         cur_lane.send_lane_data()
@@ -2565,6 +2578,82 @@ class afcACE(afcUnit):
             self._operation_active = False
             self._prev_states_stale = True
 
+    def _unwind_short(self, cur_lane: AFCLane, slot: int) -> None:
+        """
+        Unwind one short_move_dis step and wait for it.
+
+        :param cur_lane: Lane being moved.
+        :param slot: Its ACE slot.
+        """
+        self._ace.unwind_filament(slot, cur_lane.short_move_dis, self.retract_speed)
+        self._wait_for_feed_complete(slot, cur_lane.short_move_dis, self.retract_speed)
+
+    def _collapse_buffer(self, cur_lane: AFCLane, slot: int) -> bool:
+        """
+        Buffer ramming: unwind in short steps until the buffer reads trailing, as
+        AFC's own TOOL_UNLOAD does with a lane stepper.
+
+        :param cur_lane: Lane being unloaded.
+        :param slot: Its ACE slot.
+        :return bool: True once trailing; False after tool_max_unload_attempts
+            (failure handled via handle_lane_failure).
+        """
+        afc = self.afc
+        num_tries = 0
+        while (not cur_lane.get_trailing()
+               and cur_lane.tool_max_unload_attempts > 0):
+            num_tries += 1
+            if num_tries > cur_lane.tool_max_unload_attempts:
+                message = (f"Buffer did not collapse to trailing after "
+                           f"{cur_lane.tool_max_unload_attempts} short ACE unwinds, so "
+                           f"{cur_lane.name} may not be held by the extruder.\n"
+                           f"Check the toolhead, then run TOOL_UNLOAD LANE={cur_lane.name} "
+                           f"again. Raising tool_max_unload_attempts may help.")
+                if afc.function.in_print():
+                    message += "\nOnce cleared, click resume to continue printing"
+                afc.error.handle_lane_failure(cur_lane, message, pause=afc.function.in_print())
+                return False
+            self._log_delta(f"ACE unload: retracting buffer, Try:{num_tries}")
+            self._unwind_short(cur_lane, slot)
+            afc.reactor.pause(afc.reactor.monotonic() + 0.5)
+        return True
+
+    def _clear_toolhead_sensor(self, cur_lane: AFCLane, cur_extruder: Any, slot: int,
+                               retract_dist: float) -> bool:
+        """
+        Retract and unwind again while the toolhead sensor still sees filament,
+        up to tool_max_unload_attempts, as AFC's own TOOL_UNLOAD retries. A tip
+        held in the gears kept the last unwind from moving it, so each retry
+        frees it with the extruder, then unwinds the whole way again.
+
+        :param cur_lane: Lane being unloaded.
+        :param cur_extruder: Its extruder.
+        :param slot: Its ACE slot.
+        :param retract_dist: The unwind that stages the tip at the hub.
+        :return bool: True once the sensor is clear; False when it never clears
+            (failure handled via handle_lane_failure).
+        """
+        afc = self.afc
+        num_tries = 0
+        while cur_lane.get_toolhead_pre_sensor_state():
+            num_tries += 1
+            if num_tries > cur_lane.tool_max_unload_attempts:
+                message = (f"{cur_lane.name} is still at {cur_extruder.name}'s toolhead "
+                           f"sensor after the ACE unwind, so it never left the toolhead.\n"
+                           f"Run TOOL_UNLOAD LANE={cur_lane.name} again, or clear the "
+                           f"toolhead by hand.")
+                if afc.function.in_print():
+                    message += "\nOnce cleared, click resume to continue printing"
+                afc.error.handle_lane_failure(cur_lane, message, pause=afc.function.in_print())
+                return False
+            self._log_delta(f"ACE unload: toolhead sensor still sees filament, Try:{num_tries}")
+            if cur_extruder.tool_stn_unload > 0:
+                afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
+                               "ACE STN unload", wait_tool=True)
+            self._ace.unwind_filament(slot, retract_dist, self.retract_speed)
+            self._wait_for_feed_complete(slot, retract_dist, self.retract_speed)
+        return True
+
     def _ace_unload_inner(self, cur_lane: AFCLane, cur_extruder: Any) -> bool:
         """
         ACE custom unload, filament transport only.
@@ -2605,6 +2694,12 @@ class afcACE(afcUnit):
             # one issued async so it overlaps the ACE unwind. Re-assert the assist
             # stop first in case the watchdog re-armed it.
             self._stop_feed_assist(slot)
+            # With buffer ramming there is no sensor to read after the unwind, so as
+            # AFC's own unload does, first pull the lane back until the buffer
+            # collapses to trailing, proof the extruder still holds the filament.
+            if (cur_extruder.tool_start == "buffer"
+                and not self._collapse_buffer(cur_lane, slot)):
+                return False
             if cur_extruder.tool_stn_unload > 0:
                 self._log_delta('ACE unload: retracting tool_stn_unload/2 (pre-unwind)')
                 afc.move_e_pos(cur_extruder.tool_stn_unload * -0.5, cur_extruder.tool_unload_speed,
@@ -2616,6 +2711,12 @@ class afcACE(afcUnit):
             self._wait_for_feed_complete(slot, retract_dist, self.retract_speed)
             if cur_extruder.tool_stn_unload > 0:
                 afc.function.log_toolhead_pos("ACE STN unload after ")
+            # A finished unwind doesn't prove the tip left: one held in the gears
+            # stays at the toolhead sensor, and the next load would refuse it.
+            if (cur_extruder.tool_start != "buffer"
+                and not self._clear_toolhead_sensor(cur_lane, cur_extruder, slot,
+                                                    retract_dist)):
+                return False
         except Exception as e:
             afc.error.handle_lane_failure(cur_lane, f"ACE unwind failed for {cur_lane.name}: {e}",
                                           pause=afc.function.in_print())
