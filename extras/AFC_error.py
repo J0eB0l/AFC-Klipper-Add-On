@@ -57,6 +57,8 @@ class afcError:
         self.pause= False
         # Coordinate and extrude modes from before AFC_PAUSE forced absolute mode
         self.pause_modes: Optional[tuple[bool, bool]] = None
+        # True when AFC_PAUSE ran during a tool change, so the head may sit in the load area
+        self.pause_in_toolchange = False
 
     def handle_connect(self) -> None:
         """
@@ -329,8 +331,13 @@ class afcError:
             self.set_error_state(False)
             # Restore position if the printer is homed, otherwise leave it where it is
             if self.afc.function.is_homed(for_move=True):
+                # The user's RESUME puts the head back where it paused, which during a tool
+                # change is the load area; leave it before moving back to the print
+                if self.pause_in_toolchange and self.afc.pre_resume_macro:
+                    self.afc.gcode.run_script_from_command(self.afc.pre_resume_macro)
                 self.afc.restore_pos(False)
             self.pause = False
+            self.pause_in_toolchange = False
 
         # restore_pos may not run (a tool change during the pause already used the saved
         # position), and the user's RESUME brings back the absolute modes AFC_PAUSE set
@@ -466,6 +473,7 @@ class afcError:
         # Check to make sure printer is not already paused
         if not self.afc.function.is_paused():
             self.logger.debug("AFC_PAUSE: Pausing")
+            self.pause_in_toolchange = self.afc.in_toolchange
             # Save position
             self.afc.save_pos()
             # The user's PAUSE saves its state after the switch to absolute mode below, so

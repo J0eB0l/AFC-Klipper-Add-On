@@ -1184,6 +1184,40 @@ class TestCmdAfcResume:
         ]
 
 
+    def _resume_after_pause(self, in_toolchange, macro="EXIT_BIN"):
+        from tests.conftest import MockGCodeCommand
+        err, afc = _make_afc_error()
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.gcode_move.last_position = [0.0, 0.0, 10.0]
+        afc.move_z_pos = MagicMock()
+        afc.in_toolchange = in_toolchange
+        afc.pre_resume_macro = macro
+        err.cmd_AFC_PAUSE(MockGCodeCommand())
+        afc.gcode.run_script_from_command.reset_mock()
+        order = []
+        afc.gcode.run_script_from_command.side_effect = lambda s: order.append(s)
+        afc.restore_pos = MagicMock(side_effect=lambda *a: order.append("restore_pos"))
+        afc.function.is_paused.side_effect = [True, True, False, False]
+        err.set_error_state = MagicMock()
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        return err, order
+
+    def test_pause_in_a_tool_change_runs_pre_resume_macro_before_restoring(self):
+        err, order = self._resume_after_pause(in_toolchange=True)
+        assert order == [err.AFC_RENAME_RESUME_NAME + " ", "EXIT_BIN", "restore_pos"]
+        assert err.pause_in_toolchange is False
+
+    def test_pause_outside_a_tool_change_skips_pre_resume_macro(self):
+        err, order = self._resume_after_pause(in_toolchange=False)
+        assert "EXIT_BIN" not in order
+        assert order[-1] == "restore_pos"
+
+    def test_no_pre_resume_macro_configured_skips_it(self):
+        err, order = self._resume_after_pause(in_toolchange=True, macro=None)
+        assert order[-1] == "restore_pos"
+        assert len(order) == 2
+
+
 class TestCmdAfcPause:
     def test_not_paused_saves_position(self):
         err, afc = _make_afc_error()
