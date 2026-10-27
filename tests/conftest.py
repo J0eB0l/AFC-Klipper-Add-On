@@ -544,6 +544,7 @@ class MockAFC:
         self.long_moves_speed = 100.0
         self.long_moves_accel = 400.0
         self.z_hop = 0.5
+        self.pre_resume_macro = None
         self.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
         self.gcode_move = MagicMock()
         self.prep_done = False
