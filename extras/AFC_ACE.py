@@ -571,7 +571,11 @@ class afcACE(afcUnit):
                                and active_lane.get_toolhead_pre_sensor_state())
             except Exception:
                 at_toolhead = False
-            if (active_lane is not None
+            # A tool pickup schedules this just before its unload starts, so it can run
+            # after prepare_unload stopped assist; starting then pushes against the
+            # heat and tip forming. A load starts assist itself when it finishes.
+            if (not self._operation_active
+                and active_lane is not None
                 and self._use_feed_assist(active_lane)
                 and active_slot not in self._feed_assist_active
                 and active_slot not in self._assist_suppressed

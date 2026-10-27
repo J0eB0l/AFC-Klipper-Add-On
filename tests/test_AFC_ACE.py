@@ -789,6 +789,16 @@ class TestAfcACEReconcileFeedAssist:
         assert unit._assist_suppressed == {0}
         assert unit.logger.messages == []
 
+    def test_reconcile_does_not_start_during_unload(self):
+        unit = self._unit(feed_assist_active=[1])
+        unit._operation_active = True
+
+        unit._reconcile_feed_assist("lane0")
+
+        assert unit._ace.commands == [("get_status", {}), ("stop_feed_assist", {"index": 1})]
+        assert unit._feed_assist_active == set()
+        assert unit.logger.messages == []
+
     def test_reconcile_already_active_does_not_restart(self):
         unit = self._unit(feed_assist_active=[0])
 
