@@ -138,11 +138,15 @@ class AutocalLane:
                  tool_loaded: bool = False, load_state: bool = True,
                  extruder: Optional[str] = "extruder",
                  th_extruder_name: Optional[str] = None,
-                 load_active: bool = False) -> None:
+                 load_active: bool = False, material: str = "PLA",
+                 spool_vendor: str = "", sub_type: str = "") -> None:
         self.name = name
         self.spool_id = spool_id
         self.tool_loaded = tool_loaded
         self.load_state = load_state
+        self.material = material
+        self.spool_vendor = spool_vendor
+        self.sub_type = sub_type
         self.extruder_obj: Optional[AutocalExtruderObj] = (
             AutocalExtruderObj(extruder, th_extruder_name, load_active)
             if extruder is not None else None)
@@ -183,9 +187,24 @@ class AutocalKlipperExtruder:
 
     def __init__(self, name: str) -> None:
         self.name = name
+        self.nozzle_diameter = 0.4
+        self.nozzle_volume_type = "standard"
 
     def get_name(self) -> str:
         return self.name
+
+
+class AutocalFilamentParameters:
+    """The U1's filament_parameters: one K for every filament, and every lookup."""
+
+    def __init__(self, k: float = 0.02) -> None:
+        self.k = k
+        self.lookups: List[Tuple[str, str, str, float, str]] = []
+
+    def get_flow_k(self, vendor: str, main_type: str, sub_type: str,
+                   nozzle_diameter: float, nozzle_volume_type: str) -> float:
+        self.lookups.append((vendor, main_type, sub_type, nozzle_diameter, nozzle_volume_type))
+        return self.k
 
 
 class AutocalToolhead:
@@ -221,10 +240,13 @@ class AutocalExtruderStepper:
     """A Klipper extruder_stepper: every (pressure advance, smooth time) set."""
 
     def __init__(self, smooth_time: float = 0.04,
-                 config_smooth_time: Optional[float] = None) -> None:
+                 config_smooth_time: Optional[float] = None,
+                 config_pa: Optional[float] = None) -> None:
         self.pressure_advance_smooth_time = smooth_time
         if config_smooth_time is not None:
             self.config_smooth_time = config_smooth_time
+        if config_pa is not None:
+            self.config_pa = config_pa
         self.applied: List[Tuple[float, float]] = []
 
     def _set_pressure_advance(self, pressure_advance: float, smooth_time: float) -> None:
@@ -412,15 +434,17 @@ def add_autocal_lane(cal: AFC_autocal, name: str = "lane1", spool_id: Any = 5,
 
 
 def add_autocal_stepper(cal: AFC_autocal, name: str = "extruder", smooth_time: float = 0.04,
-                        config_smooth_time: Optional[float] = None) -> AutocalExtruderStepper:
+                        config_smooth_time: Optional[float] = None,
+                        config_pa: Optional[float] = None) -> AutocalExtruderStepper:
     """
     :param cal: the module; the extruder is registered on its printer
     :param name: the Klipper extruder name
     :param smooth_time: its pressure_advance_smooth_time
     :param config_smooth_time: its configured smooth time, when it has one
+    :param config_pa: its configured pressure_advance, when it has one
     :return AutocalExtruderStepper: the extruder's stepper
     """
-    stepper = AutocalExtruderStepper(smooth_time, config_smooth_time)
+    stepper = AutocalExtruderStepper(smooth_time, config_smooth_time, config_pa)
     cal.printer.objects[name] = AutocalPrinterExtruder(stepper)
     return stepper
 
@@ -2276,6 +2300,111 @@ class TestAFCautocalCmdCalibrateLaneFlowK:
         assert cal.logger.messages == [
             ("info", "AFC autocal: applied K=0.070000 for lane1 on extruder"),
             ("info", "AFC autocal: calibrated and stored K=0.070000 for lane1")]
+
+
+class TestAFCautocalDefaultK:
+    def test_u1_reads_its_filament_table(self):
+        cal = make_autocal(calibrator=True, ready=True)
+        params = AutocalFilamentParameters(0.025)
+        cal.printer.objects["filament_parameters"] = params
+        lane = add_autocal_lane(cal, "lane1", None, material="PETG", spool_vendor="Bambu",
+                                sub_type="HF")
+        assert cal._default_k(lane) == 0.025
+        assert params.lookups == [("Bambu", "PETG", "HF", 0.4, "standard")]
+
+    def test_u1_unknown_filament_as_afc_spool_names_it(self):
+        cal = make_autocal(calibrator=True, ready=True)
+        params = AutocalFilamentParameters()
+        cal.printer.objects["filament_parameters"] = params
+        cal._default_k(add_autocal_lane(cal, "lane1", None, material=""))
+        assert params.lookups == [("Generic", "NONE", "NONE", 0.4, "standard")]
+
+    def test_u1_without_filament_table(self):
+        cal = make_autocal(calibrator=True, ready=True)
+        assert cal._default_k(add_autocal_lane(cal, "lane1", None)) is None
+
+    def test_consumer_uses_the_configured_pressure_advance(self):
+        cal = make_autocal(ready=True)
+        add_autocal_stepper(cal, "extruder", config_pa=0.035)
+        assert cal._default_k(add_autocal_lane(cal, "lane1", None)) == 0.035
+
+    def test_consumer_without_configured_pressure_advance(self):
+        cal = make_autocal(ready=True)
+        add_autocal_stepper(cal, "extruder")
+        assert cal._default_k(add_autocal_lane(cal, "lane1", None)) is None
+
+
+class TestAFCautocalApplyDefaultK:
+    def test_u1_sets_it_on_the_active_extruder(self):
+        cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
+        cal.printer.objects["filament_parameters"] = AutocalFilamentParameters(0.02)
+        flow = cal.printer.objects["flow_calibrator"]
+        lane = add_autocal_lane(cal, "lane1", None)
+        assert cal._apply_default_k(lane) == (
+            "AFC autocal: applied default K=0.020000 for lane1 on extruder")
+        assert flow.applied == [(cal.printer.objects["toolhead"].extruder, 0.02)]
+        assert flow._current_k == {"extruder": 0.02}
+        assert cal._lane_flow_k == {}  # not a stored K: calibration still runs
+        assert cal.logger.messages == [
+            ("info", "AFC autocal: applied default K=0.020000 for lane1 on extruder")]
+
+    def test_consumer_sets_it_on_the_lanes_extruder(self):
+        cal = make_autocal({"apply_stored_k": True}, ready=True, toolhead="extruder1")
+        stepper = add_autocal_stepper(cal, "extruder", config_pa=0.035)
+        lane = add_autocal_lane(cal, "lane1", None)
+        cal._apply_default_k(lane)
+        assert stepper.applied == [(0.035, 0.04)]
+        assert cal._managed_extruders == {"extruder"}
+        assert cal.logger.messages == [
+            ("info", "AFC autocal: applied default K=0.035000 for lane1 on extruder")]
+
+    def test_not_without_apply_stored_k(self):
+        cal = make_autocal({"auto_calibrate": True}, calibrator=True, ready=True)
+        cal.printer.objects["filament_parameters"] = AutocalFilamentParameters()
+        assert cal._apply_default_k(add_autocal_lane(cal, "lane1", None)) is None
+        assert cal.printer.objects["flow_calibrator"].applied == []
+
+    def test_u1_not_on_a_docked_tool(self):
+        cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True,
+                           toolhead="extruder1")
+        cal.printer.objects["filament_parameters"] = AutocalFilamentParameters()
+        assert cal._apply_default_k(add_autocal_lane(cal, "lane1", None)) is None
+        assert cal.printer.objects["flow_calibrator"].applied == []
+
+    def test_lookup_error_warns(self):
+        cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
+        params = AutocalFilamentParameters()
+        params.get_flow_k = None  # type: ignore[assignment]
+        cal.printer.objects["filament_parameters"] = params
+        assert cal._apply_default_k(add_autocal_lane(cal, "lane1", None)) is None
+        assert cal.logger.messages == [
+            ("warning", "AFC autocal: no default K for lane1: 'NoneType' object is not callable")]
+
+
+class TestAFCautocalDefaultKOnLoad:
+    def test_lane_without_spool(self, autocal_threads):
+        cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
+        cal.printer.objects["filament_parameters"] = AutocalFilamentParameters(0.02)
+        cal._fetch_k_async(add_autocal_lane(cal, "lane1", None, tool_loaded=True))
+        assert autocal_threads.started == []
+        assert cal.printer.objects["flow_calibrator"].applied[-1][1] == 0.02
+
+    def test_spool_without_k(self):
+        cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
+        cal.printer.objects["filament_parameters"] = AutocalFilamentParameters(0.02)
+        add_autocal_lane(cal, "lane1", 5, tool_loaded=True)
+        cal._k_applied("lane1", 5, None)
+        assert cal.printer.objects["flow_calibrator"].applied[-1][1] == 0.02
+        assert cal._lane_flow_k == {}
+
+    def test_spool_with_k_gets_its_own(self):
+        cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
+        params = AutocalFilamentParameters(0.02)
+        cal.printer.objects["filament_parameters"] = params
+        add_autocal_lane(cal, "lane1", 5, tool_loaded=True)
+        cal._k_applied("lane1", 5, 0.04)
+        assert [k for _, k in cal.printer.objects["flow_calibrator"].applied] == [0.04]
+        assert params.lookups == []
 
 
 class TestLoadConfig:

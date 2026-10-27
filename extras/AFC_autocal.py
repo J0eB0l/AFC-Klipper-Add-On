@@ -35,6 +35,11 @@
 #                     FLOW_CALIBRATE) and store it. A no-op in consumer mode.
 # Use apply_stored_k alone to apply saved K without ever auto-calibrating.
 #
+# A lane with no stored K gets a default K on load, so it never prints with the
+# K of the lane before it on that toolhead: on the U1 the K its own filament
+# table gives the lane's filament and nozzle, elsewhere the extruder's
+# configured pressure_advance.
+#
 # ── Configuration ───────────────────────────────────────────────────
 #   [AFC_autocal]
 #   apply_stored_k: True              # apply a spool's saved K on load
@@ -271,18 +276,78 @@ class AFC_autocal:
         if entry is None:
             return None
         _, k = entry
+        return self._put_k(lane_name, k)
+
+    def _put_k(self, lane_name: str, k: float, what: str = "K") -> Optional[str]:
+        """
+        Set K for a lane, dispatching on the printer mode.
+
+        :param lane_name: The name of the lane the K is for
+        :param k: The flow K value to set
+        :param what: What the K is, for the log ("K" or "default K")
+        :return Optional[str]: a status message, or None if nothing was applied
+        """
         flow_cal = self._flow_calibrator()
         if flow_cal is None:
-            return self._apply_k_stepper(lane_name, k)
+            return self._apply_k_stepper(lane_name, k, what)
         ext = self.printer.lookup_object('toolhead').get_extruder()
         ext_name = ext.get_name()
         flow_cal._set_pressure_advance(ext, k)
         flow_cal._current_k[ext_name] = k
-        msg = f"AFC autocal: applied K={k:.6f} for {lane_name} on {ext_name}"
+        msg = f"AFC autocal: applied {what}={k:.6f} for {lane_name} on {ext_name}"
         self.logger.info(msg)
         return msg
 
-    def _apply_k_stepper(self, lane_name: str, k: float) -> Optional[str]:
+    def _default_k(self, lane: Any) -> Optional[float]:
+        """
+        The K for a lane with none stored. On the U1, its filament table's K for
+        the lane's filament and the active nozzle, what it sets for a spool it
+        knows nothing about (vendor, type and sub-type as AFC_spool gives the U1).
+        Elsewhere, the lane's extruder's configured pressure_advance.
+
+        :param lane: The lane object to find a default K for
+        :return Optional[float]: the K, or None when there is none to find
+        """
+        if self._flow_calibrator() is None:
+            ext_obj = getattr(lane, 'extruder_obj', None)
+            ext_name = getattr(ext_obj, 'name', None) or 'extruder'
+            printer_ext = self.printer.lookup_object(ext_name, None)
+            estepper = getattr(printer_ext, 'extruder_stepper', None)
+            k = getattr(estepper, 'config_pa', None)
+            return float(k) if isinstance(k, (int, float)) else None
+        params = self.printer.lookup_object('filament_parameters', None)
+        ext = self.printer.lookup_object('toolhead').get_extruder()
+        if params is None or ext is None:
+            return None
+        k = params.get_flow_k(
+            getattr(lane, 'spool_vendor', None) or "Generic",
+            (getattr(lane, 'material', None)
+             or getattr(self.afc, 'default_material_type', None) or "NONE"),
+            getattr(lane, 'sub_type', "") or "NONE",
+            ext.nozzle_diameter,
+            getattr(ext, 'nozzle_volume_type', 'standard'))
+        return float(k) if isinstance(k, (int, float)) else None
+
+    def _apply_default_k(self, lane: Any) -> Optional[str]:
+        """
+        Set the default K for a lane with no stored K, so it doesn't print with
+        the K of the lane before it on that toolhead.
+
+        :param lane: The lane object that was just loaded
+        :return Optional[str]: a status message, or None if nothing was applied
+        """
+        if not self.apply_stored_k or not self._apply_gate_ok(lane):
+            return None
+        try:
+            k = self._default_k(lane)
+        except Exception as e:
+            self.logger.warning(f"AFC autocal: no default K for {lane.name}: {e}")
+            return None
+        if k is None:
+            return None
+        return self._put_k(lane.name, k, "default K")
+
+    def _apply_k_stepper(self, lane_name: str, k: float, what: str = "K") -> Optional[str]:
         """
         Consumer-mode apply: set pressure advance on the lane's extruder stepper.
 
@@ -293,6 +358,7 @@ class AFC_autocal:
 
         :param lane_name: The name of the lane whose K to apply
         :param k: The flow K value to apply
+        :param what: What the K is, for the log ("K" or "default K")
         :return Optional[str]: a status message, or None if nothing was applied
         """
         lane = self.afc.lanes.get(lane_name) if self.afc else None
@@ -311,7 +377,7 @@ class AFC_autocal:
                               estepper.pressure_advance_smooth_time)
         estepper._set_pressure_advance(k, smooth_time)
         self._managed_extruders.add(ext_name)
-        msg = f"AFC autocal: applied K={k:.6f} for {lane_name} on {ext_name}"
+        msg = f"AFC autocal: applied {what}={k:.6f} for {lane_name} on {ext_name}"
         self.logger.info(msg)
         return msg
 
@@ -660,8 +726,9 @@ class AFC_autocal:
             return
         sid = self._norm_spool_id(getattr(cur_lane, 'spool_id', None))
         if sid is None:
-            # No spool to look up; calibrate if possible (U1). _calibrate_when_loaded
-            # waits for idle and skips during a print.
+            # No spool to look up: the default K, then calibrate if possible (U1).
+            # _calibrate_when_loaded waits for idle and skips during a print.
+            self._apply_default_k(cur_lane)
             if self._can_calibrate():
                 self._calibrate_when_loaded(cur_lane)
             return
@@ -722,8 +789,9 @@ class AFC_autocal:
                 if self.apply_stored_k and self._apply_gate_ok(lane):
                     self._apply_lane_k(lane_name)
                 return
-            # No stored K, optionally calibrate (stores + applies), gated to prep-done,
-            # idle and past the startup grace.
+            # No stored K: the default K, then optionally calibrate (stores +
+            # applies), gated to prep-done, idle and past the startup grace.
+            self._apply_default_k(lane)
             if self._can_calibrate():
                 self._calibrate_when_loaded(lane)
         except Exception as e:
