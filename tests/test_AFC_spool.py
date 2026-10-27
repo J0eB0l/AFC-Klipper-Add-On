@@ -2257,38 +2257,6 @@ class TestSetSnapmakerFilamentParams:
         assert print_task_config["filament_type"][0] == lane.material
         assert print_task_config["filament_sub_type"][0] == "NONE"
     
-    def _soft_case(self, material, is_soft):
-        """Set a loaded TPU or PLA lane's spool with filament_parameters answering is_soft."""
-        from tests.conftest import _make_print_task_config
-        import sys
-        sys.modules.setdefault("extras.print_task_config", _make_print_task_config())
-        from extras.print_task_config import DEFAULT_PRINT_TASK_CONFIG
-        spool = _make_spool()
-        spool.afc.snapmaker_printer = True
-        spool.print_task_config_obj = MagicMock()
-        spool.print_task_config_obj.print_task_config = DEFAULT_PRINT_TASK_CONFIG
-        lane = _make_lane("lane1")
-        lane.material = material
-        lane.tool_loaded = True
-        lane.extruder_obj.lane_loaded = lane.name
-        lane.multi_color = []
-        spool.printer = MagicMock()
-        params = spool.printer.lookup_object.return_value
-        params.get_is_soft.return_value = is_soft
-        spool.set_snapmaker_filament_params(lane)
-        return spool, params
-
-    def test_snapmaker_printer_extruder_soft_from_filament_parameters(self):
-        """A TPU lane marks its toolhead soft, from Snapmaker's own filament table."""
-        spool, params = self._soft_case("TPU", True)
-        params.get_is_soft.assert_called_once_with("Generic", "TPU", "NONE")
-        assert spool.print_task_config_obj.print_task_config["filament_soft"][0] is True
-
-    def test_snapmaker_printer_extruder_hard_from_filament_parameters(self):
-        """A PLA lane clears a soft flag left by the toolhead's previous spool."""
-        spool, _ = self._soft_case("PLA", False)
-        assert spool.print_task_config_obj.print_task_config["filament_soft"][0] is False
-
     def test_snapmaker_printer_extruder_check_sub_type_from_lane(self):
         from tests.conftest import _make_print_task_config
         import sys

@@ -221,7 +221,6 @@ def _make_print_task_config():
         "filament_vendor": ["NONE"] * 4,
         "filament_type": ["NONE"] * 4,
         "filament_sub_type": ["NONE"] * 4,
-        "filament_soft": [False] * 4,
         "filament_color": [0xFFFFFFFF] * 4,
         "filament_color_rgba": ['FFFFFFFF'] * 4,
         "filament_color_multi": [
