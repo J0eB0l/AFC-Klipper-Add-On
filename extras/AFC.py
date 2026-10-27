@@ -240,6 +240,9 @@ class afc:
 
         self.post_load_macro        = config.get("post_load_macro", None)
         self.post_unload_macro      = config.get("post_unload_macro", None)
+        # Run by AFC_RESUME before the move back to the print when the pause came during a tool
+        # change, so a head paused in the load area (a U1 discard bin) clears it first
+        self.pre_resume_macro       = config.get("pre_resume_macro", None)
 
         self.form_tip               = config.getboolean("form_tip", False)          # Set to True to tip forming when unloading lanes
         self.form_tip_cmd           = config.get('form_tip_cmd', None)              # Macro to use when tip forming. Change macro name if you would like to use your own tip forming macro
