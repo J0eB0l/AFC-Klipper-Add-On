@@ -1593,7 +1593,9 @@ class TestBambuBridgeSetNarrationLog:
         null = logging.NullHandler()
         lg.addHandler(null)
         assert bambu_bridge.set_narration_log(str(tmp_path)) is True
-        assert lg.handlers[0] is null
+        # By membership, not position: pytest also hangs its capture
+        # handlers on a logger that does not propagate.
+        assert null in lg.handlers
         assert len(self._rotating()) == 1
         line = "[AMS_SWITCH]feed finish 0, dw_len:3.5 m"
         feed_amsdbg(bambu_bridge, line)
