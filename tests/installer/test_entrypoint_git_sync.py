@@ -7,12 +7,7 @@ from typing import List, Optional, Tuple
 import pytest
 
 from installer import git_sync
-from installer.git_sync import (
-    checkout_source,
-    clone_and_maybe_restart,
-    make_reexec,
-    switch_branch_early,
-)
+from installer.git_sync import clone_and_maybe_restart, make_reexec, switch_branch_early
 from installer.platform_core.console import Console
 from installer.platform_core.context import Context
 from installer.platform_core.errors import InstallerExit
@@ -403,52 +398,6 @@ class TestCloneAndMaybeRestart:
             )
         assert exc.value.code == 1
         assert ["git", "-C", str(afc), "fetch", "--prune", "--quiet"] not in runner.calls
-
-
-@needs_git
-class TestCheckoutSource:
-    FALLBACK = "https://example.com/default.git"
-
-    def test_a_clone_reports_its_remote_and_branch(self, tmp_path: Path) -> None:
-        remote = make_remote(tmp_path)
-        afc = clone(remote, tmp_path / "afc")
-        git(afc, "checkout", "-q", "dev")
-        assert checkout_source(afc, CommandRunner(), self.FALLBACK) == (str(remote), "dev")
-
-    def test_a_branch_tracking_another_remote_reports_that_remote(self, tmp_path: Path) -> None:
-        remote = make_remote(tmp_path)
-        afc = clone(remote, tmp_path / "afc")
-        git(afc, "remote", "add", "fork", "https://example.com/fork.git")
-        git(afc, "checkout", "-q", "-b", "feature")
-        git(afc, "config", "branch.feature.remote", "fork")
-        assert checkout_source(afc, CommandRunner(), self.FALLBACK) == (
-            "https://example.com/fork.git", "feature"
-        )
-
-    def test_a_branch_without_upstream_uses_origin(self, tmp_path: Path) -> None:
-        remote = make_remote(tmp_path)
-        afc = clone(remote, tmp_path / "afc")
-        git(afc, "checkout", "-q", "-b", "local")
-        assert checkout_source(afc, CommandRunner(), self.FALLBACK) == (str(remote), "local")
-
-    def test_a_detached_head_falls_back(self, tmp_path: Path) -> None:
-        afc = clone(make_remote(tmp_path), tmp_path / "afc")
-        git(afc, "checkout", "-q", "--detach")
-        assert checkout_source(afc, CommandRunner(), self.FALLBACK) == (self.FALLBACK, "main")
-
-    def test_no_remote_url_falls_back_to_the_repo_but_keeps_the_branch(
-        self, tmp_path: Path
-    ) -> None:
-        afc = tmp_path / "afc"
-        afc.mkdir()
-        git(afc, "init", "-q")
-        git(afc, "checkout", "-q", "-b", "work")
-        assert checkout_source(afc, CommandRunner(), self.FALLBACK) == (self.FALLBACK, "work")
-
-    def test_not_a_checkout_falls_back(self, tmp_path: Path) -> None:
-        assert checkout_source(tmp_path, FakeCommandRunner(), self.FALLBACK) == (
-            self.FALLBACK, "main"
-        )
 
 
 class TestMakeReexec:

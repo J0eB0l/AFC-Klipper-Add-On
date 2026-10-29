@@ -23,7 +23,6 @@ from installer.config_editor.includes import (
     manage_include,
     moonraker_update_block,
 )
-from installer.git_sync import checkout_source
 from installer.install_flow.config_copy import copy_config
 from installer.install_flow.snapmaker import (
     check_and_move_lite_files,
@@ -114,9 +113,8 @@ def _update_moonraker_config(ctx: Context, runner: CommandRunner) -> None:
     """
     if not ctx.moonraker_config_file.exists():
         return
-    gitrepo, branch = checkout_source(ctx.afc_path, runner, ctx.gitrepo)
     block = moonraker_update_block(
-        str(ctx.afc_path), gitrepo, ctx.klipper_service, str(ctx.home), branch
+        str(ctx.afc_path), ctx.gitrepo, ctx.klipper_service, str(ctx.home)
     )
     if ensure_moonraker_update_block(ctx.moonraker_config_file, block):
         restart_service(runner, "moonraker")

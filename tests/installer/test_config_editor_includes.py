@@ -190,11 +190,8 @@ class TestMoonrakerUpdateBlock:
         assert "managed_services: klipper-2\n" in text
         assert "origin: https://x/y.git\n" in text
 
-    def test_the_primary_branch_defaults_to_main(self) -> None:
+    def test_the_primary_branch_is_always_main(self) -> None:
         assert "primary_branch: main\n" in self.block()
-
-    def test_the_primary_branch_is_the_one_given(self) -> None:
-        assert "primary_branch: BridgeBox\n" in self.block(branch="BridgeBox")
 
 
 class TestEnsureMoonrakerUpdateBlock:
