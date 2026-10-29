@@ -4423,6 +4423,55 @@ class TestAfcBambuAMSReportUids:
             "Configured units:"))]
         assert unit.logger.messages == []
 
+    @staticmethod
+    def _two_chains():
+        """
+        Two units on two buses, each with its [AFC_BridgeBox] master.
+
+        :return Tuple: the printer and the two units
+        """
+        printer = make_printer()
+        a = make_bambu_unit("Bambu_AMS_1", printer=printer,
+                            bridge=FakeBridge(uids=["AAA"]),
+                            values={"serial_port": "/dev/a"})
+        b = make_bambu_unit("Bambu_AMS_chain2_1", printer=printer,
+                            bridge=FakeBridge(uids=["BBB"]),
+                            values={"serial_port": "/dev/b"})
+        printer.add_object("AFC_BridgeBox chain1",
+                           SimpleNamespace(serial_port="/dev/a"))
+        printer.add_object("AFC_BridgeBox chain2",
+                           SimpleNamespace(serial_port="/dev/b"))
+        return printer, a, b
+
+    def test_chain_reads_that_chains_bus_and_lists_only_its_units(self):
+        printer, a, b = self._two_chains()
+        assert printer.gcode.ready_gcode_handlers["AFC_BAMBU_UIDS"] == \
+            a.cmd_AFC_BAMBU_UIDS
+        a.cmd_AFC_BAMBU_UIDS(FakeGcmd({"CHAIN": "chain2"}))
+        a.afc.reactor.run_callbacks(a.afc.reactor.advance(1.0))
+        assert a._bridge.sent == [] and b._bridge.sent == [{"cmd": "chain"}]
+        assert b.gcode.messages[-1] == ("respond_info", (
+            "Bambu AMS bus (firmware pre-0.3.0) -- copy each UID into that "
+            "unit's `unit_uid`:\n"
+            "  chain index 0: BBB  <- (empty)\n"
+            "  capacity: capn=0 poll_ub=0x00 boxed_burst=0\n"
+            "Configured units:\n"
+            "  Bambu_AMS_chain2_1 -> chain index 0  measure=off (firmware "
+            "pre-dates the readback)"))
+
+    def test_without_chain_it_reads_the_registering_units_bus(self):
+        _printer, a, b = self._two_chains()
+        a.cmd_AFC_BAMBU_UIDS(FakeGcmd({}))
+        a.afc.reactor.run_callbacks(a.afc.reactor.advance(1.0))
+        assert a._bridge.sent == [{"cmd": "chain"}] and b._bridge.sent == []
+        assert "Bambu_AMS_chain2_1" not in a.gcode.messages[-1][1]
+
+    def test_an_unknown_chain_is_refused(self):
+        _printer, a, _b = self._two_chains()
+        with pytest.raises(Exception, match="no BridgeBox chain named chain9"):
+            a.cmd_AFC_BAMBU_UIDS(FakeGcmd({"CHAIN": "chain9"}))
+        assert a._bridge.sent == []
+
     def test_report_uids_empty(self):
         unit = make_bambu_unit(bridge=FakeBridge())
         unit._report_uids(0.0)

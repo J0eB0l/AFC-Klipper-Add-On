@@ -2029,7 +2029,8 @@ class afcBambuAMS(afcUnit):
             self.gcode.register_command(
                 "AFC_BAMBU_UIDS", self.cmd_AFC_BAMBU_UIDS,
                 desc="List the AMS UIDs on the bus (chain index -> UID, with what "
-                     "each holds) so you can pin units via unit_uid.")
+                     "each holds) so you can pin units via unit_uid. "
+                     "AFC_BAMBU_UIDS [CHAIN=<chain>]")
         except Exception:
             pass        # another [AFC_BambuAMS] on this bus already registered it
     def _gcmd_lane_slot(self, cmd: str, gcmd: Any,
@@ -3949,16 +3950,31 @@ class afcBambuAMS(afcUnit):
         UID plus what that unit holds (to tell them apart), so the UIDs can be
         copied into each section's ``unit_uid`` for stable mapping.
 
+        The command is registered once per printer, by the first unit, so it
+        reads that unit's bus. CHAIN= names an [AFC_BridgeBox] chain and hands
+        the command to a unit on that chain's serial port instead.
+
         Usage
         -------
-        `AFC_BAMBU_UIDS UNIT=<unit>`
+        `AFC_BAMBU_UIDS [CHAIN=<chain>]`
 
         Example
         -------
         ```
-        AFC_BAMBU_UIDS UNIT=BambuAMS_1
+        AFC_BAMBU_UIDS CHAIN=chain2
         ```
         """
+        chain = gcmd.get("CHAIN", None)
+        if chain is not None:
+            master = self.printer.lookup_object(f"AFC_BridgeBox {chain}", None)
+            port = getattr(master, "serial_port", None)
+            unit = next((u for _n, u in self.printer.lookup_objects("AFC_BambuAMS")
+                         if port and getattr(u, "serial_port", None) == port), None)
+            if unit is None:
+                raise gcmd.error(f"AFC_BAMBU_UIDS: no BridgeBox chain named {chain}")
+            if unit is not self:
+                unit.cmd_AFC_BAMBU_UIDS(gcmd)
+                return
         if self._bridge is None:
             error_str = "AFC_BAMBU_UIDS: bridge not connected"
             raise gcmd.error(error_str)
@@ -4058,6 +4074,8 @@ class afcBambuAMS(afcUnit):
         lines.append("Configured units:")
         try:
             for _, unit in self.printer.lookup_objects("AFC_BambuAMS"):
+                if getattr(unit, "_bridge", None) is not self._bridge:
+                    continue        # a unit on another bus
                 idx = getattr(unit, "ams_index", "?")
                 is_ht = bool(getattr(unit, "has_heater", False)
                              and getattr(unit, "dry_dev_addr", 0) == 0x1800)
