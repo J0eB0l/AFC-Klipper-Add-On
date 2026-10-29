@@ -171,11 +171,12 @@ auto_drop: True
 
 # ---- Buffer ----
 # The chain's buffer, [AFC_buffer <unit_prefix>_Buffer] (Bambu_AMS_Buffer
-# by default), reads each AMS's own buffer through the bridge. FPS_PSF
-# (the default) follows its tension. bambu also watches the AMS odometer,
-# so the buffer can stand in for a toolhead filament sensor: use it with
-# pin_tool_start: buffer in the [AFC_extruder] named above.
-buffer_type: bambu
+# by default), reads each AMS's own buffer through the bridge. bambu (the
+# default) follows its tension and also watches the AMS odometer, so the
+# buffer can stand in for a toolhead filament sensor: use it with
+# pin_tool_start: buffer in the [AFC_extruder] named above. FPS_PSF follows
+# the tension only.
+#buffer_type: bambu
 
 # ---- Dryer ----
 # Drying ceiling for every heated unit, in C. 0 (the default) uses each

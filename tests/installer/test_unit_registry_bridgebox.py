@@ -71,20 +71,19 @@ class TestFirstInstall:
         source = printer_tree.afc_path / "templates" / "AFC_Hardware-AFC.cfg"
         assert (ctx.afc_config_dir / "AFC_Hardware.cfg").read_bytes() == source.read_bytes()
 
-    def test_the_defaults_write_the_bambu_buffer_and_leave_the_rest_as_the_template(
+    def test_the_defaults_leave_the_file_as_the_template(
         self, printer_tree: PrinterTree
     ) -> None:
         ctx = install(printer_tree, selection())
         lines = settings(ctx)
-        assert "buffer_type: bambu" in lines
+        assert not any(line.startswith("buffer_type:") for line in lines), "bambu is the default"
         assert "pool_ams: 4" in lines
         assert "pool_ht: 8" in lines
         assert "serial_port: auto" in lines
         assert "extruder: extruder" in lines
         assert "connection: wifi" not in lines
         template = (printer_tree.afc_path / "templates" / TEMPLATE).read_text()
-        changed = template.replace("#buffer_type: FPS_PSF", "buffer_type: bambu")
-        assert (ctx.afc_config_dir / TEMPLATE).read_text() == changed
+        assert (ctx.afc_config_dir / TEMPLATE).read_text() == template
 
     def test_the_counts_the_port_and_the_extruder_are_written(
         self, printer_tree: PrinterTree
@@ -139,7 +138,6 @@ class TestAdditionalChain:
         assert "\n[AFC_BridgeBox chain1]\n" not in text
         assert "# [AFC_BridgeBox chain1] below" in text, "comments are left alone"
         lines = settings(ctx, "AFC_chain2.cfg")
-        assert "buffer_type: bambu" in lines
         assert "pool_ams: 1" in lines
 
     def test_the_first_chains_unit_names_are_commented_out(

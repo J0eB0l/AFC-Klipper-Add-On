@@ -4460,7 +4460,7 @@ class TestAfcBridgeBoxInit:
         return holder
 
     #: The buffer a chain fabricates, but for its chip.
-    FPS = {"type": "FPS_PSF", "deadband": "0.48",
+    FPS = {"type": "bambu", "deadband": "0.48",
            "filament_error_sensitivity": "0"}
 
     def test_the_first_chain_keeps_the_plain_default(self, tmp_path):
@@ -5142,7 +5142,7 @@ class TestAfcBridgeBoxRosterSections:
         # The two values tuned on hardware: the AMS buffer's swing, and jam
         # detection off because the AMS meters its own moves.
         assert self._sections(m)["AFC_buffer Bambu_AMS_Buffer"] == dict(
-            self.FPS, type="FPS_PSF", adc_pin="bambu_buffer:fps")
+            self.FPS, type="bambu", adc_pin="bambu_buffer:fps")
 
     def test_every_unit_on_the_chain_references_it(self, tmp_path):
         m = _bbx_boot(tmp_path, buffer=None, roster=f"ht:{A}, boxed:{B}")
@@ -5151,17 +5151,16 @@ class TestAfcBridgeBoxRosterSections:
             "AFC_BambuAMS Bambu_AMS_1": "Bambu_AMS_Buffer",
             "AFC_BambuAMS Bambu_AMS_HT_1": "Bambu_AMS_Buffer"}
 
-    def test_buffer_type_defaults_to_the_plain_tension_follower(
-            self, tmp_path):
+    def test_buffer_type_defaults_to_the_gated_buffer(self, tmp_path):
         m = _bbx_boot(tmp_path, buffer=None)
         assert self._sections(m)["AFC_buffer Bambu_AMS_Buffer"][
-            "type"] == "FPS_PSF"
+            "type"] == "bambu"
 
-    def test_buffer_type_bambu_fabricates_the_gated_buffer(self, tmp_path):
+    def test_buffer_type_fps_psf_fabricates_the_plain_buffer(self, tmp_path):
         # Only the type changes: same pin, same deadband, jam detection off.
-        m = _bbx_boot(tmp_path, buffer=None, buffer_type="bambu")
+        m = _bbx_boot(tmp_path, buffer=None, buffer_type="FPS_PSF")
         assert self._sections(m)["AFC_buffer Bambu_AMS_Buffer"] == dict(
-            self.FPS, type="bambu", adc_pin="bambu_buffer:fps")
+            self.FPS, type="FPS_PSF", adc_pin="bambu_buffer:fps")
 
     def test_buffer_type_never_reaches_a_unit_section(self, tmp_path):
         m = _bbx_boot(tmp_path, buffer=None, buffer_type="bambu")
@@ -5174,7 +5173,7 @@ class TestAfcBridgeBoxRosterSections:
         m = _bbx_boot(tmp_path, buffer=None, unit_prefix="Bambu_AMS_B",
                       buffer_chip_name="bambu_buffer_b")
         assert self._sections(m)["AFC_buffer Bambu_AMS_B_Buffer"] == dict(
-            self.FPS, type="FPS_PSF", adc_pin="bambu_buffer_b:fps")
+            self.FPS, type="bambu", adc_pin="bambu_buffer_b:fps")
 
     # lane and name tombstones
 

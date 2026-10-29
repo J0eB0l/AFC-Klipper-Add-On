@@ -703,11 +703,11 @@ class afcBridgeBox:
         self.buffer_chip_name = chip_set or (
             f"{_BUFFER_CHIP_NAME}_{self.name}" if earlier
             else _BUFFER_CHIP_NAME)
-        # The fabricated buffer's type: "FPS_PSF" is the plain
-        # tension-follower, "bambu" adds the odometer gate so the buffer can
-        # stand in for a toolhead sensor (see AFCBambuBuffer). Ignored when an
-        # [AFC_buffer] is adopted.
-        self.buffer_type = config.get("buffer_type", "FPS_PSF")
+        # The fabricated buffer's type: "bambu" (the default) adds the odometer
+        # gate so the buffer can stand in for a toolhead sensor (see
+        # AFCBambuBuffer), "FPS_PSF" is the plain tension-follower. Ignored
+        # when an [AFC_buffer] is adopted.
+        self.buffer_type = config.get("buffer_type", "bambu")
         self.buffer = config.get("buffer", None)
         self._fabricate_buffer = self.buffer is None
         if self._fabricate_buffer:

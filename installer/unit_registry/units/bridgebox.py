@@ -115,7 +115,6 @@ def _chain_edits(sel: UnitSelection) -> List[_LineEdit]:
     :return List[_LineEdit]: the edits, in the order to apply them
     """
     edits: List[_LineEdit] = [
-        (re.compile(r"#buffer_type: FPS_PSF"), "buffer_type: bambu"),
         (re.compile(r"pool_ams: .*"), f"pool_ams: {sel.bridgebox_pool_ams}"),
         (re.compile(r"pool_ht: .*"), f"pool_ht: {sel.bridgebox_pool_ht}"),
     ]
