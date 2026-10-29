@@ -12420,6 +12420,50 @@ class afcBambuAMS(afcUnit):
         except Exception:
             return False
 
+    def _buffer_gate_reading(self, cur_lane: Any) -> Optional[dict]:
+        """
+        What the buffer reads when it stands in for the toolhead sensor.
+
+        With ``pin_tool_start: buffer`` the load ends only when the buffer
+        reads compressed (smoothed fps at ``homing_high_point``) and, for a
+        ``bambu`` buffer, the odometer has stopped. These numbers go into the
+        load's log lines so a load that never arrives shows why.
+
+        :param cur_lane: The lane being loaded
+        :return dict: fps, smoothed, need and (bambu only) still, or None
+          when the lane's extruder has a real toolhead sensor
+        """
+        try:
+            if getattr(cur_lane.extruder_obj, "tool_start", None) != "buffer":
+                return None
+            buf = cur_lane.buffer_obj
+            reading = {"fps": float(buf.fps_value),
+                       "smoothed": float(buf.smoothed_fps),
+                       "need": float(buf._homing_high_point)}
+            if hasattr(buf, "_odom_still_for"):
+                reading["still"] = float(buf._odom_still_for())
+            return reading
+        except Exception:
+            return None            # a log line must never break a load
+
+    @staticmethod
+    def _describe_gate(reading: dict, peak: Optional[float] = None) -> str:
+        """
+        One phrase for a buffer reading, for the load's log lines.
+
+        :param reading: from _buffer_gate_reading
+        :param peak: highest smoothed fps this attempt, when tracked
+        :return str: e.g. "buffer fps 0.62 (smoothed 0.58, peak 0.71,
+          needs 0.70), odometer still 0.2s"
+        """
+        peak_s = f", peak {peak:.2f}" if peak is not None else ""
+        text = (f"buffer fps {reading['fps']:.2f} (smoothed "
+                f"{reading['smoothed']:.2f}{peak_s}, needs "
+                f"{reading['need']:.2f})")
+        if "still" in reading:
+            text += f", odometer still {reading['still']:.1f}s"
+        return text
+
     @staticmethod
     def _buffer_is_toolhead_sensor(cur_lane: Any) -> bool:
         """
@@ -12756,6 +12800,7 @@ class afcBambuAMS(afcUnit):
         odom_t = attempt_t0
         odom_moved = False
         lite_clear = False
+        gate_peak: Optional[float] = None     # highest smoothed buffer fps
 
         def _at_gears(pos: Optional[float], fed: Optional[float]) -> bool:
             """
@@ -12810,13 +12855,19 @@ class afcBambuAMS(afcUnit):
             # A kick to an AMS Lite showing a fault would clear it and feed
             # again: a retry its user never asked for.
             lf = self._lite_fault() if lite else None
+            gate = self._buffer_gate_reading(cur_lane)
+            if gate is not None:
+                gate_peak = max(gate_peak or 0.0, gate["smoothed"])
             if (now - last_kick >= self.load_retry_interval
                 and lf is None):
                 kicks += 1
                 last_kick = now
+                gate_s = (f"; {self._describe_gate(gate, gate_peak)}"
+                          if gate is not None else "")
                 self.logger.debug(
                     f"AFC bambu {self.name}: feeding {cur_lane.name} to sensor "
-                    f"(kick {kicks}); letting the AMS run its own retry")
+                    f"(kick {kicks}); letting the AMS run its own retry"
+                    f"{gate_s}")
                 self.feed(cur_lane, self.load_retry_pulse)
             # A fault is not a reason to stop asking: the AMS recovers under a
             # continued request. Except "state_switch finish, fail, retry:5",
@@ -12875,16 +12926,18 @@ class afcBambuAMS(afcUnit):
                 # takes over (tool_stn plus the purge), so any later reading
                 # would include what the toolhead consumed.
                 self._load_odom_at_sensor = self._feed_odom_mm(cur_lane)
+                gate_s = (f" ({self._describe_gate(gate)})"
+                          if gate is not None else "")
                 # A clean load is already narrated by AFC's load path; log at
                 # info only when this loop had to re-kick the AMS.
                 if kicks:
                     self.logger.info(
                         f"AFC bambu {self.name}: {cur_lane.name} reached the "
-                        f"toolhead sensor after {kicks} feed kick(s)")
+                        f"toolhead sensor after {kicks} feed kick(s){gate_s}")
                 else:
                     self.logger.debug(
                         f"AFC bambu {self.name}: sensor triggered for "
-                        f"{cur_lane.name}, AMS stopped")
+                        f"{cur_lane.name}, AMS stopped{gate_s}")
                 return True
             if limit_mm is not None:
                 fed = self._load_fed_mm(cur_lane)
@@ -12931,6 +12984,12 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 break
         self.stop()
+        gate = self._buffer_gate_reading(cur_lane)
+        if gate is not None:
+            self.logger.info(
+                f"AFC bambu {self.name}: {cur_lane.name} feed ended without "
+                f"the buffer calling the load; "
+                f"{self._describe_gate(gate, gate_peak)}")
         return False
 
     def _log_delta(self, msg: str, debug: bool = True) -> None:

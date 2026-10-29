@@ -24665,6 +24665,35 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert 100.3 <= unit.reactor.now < 100.4
         assert unit.logger.messages == [self._kick(1)]
 
+    def test_a_buffer_toolhead_sensor_logs_its_reading(self, monkeypatch):
+        # pin_tool_start: buffer -- each kick and the give-up say what the
+        # buffer read, so a load the gate never called shows why.
+        unit, lane = self._rig(monkeypatch)
+        readings = iter([0.62, 0.71, 0.55, 0.40])
+        buf = SimpleNamespace(fps_value=0.0, smoothed_fps=0.0,
+                              _homing_high_point=0.7,
+                              _odom_still_for=lambda: 0.2)
+        lane.extruder_obj.tool_start = "buffer"
+        lane.buffer_obj = buf
+
+        real = unit._buffer_gate_reading
+
+        def _step(cur_lane):
+            buf.smoothed_fps = next(readings, 0.40)
+            buf.fps_value = buf.smoothed_fps + 0.04
+            return real(cur_lane)
+        monkeypatch.setattr(unit, "_buffer_gate_reading", _step)
+        assert unit._feed_until_sensor(lane, 0.12) is False
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: feeding lane1 to sensor "
+                      "(kick 1); letting the AMS run its own retry; buffer "
+                      "fps 0.66 (smoothed 0.62, peak 0.62, needs 0.70), "
+                      "odometer still 0.2s"),
+            ("info", "AFC bambu Bambu_AMS_1: lane1 feed ended without the "
+                     "buffer calling the load; buffer fps 0.44 (smoothed "
+                     "0.40, peak 0.71, needs 0.70), odometer still 0.2s"),
+        ]
+
     def test_the_sensor_completes_a_load(self, monkeypatch):
         unit, lane = self._rig(monkeypatch, sensor=[False, False, True],
                                bridge=FakeBridge(status=_p6_frame(odom=3346)))
