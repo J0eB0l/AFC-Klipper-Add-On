@@ -13,7 +13,7 @@ Two files, which always travel together:
 |---|---|
 | `signed_s3.bin` | `signed_s3.bin.manifest.json` |
 
-Both are included in this folder, `Firmwares/BridgeBox/`. They are AFC-2.83.
+Both are included in this folder, `Firmwares/BridgeBox/`. They are AFC-2.90.
 The BridgeBox runs only signed images, and the manifest is the signature:
 without it the BridgeBox refuses the update. AFC needs to understand the
 `.bin`: an AFC too old for it answers `block 0 has no UF2 magic`.
@@ -43,7 +43,7 @@ config, add `UNIT=` with any unit on the BridgeBox you mean, e.g.
 
        AFC_BAMBU_UIDS
 
-   The firmware line reads something like `AFC-2.81`.
+   The firmware line reads something like `AFC-2.83`.
 
 3. **Upload both files** into your Klipper config folder, the one that holds
    `printer.cfg`. In Mainsail or Fluidd that is the Machine tab's file list;
