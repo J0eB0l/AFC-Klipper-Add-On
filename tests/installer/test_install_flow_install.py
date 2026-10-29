@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from typing import Dict
 
@@ -249,6 +250,29 @@ class TestInstallAfcBehavior:
         )
         assert (home / "klipper" / ".git" / "info" / "exclude").read_text() == ""
         assert not [m for m in console.messages if "exclude" in m[1]]
+
+    def test_the_moonraker_block_follows_the_checkouts_remote_and_branch(
+        self, tmp_path: Path
+    ) -> None:
+        home = sandbox(tmp_path, Scenario())
+        ctx = Context.create(REPO_ROOT, home=home)
+        git = ["git", "-C", str(ctx.afc_path)]
+        answers = {
+            (*git, "symbolic-ref", "--quiet", "--short", "HEAD"): "BridgeBox\n",
+            (*git, "config", "branch.BridgeBox.remote"): "bridgebox\n",
+            (*git, "remote", "get-url", "bridgebox"): "https://example.com/fork.git\n",
+        }
+        runner = FakeCommandRunner({
+            argv: subprocess.CompletedProcess(list(argv), 0, stdout=out, stderr="")
+            for argv, out in answers.items()
+        })
+        install_afc(
+            ctx, RecordingConsole(), ScriptedPrompter(["o"] * 10), runner,
+            InstallOptions(selection=UnitSelection()),
+        )
+        text = ctx.moonraker_config_file.read_text()
+        assert "origin: https://example.com/fork.git\n" in text
+        assert "primary_branch: BridgeBox\n" in text
 
     def test_a_second_install_over_the_same_tree_keeps_a_single_include_and_prep(
         self, tmp_path: Path

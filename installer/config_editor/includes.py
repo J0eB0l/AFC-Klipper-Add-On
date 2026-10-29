@@ -72,17 +72,19 @@ def _add_include(doc: ConfigDocument) -> None:
     doc.save()
 
 
-def moonraker_update_block(afc_path: str, gitrepo: str, service: str, home: str) -> str:
+def moonraker_update_block(
+    afc_path: str, gitrepo: str, service: str, home: str, branch: str = "main"
+) -> str:
     """
     Build the ``[update_manager afc-software]`` block for moonraker.conf.
 
-    A checkout under ``home`` is written as ``~/...``. The primary branch is always
-    ``main``, whatever branch is installed.
+    A checkout under ``home`` is written as ``~/...``.
 
     :param afc_path: the AFC-Klipper-Add-On checkout
     :param gitrepo: git remote URL
     :param service: Klipper service managed by the update
     :param home: the user's home directory
+    :param branch: the branch Moonraker keeps the checkout on
     :return str: the block, starting and ending with a newline
     """
     repo_path = afc_path
@@ -94,7 +96,7 @@ def moonraker_update_block(afc_path: str, gitrepo: str, service: str, home: str)
         f"path: {repo_path}\n"
         f"origin: {gitrepo}\n"
         f"managed_services: {service}\n"
-        "primary_branch: main\n"
+        f"primary_branch: {branch}\n"
         "is_system_service: False\n"
         "info_tags:\n"
         "    desc=AFC Klipper Add On\n"

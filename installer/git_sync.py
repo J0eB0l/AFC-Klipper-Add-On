@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Tuple
 
 from installer.platform_core.console import Console
 from installer.platform_core.context import Context
@@ -36,6 +36,27 @@ def make_reexec(script: Path, original_args: List[str]) -> Reexec:
 
 def _git(path: Path, *args: str) -> List[str]:
     return ["git", "-C", str(path), *args]
+
+
+def checkout_source(path: Path, runner: CommandRunner, gitrepo: str) -> Tuple[str, str]:
+    """
+    The remote URL and branch a checkout follows, for Moonraker's update manager.
+
+    A checkout cloned from a fork, or switched with ``-b``, is updated from there rather
+    than from the default repository and ``main``. Without a git checkout on a branch, the
+    answer is ``gitrepo`` and ``main``.
+
+    :param path: the AFC checkout
+    :param runner: command runner
+    :param gitrepo: the repository to fall back to
+    :return Tuple[str, str]: the remote URL and the branch
+    """
+    branch = runner.run(_git(path, "symbolic-ref", "--quiet", "--short", "HEAD")).stdout.strip()
+    if not branch:
+        return gitrepo, "main"
+    remote = runner.run(_git(path, "config", f"branch.{branch}.remote")).stdout.strip()
+    url = runner.run(_git(path, "remote", "get-url", remote or "origin")).stdout.strip()
+    return url or gitrepo, branch
 
 
 def switch_branch_early(
