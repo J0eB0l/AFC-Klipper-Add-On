@@ -98,18 +98,19 @@ FW_MAX_GAP = 64 * 1024
 
 
 #: ESP-IDF app image: magic in byte 0, chip id at byte 12 of the extended
-#: header. The S3 bridge (BridgeBox S3) takes the .bin exactly as built, with
-#: nothing to flatten -- it writes it into its spare OTA slot.
+#: header. The S3 and C3 bridges (BridgeBox S3, BridgeBox C3) take the .bin
+#: exactly as built, with nothing to flatten -- each writes it into its spare
+#: OTA slot. The chip id is ESP-IDF's (esp_chip_id_t).
 ESP_IMAGE_MAGIC = 0xE9
-ESP_CHIP_IDS = {9: "ESP32S3"}
+ESP_CHIP_IDS = {5: "ESP32C3", 9: "ESP32S3"}
 
 
 def firmware_image(blob: bytes) -> Tuple[bytes, Optional[str]]:
     """
     The bytes to send to a bridge, and the chip they are for.
 
-    A Pico bridge takes a .uf2, flattened to flash contents; an ESP32-S3
-    bridge takes the ESP-IDF app .bin unchanged. The chip comes from the file
+    A Pico bridge takes a .uf2, flattened to flash contents; an ESP32-S3 or
+    ESP32-C3 bridge takes the ESP-IDF app .bin unchanged. The chip comes from the file
     either way, so AFC_BAMBU_FLASH can refuse an image built for the other
     board before a byte is sent.
 

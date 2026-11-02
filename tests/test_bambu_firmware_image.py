@@ -1,7 +1,7 @@
 """AFC_BAMBU_FLASH must send each bridge an image built for its chip.
 
-A Pico bridge takes a .uf2, flattened; the BridgeBox S3 takes its ESP-IDF app
-.bin unchanged. Both arrive through firmware_image(), which also names the
+A Pico bridge takes a .uf2, flattened; the BridgeBox S3 and C3 take their
+ESP-IDF app .bin unchanged. Both arrive through firmware_image(), which also names the
 chip so the flash command can refuse a mismatch before a byte is sent. The
 S3 firmware reports "ESP32S3" in `info`; that name is not cross-checked here
 because this test ships with the module and the firmware tree does not (see
@@ -32,9 +32,17 @@ def test_s3_image_passes_through_unchanged() -> None:
     assert chip == "ESP32S3"
 
 
+def test_c3_image_passes_through_unchanged() -> None:
+    blob = _esp_header(5) + bytes(range(256)) * 4
+    img, chip = firmware_image(blob)
+    assert img == blob
+    assert chip == "ESP32C3"
+
+
 def test_esp_image_for_an_unknown_chip_is_refused() -> None:
-    with pytest.raises(ValueError, match="chip id 5"):
-        firmware_image(_esp_header(5) + bytes(64))
+    # 2 is the ESP32-S2, which no bridge uses.
+    with pytest.raises(ValueError, match="chip id 2"):
+        firmware_image(_esp_header(2) + bytes(64))
 
 
 def test_anything_else_goes_to_the_uf2_reader() -> None:
