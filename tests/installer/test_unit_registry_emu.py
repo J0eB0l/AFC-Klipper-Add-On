@@ -232,17 +232,17 @@ class TestTheCompleteRegistry:
             "QuattroBox",
             "OpenAMS",
             "ACE",
-            "BridgeBox",
             "ViViD",
             "EMU",
+            "BridgeBox",
         ]
 
     def test_keys_are_the_unit_keys(self) -> None:
         assert [u.key for u in UNIT_TYPES] == [
             "BoxTurtle_4Lane", "BoxTurtle_8Lane", "NightOwl", "HTLF", "Claymore",
-            "QuattroBox", "OpenAMS", "ACE", "BridgeBox", "ViViD", "EMU",
+            "QuattroBox", "OpenAMS", "ACE", "ViViD", "EMU", "BridgeBox",
         ]
 
-    def test_only_bridgebox_and_vivid_lack_additional_unit_buffer_support(self) -> None:
+    def test_only_vivid_and_bridgebox_lack_additional_unit_buffer_support(self) -> None:
         unsupported = [u.display_name for u in UNIT_TYPES if not u.additional_buffer_supported]
-        assert unsupported == ["BridgeBox", "ViViD"]
+        assert unsupported == ["ViViD", "BridgeBox"]

@@ -1,12 +1,11 @@
 === FILES ===
---- AFC_Ace2_2.cfg ---
+--- AFC_Ace_1.cfg ---
 # Anycubic ACE 2 Pro
 #
 # The ACE 2 is not an MCU. Klipper talks to its firmware over the unit's
 # own USB serial port and the ACE 2 moves the filament itself, so there
 # are no pins or steppers in this file. Its lanes are plain [AFC_lane]
-# sections, not [AFC_stepper]. For a first generation ACE Pro use
-# AFC_ACE_1.cfg instead; the two speak different serial protocols.
+# sections, not [AFC_stepper].
 #
 # Before the first boot:
 #   1. Check serial_port and ace_index below.
@@ -16,10 +15,10 @@
 #      AFC_FPS.cfg). A load feeds afc_bowden_length, then pushes short
 #      pulses until that sensor triggers, and fails if it never does.
 # After boot:
-#   4. AFC_ACE_STATUS UNIT=Ace2_2 prints the unit's status, or "ACE not
+#   4. AFC_ACE_STATUS UNIT=Ace_1 prints the unit's status, or "ACE not
 #      connected". AFC.log, next to klippy.log, says why.
 #   5. With the toolhead empty, insert a spool and run
-#      AFC_ACE_CALIBRATE UNIT=Ace2_2 LANE=lane0. It feeds until the toolhead
+#      AFC_ACE_CALIBRATE UNIT=Ace_1 LANE=lane0. It feeds until the toolhead
 #      sensor triggers and saves that length as the hub's
 #      afc_bowden_length and afc_unload_bowden_length. In direct mode,
 #      run it once for every lane.
@@ -32,7 +31,7 @@
 # flash: AFC keeps the unit's serial port open.
 
 
-[AFC_ACE2 Ace2_2]
+[AFC_ACE2 Ace_1]
 # ---- Serial port ----
 # auto asks every ACE 2 on USB for its id and takes the ace_index-th one
 # in USB port order (first = 1). ACE 2 units show up as
@@ -56,13 +55,13 @@ ace_index: 1
 #           toolchanger. Each lane then sets its own hub: and extruder:
 #           (see the hub and lane sections below).
 mode: combined
-hub: Ace2_2_hub             # direct mode: comment this out
+hub: Ace_1_hub             # direct mode: comment this out
 extruder: extruder          # the [AFC_extruder] fed; a lane can override
 #buffer: <buffer_name>      # an [AFC_buffer], e.g. from AFC_FPS.cfg. In
                             # direct mode set it on each lane or
                             # [AFC_extruder] instead. The ACE 2's own
                             # buffer needs no setting;
-                            # AFC_ACE_BUFFER_STATE UNIT=Ace2_2 shows it.
+                            # AFC_ACE_BUFFER_STATE UNIT=Ace_1 shows it.
 
 # ---- Feeding (defaults shown) ----
 #max_feed_speed: 100        # mm/s. Stock firmware refuses faster feeds;
@@ -75,7 +74,7 @@ extruder: extruder          # the [AFC_extruder] fed; a lane can override
 # On by default on the ACE 2. When its encoder reports that the spool of
 # the lane being printed is not turning with the motor (stuck, tangled,
 # slipping or a motor fault), AFC stops feed assist and pauses the print.
-# Toggle it live with AFC_ACE_STUCK_SPOOL_DETECTION UNIT=Ace2_2 ENABLE=0.
+# Toggle it live with AFC_ACE_STUCK_SPOOL_DETECTION UNIT=Ace_1 ENABLE=0.
 #stuck_spool_detection: True
 
 # ---- Staging ----
@@ -94,19 +93,19 @@ extruder: extruder          # the [AFC_extruder] fed; a lane can override
                             # dryer from the [afc_dryer] panel.
 # Start and stop a drying cycle (DURATION in minutes; defaults are 50 C
 # for 90 minutes; FAN=0 dries with the dryer fan off):
-#   AFC_ACE_DRY UNIT=Ace2_2 TEMP=55 DURATION=240
-#   AFC_ACE_DRY_STOP UNIT=Ace2_2
+#   AFC_ACE_DRY UNIT=Ace_1 TEMP=55 DURATION=240
+#   AFC_ACE_DRY_STOP UNIT=Ace_1
 # ROTATE=1 turns the spools while drying, as the Bambu units do: every
 # dry_rotate_interval seconds each lane with nothing in the feed gears gets
 # a slow rollback, which turns its spool without moving filament. It is
 # refused while any lane on the unit is loaded to the hub or toolhead,
 # holds while printing, skips threaded lanes, and ends with the cycle.
 # Unthread a lane (tip secured to the spool) to dry it with rotation.
-#   AFC_ACE_DRY UNIT=Ace2_2 TEMP=50 DURATION=240 ROTATE=1
+#   AFC_ACE_DRY UNIT=Ace_1 TEMP=50 DURATION=240 ROTATE=1
 #dry_rotate_length: 150     # mm of rollback per turn
 #dry_rotate_speed: 15       # mm/s, slow on purpose
 #dry_rotate_interval: 300   # seconds between turns
-# AFC_ACE_FAN UNIT=Ace2_2 SPEED=0-100 sets the unit's own fan. For buttons,
+# AFC_ACE_FAN UNIT=Ace_1 SPEED=0-100 sets the unit's own fan. For buttons,
 # add templates/AFC_Dryer.cfg. Its web panel finds this unit by itself.
 
 # ---- Spoolman ----
@@ -125,24 +124,24 @@ extruder: extruder          # the [AFC_extruder] fed; a lane can override
 # parked tip short of the point where the four tubes merge, or it blocks
 # the other lanes. In direct mode it can run most of the way to the tool.
 [AFC_lane lane0]
-unit: Ace2_2:1
+unit: Ace_1:1
 dist_hub: 60
 
 [AFC_lane lane1]
-unit: Ace2_2:2
+unit: Ace_1:2
 dist_hub: 60
 
 [AFC_lane lane2]
-unit: Ace2_2:3
+unit: Ace_1:3
 dist_hub: 60
 
 [AFC_lane lane3]
-unit: Ace2_2:4
+unit: Ace_1:4
 dist_hub: 60
 
 # The ACE 2 has no hub switch, so the hub is VIRTUAL: it reads occupied
 # only while a lane is loaded through to the toolhead.
-[AFC_hub Ace2_2_hub]
+[AFC_hub Ace_1_hub]
 switch_pin: virtual
 afc_bowden_length: 900      # mm from where a lane parks (dist_hub) to the
                             # toolhead sensor. Too long pushes filament
@@ -153,29 +152,30 @@ afc_bowden_length: 900      # mm from where a lane parks (dist_hub) to the
 # above. Each lane runs to its own tool, so each needs its own length, and
 # a shared hub would block every load while any one tool is loaded. A lane
 # that names a missing hub gets a plain hub with no sensor, with no warning.
-#[AFC_hub Ace2_2_hub1]
+#[AFC_hub Ace_1_hub1]
 #switch_pin: virtual
 #afc_bowden_length: 900
 #
-#[AFC_hub Ace2_2_hub2]
+#[AFC_hub Ace_1_hub2]
 #switch_pin: virtual
 #afc_bowden_length: 900
 #
-#[AFC_hub Ace2_2_hub3]
+#[AFC_hub Ace_1_hub3]
 #switch_pin: virtual
 #afc_bowden_length: 900
 #
-#[AFC_hub Ace2_2_hub4]
+#[AFC_hub Ace_1_hub4]
 #switch_pin: virtual
 #afc_bowden_length: 900
 
 # Optional: the ACE 2's temperature and humidity on the Mainsail/Fluidd
-# card. Keep this after [AFC_ACE2 Ace2_2], which registers the sensor
+# card. Keep this after [AFC_ACE2 Ace_1], which registers the sensor
 # type. Fluidd shows the humidity only with sensor_type: aht2x (the same
 # sensor).
-[temperature_sensor Ace2_2]
+[temperature_sensor Ace_1]
 sensor_type: aht2x
-ace_unit: Ace2_2            # the [AFC_ACE2] section name
+afc_type: ACE2
+ace_unit: Ace_1            # the [AFC_ACE2] section name
 min_temp: 0
 max_temp: 85                # Klipper shuts down above this, so keep it
                             # well above max_dryer_temperature
@@ -192,7 +192,7 @@ max_temp: 85                # Klipper shuts down above this, so keep it
 # Klipper takes only one [AFC_ACE2_rfid], and it serves one ACE 2: the one
 # named in ace2_object, or the first [AFC_ACE2] it finds.
 #[AFC_ACE2_rfid]
-#ace2_object: AFC_ACE2 Ace2_2
+#ace2_object: AFC_ACE2 Ace_1
 #
 # Decode keys, 32 hex characters each. AFC does not ship them. Bambu tags
 # need bambu_master_key, the Bambu RFID master key published by the
@@ -245,7 +245,7 @@ max_temp: 85                # Klipper shuts down above this, so keep it
 # Read retries, reader timing and more staging options are described
 # where extras/AFC_ACE2_rfid.py reads them. Leave them unless debugging.
 #
-# Read a tag by hand: ACE_RFID_READ LANE=lane0--- end AFC_Ace2_2.cfg ---
+# Read a tag by hand: ACE_RFID_READ LANE=lane0--- end AFC_Ace_1.cfg ---
 --- AFC_Turtle_1.cfg ---
 placeholder
 --- end AFC_Turtle_1.cfg ---

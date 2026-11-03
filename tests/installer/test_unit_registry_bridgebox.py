@@ -6,6 +6,7 @@ import pytest
 from installer.platform_core.console import NC, RED
 from installer.platform_core.context import Context
 from installer.platform_core.errors import InstallerExit
+from installer.unit_registry.extruders import apply_unit_extruder
 from installer.unit_registry.registry import (
     additional_buffer_supported,
     additional_default_name,
@@ -16,7 +17,6 @@ from installer.unit_registry.units import bridgebox
 from installer.unit_registry.units.bridgebox import (
     BridgeBox,
     ConnectionOption,
-    ExtruderOption,
     PoolOption,
     SerialOption,
     connection_label,
@@ -85,20 +85,17 @@ class TestFirstInstall:
         template = (printer_tree.afc_path / "templates" / TEMPLATE).read_text()
         assert (ctx.afc_config_dir / TEMPLATE).read_text() == template
 
-    def test_the_counts_the_port_and_the_extruder_are_written(
-        self, printer_tree: PrinterTree
-    ) -> None:
+    def test_the_counts_and_the_port_are_written(self, printer_tree: PrinterTree) -> None:
         sel = selection(
             bridgebox_pool_ams=2, bridgebox_pool_ht=0,
             bridgebox_serial="/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_AA-if00",
-            bridgebox_extruder="extruder1",
+            extruder="extruder1",
         )
         lines = settings(install(printer_tree, sel))
         assert "pool_ams: 2" in lines
         assert "pool_ht: 0" in lines
         assert "serial_port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_AA-if00" in lines
-        assert "extruder: extruder1" in lines
-        assert "extruder: extruder" not in lines
+        assert "extruder: extruder" in lines, "the installer's extruder step writes it"
 
     def test_usb_then_wifi_turns_the_connection_line_on(self, printer_tree: PrinterTree) -> None:
         lines = settings(install(printer_tree, selection(bridgebox_connection="usb_wifi")))
@@ -130,22 +127,22 @@ class TestAdditionalChain:
     def test_copies_the_template_under_the_chain_name_and_renames_the_section(
         self, printer_tree: PrinterTree
     ) -> None:
-        sel = selection(unit_name="chain2", is_additional_unit=True, bridgebox_pool_ams=1)
+        sel = selection(unit_name="chain_2", is_additional_unit=True, bridgebox_pool_ams=1)
         ctx = install(printer_tree, sel, additional=True)
-        assert files(ctx) == ["AFC_chain2.cfg"]
-        text = (ctx.afc_config_dir / "AFC_chain2.cfg").read_text()
-        assert "\n[AFC_BridgeBox chain2]\n" in text
+        assert files(ctx) == ["AFC_chain_2.cfg"]
+        text = (ctx.afc_config_dir / "AFC_chain_2.cfg").read_text()
+        assert "\n[AFC_BridgeBox chain_2]\n" in text
         assert "\n[AFC_BridgeBox chain1]\n" not in text
         assert "# [AFC_BridgeBox chain1] below" in text, "comments are left alone"
-        lines = settings(ctx, "AFC_chain2.cfg")
+        lines = settings(ctx, "AFC_chain_2.cfg")
         assert "pool_ams: 1" in lines
 
     def test_the_first_chains_unit_names_are_commented_out(
         self, printer_tree: PrinterTree
     ) -> None:
-        sel = selection(unit_name="chain2", is_additional_unit=True)
+        sel = selection(unit_name="chain_2", is_additional_unit=True)
         ctx = install(printer_tree, sel, additional=True)
-        text = (ctx.afc_config_dir / "AFC_chain2.cfg").read_text()
+        text = (ctx.afc_config_dir / "AFC_chain_2.cfg").read_text()
         template = (printer_tree.afc_path / "templates" / TEMPLATE).read_text()
         for key in ("ams_names", "ht_names"):
             original = [line for line in template.splitlines() if line.startswith(f"{key}:")]
@@ -153,54 +150,76 @@ class TestAdditionalChain:
             assert f"#{original[0]}\n" in text
             assert f"\n{original[0]}\n" not in text
 
-    def test_no_buffer_target_the_chain_builds_its_own(self, printer_tree: PrinterTree) -> None:
-        ctx = make_ctx(printer_tree)
-        assert BridgeBox().buffer_target(ctx, selection()) is None
+    def test_the_chain_builds_its_own_buffer(self) -> None:
         assert additional_buffer_supported(BRIDGEBOX) is False
 
 
+class TestExtruderChoice:
+    def test_the_first_chain_is_targeted_in_its_own_file(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        target = BridgeBox().buffer_target(ctx, selection(unit_name="ignored"))
+        assert target == (
+            "chain1", "AFC_BridgeBox", ctx.afc_config_dir / TEMPLATE, "chain1", ""
+        )
+
+    def test_an_additional_chain_is_targeted_by_its_name(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        sel = selection(unit_name="chain_2", is_additional_unit=True)
+        target = BridgeBox().buffer_target(ctx, sel)
+        assert target == (
+            "chain_2", "AFC_BridgeBox", ctx.afc_config_dir / "AFC_chain_2.cfg", "chain_2", ""
+        )
+
+    def test_the_chosen_extruder_is_written_into_the_chain(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        sel = selection(unit_name="chain_2", is_additional_unit=True, extruder="extruder1")
+        ctx = install(printer_tree, sel, additional=True)
+        (ctx.afc_config_dir / "AFC_Hardware.cfg").write_text(
+            "[AFC_extruder Tool1]\nextruder_name: extruder1\n"
+        )
+        apply_unit_extruder(ctx, RecordingConsole(), ScriptedPrompter([]), sel)
+        lines = settings(ctx, "AFC_chain_2.cfg")
+        assert "extruder: Tool1" in lines
+        assert "extruder: extruder" not in lines
+
+
 class TestChainNames:
-    def write(self, ctx: Context, name: str, text: str) -> None:
+    def write(self, ctx: Context, name: str, text: str = "placeholder\n") -> None:
         ctx.afc_config_dir.mkdir(parents=True, exist_ok=True)
         (ctx.afc_config_dir / name).write_text(text)
 
-    def test_chain1_when_no_chain_exists(self, printer_tree: PrinterTree) -> None:
+    def test_chain_1_when_no_chain_exists(self, printer_tree: PrinterTree) -> None:
         ctx = make_ctx(printer_tree)
-        self.write(ctx, "AFC_Turtle_1.cfg", "[AFC_BoxTurtle Turtle_1]\n")
-        assert additional_default_name(ctx, selection()) == "chain1"
+        self.write(ctx, "AFC_Turtle_1.cfg")
+        assert additional_default_name(ctx, selection()) == "chain_1"
 
-    def test_the_next_free_chain_after_the_sections_found_whatever_the_file_names(
-        self, printer_tree: PrinterTree
-    ) -> None:
+    def test_the_first_chains_file_takes_chain_1(self, printer_tree: PrinterTree) -> None:
         ctx = make_ctx(printer_tree)
-        self.write(ctx, TEMPLATE, "[AFC_BridgeBox chain1]\nserial_port: auto\n")
-        self.write(ctx, "AFC_Second.cfg", "# [AFC_BridgeBox chain9]\n[AFC_BridgeBox chain2]\n")
-        assert additional_default_name(ctx, selection()) == "chain3"
+        self.write(ctx, TEMPLATE)
+        assert additional_default_name(ctx, selection()) == "chain_2"
 
-    def test_a_gap_is_filled_first(self, printer_tree: PrinterTree) -> None:
+    def test_the_next_free_chain_file_is_offered(self, printer_tree: PrinterTree) -> None:
         ctx = make_ctx(printer_tree)
-        self.write(ctx, "AFC_chain2.cfg", "[AFC_BridgeBox chain2]\n")
-        assert additional_default_name(ctx, selection()) == "chain1"
+        self.write(ctx, TEMPLATE)
+        self.write(ctx, "AFC_chain_2.cfg")
+        assert additional_default_name(ctx, selection()) == "chain_3"
 
     def test_the_additional_screen_offers_that_name(self, printer_tree: PrinterTree) -> None:
         unit = unit_for(BRIDGEBOX)
         assert unit is not None
         ctx = make_ctx(printer_tree)
-        self.write(ctx, TEMPLATE, "[AFC_BridgeBox chain1]\n")
+        self.write(ctx, TEMPLATE)
         sel = selection(unit_name="stale")
-        assert additional_rows(unit, ctx, sel)[0] == "BridgeBox Chain Name : chain2"
+        assert additional_rows(unit, ctx, sel)[0] == "BridgeBox Chain Name : chain_2"
 
     def test_the_first_chain_is_always_chain1(self) -> None:
         assert BridgeBox().default_name == "chain1"
 
 
 class TestMessageAndRows:
-    def test_the_message_names_the_extruder_section(self, printer_tree: PrinterTree) -> None:
-        sel = selection(bridgebox_extruder="extruder2")
-        assert BridgeBox().message(make_ctx(printer_tree), sel) == (
-            "\n- This chain feeds [AFC_extruder extruder2]. Check that your AFC config has that "
-            "section.\n  "
-        )
+    def test_there_is_no_extra_message(self, printer_tree: PrinterTree) -> None:
+        assert BridgeBox().message(make_ctx(printer_tree), selection()) == ""
 
     def test_install_rows_show_every_choice(self) -> None:
         unit = unit_for(BRIDGEBOX)
@@ -210,7 +229,6 @@ class TestMessageAndRows:
             "Units on this chain : 4 AMS, 8 AMS HT",
             "Connection : WiFi at 10.0.0.9",
             "USB serial port : none (WiFi only)",
-            "Extruder : extruder",
         ]
 
     @pytest.mark.parametrize(
@@ -398,33 +416,3 @@ class TestSerialOption:
 
     def test_value_is_the_port_otherwise(self) -> None:
         assert SerialOption().value(selection(bridgebox_serial="/dev/x")) == "/dev/x"
-
-
-class TestExtruderOption:
-    def test_a_name_is_stored(self, printer_tree: PrinterTree) -> None:
-        sel = selection()
-        message, _, prompter = activate(ExtruderOption(), printer_tree, sel, ["extruder1"])
-        assert prompter.prompts == [
-            "Extruder this chain feeds (for example extruder or extruder1; Enter keeps extruder): "
-        ]
-        assert (message, sel.bridgebox_extruder) == ("Extruder: extruder1", "extruder1")
-
-    def test_enter_keeps_the_extruder(self, printer_tree: PrinterTree) -> None:
-        sel = selection(bridgebox_extruder="extruder3")
-        message, _, _ = activate(ExtruderOption(), printer_tree, sel, [""])
-        assert (message, sel.bridgebox_extruder) == ("Extruder: extruder3", "extruder3")
-
-    @pytest.mark.parametrize("answer", ["two words", "[AFC_extruder extruder]", "ext:1"])
-    def test_a_name_that_is_not_a_section_name_is_refused(
-        self, printer_tree: PrinterTree, answer: str
-    ) -> None:
-        sel = selection()
-        message, _, _ = activate(ExtruderOption(), printer_tree, sel, [answer])
-        assert message == (
-            f"{RED}Enter the extruder's name as its [AFC_extruder] section names it, with no "
-            f"spaces.{NC}"
-        )
-        assert sel.bridgebox_extruder == "extruder"
-
-    def test_value_is_the_extruder(self) -> None:
-        assert ExtruderOption().value(selection(bridgebox_extruder="e2")) == "e2"

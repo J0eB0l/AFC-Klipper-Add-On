@@ -29,9 +29,9 @@ class TestRepoLayout:
 
     #: The firmware and flashing-tool tree. Anything naming this path is on
     #: the wrong side of the release boundary if it also ships.
-    PRIVATE = "Firmwares"
+    PRIVATE = "firmwares"
 
-    #: Firmwares/ tools whose own tests may reach across: module name ->
+    #: firmwares/ tools whose own tests may reach across: module name ->
     #: its path under the repo root.
     TOOLS = {"ams_flash": pathlib.Path(PRIVATE, "Bambu_AMS", "ams_flash.py")}
 
@@ -44,7 +44,7 @@ class TestRepoLayout:
     @classmethod
     def _depends_on_private(cls, path: pathlib.Path) -> bool:
         """
-        Whether this file depends on Firmwares/, as opposed to mentioning it.
+        Whether this file depends on firmwares/, as opposed to mentioning it.
 
         This guard itself is skipped, as it names the tree to look for it.
         Comments and docstrings do not count: a released module explaining
@@ -52,7 +52,7 @@ class TestRepoLayout:
         and string literals do, because those break once the tree is gone.
 
         :param path: a Python file
-        :return bool: True when it imports from or names a path in Firmwares/
+        :return bool: True when it imports from or names a path in firmwares/
         """
         if (path.name == "test_repo_boundary.py"
             or path.resolve() == pathlib.Path(__file__).resolve()):
@@ -84,7 +84,7 @@ class TestRepoLayout:
 
     @classmethod
     def _crossing_tests(cls) -> List[str]:
-        """:return list: names of the test files that depend on Firmwares/"""
+        """:return list: names of the test files that depend on firmwares/"""
         return sorted(p.name for p in (cls.ROOT / "tests").glob("*.py")
                       if cls._depends_on_private(p))
 
@@ -95,7 +95,7 @@ class TestRepoLayout:
         or ``test_<tool>_<topic>``.
 
         :param test_name: a test file's name
-        :return str: the Firmwares/ tool it tests, None for none
+        :return str: the firmwares/ tool it tests, None for none
         """
         stem = pathlib.Path(test_name).stem
         for tool in cls.TOOLS:
@@ -163,12 +163,12 @@ class TestRepoLayout:
         # The scan has to see each way a module can depend on the tree, and
         # not a docstring that only explains it, or it passes vacuously.
         planted = {
-            "imports.py": "import Firmwares.Bambu_AMS.ams_flash\n",
-            "from_import.py": "from Firmwares.Bambu_AMS import ams_flash\n",
-            "literal.py": "TOOL = 'Firmwares/Bambu_AMS/ams_flash.py'\n",
-            "docstring.py": '"""Talks to what Firmwares/ flashes."""\n'
-                            "# Firmwares/ in a comment\nX = 1\n",
-            "broken.py": "Firmwares = (\n"}
+            "imports.py": "import firmwares.Bambu_AMS.ams_flash\n",
+            "from_import.py": "from firmwares.Bambu_AMS import ams_flash\n",
+            "literal.py": "TOOL = 'firmwares/Bambu_AMS/ams_flash.py'\n",
+            "docstring.py": '"""Talks to what firmwares/ flashes."""\n'
+                            "# firmwares/ in a comment\nX = 1\n",
+            "broken.py": "firmwares = (\n"}
         for name, text in planted.items():
             (tmp_path / name).write_text(text)
         flagged = sorted(name for name in planted
@@ -181,7 +181,7 @@ class TestRepoLayout:
         assert offenders == []
 
     def test_only_the_known_tests_cross_the_boundary(self) -> None:
-        # Tests may cross, but only those of a Firmwares/ tool, named for it:
+        # Tests may cross, but only those of a firmwares/ tool, named for it:
         # test_<tool> or test_<tool>_<topic>.
         names = {"test_ams_flash.py": "ams_flash",
                  "test_ams_flash_addressing.py": "ams_flash",

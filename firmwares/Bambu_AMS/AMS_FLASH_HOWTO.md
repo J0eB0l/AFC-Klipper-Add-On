@@ -40,10 +40,10 @@ Also:
    bridges both work; the port is read from your Klipper config. To update
    the bridge itself, see
    [BRIDGE_FLASH_HOWTO.md](../BridgeBox/BRIDGE_FLASH_HOWTO.md) in
-   `Firmwares/BridgeBox/`.
+   `firmwares/BridgeBox/`.
 2. **Klipper's `gcode_shell_command`.** Built into Kalico; on stock Klipper
    install the `gcode_shell_command` extra.
-3. **The updater files** from this folder, `Firmwares/Bambu_AMS/`, copied
+3. **The updater files** from this folder, `firmwares/Bambu_AMS/`, copied
    into your Klipper config folder (usually `~/printer_data/config/`):
    - `ams_flash.py`
    - `ams_flash.cfg`
@@ -157,7 +157,7 @@ Update them one at a time: finish one, unplug it, connect the next, repeat.
 
 An artifact is the firmware as it goes out on the bus: one header frame plus
 the data blocks. Each model's is different and they are not interchangeable.
-The two that exist ship in this folder, `Firmwares/Bambu_AMS/`.
+The two that exist ship in this folder, `firmwares/Bambu_AMS/`.
 
 | file | model | firmware | blocks |
 |---|---|---|---|

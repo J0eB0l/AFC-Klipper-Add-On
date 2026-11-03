@@ -11,7 +11,7 @@ AMS bus, so unplugging it, even mid-print, changes nothing on the printer.
 
 ## The files
 
-Both are version AFC-1.46, in this folder, `Firmwares/BridgeBox_Display/`.
+Both are version AFC-1.46, in this folder, `firmwares/BridgeBox_Display/`.
 
 | file | flash at | keeps the saved WiFi and printer | use it for |
 |---|---|---|---|
@@ -42,8 +42,8 @@ use esptool 5, whose commands are spelled with dashes (`flash-id`,
    GitHub):
 
        mkdir -p ~/bridgebox_display && cd ~/bridgebox_display
-       wget -O bridgebox-full-0x0.bin https://raw.githubusercontent.com/J0eB0l/AFC-Klipper-Add-On/BridgeBox/Firmwares/BridgeBox_Display/bridgebox-full-0x0.bin
-       wget -O bridgebox-update-app-0x10000.bin https://raw.githubusercontent.com/J0eB0l/AFC-Klipper-Add-On/BridgeBox/Firmwares/BridgeBox_Display/bridgebox-update-app-0x10000.bin
+       wget -O bridgebox-full-0x0.bin https://raw.githubusercontent.com/J0eB0l/AFC-Klipper-Add-On/BridgeBox/firmwares/BridgeBox_Display/bridgebox-full-0x0.bin
+       wget -O bridgebox-update-app-0x10000.bin https://raw.githubusercontent.com/J0eB0l/AFC-Klipper-Add-On/BridgeBox/firmwares/BridgeBox_Display/bridgebox-update-app-0x10000.bin
 
 3. **Connect the panel's USB-C and find its port.** It is a CH340 serial
    port. On Linux list the ports by name:

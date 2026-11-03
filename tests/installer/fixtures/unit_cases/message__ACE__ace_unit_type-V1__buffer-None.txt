@@ -4,7 +4,7 @@
 
 - AFC-Klipper-Add-On python extensions installed to <WORKDIR>/klipper/klippy/extras/
 
-- Ensure you check the serial_port and ace_index settings in the <WORKDIR>/AFC/AFC_ACE_1.cfg file.
+- Ensure you check the serial_port and ace_index settings in the <WORKDIR>/AFC/AFC_ACE_1.cfg file (leaving serial_port as auto is fine).
   
 You may now quit the script or return to the main menu.
 

@@ -30,28 +30,30 @@ _SECOND_NAME = "Turtle_2"
 
 def lowest_free_name(ctx: Context, sel: UnitSelection, unit: Optional[UnitType]) -> str:
     """
-    The default name for an additional unit: the lowest free ``<prefix>_N``.
+    The default name for an additional unit: the lowest free `<prefix>_N`.
 
-    "Free" means no matching unit file exists yet in the AFC config directory. A unit
-    type decides its own names (``UnitType.lowest_free_name``); an unknown type gets
-    ``Unit_N``.
+    "Free" means no matching unit file exists yet in the AFC config directory.
 
     :param ctx: installer context
     :param sel: the user's unit choices
     :param unit: the unit type, or None for an unknown type
     :return str: the name
     """
-    if unit is not None:
-        return unit.lowest_free_name(ctx, sel)
+    prefix = unit.name_prefix(sel) if unit is not None else "Unit"
     number = 1
-    while (ctx.afc_config_dir / f"AFC_Unit_{number}.cfg").is_file():
+    while True:
+        if unit is not None:
+            probe = unit.additional_probe_file(prefix, number, sel)
+        else:
+            probe = f"AFC_{prefix}_{number}.cfg"
+        if not (ctx.afc_config_dir / probe).is_file():
+            return f"{prefix}_{number}"
         number += 1
-    return f"Unit_{number}"
 
 
 def valid_unit_name(name: str) -> bool:
     """
-    Is this an allowed unit name: ASCII letters, digits, ``-`` and ``_``, at most 24 long?
+    Is this an allowed unit name: ASCII letters, digits, `-` and `_`, at most 24 long?
 
     :param name: candidate name
     :return bool: True if allowed
@@ -89,7 +91,7 @@ def name_unit(
 
     :param console: where messages go
     :param prompter: where answers come from
-    :param sel: the user's unit choices, ``unit_name`` is updated
+    :param sel: the user's unit choices, `unit_name` is updated
     :param default: the name used when the answer is empty
     :return str: the status message for the menu
     """
@@ -103,9 +105,9 @@ def replace_unit_name(ctx: Context, old: str, new: str) -> None:
     """
     Rename a unit everywhere in the AFC config directory.
 
-    Every file's contents are rewritten, then each ``AFC_<old>.cfg`` anywhere in the tree
-    moves to ``AFC_<new>.cfg`` at the top and each ``mcu/**/<old>.cfg`` to ``mcu/<new>.cfg``,
-    replacing whatever is there, like the ``find -exec mv`` it ports.
+    Every file's contents are rewritten, then each `AFC_<old>.cfg` anywhere in the tree
+    moves to `AFC_<new>.cfg` at the top and each `mcu/**/<old>.cfg` to `mcu/<new>.cfg`,
+    replacing whatever is there, like the `find -exec mv` it ports.
 
     :param ctx: installer context
     :param old: current unit name
@@ -121,17 +123,22 @@ def replace_unit_name(ctx: Context, old: str, new: str) -> None:
 
 def _regular_files_named(directory: Path, name: str) -> List[Path]:
     """
-    Regular files (not links) with this exact name anywhere under a directory.
+    Regular files (not links) matching this name anywhere under a directory.
+
+    The match is case-insensitive, since a unit's own file can use different casing than
+    its name (e.g. ACE's default `AFC_ACE_1.cfg` for the unit named `Ace_1`).
 
     :param directory: tree to search; a missing one has no files
-    :param name: file name
+    :param name: file name to match
     :return List[Path]: the matches
     """
     found: List[Path] = []
+    target = name.lower()
     for root, _dirs, files in os.walk(directory):
-        candidate = Path(root) / name
-        if name in files and not candidate.is_symlink():
-            found.append(candidate)
+        for file_name in files:
+            candidate = Path(root) / file_name
+            if file_name.lower() == target and not candidate.is_symlink():
+                found.append(candidate)
     return found
 
 
@@ -153,7 +160,7 @@ def rename_unit_prompt(ctx: Context, console: Console, prompter: Prompter) -> st
     new = ask_for_name(
         console, prompter, f"Enter new name for unit (Default: {_SECOND_NAME}): ", _SECOND_NAME
     )
-    if not (ctx.afc_config_dir / f"AFC_{old}.cfg").is_file():
+    if not _regular_files_named(ctx.afc_config_dir, f"AFC_{old}.cfg"):
         return f"Unit {old} not found, please enter a valid unit name."
     replace_unit_name(ctx, old, new)
     return f"Renaming unit {old} to {new}"
@@ -185,7 +192,7 @@ def verify_name_not_in_use(ctx: Context, name: str) -> bool:
     """
     Is this name already used anywhere in the AFC config directory contents?
 
-    A plain substring search over every file, so ``Turtle_1`` is blocked by ``Turtle_10``.
+    A plain substring search over every file, so `Turtle_1` is blocked by `Turtle_10`.
 
     :param ctx: installer context
     :param name: candidate unit name
@@ -206,7 +213,7 @@ def name_in_use_message(name: str) -> str:
 
 def check_existing_unit_installed(ctx: Context) -> bool:
     """
-    Has a first unit been installed (does any config file define an ``[AFC_stepper lane``)?
+    Has a first unit been installed (does any config file define an `[AFC_stepper lane`)?
 
     :param ctx: installer context
     :return bool: True if a lane section exists

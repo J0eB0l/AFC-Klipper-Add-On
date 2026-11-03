@@ -88,7 +88,6 @@ LEGACY_LABEL_KEYS = {
     "Units on this chain": "P",
     "Connection": "W",
     "USB serial port": "S",
-    "Extruder": "X",
 }
 
 

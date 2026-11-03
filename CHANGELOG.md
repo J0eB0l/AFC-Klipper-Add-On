@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11-01-2026]
+### Added
+- Added ability to choose extruder when first installing AFC and when adding additional units on a multi-toolhead system
+
+## [10-31-2026]
+### Fixed
+- Fixed Bowden calibration not detecting an already extended buffer when `pin_tool_start` is set to buffer, which previously surfaced as an unrelated "failed to home filament back to hub" error. Fixes #742
+- Fixed TD-1 calibration silently ignoring a failed move to hub/load instead of failing the calibration. Fixes #799
+- Fixed CALIBRATE_AFC continuing on to Bowden/TD-1 calibration after an earlier LANE or Bowden step had already failed. Fixes #747
+- Fixed Bowden calibration reporting a failure when homing actually succeeded but the move distance was greater than the fault distance.
+- Fixed potential aht2x objects getting overridden in klippers heater factory. Now temperature_afc only registers aht2x once and then returns the correct temperature_ace/oams depending on type.
+
+## [10-25-2026]
+### Fixed
+- Brought in fix from suchmememanyskill which fixes issue 828 where AFC would throw an error during printing if lanes T(n) index was not found in the gcode file metadata.
+
+## [10-24-2026]
+### Added
+- Added support for ACE Pro(1/2) series filament changes, work originally done by J0eb0l
+- Changed FPSEndstopWrapper class to be PollingEndstopWrapper since this is common enough and can now be used for filament_motion_sensor homing like what is on U1's printer as toolhead sensor.
+
 ## [10-16-2026]
 ### Added
 - Added support for Isik Techs new OWLFC MCU board for NightOwl units

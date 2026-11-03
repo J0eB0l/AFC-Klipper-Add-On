@@ -3,10 +3,10 @@
 # Copyright (C) 2026 AFCProject
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-"""Anycubic ACE Pro (V1) and ACE 2 Pro (V2_Pro)."""
+"""ACE: Anycubic's ACE Pro (V1) and ACE 2 Pro filament changers."""
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from installer.config_editor.edits import replace_text
 from installer.platform_core.console import Console, Prompter
@@ -16,26 +16,20 @@ from installer.unit_registry.base import BufferTarget, UnitType
 from installer.unit_registry.options import ACE_UNIT_TYPES, ChoiceOption, NameOption, UnitOption
 from installer.unit_registry.selection import UnitSelection
 
-_V2_PRO = "V2_Pro"
-# The buffer cycle: the ACE buffers internally, so Internal is the default and None is
-# offered as well, since ramming is never active and FPS_PSF has nothing to fall back to.
-_NEXT_BUFFER: Dict[str, str] = {
-    "Internal": "TurtleNeck",
-    "TurtleNeck": "TurtleNeckV2",
-    "TurtleNeckV2": "TurtleNeck2Remastered",
-    "TurtleNeck2Remastered": "FPS_PSF",
-    "FPS_PSF": "None",
-}
+_BUFFER_ORDER: Tuple[str, ...] = (
+    "Internal", "TurtleNeck", "TurtleNeckV2", "TurtleNeck2Remastered", "FPS_PSF", "None"
+)
 
 
 class Ace(UnitType):
     """
-    The ACE is not an MCU: no board or motor type, no pins or steppers file.
+    ACE is not an MCU: no board/motor type, no pins or steppers file.
 
-    The two generations are separate Klipper modules (``AFC_ACE`` and ``AFC_ACE2``) with
-    their own templates and default names, chosen with the unit type option rather than a
-    second entry in the type picker. Its load pulses filament until the toolhead sensor
-    triggers, so ramming is not offered.
+    V1 (`AFC_ACE`) and V2_Pro (`AFC_ACE2`) are separate Klipper classes with their own
+    templates and default names, toggled by `ace_unit_type`. ACE's load sequence always
+    uses a toolhead sensor (ramming is not a supported strategy for it), and it buffers
+    internally by default, so its buffer cycle includes `Internal` alongside the usual
+    mechanical options.
     """
 
     display_name = "ACE"
@@ -46,30 +40,14 @@ class Ace(UnitType):
         "None", "Internal", "TurtleNeck", "TurtleNeckV2", "TurtleNeck2Remastered", "FPS_PSF"
     )
     additional_buffer_default = "Internal"
-
-    def additional_prefix(self, sel: UnitSelection) -> str:
-        """
-        ``Ace2`` for an ACE 2 Pro, ``Ace`` for an ACE Pro.
-
-        :param sel: the user's unit choices
-        :return str: the prefix
-        """
-        return "Ace2" if sel.ace_unit_type == _V2_PRO else "Ace"
-
-    def _first_name(self, sel: UnitSelection) -> str:
-        return f"{self.additional_prefix(sel)}_1"
-
-    def _section_prefix(self, sel: UnitSelection) -> str:
-        return "AFC_ACE2" if sel.ace_unit_type == _V2_PRO else "AFC_ACE"
-
-    def _template(self, sel: UnitSelection) -> str:
-        return "AFC_ACE2_1.cfg" if sel.ace_unit_type == _V2_PRO else "AFC_ACE_1.cfg"
+    ramming_supported = False
+    force_additional_buffer_default = True
 
     def copy_files(
         self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
     ) -> None:
         """
-        Copy the hardware file and the generation's unit file under its fixed name.
+        Copy the hardware file and the fixed-name unit file for the selected ACE version.
 
         :param ctx: installer context
         :param console: where messages go
@@ -78,64 +56,101 @@ class Ace(UnitType):
         """
         templates = ctx.afc_path / "templates"
         cfg = ctx.afc_config_dir
-        hardware = templates / "AFC_Hardware-AFC.cfg"
-        safe_copy(ctx, console, prompter, hardware, cfg / "AFC_Hardware.cfg")
-        template = self._template(sel)
-        safe_copy(ctx, console, prompter, templates / template, cfg / template)
+        safe_copy(ctx, console, prompter, templates / "AFC_Hardware-AFC.cfg",
+                  cfg / "AFC_Hardware.cfg")
+        template_name = "AFC_ACE2_1.cfg" if sel.ace_unit_type == "V2_Pro" else "AFC_ACE_1.cfg"
+        safe_copy(ctx, console, prompter, templates / template_name, cfg / template_name)
+
+    def _additional_file_stem(self, sel: UnitSelection, name: str) -> str:
+        """
+        The file name for an additional unit currently named `name`.
+
+        Still on the untouched default (`sel.turtle_renamed` is False), the brand prefix is
+        upper-cased for the file, matching the first unit's `AFC_ACE_1.cfg`; a name the user
+        chose is used exactly as typed.
+
+        :param sel: the user's unit choices
+        :param name: the unit's current name
+        :return str: the file name stem (without `AFC_` or `.cfg`)
+        """
+        prefix = self.name_prefix(sel)
+        if (not sel.turtle_renamed
+            and name.startswith(prefix)):
+            return prefix.upper() + name[len(prefix):]
+        return name
 
     def install_additional(
         self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
     ) -> None:
         """
-        Copy the generation's unit file under the new name and rename the unit inside it.
+        Copy the unit file under its new name and rename the default unit name inside it.
+
+        The unit name inside the file (section names, `unit:` references) is always exactly
+        the chosen name, e.g. `Ace2_1`; see `_additional_file_stem` for the file's own name.
 
         :param ctx: installer context
         :param console: where messages go
         :param prompter: used when a destination file already exists
         :param sel: the user's unit choices
         """
-        unit_file = ctx.afc_config_dir / f"AFC_{sel.unit_name}.cfg"
-        source = ctx.afc_path / "templates" / self._template(sel)
-        safe_copy(ctx, console, prompter, source, unit_file)
-        replace_text(unit_file, self._first_name(sel), sel.unit_name)
+        cfg = ctx.afc_config_dir
+        name = sel.unit_name
+        unit_file = cfg / f"AFC_{self._additional_file_stem(sel, name)}.cfg"
+        if sel.ace_unit_type == "V2_Pro":
+            template = ctx.afc_path / "templates" / "AFC_ACE2_1.cfg"
+            safe_copy(ctx, console, prompter, template, unit_file)
+            replace_text(unit_file, "Ace2_1", name)
+        else:
+            template = ctx.afc_path / "templates" / "AFC_ACE_1.cfg"
+            safe_copy(ctx, console, prompter, template, unit_file)
+            replace_text(unit_file, "Ace_1", name)
 
     def buffer_target(self, ctx: Context, sel: UnitSelection) -> BufferTarget:
         """
-        The generation's fixed first unit, in the file ``copy_files`` wrote, or the named
-        additional unit.
+        The fixed first unit (by ACE version), or the named additional unit.
 
         :param ctx: installer context
         :param sel: the user's unit choices
         :return BufferTarget: where the buffer goes
         """
+        if sel.ace_unit_type == "V2_Pro":
+            section_prefix, default_name, unit_file = "AFC_ACE2", "Ace2_1", "AFC_ACE2_1.cfg"
+        else:
+            section_prefix, default_name, unit_file = "AFC_ACE", "Ace_1", "AFC_ACE_1.cfg"
         if sel.is_additional_unit:
             name = sel.unit_name
-            unit_file = ctx.afc_config_dir / f"AFC_{name}.cfg"
-        else:
-            name = self._first_name(sel)
-            unit_file = ctx.afc_config_dir / self._template(sel)
-        return BufferTarget(name, self._section_prefix(sel), unit_file, name)
+            file_stem = self._additional_file_stem(sel, name)
+            return BufferTarget(
+                name, section_prefix, ctx.afc_config_dir / f"AFC_{file_stem}.cfg", name
+            )
+        return BufferTarget(
+            default_name, section_prefix, ctx.afc_config_dir / unit_file, default_name
+        )
 
     def message(self, ctx: Context, sel: UnitSelection) -> str:
         """
-        Point the user at the serial port settings, and the RFID section of an ACE 2 Pro.
+        Point the user at serial settings, and at the RFID section for an ACE 2 Pro.
 
         :param ctx: installer context
         :param sel: the user's unit choices
         :return str: the message
         """
-        unit_file = ctx.afc_config_dir / self._template(sel)
-        message = (
-            f"\n- Ensure you check the serial_port and ace_index settings in the {unit_file} "
-            "file.\n"
+        if sel.ace_unit_type == "V2_Pro":
+            return (
+                "\n- Ensure you check the serial_port and ace_index settings in the "
+                f"{ctx.afc_config_dir}/AFC_ACE2_1.cfg file (leaving serial_port as auto is "
+                "fine).\n\n"
+                "- Review the [AFC_ACE2_rfid] section if your unit has an RFID reader.\n  "
+            )
+        return (
+            "\n- Ensure you check the serial_port and ace_index settings in the "
+            f"{ctx.afc_config_dir}/AFC_ACE_1.cfg file (leaving serial_port as auto is "
+            "fine).\n  "
         )
-        if sel.ace_unit_type == _V2_PRO:
-            message += "\n- Review the [AFC_ACE2_rfid] section if your unit has an RFID reader.\n"
-        return message + "  "
 
     def install_options(self) -> List[UnitOption]:
         """
-        The generation option of the install screen.
+        The ACE version option of the install screen.
 
         :return List[UnitOption]: the options
         """
@@ -143,35 +158,62 @@ class Ace(UnitType):
 
     def additional_options(self) -> List[UnitOption]:
         """
-        The name and generation options of the additional-unit screen.
+        The name and version options of the additional-unit screen.
 
         :return List[UnitOption]: the options
         """
-        return [NameOption("ACE Name", additional_prompt=True), *self.install_options()]
+        return [
+            NameOption("ACE Name", additional_prompt=True),
+            ChoiceOption("ACE Unit Type", "ace_unit_type", ACE_UNIT_TYPES),
+        ]
+
+    def additional_probe_file(self, prefix: str, number: int, sel: UnitSelection) -> str:
+        """
+        File name whose existence means the default `<prefix>_<number>` is taken.
+
+        Matches the all-caps file an unrenamed default gets (see `_additional_file_stem`),
+        so an already-installed default isn't offered again.
+
+        :param prefix: name prefix, e.g. `Ace2`
+        :param number: candidate number
+        :param sel: the user's unit choices
+        :return str: file name inside the AFC config directory
+        """
+        return f"AFC_{prefix.upper()}_{number}.cfg"
+
+    def name_prefix(self, sel: UnitSelection) -> str:
+        """
+        `Ace2` for an ACE 2 Pro, `Ace` for a V1, instead of a single static prefix.
+
+        :param sel: the user's unit choices
+        :return str: the prefix additional units are named after
+        """
+        return "Ace2" if sel.ace_unit_type == "V2_Pro" else "Ace"
 
     def on_select(self, sel: UnitSelection) -> None:
         """
-        An ACE loads to a toolhead sensor and buffers internally.
+        ACE always uses a toolhead sensor and buffers internally by default.
 
-        :param sel: the user's unit choices, ``toolhead_sensor`` and ``buffer_type`` are set
+        Also fixes up the first unit's display name for the currently selected version,
+        since it was just set from the static `default_name`.
+
+        :param sel: the user's unit choices, updated in place
         """
         sel.toolhead_sensor = "Sensor"
         sel.buffer_type = "Internal"
-
-    def after_sensor_change(self, sel: UnitSelection) -> str:
-        """
-        Keep the toolhead sensor: ramming is not a load strategy the ACE supports.
-
-        :param sel: the user's unit choices, ``toolhead_sensor`` is set back
-        :return str: the status message
-        """
-        sel.toolhead_sensor = "Sensor"
-        return "ACE requires a toolhead sensor; ramming is not supported"
+        sel.unit_name = "Ace2_1" if sel.ace_unit_type == "V2_Pro" else "Ace_1"
 
     def cycle_buffer(self, sel: UnitSelection) -> None:
         """
-        Step through Internal, the TurtleNecks, FPS_PSF and None, then back to Internal.
+        Step to the next buffer type: `Internal`, then the mechanical options, then `None`.
 
-        :param sel: the user's unit choices, ``buffer_type`` is updated
+        Ramming is never active for ACE, so unlike the generic cycle, `FPS_PSF` falls
+        back to `None` rather than back to `TurtleNeck`.
+
+        :param sel: the user's unit choices, `buffer_type` is updated
         """
-        sel.buffer_type = _NEXT_BUFFER.get(sel.buffer_type, "Internal")
+        if sel.buffer_type in _BUFFER_ORDER:
+            position = (_BUFFER_ORDER.index(sel.buffer_type) + 1) % len(_BUFFER_ORDER)
+        else:
+            position = 0
+        sel.buffer_type = _BUFFER_ORDER[position]

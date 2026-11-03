@@ -788,13 +788,13 @@ class afcAMS(afcUnit):
         self._rfid_scanned: set[str] = set()
         self._rfid_coord: Optional[AFC_OpenAMS_rfid] = None
 
-        # Register temperature_oams sensor factory during config parsing
         try:
             from extras.temperature_oams import TemperatureOAMS
+            from extras.temperature_afc import register_on_heaters
             pheaters = self.printer.load_object(config, "heaters")
             pheaters.add_sensor_factory("temperature_oams", TemperatureOAMS)
-            # Alias under a sensor type Fluidd recognises, so it shows humidity.
-            pheaters.add_sensor_factory("aht3x", TemperatureOAMS)
+            # Also register the shared aht2x alias.
+            register_on_heaters(pheaters)
         except Exception:
             pass
 

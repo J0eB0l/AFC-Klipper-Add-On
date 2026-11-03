@@ -10,13 +10,12 @@ import re
 from pathlib import Path
 from typing import List, Pattern, Tuple
 
-from installer.config_editor.blocks import section_names
 from installer.config_editor.document import ConfigDocument
 from installer.platform_core.console import NC, RED, Console, Prompter
 from installer.platform_core.context import Context
 from installer.platform_core.errors import InstallerExit
 from installer.platform_core.fsops import safe_copy
-from installer.unit_registry.base import UnitType
+from installer.unit_registry.base import BufferTarget, UnitType
 from installer.unit_registry.options import NameOption, UnitOption
 from installer.unit_registry.selection import UnitSelection
 
@@ -34,7 +33,6 @@ _FIRST_CHAIN = "chain1"
 _ADDRESS = re.compile(r"[A-Za-z0-9.-]+(:[0-9]+)?")
 _DEV_PATH = re.compile(r"/dev/[A-Za-z0-9._:/+-]+")
 _NUMBER = re.compile(r"[0-9]+")
-_EXTRUDER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 _LineEdit = Tuple[Pattern[str], str]
 
@@ -109,7 +107,9 @@ def _edit_lines(path: Path, edits: List[_LineEdit]) -> None:
 
 def _chain_edits(sel: UnitSelection) -> List[_LineEdit]:
     """
-    The edits that turn the template into this chain: its buffer, counts, link and extruder.
+    The edits that turn the template into this chain: its counts and link.
+
+    The extruder is written afterwards by the installer's own extruder choice.
 
     :param sel: the user's unit choices
     :return List[_LineEdit]: the edits, in the order to apply them
@@ -126,7 +126,6 @@ def _chain_edits(sel: UnitSelection) -> List[_LineEdit]:
             address = f"{address}:{_TCP_PORT}"
         edits.append((re.compile(r"serial_port: auto"), f"serial_port: tcp://{address}"))
     edits.append((re.compile(r"serial_port: auto"), f"serial_port: {sel.bridgebox_serial}"))
-    edits.append((re.compile(r"extruder: extruder"), f"extruder: {sel.bridgebox_extruder}"))
     return edits
 
 
@@ -292,53 +291,13 @@ class SerialOption(UnitOption):
         return f"USB serial port: {sel.bridgebox_serial}"
 
 
-class ExtruderOption(UnitOption):
-    """The ``[AFC_extruder]`` the chain feeds."""
-
-    label = "Extruder"
-
-    def value(self, sel: UnitSelection) -> str:
-        """
-        The extruder name.
-
-        :param sel: the user's unit choices
-        :return str: the name
-        """
-        return sel.bridgebox_extruder
-
-    def activate(
-        self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
-    ) -> str:
-        """
-        Ask for the extruder's section name; an empty answer keeps the current one.
-
-        :param ctx: installer context
-        :param console: unused
-        :param prompter: where answers come from
-        :param sel: the user's unit choices, updated in place when the name is valid
-        :return str: the status message
-        """
-        name = _answer(
-            prompter,
-            "Extruder this chain feeds (for example extruder or extruder1; Enter keeps "
-            f"{sel.bridgebox_extruder}): ",
-        ) or sel.bridgebox_extruder
-        if _EXTRUDER_NAME.fullmatch(name) is None:
-            return (
-                f"{RED}Enter the extruder's name as its [AFC_extruder] section names it, with "
-                f"no spaces.{NC}"
-            )
-        sel.bridgebox_extruder = name
-        return f"Extruder: {name}"
-
-
 class BridgeBox(UnitType):
     """
     A BridgeBox chain: stock Bambu Lab AMS, AMS 2 Pro and AMS HT units on one RS-485 bus.
 
     Neither the BridgeBox nor the AMS units are an MCU. Each chain builds its own
     ``[AFC_buffer]`` from the AMS's buffer, so the buffer is not a choice, and a second
-    BridgeBox is a second chain named ``chainN``.
+    BridgeBox is a second chain named ``chain_N``.
     """
 
     display_name = "BridgeBox"
@@ -396,42 +355,55 @@ class BridgeBox(UnitType):
         ]
         _edit_lines(unit_file, edits + _chain_edits(sel))
 
-    def lowest_free_name(self, ctx: Context, sel: UnitSelection) -> str:
+    def additional_probe_file(self, prefix: str, number: int, sel: UnitSelection) -> str:
         """
-        The first ``chainN`` no ``[AFC_BridgeBox chainN]`` section in the AFC config uses.
+        File name whose existence means chain ``<prefix>_<number>`` is taken.
 
-        ``chain1`` when the system has other units but no BridgeBox yet.
+        The first chain lives in the template's own file, so ``chain_1`` is taken once
+        ``AFC_BridgeBox.cfg`` exists and an additional chain starts at ``chain_2``.
+
+        :param prefix: name prefix, ``chain``
+        :param number: candidate number
+        :param sel: the user's unit choices
+        :return str: file name inside the AFC config directory
+        """
+        if number == 1:
+            return _TEMPLATE
+        return f"AFC_{prefix}_{number}.cfg"
+
+    def buffer_target(self, ctx: Context, sel: UnitSelection) -> BufferTarget:
+        """
+        The chain's own file and section.
+
+        The AMS buffer is built into each chain (``buffer_selectable`` is False), so this is
+        only used to write the selected extruder into the chain.
 
         :param ctx: installer context
         :param sel: the user's unit choices
-        :return str: the chain name
+        :return BufferTarget: the chain file and section
         """
-        taken = section_names(sorted(ctx.afc_config_dir.glob("*.cfg")), "AFC_BridgeBox")
-        number = 1
-        while f"chain{number}" in taken:
-            number += 1
-        return f"chain{number}"
-
-    def message(self, ctx: Context, sel: UnitSelection) -> str:
-        """
-        Remind the user that the extruder the chain feeds needs its own section.
-
-        :param ctx: installer context
-        :param sel: the user's unit choices
-        :return str: the message
-        """
-        return (
-            f"\n- This chain feeds [AFC_extruder {sel.bridgebox_extruder}]. Check that your AFC "
-            "config has that section.\n  "
+        if sel.is_additional_unit:
+            name = sel.unit_name
+            chain_file = ctx.afc_config_dir / f"AFC_{name}.cfg"
+        else:
+            name = _FIRST_CHAIN
+            chain_file = ctx.afc_config_dir / _TEMPLATE
+        return BufferTarget(
+            unit_name=name,
+            unit_section_prefix="AFC_BridgeBox",
+            extruder_file=chain_file,
+            section_name=name,
         )
 
     def install_options(self) -> List[UnitOption]:
         """
-        The chain's counts, connection, USB port and extruder.
+        The chain's counts, connection and USB port.
+
+        The extruder row is the installer's own, shown when the printer has more than one.
 
         :return List[UnitOption]: the options
         """
-        return [PoolOption(), ConnectionOption(), SerialOption(), ExtruderOption()]
+        return [PoolOption(), ConnectionOption(), SerialOption()]
 
     def additional_options(self) -> List[UnitOption]:
         """

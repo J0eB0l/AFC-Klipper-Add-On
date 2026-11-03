@@ -42,9 +42,9 @@
 # marker line is rewritten.
 #
 # BridgeBoxes ship flashed. To update one, follow
-# Firmwares/BridgeBox/BRIDGE_FLASH_HOWTO.md with the signed_s3.bin image
+# firmwares/BridgeBox/BRIDGE_FLASH_HOWTO.md with the signed_s3.bin image
 # and its .manifest.json from the same folder. The AMS units' own firmware
-# updater is in Firmwares/Bambu_AMS/.
+# updater is in firmwares/Bambu_AMS/.
 #
 # docs/bambu_hotswap.md covers the pool, the lane layout, the popups and the
 # AFC_BRIDGEBOX_* commands in full.

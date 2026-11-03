@@ -34,7 +34,7 @@ class UnitType(ABC):
     """
     A supported unit type.
 
-    Only ``copy_files`` is required. The other hooks default to "nothing to do", so a
+    Only `copy_files` is required. The other hooks default to "nothing to do", so a
     type only implements what it needs.
     """
 
@@ -44,8 +44,12 @@ class UnitType(ABC):
     additional_buffer_supported: bool = False
     additional_buffer_options: Tuple[str, ...] = GENERIC_BUFFER_OPTIONS
     additional_buffer_default: str = "TurtleNeck"
+    # When True, switching an additional unit to this type always resets its buffer to
+    # additional_buffer_default.
+    force_additional_buffer_default: bool = False
     buffer_selectable: bool = True  # False: the buffer follows the sensor / ramming choice
     ramming_hardware: str = "a TurtleNeck buffer"  # wording for the sensor / ramming option
+    ramming_supported: bool = True  # False: always a toolhead sensor, no ramming toggle shown
 
     @abstractmethod
     def copy_files(
@@ -95,7 +99,7 @@ class UnitType(ABC):
     @property
     def default_name(self) -> str:
         """
-        The name a first unit of this type starts with (``<prefix>_1``, for example ``HTLF_1``).
+        The name a first unit of this type starts with (`<prefix>_1`, for example `HTLF_1`).
 
         :return str: the default unit name
         """
@@ -117,41 +121,17 @@ class UnitType(ABC):
         """
         return []
 
-    def additional_prefix(self, sel: UnitSelection) -> str:
-        """
-        The prefix additional units are named with, ``additional_name_prefix`` unless the
-        choices on the selection change it.
-
-        :param sel: the user's unit choices
-        :return str: the prefix
-        """
-        return self.additional_name_prefix
-
-    def lowest_free_name(self, ctx: Context, sel: UnitSelection) -> str:
-        """
-        The default name for an additional unit: the lowest free ``<prefix>_N``.
-
-        "Free" means no matching unit file exists yet in the AFC config directory.
-
-        :param ctx: installer context
-        :param sel: the user's unit choices
-        :return str: the name
-        """
-        prefix = self.additional_prefix(sel)
-        number = 1
-        while (ctx.afc_config_dir / self.additional_probe_file(prefix, number, sel)).is_file():
-            number += 1
-        return f"{prefix}_{number}"
-
     def refresh_additional_name(self, ctx: Context, sel: UnitSelection) -> None:
         """
         Reset the unit name to the lowest free default unless the user chose a name.
 
         :param ctx: installer context
-        :param sel: the user's unit choices, ``unit_name`` may be updated
+        :param sel: the user's unit choices, `unit_name` may be updated
         """
+        from installer.unit_registry.naming import lowest_free_name
+
         if not sel.turtle_renamed:
-            sel.unit_name = self.lowest_free_name(ctx, sel)
+            sel.unit_name = lowest_free_name(ctx, sel, self)
 
     def on_select(self, sel: UnitSelection) -> None:
         """
@@ -164,7 +144,7 @@ class UnitType(ABC):
         """
         Adjust the buffer after the toolhead sensor / ramming choice flipped.
 
-        :param sel: the user's unit choices, ``buffer_type`` may change
+        :param sel: the user's unit choices, `buffer_type` may change
         :return str: the status message
         """
         if sel.toolhead_sensor == "Sensor":
@@ -182,7 +162,7 @@ class UnitType(ABC):
         """
         Step to the next buffer type (a buffer is mandatory with ramming, optional with a sensor).
 
-        :param sel: the user's unit choices, ``buffer_type`` is updated
+        :param sel: the user's unit choices, `buffer_type` is updated
         """
         order = {
             "TurtleNeck": "TurtleNeckV2",
@@ -196,11 +176,23 @@ class UnitType(ABC):
 
     def additional_probe_file(self, prefix: str, number: int, sel: UnitSelection) -> str:
         """
-        File name whose existence means unit ``<prefix>_<number>`` is taken.
+        File name whose existence means unit `<prefix>_<number>` is taken.
 
-        :param prefix: name prefix, e.g. ``Turtle``
+        :param prefix: name prefix, e.g. `Turtle`
         :param number: candidate number
         :param sel: the user's unit choices
         :return str: file name inside the AFC config directory
         """
         return f"AFC_{prefix}_{number}.cfg"
+
+    def name_prefix(self, sel: UnitSelection) -> str:
+        """
+        The prefix additional units of this type are named after.
+
+        By default this is the static `additional_name_prefix`; a type whose prefix
+        depends on a sub-type choice (for example ACE's V1 vs V2_Pro) overrides this.
+
+        :param sel: the user's unit choices
+        :return str: the prefix
+        """
+        return self.additional_name_prefix

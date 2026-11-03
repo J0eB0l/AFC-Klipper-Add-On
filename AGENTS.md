@@ -54,9 +54,11 @@
    error_str = f"Lane {self.name}: [filament_feed {self.feed_module}] not found"
    raise error(error_str)
    ```
-- **Keep comments short and succinct** — a sentence or two at most. Comments
-   still need to make sense to the developer reading them, just don't let
-   them turn into paragraphs.
+- **Keep comments short and succinct** — Keep comments succinct and to the point.
+   They should only be used when the code does not adequately explain itself.
+- **No decorative dashes on section-divider comments** — write `# Calibration
+   commands` rather than `# ── Calibration commands ──`. The label alone is
+   enough; drop the surrounding dashes/banner characters.
 - **No em-dashes.** Use a period, comma, or colon instead when breaking up a
    clause, in comments, docstrings, commit messages, or any other prose. This
    applies to new code and documentation, and to existing documentation while
@@ -66,7 +68,8 @@
    Sphinx-style convention in this shape: a short description, a blank line,
    then one `:param name:` per parameter (skip `self`) and a `:return type:`
    line if the method returns something meaningful (omit it otherwise).
-   No blank line between the `:param`/`:return` block and the closing `"""`.
+   No blank line between the `:param`/`:return` block and the closing `"""`. 
+   Docstrings should use a single backtick when appropriate. 
 
    ```python
    def register_lane_macros(self, lane_obj: AFCLane):

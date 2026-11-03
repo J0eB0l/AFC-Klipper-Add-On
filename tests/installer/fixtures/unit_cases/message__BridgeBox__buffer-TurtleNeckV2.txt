@@ -4,8 +4,6 @@
 
 - AFC-Klipper-Add-On python extensions installed to <WORKDIR>/klipper/klippy/extras/
 
-- This chain feeds [AFC_extruder extruder]. Check that your AFC config has that section.
-  
 - Ensure you add the correct serial information to the <WORKDIR>/AFC/mcu/TurtleNeckv2.cfg file
   
 You may now quit the script or return to the main menu.

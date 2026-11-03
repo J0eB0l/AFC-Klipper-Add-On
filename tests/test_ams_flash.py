@@ -1,4 +1,4 @@
-"""Unit tests for Firmwares/Bambu_AMS/ams_flash.py."""
+"""Unit tests for firmwares/Bambu_AMS/ams_flash.py."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 import pytest
 
 
-AMS_FLASH_DIR = Path(__file__).resolve().parents[1] / "Firmwares" / "Bambu_AMS"
+AMS_FLASH_DIR = Path(__file__).resolve().parents[1] / "firmwares" / "Bambu_AMS"
 
 
 def _load_ams_flash() -> ModuleType:

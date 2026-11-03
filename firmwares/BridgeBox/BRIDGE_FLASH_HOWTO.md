@@ -13,7 +13,7 @@ Two files, which always travel together:
 |---|---|
 | `signed_s3.bin` | `signed_s3.bin.manifest.json` |
 
-Both are included in this folder, `Firmwares/BridgeBox/`. They are AFC-2.90.
+Both are included in this folder, `firmwares/BridgeBox/`. They are AFC-2.90.
 The BridgeBox runs only signed images, and the manifest is the signature:
 without it the BridgeBox refuses the update. AFC needs to understand the
 `.bin`: an AFC too old for it answers `block 0 has no UF2 magic`.
@@ -110,4 +110,4 @@ not start, ask for it to be recovered.
 ## Updating the AMS units themselves
 
 That is a separate procedure with its own commands: see
-[AMS_FLASH_HOWTO.md](../Bambu_AMS/AMS_FLASH_HOWTO.md) in `Firmwares/Bambu_AMS/`.
+[AMS_FLASH_HOWTO.md](../Bambu_AMS/AMS_FLASH_HOWTO.md) in `firmwares/Bambu_AMS/`.

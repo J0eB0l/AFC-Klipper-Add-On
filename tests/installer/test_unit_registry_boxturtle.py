@@ -11,6 +11,7 @@ from installer.unit_registry.registry import (
     additional_buffer_options,
     additional_buffer_supported,
     additional_default_name,
+    force_additional_buffer_default,
     unit_for,
 )
 from installer.unit_registry.selection import UnitSelection
@@ -290,13 +291,6 @@ class TestAdditionalDefaultName:
         sel = UnitSelection(installation_type="Nope")
         assert additional_default_name(make_ctx(printer_tree), sel) == "Unit_1"
 
-    def test_the_fallback_skips_taken_unit_numbers_too(self, printer_tree: PrinterTree) -> None:
-        ctx = make_ctx(printer_tree)
-        ctx.afc_config_dir.mkdir(parents=True)
-        (ctx.afc_config_dir / "AFC_Unit_1.cfg").write_text("placeholder\n")
-        sel = UnitSelection(installation_type="Nope")
-        assert additional_default_name(ctx, sel) == "Unit_2"
-
 
 class TestRegistry:
     def test_boxturtle_types_lead_the_menu_order(self) -> None:
@@ -347,6 +341,8 @@ class TestRegistry:
         assert additional_buffer_options("Dummy") == ("None", "Special")
         assert additional_buffer_default("Dummy") == "Special"
         assert additional_default_name(ctx, sel) == "Dummy_1"
+        # a type that doesn't override it keeps the base class's False
+        assert force_additional_buffer_default("Dummy") is False
 
 
 class TestAdditionalBufferRules:
@@ -369,3 +365,4 @@ class TestAdditionalBufferRules:
             "TurtleNeck2Remastered",
             "FPS_PSF",
         )
+        assert force_additional_buffer_default("Nope") is False

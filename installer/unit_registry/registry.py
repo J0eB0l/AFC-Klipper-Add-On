@@ -34,9 +34,9 @@ UNIT_TYPES: List[UnitType] = [
     QuattroBox(),
     OpenAms(),
     Ace(),
-    BridgeBox(),
     Vivid(),
     Emu(),
+    BridgeBox(),
 ]
 
 _GENERIC_DEFAULT_BUFFER = "TurtleNeck"
@@ -46,7 +46,7 @@ def unit_for(installation_type: str) -> Optional[UnitType]:
     """
     Look up a unit type by its display name.
 
-    :param installation_type: display name, e.g. ``BoxTurtle (4-Lane)``
+    :param installation_type: display name, e.g. `BoxTurtle (4-Lane)`
     :return Optional[UnitType]: the unit, or None for an unknown type
     """
     for unit in UNIT_TYPES:
@@ -88,13 +88,25 @@ def additional_buffer_default(installation_type: str) -> str:
     return unit.additional_buffer_default if unit is not None else _GENERIC_DEFAULT_BUFFER
 
 
+def force_additional_buffer_default(installation_type: str) -> bool:
+    """
+    Should switching into this type always reset the buffer to its own default?
+
+    :param installation_type: display name
+    :return bool: True to force the reset even when the incoming buffer_type would
+        otherwise carry over; unknown types do not force it
+    """
+    unit = unit_for(installation_type)
+    return unit is not None and unit.force_additional_buffer_default
+
+
 def additional_default_name(ctx: Context, sel: UnitSelection) -> str:
     """
     The default name for an additional unit of the selected type.
 
     :param ctx: installer context
     :param sel: the user's unit choices
-    :return str: the lowest free ``<prefix>_N`` name
+    :return str: the lowest free `<prefix>_N` name
     """
     return lowest_free_name(ctx, sel, unit_for(sel.installation_type))
 
@@ -108,7 +120,7 @@ def name_additional_unit(
     :param ctx: installer context
     :param console: where messages go
     :param prompter: where answers come from
-    :param sel: the user's unit choices, ``unit_name`` and ``turtle_renamed`` are updated
+    :param sel: the user's unit choices, `unit_name` and `turtle_renamed` are updated
     :return str: the status message for the menu
     """
     default = additional_default_name(ctx, sel)

@@ -1543,6 +1543,14 @@ class AceFileConfig:
         """
         return list(self._printer.section_values.get(section, {}))
 
+    def has_option(self, section: str, option: str) -> bool:
+        """
+        :param section: section name
+        :param option: option name
+        :return bool: whether the section has that option set
+        """
+        return option in self._printer.section_values.get(section, {})
+
 
 class AceConfig:
     """
@@ -1566,6 +1574,10 @@ class AceConfig:
         self._values: Dict[str, Any] = {k: v for k, v in (values or {}).items()
                                         if v is not None}
         self.fileconfig = AceFileConfig(printer)
+        # So fileconfig.has_option/options reflect these values even when this
+        # AceConfig was built directly (not via printer.add_section), matching
+        # real Klipper where fileconfig and config always agree on what's set.
+        printer.section_values.setdefault(name, {}).update(self._values)
 
     def get_printer(self) -> "AcePrinter":
         """
@@ -2883,6 +2895,7 @@ def _build_unit(cls: type, prefix: str, name: str, ace2: bool, *,
         unit._hw_status_time = printer.reactor.monotonic()
     if temp_info is not None:
         unit._cached_temp_info = temp_info
+        unit._temp_info_time = printer.reactor.monotonic()
     for slot, slot_info in (inventory or {}).items():
         unit._slot_inventory[slot].update(slot_info)
     if prev_slot_states is not None:
