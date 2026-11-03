@@ -1,7 +1,7 @@
 # BridgeBox display
 
 A touchscreen that shows what the BridgeBox's AMS units hold: each bay's
-colour, material, weight and state, and each unit's humidity and temperature,
+color, material, weight and state, and each unit's humidity and temperature,
 with the dryer controls one tap away. It runs on a **BTT K-Touch**. A **BTT
 Panda Touch** is the same board under another name, so one left over from a
 Bambu printer works too.
@@ -23,28 +23,53 @@ display starts in setup again.
 
 ## First flash
 
-This replaces the stock BTT firmware on the panel. You need a computer with
-Python and esptool (`pip install esptool`).
+This replaces the stock BTT firmware on the panel. It works from the
+printer's Raspberry Pi over SSH, or from any computer with Python. These steps
+use esptool 5, whose commands are spelled with dashes (`flash-id`,
+`write-flash`); esptool 4 spelled them with underscores.
 
-1. **Connect the panel's USB-C to the computer.** It shows up as a CH340
-   serial port: `/dev/ttyUSB0` on Linux, a `COM` port on Windows (older
-   Windows may need the CH340 driver), `/dev/cu.wchusbserial...` on a Mac.
-   Use your port in place of `/dev/ttyUSB0` below.
+1. **Get esptool 5.** On a Pi (or any Debian-style Linux), plain
+   `pip install` is refused, so put it in its own folder:
 
-2. **Check it is the right board.** This only reads:
+       python3 -m venv ~/esptool-venv
+       ~/esptool-venv/bin/pip install "esptool>=5,<6"
 
-       esptool.py -p /dev/ttyUSB0 flash_id
+   The commands below run it as `~/esptool-venv/bin/esptool`. If the Pi
+   already has `~/esptool-venv`, skip this step. On Windows or a Mac,
+   `pip install "esptool>=5,<6"` and run plain `esptool` instead.
 
-   Look for `Chip is ESP32-S3` and a 16 MB flash.
+2. **Download the images** (on the Pi, or save them from this folder on
+   GitHub):
 
-3. **Flash the full image:**
+       mkdir -p ~/bridgebox_display && cd ~/bridgebox_display
+       wget -O bridgebox-full-0x0.bin https://raw.githubusercontent.com/J0eB0l/AFC-Klipper-Add-On/BridgeBox/Firmwares/BridgeBox_Display/bridgebox-full-0x0.bin
+       wget -O bridgebox-update-app-0x10000.bin https://raw.githubusercontent.com/J0eB0l/AFC-Klipper-Add-On/BridgeBox/Firmwares/BridgeBox_Display/bridgebox-update-app-0x10000.bin
 
-       esptool.py -p /dev/ttyUSB0 -b 460800 write_flash 0x0 bridgebox-full-0x0.bin
+3. **Connect the panel's USB-C and find its port.** It is a CH340 serial
+   port. On Linux list the ports by name:
 
-   The panel restarts into setup.
+       ls -l /dev/serial/by-id/
 
-Newer esptool installs name the command `esptool` instead of `esptool.py`; the
-rest of the line is the same.
+   The panel is `usb-1a86_USB_Serial-if00-port0`. A printer has other USB
+   serial boards; if more than one `1a86` port is listed, unplug the panel,
+   list again and take the one that went away. Never flash a port Klipper
+   uses: that overwrites the board on it. On Windows it is a `COM` port (older
+   Windows may need the CH340 driver), on a Mac `/dev/cu.wchusbserial...`.
+   Use your port in place of `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`
+   below.
+
+4. **Check it is the right board.** This only reads:
+
+       ~/esptool-venv/bin/esptool --chip esp32s3 -p /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 flash-id
+
+   Look for `Chip type: ESP32-S3` and `Detected flash size: 16MB`.
+
+5. **Flash the full image.** `--erase-all` clears the whole chip first, so
+   nothing of the stock firmware is left behind:
+
+       ~/esptool-venv/bin/esptool --chip esp32s3 -p /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 -b 460800 --after watchdog-reset write-flash --erase-all 0x0 bridgebox-full-0x0.bin
+
+   It ends with `Hash of data verified.` and the panel restarts into setup.
 
 ## Setup on the panel
 
@@ -94,9 +119,9 @@ Settings sheet (the cog in the top bar). Open that address, choose
 **Update panel**. The panel shows `Updating NN%`, then restarts on the new
 version.
 
-**Over USB:**
+**Over USB**, with the port and esptool from the first flash:
 
-    esptool.py -p /dev/ttyUSB0 -b 460800 write_flash 0x10000 bridgebox-update-app-0x10000.bin
+    ~/esptool-venv/bin/esptool --chip esp32s3 -p /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 -b 460800 --after watchdog-reset write-flash 0x10000 bridgebox-update-app-0x10000.bin
 
 Use only the update image on the update page. It refuses the full image,
 because the full image cannot boot from there.
@@ -114,3 +139,8 @@ works on any panel that had its first flash from this folder.
 | `HTTP 401 -- API key?` | Moonraker does not trust the panel. Either add the panel's network to `trusted_clients` under `[authorization]` in `moonraker.conf`, or log out and enter Moonraker's API key in setup. |
 | no units | The panel shows the Bambu AMS units the printer reports online, up to twelve (4 AMS and 8 AMS HT). Check the units are online in Mainsail or Fluidd first. |
 | nothing, or it keeps restarting, after a USB flash | Flash the full image again. |
+
+If esptool says `Failed to connect`, try again with `-b 115200`, or another
+USB-C cable (some carry power only). `Permission denied` on the port means
+your user is not in the `dialout` group: `sudo usermod -aG dialout $USER`,
+then log in again.
