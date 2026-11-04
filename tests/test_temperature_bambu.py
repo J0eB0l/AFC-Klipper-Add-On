@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import pytest
 
 from extras.temperature_bambu import load_config, TemperatureBambu
+from extras.temperature_afc import TemperatureAFC
 from tests.bambu_helpers import BambuConfig, BambuPrinter, FakeMcu, FakeReactor, FakeTimer, Recorder
 
 
@@ -736,7 +737,8 @@ class TestLoadConfig:
         printer.objects["heaters"] = heaters
         config = BambuTempConfig("temperature_bambu", printer)
         assert load_config(config) is None
-        assert heaters.factories == [("temperature_bambu", TemperatureBambu)]
+        assert heaters.factories == [("temperature_bambu", TemperatureBambu),
+                                     ("aht2x", TemperatureAFC)]
         assert printer.lookups == ["heaters"]
         assert bambu_temp_log.record_tuples == []
 

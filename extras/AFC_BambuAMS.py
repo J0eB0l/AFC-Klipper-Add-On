@@ -1880,31 +1880,12 @@ class afcBambuAMS(afcUnit):
         # ACE.
         try:
             from extras.temperature_bambu import TemperatureBambu
+            from extras.temperature_afc import register_on_heaters
             pheaters = self.printer.load_object(config, "heaters")
             pheaters.add_sensor_factory("temperature_bambu", TemperatureBambu)
-            # Fluidd shows humidity only for sensor types it knows, and reads
-            # aht2x and aht3x from the "aht10 <name>" object. Wrap those
-            # factories: a section with bambu_unit is ours, anything else goes
-            # to the previous owner.
-            for _alias in ("aht3x", "aht2x"):
-                _prev = getattr(pheaters, "sensor_factories", {}).get(_alias)
-
-                def _dispatch(cfg: Any, _prev: Any = _prev) -> Any:
-                    """
-                    Route an aht sensor section to its rightful owner.
-
-                    :param cfg: the sensor section's config wrapper
-                    :param _prev: the factory this wrap displaced, if any
-                    :return Any: our sensor for bambu_unit sections, else
-                        whatever the previous factory builds
-                    """
-                    if cfg.get("bambu_unit", None) is not None:
-                        return TemperatureBambu(cfg)
-                    if _prev is not None:
-                        return _prev(cfg)
-                    return TemperatureBambu(cfg)
-
-                pheaters.add_sensor_factory(_alias, _dispatch)
+            # Fluidd shows humidity only for sensor types it knows. The shared
+            # aht2x type sends a section with bambu_unit to TemperatureBambu.
+            register_on_heaters(pheaters)
         except Exception as e:
             self.logger.warning(
                 f"AFC_BambuAMS: temperature_bambu factory not registered ({e}); "

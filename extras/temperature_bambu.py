@@ -216,3 +216,6 @@ def load_config(config: "ConfigWrapper") -> None:
     """
     pheaters = config.get_printer().lookup_object("heaters")
     pheaters.add_sensor_factory("temperature_bambu", TemperatureBambu)
+    # Also the shared aht2x type, which sends a bambu_unit section here.
+    from extras.temperature_afc import register_on_heaters
+    register_on_heaters(pheaters)

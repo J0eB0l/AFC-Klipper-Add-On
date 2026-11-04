@@ -2342,6 +2342,24 @@ class TestAfcBambuAMSInit:
         assert u._held_lanes is None and u._prep_seen is False
         assert u.logger.messages == []
 
+    def test_the_unit_registers_its_sensor_types(self):
+        from extras.temperature_afc import TemperatureAFC
+        from extras.temperature_bambu import TemperatureBambu
+
+        class _Heaters:
+            def __init__(self) -> None:
+                self.factories: List[Tuple[str, Any]] = []
+
+            def add_sensor_factory(self, name: str, factory: Any) -> None:
+                self.factories.append((name, factory))
+
+        printer = make_printer()
+        heaters = _Heaters()
+        printer._objects["heaters"] = heaters
+        afcBambuAMS(unit_config(printer=printer))
+        assert heaters.factories == [("temperature_bambu", TemperatureBambu),
+                                     ("aht2x", TemperatureAFC)]
+
     def test_a_tcp_key_store_flag_is_split_off_the_key(self):
         u = afcBambuAMS(unit_config(values={"tcp_key": "abc123 -store"}))
         assert (u.tcp_key, u._tcp_key_store) == ("abc123", True)
