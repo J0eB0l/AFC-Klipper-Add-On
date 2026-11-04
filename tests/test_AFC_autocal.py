@@ -713,6 +713,24 @@ class TestAFCautocalGetLaneK:
         assert cal.logger.messages == []
 
 
+class TestAFCautocalGetStatus:
+    def test_empty_before_ready(self):
+        cal = make_autocal()
+        cal._lane_flow_k["lane1"] = (None, 0.04)
+        assert cal.get_status(0.0) == {"lane_k": {}}
+
+    def test_reports_lanes_whose_spool_matches(self):
+        cal = make_autocal(ready=True)
+        add_autocal_lane(cal, "lane1", spool_id=5)
+        add_autocal_lane(cal, "lane2", spool_id=None)
+        add_autocal_lane(cal, "lane3", spool_id=8)
+        cal._lane_flow_k.update({"lane1": (5, 0.04), "lane2": (None, 0.023),
+                                 "lane3": (7, 0.05), "gone": (None, 0.06)})
+        assert cal.get_status(0.0) == {"lane_k": {"lane1": 0.04, "lane2": 0.023}}
+        assert len(cal._lane_flow_k) == 4
+        assert cal.logger.messages == []
+
+
 class TestAFCautocalReadKFromSpoolman:
     def test_none_without_spool(self, autocal_spoolman):
         cal = make_autocal(ready=True, spoolman=True)

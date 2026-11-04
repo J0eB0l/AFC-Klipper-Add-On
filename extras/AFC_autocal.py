@@ -231,6 +231,24 @@ class AFC_autocal:
             return None
         return k
 
+    def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Report each lane's cached K, so a slicer can show the K of a lane with no
+        Spoolman spool. A lane whose spool changed since its K was stored is left
+        out; the stale entry itself is dropped by _get_lane_k as usual.
+
+        :param eventtime: The Klipper event time (unused)
+        :return Dict[str, Any]: {"lane_k": {lane name: K}}
+        """
+        lanes = getattr(self.afc, 'lanes', None) or {}
+        lane_k: Dict[str, float] = {}
+        for name, (stored, k) in self._lane_flow_k.items():
+            lane = lanes.get(name)
+            if lane is not None and stored == self._norm_spool_id(
+                    getattr(lane, 'spool_id', None)):
+                lane_k[name] = k
+        return {"lane_k": lane_k}
+
     # ── Spoolman read/write (via the shared client) ─────────────────
 
     def _read_k_from_spoolman(self, lane: Any) -> Optional[float]:
