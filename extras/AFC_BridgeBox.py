@@ -2616,8 +2616,8 @@ class afcBridgeBox:
         For a board moving to another printer or network: it restarts with its
         setup hotspot, as new, and this chain makes a new key for its next
         setup. Refused during a print, since the board restarts, and while the
-        bridge is not connected; then hold the board's BOOT button for 10
-        seconds instead.
+        bridge is not connected; a board that holds another printer's key
+        connects once it is plugged into this printer's USB.
 
         Usage
         -------
@@ -2636,8 +2636,8 @@ class afcBridgeBox:
         bridge = self._chain_bridge()
         if bridge is None or not bridge.is_connected():
             error_str = (f"AFC_BRIDGEBOX_RESET_WIFI: no link to the BridgeBox "
-                         f"of {self.name}. Hold its BOOT button for 10 seconds "
-                         f"to reset it instead.")
+                         f"of {self.name}. Plug it into this printer's USB "
+                         f"and run it again.")
             raise gcmd.error(error_str)
         bridge.send({"cmd": "wifi", "clear": 1})
         bridge.send({"cmd": "reset"})

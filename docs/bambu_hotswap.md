@@ -887,8 +887,10 @@ known until then.
   and restarts it with its bb-bridge setup hotspot, for a move to another
   printer or network. It forgets the address the chain saved and makes a new
   key for the next setup (a `tcp_key` you set is kept). It is refused during a
-  print and while the bridge is not connected; holding the board's BOOT button
-  for 10 seconds does the same wipe without Klipper.
+  print and while the bridge is not connected. A BridgeBox that holds another
+  printer's key can't be reached over WiFi: plug it into this printer's USB,
+  which gives it this printer's key, or run the command on the printer that set
+  it up.
 
 - `AFC_BRIDGEBOX_FORGET_BOARD` forgets the board a chain on `serial_port: auto`
   saved, and its WiFi address, for a replacement board. After a RESTART the

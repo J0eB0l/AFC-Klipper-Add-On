@@ -17925,7 +17925,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
             m.cmd_AFC_BRIDGEBOX_RESET_WIFI(_p3_cmd())
         assert str(err.value) == (
             "AFC_BRIDGEBOX_RESET_WIFI: no link to the BridgeBox of chain1. "
-            "Hold its BOOT button for 10 seconds to reset it instead.")
+            "Plug it into this printer's USB and run it again.")
         assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
 
     def test_a_usb_chain_forgets_the_address_and_makes_a_new_key(

@@ -86,8 +86,8 @@ serial_port: auto
 #serial_port: tcp://BRIDGE_ADDRESS:8888
 
 # Moving the BridgeBox to another printer or network: run
-# AFC_BRIDGEBOX_RESET_WIFI, or hold its BOOT button for 10 seconds. It
-# forgets its network and key and brings its hotspot back.
+# AFC_BRIDGEBOX_RESET_WIFI. It forgets its network and key and brings its
+# hotspot back.
 
 # ---- Extruder ----
 # The [AFC_extruder] this chain feeds. One chain feeds one extruder. The

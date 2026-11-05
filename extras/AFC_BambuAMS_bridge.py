@@ -1199,11 +1199,16 @@ class WifiLink:
         """
         self._failed_addr = self.addr
         self._retry_at = time.monotonic() + self.RETRY_S
-        if isinstance(error, LinkKeyError):
+        if isinstance(error, LinkKeyError) and usb_in:
             self._say("key", f"the BridgeBox at {self.addr} holds another "
-                             f"printer's link key. Hold its BOOT button for "
-                             f"10 seconds to reset it, then set up its WiFi "
-                             f"again.", warning=True)
+                             f"printer's link key; staying on USB, which "
+                             f"gives it this printer's key", warning=True)
+        elif isinstance(error, LinkKeyError):
+            self._say("key", f"the BridgeBox at {self.addr} holds another "
+                             f"printer's link key. Plug it into this "
+                             f"printer's USB to give it this printer's key, "
+                             f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer "
+                             f"that set it up.", warning=True)
         elif usb_in:
             self._say("usb", f"can't reach the BridgeBox on WiFi at "
                              f"{self.addr} ({error}); staying on USB",

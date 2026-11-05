@@ -6480,16 +6480,29 @@ class TestWifiLinkOpen:
 
 
 class TestWifiLinkTcpFailed:
-    def test_a_key_mismatch_says_to_reset_the_board(self, monkeypatch,
-                                                    tmp_path):
+    def test_a_key_mismatch_with_the_cable_in_stays_on_usb(self, monkeypatch,
+                                                           tmp_path):
         link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path,
                                            addr=WIFI_ADDR)
         link._tcp_failed(LinkKeyError("rejected"), True)
         assert (link._failed_addr, link._retry_at) == (WIFI_ADDR, 160.0)
         assert bridge.logger.messages == wifi_said(
             ("warning", f"the BridgeBox at {WIFI_ADDR} holds another "
-                        f"printer's link key. Hold its BOOT button for 10 "
-                        f"seconds to reset it, then set up its WiFi again."))
+                        f"printer's link key; staying on USB, which gives "
+                        f"it this printer's key"))
+
+    def test_a_key_mismatch_with_no_cable_says_how_to_rekey(self, monkeypatch,
+                                                            tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path,
+                                           addr=WIFI_ADDR)
+        link._tcp_failed(LinkKeyError("rejected"), False)
+        assert (link._failed_addr, link._retry_at) == (WIFI_ADDR, 160.0)
+        assert bridge.logger.messages == wifi_said(
+            ("warning", f"the BridgeBox at {WIFI_ADDR} holds another "
+                        f"printer's link key. Plug it into this printer's "
+                        f"USB to give it this printer's key, or run "
+                        f"AFC_BRIDGEBOX_RESET_WIFI on the printer that set "
+                        f"it up."))
 
     def test_with_the_cable_in_it_stays_on_usb(self, monkeypatch, tmp_path):
         link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path,
