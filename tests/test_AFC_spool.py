@@ -880,6 +880,65 @@ class TestSetMaterial:
         assert lane.filament_density == 1.24
 
 
+    def test_new_material_clears_filament_id(self):
+        spool = _make_spool()
+        lane = _make_lane("lane1")
+        lane.material = "PLA"
+        lane.filament_id = "OFDSrzZ8"
+        spool.afc.lanes = {"lane1": lane}
+        spool.cmd_SET_MATERIAL(_make_gcmd(LANE="lane1", MATERIAL="PETG"))
+        assert lane.filament_id == ""
+
+    def test_same_material_keeps_filament_id(self):
+        spool = _make_spool()
+        lane = _make_lane("lane1")
+        lane.material = "PLA"
+        lane.filament_id = "OFDSrzZ8"
+        spool.afc.lanes = {"lane1": lane}
+        spool.cmd_SET_MATERIAL(_make_gcmd(LANE="lane1", MATERIAL="PLA", DENSITY=1.24))
+        assert lane.filament_id == "OFDSrzZ8"
+
+
+# ── cmd_SET_FILAMENT_ID ────────────────────────────────────────────────────────
+
+class TestSetFilamentId:
+    def _lane(self, spool):
+        lane = _make_lane("lane1")
+        lane.filament_id = ""
+        spool.afc.lanes = {"lane1": lane}
+        spool.afc.save_vars = MagicMock()
+        return lane
+
+    def test_sets_sends_and_saves(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="OF5CgdDq"))
+        assert lane.filament_id == "OF5CgdDq"
+        lane.send_lane_data.assert_called_once()
+        spool.afc.save_vars.assert_called_once()
+
+    def test_empty_id_clears(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        lane.filament_id = "GFL99"
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1"))
+        assert lane.filament_id == ""
+
+    def test_invalid_id_is_refused(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        lane.filament_id = "GFL99"
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="bad id;"))
+        assert lane.filament_id == "GFL99"
+        spool.afc.save_vars.assert_not_called()
+
+    def test_unknown_lane_logs_info(self):
+        spool = _make_spool()
+        spool.afc.lanes = {}
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="ghost", ID="GFL99"))
+        assert spool.logger.messages == [("info", "ghost Unknown")]
+
+
 # ── cmd_SET_WEIGHT ─────────────────────────────────────────────────────────────
 
 class TestSetWeight:
@@ -1338,12 +1397,12 @@ class TestHandleConnect:
 
 
 class TestRegisterLaneMacros:
-    def test_registers_seven_mux_commands(self):
+    def test_registers_eight_mux_commands(self):
         spool = _make_spool()
         spool.gcode.register_mux_command = MagicMock()
         lane = _make_lane("lane1")
         spool.register_lane_macros(lane)
-        assert spool.gcode.register_mux_command.call_count == 7
+        assert spool.gcode.register_mux_command.call_count == 8
 
     def test_all_commands_use_correct_lane_name(self):
         spool = _make_spool()
@@ -1668,6 +1727,30 @@ class TestSetSpoolID:
         _stub_get_spool(spool, result)
         spool.set_spoolID(lane, 42)
         assert lane.filament_id == "OF5CgdDq"
+
+    def test_same_spool_without_spoolman_id_keeps_the_set_one(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        lane.spool_id = 42
+        lane.filament_id = "OFDSrzZ8"
+        _stub_get_spool(spool, _make_spool_result())
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == "OFDSrzZ8"
+
+    def test_new_spool_without_spoolman_id_clears_it(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        lane.spool_id = 7
+        lane.filament_id = "OFDSrzZ8"
+        _stub_get_spool(spool, _make_spool_result())
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == ""
 
     def test_valid_spool_id_lane_not_loaded_lane_in_unit(self):
         spool = self._make_spool_with_spoolman()

@@ -2514,10 +2514,10 @@ class AFCLane:
         response["remember_spool"]= bool(self.remember_spool)
         response["spool_id"]= int(self.spool_id) if self.spool_id else None
         response["color"]=self.color
+        response["filament_id"] = self.filament_id
         if not save_to_file:
             response["filament_name"] = self.filament_name
             response["spool_vendor"] = self.spool_vendor
-            response["filament_id"] = self.filament_id
             response["multi_color_hexes"] = self.multi_color
             response["initial_weight"] = self.espooler.espooler_values.full_weight
 
