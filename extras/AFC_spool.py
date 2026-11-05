@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Optional, Union, Any, Callable, TYPE_CHECKING
 import copy
+import json
 import traceback
 import re
 
@@ -661,6 +662,26 @@ class AFCSpool:
             value = filament[field]
         return value
 
+    @staticmethod
+    def _filament_id(filament: dict) -> str:
+        """
+        OrcaSlicer's filament_id for a Spoolman filament, from its filament_id extra field.
+
+        Spoolman stores extra values JSON-encoded; a bare string is taken as is. Only a text
+        id counts, as OrcaSlicer ignores a number in lane_data's filament_id.
+
+        :param filament: Spoolman filament dict
+        :return:         The id, or "" when the filament has none
+        """
+        raw = (filament.get("extra") or {}).get("filament_id")
+        if not raw:
+            return ""
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            value = raw
+        return value.strip() if isinstance(value, str) else ""
+
     def _set_values(self, cur_lane: AFCLane, on_done: Optional[Callable[[], None]] = None) -> None:
         """
         Helper function for setting lane spool values
@@ -704,6 +725,7 @@ class AFCSpool:
         cur_lane.clear_lane_data()
         cur_lane.spool_vendor = ""
         cur_lane.filament_name = ""
+        cur_lane.filament_id = ""
 
     def set_spoolID(self, cur_lane: AFCLane, SpoolID: Optional[Union[int, str]],
                     save_vars: bool = True, on_done: Optional[Callable[[], None]] = None) -> None:
@@ -785,6 +807,7 @@ class AFCSpool:
                 full_weight                 = self._get_filament_values(result, 'initial_weight', default=1000)
                 cur_lane.espooler.espooler_values.full_weight = full_weight
                 cur_lane.filament_name      = self._get_filament_values(result['filament'], 'name', default="")
+                cur_lane.filament_id        = self._filament_id(result['filament'])
 
                 vendor_result  = result["filament"].get("vendor", None)
                 cur_lane.spool_vendor       = ""

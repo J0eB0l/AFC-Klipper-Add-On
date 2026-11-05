@@ -1431,8 +1431,10 @@ class TestClearValues:
         lane.weight = 500
         lane.extruder_temp = 210
         lane.bed_temp = 60
+        lane.filament_id = "OF5CgdDq"
         lane.clear_lane_data = MagicMock()
         spool.clear_values(lane)
+        assert lane.filament_id == ""
         assert lane.spool_id is None
         assert lane.material == ""
         assert lane.color == ""
@@ -1568,6 +1570,22 @@ def _stub_get_spool(spool, result):
         side_effect=lambda id, callback: callback(result))
 
 
+class TestFilamentId:
+    def test_reads_json_encoded_extra(self):
+        assert AFCSpool._filament_id({"extra": {"filament_id": '"OF5CgdDq"'}}) == "OF5CgdDq"
+
+    def test_takes_a_bare_string(self):
+        assert AFCSpool._filament_id({"extra": {"filament_id": "OF5CgdDq"}}) == "OF5CgdDq"
+
+    def test_none_without_the_field(self):
+        assert AFCSpool._filament_id({}) == ""
+        assert AFCSpool._filament_id({"extra": {}}) == ""
+        assert AFCSpool._filament_id({"extra": None}) == ""
+
+    def test_ignores_a_number(self):
+        assert AFCSpool._filament_id({"extra": {"filament_id": "12"}}) == ""
+
+
 class TestSetSpoolID:
     def _make_spool_with_spoolman(self):
         spool = _make_spool()
@@ -1638,6 +1656,18 @@ class TestSetSpoolID:
         assert lane.spool_vendor == "Polymaker"
         spool.set_snapmaker_filament_params.assert_called_once()
         spool.afc.function.afc_led.assert_not_called()
+
+    def test_valid_spool_id_sets_filament_id(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        result = _make_spool_result()
+        result["filament"]["extra"] = {"filament_id": '"OF5CgdDq"'}
+        _stub_get_spool(spool, result)
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == "OF5CgdDq"
 
     def test_valid_spool_id_lane_not_loaded_lane_in_unit(self):
         spool = self._make_spool_with_spoolman()

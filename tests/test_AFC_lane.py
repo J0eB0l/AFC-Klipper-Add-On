@@ -1794,6 +1794,7 @@ def _make_lane_for_get_status(map_value):
     lane.spool_id = None
     lane.color = ""
     lane.filament_name = ""
+    lane.filament_id = ""
     lane.spool_vendor = ""
     lane.multi_color = []
     lane.weight = 0
@@ -2128,6 +2129,7 @@ def _make_lane_for_moonraker(extruder_name="extruder", map_value="T0"):
     lane.weight = 750.0
     lane.spool_vendor = "Overture"
     lane.filament_name = "Overture Gray ASA"
+    lane.filament_id = ""
     lane.espooler.espooler_values.full_weight = 1000
     return lane
 
@@ -2228,6 +2230,18 @@ class TestSendLaneDataExtruderIndex:
         assert payload["value"]["name"] == "Overture Gray ASA"
         assert "filament_name" not in payload["value"]
 
+    def test_filament_id_is_published(self):
+        """OrcaSlicer matches a lane's preset by lane_data's filament_id."""
+        lane = _make_lane_for_moonraker()
+        lane.filament_id = "OF5CgdDq"
+        payload = _get_sent_payload(lane)
+        assert payload["value"]["filament_id"] == "OF5CgdDq"
+
+    def test_filament_id_empty_without_one(self):
+        lane = _make_lane_for_moonraker()
+        payload = _get_sent_payload(lane)
+        assert payload["value"]["filament_id"] == ""
+
     def test_initial_weight_is_included(self):
         lane = _make_lane_for_moonraker()
         payload = _get_sent_payload(lane)
@@ -2239,6 +2253,7 @@ class TestSendLaneDataExtruderIndex:
         lane = _make_lane_for_moonraker()
         lane.spool_vendor = ""
         lane.filament_name = ""
+        lane.filament_id = ""
         payload = _get_sent_payload(lane)
         assert payload["value"]["vendor_name"] == ""
         assert payload["value"]["name"] == ""
