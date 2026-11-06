@@ -581,11 +581,11 @@ class AFCSpool:
     cmd_SET_FILAMENT_ID_help = "Sets the slicer's filament id for a lane"
     def cmd_SET_FILAMENT_ID(self, gcmd: GCodeCommand) -> None:
         """
-        Sets the slicer's filament id for the spool in a lane, for example the id of the OrcaSlicer
-        preset picked for it. The id is sent to the slicer in the lane's lane_data so it can pick the
-        same preset again. It stays with the lane until the spool or its material changes. A spool
-        whose Spoolman filament has its own filament_id takes that one when the spool is assigned.
-        Leaving ID out, or passing it empty, clears it.
+        Sets the slicer's filament id for the spool in a lane, for example the id of the
+        OrcaSlicer preset picked for it. The id is sent to the slicer in the lane's lane_data so
+        it can pick the same preset again. It stays with the lane until the spool or its material
+        changes. A spool whose Spoolman filament has its own filament_id takes that one when the
+        spool is assigned. Leaving ID out, or passing it empty, clears it.
 
         Values
         ----
@@ -609,8 +609,10 @@ class AFCSpool:
             self.logger.info(f"{lane} Unknown")
             return
         filament_id = gcmd.get('ID', '').strip()
-        if filament_id and not self.FILAMENT_ID_RE.match(filament_id):
-            self.logger.info(f"Invalid filament id '{filament_id}': use up to 64 letters, digits or _ . + -")
+        if (filament_id
+            and not self.FILAMENT_ID_RE.match(filament_id)):
+            self.logger.info(f"Invalid filament id '{filament_id}': use up to 64 letters, digits "
+                             "or _ . + -")
             return
         cur_lane = self.afc.lanes[lane]
         cur_lane.filament_id = filament_id
@@ -855,9 +857,10 @@ class AFCSpool:
                 full_weight                 = self._get_filament_values(result, 'initial_weight', default=1000)
                 cur_lane.espooler.espooler_values.full_weight = full_weight
                 cur_lane.filament_name      = self._get_filament_values(result['filament'], 'name', default="")
-                # Spoolman's id wins; with none, the same spool keeps the one set with SET_FILAMENT_ID
+                # Spoolman's id wins; with none, the same spool keeps its SET_FILAMENT_ID one
                 filament_id = self._filament_id(result['filament'])
-                if filament_id or not same_spool:
+                if (filament_id
+                    or not same_spool):
                     cur_lane.filament_id = filament_id
 
                 vendor_result  = result["filament"].get("vendor", None)

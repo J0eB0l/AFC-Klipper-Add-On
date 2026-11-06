@@ -899,8 +899,6 @@ class TestSetMaterial:
         assert lane.filament_id == "OFDSrzZ8"
 
 
-# ── cmd_SET_FILAMENT_ID ────────────────────────────────────────────────────────
-
 class TestSetFilamentId:
     def _lane(self, spool):
         lane = _make_lane("lane1")
@@ -912,10 +910,11 @@ class TestSetFilamentId:
     def test_sets_sends_and_saves(self):
         spool = _make_spool()
         lane = self._lane(spool)
-        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="OF5CgdDq"))
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID=" OF5CgdDq "))
         assert lane.filament_id == "OF5CgdDq"
-        lane.send_lane_data.assert_called_once()
-        spool.afc.save_vars.assert_called_once()
+        lane.send_lane_data.assert_called_once_with()
+        spool.afc.save_vars.assert_called_once_with()
+        assert spool.logger.messages == []
 
     def test_empty_id_clears(self):
         spool = _make_spool()
@@ -923,6 +922,9 @@ class TestSetFilamentId:
         lane.filament_id = "GFL99"
         spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1"))
         assert lane.filament_id == ""
+        lane.send_lane_data.assert_called_once_with()
+        spool.afc.save_vars.assert_called_once_with()
+        assert spool.logger.messages == []
 
     def test_invalid_id_is_refused(self):
         spool = _make_spool()
@@ -930,13 +932,35 @@ class TestSetFilamentId:
         lane.filament_id = "GFL99"
         spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="bad id;"))
         assert lane.filament_id == "GFL99"
+        lane.send_lane_data.assert_not_called()
         spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [
+            ("info", "Invalid filament id 'bad id;': use up to 64 letters, digits or _ . + -")]
+
+    def test_an_id_over_64_characters_is_refused(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="A" * 65))
+        assert lane.filament_id == ""
+        spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [
+            ("info", f"Invalid filament id '{'A' * 65}': use up to 64 letters, digits or _ . + -")]
 
     def test_unknown_lane_logs_info(self):
         spool = _make_spool()
         spool.afc.lanes = {}
+        spool.afc.save_vars = MagicMock()
         spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="ghost", ID="GFL99"))
+        spool.afc.save_vars.assert_not_called()
         assert spool.logger.messages == [("info", "ghost Unknown")]
+
+    def test_no_lane_logs_info(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(ID="GFL99"))
+        assert lane.filament_id == ""
+        spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [("info", "No LANE Defined")]
 
 
 # ── cmd_SET_WEIGHT ─────────────────────────────────────────────────────────────
@@ -1739,6 +1763,20 @@ class TestSetSpoolID:
         _stub_get_spool(spool, _make_spool_result())
         spool.set_spoolID(lane, 42)
         assert lane.filament_id == "OFDSrzZ8"
+
+    def test_same_spool_takes_spoolman_id_over_the_set_one(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        lane.spool_id = 42
+        lane.filament_id = "OFDSrzZ8"
+        result = _make_spool_result()
+        result["filament"]["extra"] = {"filament_id": '"OF5CgdDq"'}
+        _stub_get_spool(spool, result)
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == "OF5CgdDq"
 
     def test_new_spool_without_spoolman_id_clears_it(self):
         spool = self._make_spool_with_spoolman()

@@ -168,3 +168,44 @@ class TestTd1Prep:
         prep.afc.lanes = {"lane1": lane}
         prep._td1_prep(overrall_status=False)
         lane.get_td1_data.assert_not_called()
+
+
+class TestPREP:
+    @staticmethod
+    def _prep(tmp_path, saved):
+        prep = _make_prep()
+        afc = prep.afc
+        afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"Turtle_1": {"lane1": saved}}))
+        afc.handle_moonraker_connect = MagicMock()
+        afc.print_version = MagicMock()
+        afc.get_bypass_state = MagicMock(return_value=False)
+        afc.verify_macro_positions = MagicMock(return_value=None)
+        afc.bypass = MagicMock(filament_present=False)
+        afc.bypass.name = "AFC_bypass"
+        prep._rename_macros = MagicMock()
+        # A pool unit has nothing to prep, so PREP only restores the lane
+        afc.units = {"Turtle_1": MagicMock(pool=True, lanes=[])}
+        lane = MagicMock(unit="Turtle_1", filament_id="GFL99", spool_id=None, map=None,
+                         runout_lane=None)
+        lane.name = "lane1"
+        afc.lanes = {"lane1": lane}
+        return prep, lane
+
+    def test_restores_the_saved_filament_id(self, tmp_path):
+        prep, lane = self._prep(tmp_path, {"filament_id": "OF5CgdDq"})
+        prep.PREP(MagicMock())
+        assert lane.filament_id == "OF5CgdDq"
+        assert prep.logger.messages == []
+
+    def test_a_lane_saved_without_one_has_none(self, tmp_path):
+        prep, lane = self._prep(tmp_path, {"material": "PLA"})
+        prep.PREP(MagicMock())
+        assert lane.filament_id == ""
+        assert prep.logger.messages == []
+
+    def test_a_saved_null_reads_as_none(self, tmp_path):
+        prep, lane = self._prep(tmp_path, {"filament_id": None})
+        prep.PREP(MagicMock())
+        assert lane.filament_id == ""
+        assert prep.logger.messages == []

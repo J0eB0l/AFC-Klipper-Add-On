@@ -101,6 +101,14 @@ class TestAfcErrorInit:
         err = afcError(config)
         assert err.pause is False
 
+    def test_init_sets_pause_in_toolchange_false(self):
+        from tests.conftest import MockConfig, MockPrinter, MockAFC
+        afc = MockAFC()
+        printer = MockPrinter(afc=afc)
+        config = MockConfig(name="AFC_error", printer=printer)
+        err = afcError(config)
+        assert err.pause_in_toolchange is False
+
     def test_init_registers_klippy_connect_handler(self):
         from tests.conftest import MockConfig, MockPrinter, MockAFC
         afc = MockAFC()
@@ -1204,21 +1212,34 @@ class TestCmdAfcResume:
 
     def test_pause_in_a_tool_change_runs_pre_resume_macro_before_restoring(self):
         err, order = self._resume_after_pause(in_toolchange=True)
-        assert order == [err.AFC_RENAME_RESUME_NAME + " ", "EXIT_BIN", "restore_pos"]
+        assert order == [f"{err.AFC_RENAME_RESUME_NAME} ", "EXIT_BIN", "restore_pos"]
         assert err.pause_in_toolchange is False
 
     def test_pause_outside_a_tool_change_skips_pre_resume_macro(self):
         err, order = self._resume_after_pause(in_toolchange=False)
-        assert "EXIT_BIN" not in order
-        assert order[-1] == "restore_pos"
+        assert order == [f"{err.AFC_RENAME_RESUME_NAME} ", "restore_pos"]
+        assert err.pause_in_toolchange is False
 
     def test_no_pre_resume_macro_configured_skips_it(self):
         err, order = self._resume_after_pause(in_toolchange=True, macro=None)
-        assert order[-1] == "restore_pos"
-        assert len(order) == 2
+        assert order == [f"{err.AFC_RENAME_RESUME_NAME} ", "restore_pos"]
+        assert err.pause_in_toolchange is False
 
 
 class TestCmdAfcPause:
+    @pytest.mark.parametrize("in_toolchange", [True, False])
+    def test_records_whether_the_pause_came_during_a_tool_change(self, in_toolchange):
+        err, afc = _make_afc_error()
+        afc.function.is_paused.return_value = False
+        afc.save_pos = MagicMock()
+        afc.move_z_pos = MagicMock()
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.gcode_move.last_position = [0.0, 0.0, 0.0]
+        afc.in_toolchange = in_toolchange
+        err.pause_in_toolchange = not in_toolchange
+        err.cmd_AFC_PAUSE(MagicMock())
+        assert err.pause_in_toolchange is in_toolchange
+
     def test_not_paused_saves_position(self):
         err, afc = _make_afc_error()
         afc.function.is_paused.return_value = False

@@ -3067,6 +3067,87 @@ class TestAfcBambuAMSCmdBambuClear:
         assert str(exc.value) == "BAMBU_CLEAR: no Bambu unit named Turtle_1"
         assert unit._bridge.sent == []
 
+    def test_a_named_unit_is_cleared_even_when_it_reads_healthy(self):
+        unit = self._unit(0x00)
+        gcmd = unit.gcode.run("BAMBU_CLEAR", UNIT="Bambu_AMS_1")
+        assert unit._bridge.sent == [{"cmd": "clearfault", "unit": 0}]
+        assert gcmd.messages == [
+            ("respond_info",
+             "BAMBU_CLEAR: Bambu_AMS_1: nothing to clear -- the unit was not "
+             "in a fault state before the burst (state 0) and is not now (0). "
+             "The clear was still sent to unit 0. If its LEDs are red, the "
+             "cause is not a parked feeder: try AFC_BAMBU_RELINK "
+             "UNIT=Bambu_AMS_1, which re-registers the unit without a power "
+             "cycle.")]
+
+    def test_alone_it_skips_a_unit_with_no_bridge(self):
+        unit = self._unit(0x07)
+        unit._bridge = None
+        gcmd = unit.gcode.run("BAMBU_CLEAR")
+        assert gcmd.messages == [
+            ("respond_info", "BAMBU_CLEAR: no Bambu unit reports a fault.")]
+
+    def test_a_named_unit_with_no_bridge_says_so(self):
+        unit = self._unit(0x07)
+        unit._bridge = None
+        gcmd = unit.gcode.run("BAMBU_CLEAR", UNIT="Bambu_AMS_1")
+        assert gcmd.messages == [
+            ("respond_info", "BAMBU_CLEAR: Bambu_AMS_1: bridge not connected")]
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSClearFault:
+    @staticmethod
+    def _run(before: int, after: int) -> Tuple[afcBambuAMS, FakeGcmd]:
+        """
+        Run the clear on a unit reporting ``before``, which reports ``after``
+        once the clear is sent.
+
+        :param before: the unit's state before the burst
+        :param after: its state after
+        :return tuple: (unit, the command the verdict went to)
+        """
+        def answer(bridge: FakeBridge, frame: dict) -> None:
+            """The unit's state once the clear went out."""
+            bridge.status = {"units": [{"n": 2, "ustate": after}]}
+
+        bridge = FakeBridge(status={"units": [{"n": 2, "ustate": before}]},
+                            on_send=answer)
+        unit = make_bambu_unit(ams_index=2, bridge=bridge)
+        gcmd = FakeGcmd()
+        t0 = unit.reactor.monotonic()
+        unit._clear_fault(gcmd, "MY_CLEAR")
+        assert unit.reactor.monotonic() == pytest.approx(t0 + 2.6)
+        assert unit._bridge.sent == [{"cmd": "clearfault", "unit": 2}]
+        assert unit.logger.messages == []
+        return unit, gcmd
+
+    def test_a_cleared_unit_is_reported_under_the_command_name(self):
+        _unit, gcmd = self._run(0x07, 0x00)
+        assert gcmd.messages == [
+            ("respond_info",
+             "MY_CLEAR: Bambu_AMS_1: cleared (state 7 -> 0); the unit "
+             "accepted the operation and left its park.")]
+
+    def test_a_still_faulted_unit_says_so(self):
+        _unit, gcmd = self._run(0x07, 0x06)
+        assert gcmd.messages == [
+            ("respond_info",
+             "MY_CLEAR: Bambu_AMS_1: STILL FAULTED (state 6). The unit will "
+             "not accept a fresh operation while the jam is there -- relieve "
+             "the pressure (the buffer coming off the floor is the sign) and "
+             "run this again.")]
+
+    def test_a_healthy_unit_has_nothing_to_clear(self):
+        _unit, gcmd = self._run(0x00, 0x00)
+        assert gcmd.messages == [
+            ("respond_info",
+             "MY_CLEAR: Bambu_AMS_1: nothing to clear -- the unit was not in a "
+             "fault state before the burst (state 0) and is not now (0). The "
+             "clear was still sent to unit 2. If its LEDs are red, the cause "
+             "is not a parked feeder: try AFC_BAMBU_RELINK UNIT=Bambu_AMS_1, "
+             "which re-registers the unit without a power cycle.")]
+
 
 class TestAfcBambuAMSMcaddrAckStr:
     class _OldBridge(FakeBridge):
