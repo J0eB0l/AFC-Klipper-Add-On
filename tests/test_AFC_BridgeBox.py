@@ -7641,6 +7641,27 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert _p3_console(m) == [("respond_raw", "// action:prompt_end")]
 
 
+class TestAfcBridgeBoxCmdAFCBridgeboxStatus:
+    """STATUS lists every chain: board, link, extruder, units and lanes."""
+
+    def test_status_lists_the_units_on_bays_and_counts_the_free_ones(
+            self, tmp_path, monkeypatch):
+        m = _p3_named(tmp_path, monkeypatch, online=(C,))
+        assert m._claim_pool_unit(C, "boxed") is not None
+        _p3_quiet(m)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_STATUS(cmd)
+        # AAAA is recorded on Alpha but not on the chain now; CCCC claimed
+        # Bravo live and took the first free T#s.
+        assert cmd.messages == [("respond_info", (
+            "BridgeBox chains --\n"
+            "chain1: extruder, board, USB usb-chain1-if00, connected\n"
+            "  Alpha [AMS] AAAA offline: lane24 no T#; lane25 no T#; "
+            "lane26 no T#; lane27 no T#\n"
+            "  Bravo [AMS] CCCC online: lane28 T0; lane29 T1; lane30 T2; "
+            "lane31 T3\n"
+            "  free bays: 1 AMS, 1 HT"))]
+
 class TestAfcBridgeBoxCmdAFCBridgeboxBays:
     """BAYS pops the bay manager: each bay, its unit, and what it offers."""
 
