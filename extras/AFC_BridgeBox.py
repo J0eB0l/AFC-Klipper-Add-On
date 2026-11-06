@@ -2626,12 +2626,100 @@ class afcBridgeBox:
             "Forget the BridgeBox a chain on serial_port: auto saved, for a "
             "replacement board; the next start takes the next free one: "
             "AFC_BRIDGEBOX_FORGET_BOARD [CHAIN=<chain>]")
+        gcode = self.printer.lookup_object("gcode", None)
+        if gcode is not None:
+            try:
+                gcode.register_command(
+                    "AFC_BRIDGEBOX_STATUS", self.cmd_AFC_BRIDGEBOX_STATUS,
+                    desc="Show every BridgeBox chain in one list: its board, "
+                         "link, extruder, and each unit with its lanes, T#s "
+                         "and spools -- AFC_BRIDGEBOX_STATUS")
+            except Exception:
+                pass                  # a second chain: the first one lists all
         self._register_mux(
             "AFC_BRIDGEBOX_REPLACE", self.cmd_AFC_BRIDGEBOX_REPLACE,
             "Forget an offline unit and put a new unit on its bay, live: "
             "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> "
             "OLD=<old uid or bay name> [FORCE=1]. Without OLD, pops a picker "
             "of the bays held for offline units.")
+
+    def cmd_AFC_BRIDGEBOX_STATUS(self, gcmd: Any) -> None:
+        """
+        List every BridgeBox chain on the printer, in config order: its board,
+        how it is linked, its extruder, and each unit on a bay with its lanes,
+        their T#s and spools. The bays with no unit are counted per family.
+
+        Registered once, by the first chain; it lists them all, so it takes no
+        CHAIN=.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_STATUS`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_STATUS
+        ```
+        """
+        chains = [obj for _name, obj
+                  in self.printer.lookup_objects(self._BASE_SECTION)
+                  if isinstance(obj, afcBridgeBox)] or [self]
+        lines: List[str] = []
+        for chain in chains:
+            lines += chain._status_lines()
+        gcmd.respond_info("BridgeBox chains --\n" + "\n".join(lines))
+
+    def _status_lines(self) -> List[str]:
+        """
+        This chain's part of AFC_BRIDGEBOX_STATUS.
+
+        :return list: the chain's head line, then one line per unit on a bay
+            and one counting the free bays
+        """
+        bridge = self._chain_bridge()
+        info = (getattr(bridge, "_info", None) or {}) if bridge else {}
+        board = " ".join(f"{k} {info[k]}" for k in ("chip", "fw")
+                         if info.get(k)) or "board"
+        port = str(self.serial_port or "")
+        wifi = getattr(bridge, "wifi", None) if bridge else None
+        if wifi is not None and getattr(wifi, "on_wifi", False):
+            link = f"WiFi {wifi.addr}"
+        elif port.lower().startswith("tcp://"):
+            link = f"WiFi {port}"
+        elif port.startswith("auto:"):
+            link = "USB, no board found yet"
+        else:
+            link = f"USB {os.path.basename(port)}"
+        state = ("connected" if bridge is not None and bridge.is_connected()
+                 else "not connected")
+        lines = [f"{self.name}: {self.extruder or 'no extruder'}, {board}, "
+                 f"{link}, {state}"]
+        free = {"AMS": 0, "HT": 0}
+        for pu in sorted(getattr(self, "_pool_units", None) or [],
+                         key=_pool_laneno):
+            fam = "HT" if pu.get("family") == "ht" else "AMS"
+            uid = _norm_uid(pu.get("uid"))
+            if not uid:
+                free[fam] += 1
+                continue
+            lanes = []
+            for lname in pu.get("lanes") or []:
+                lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+                maps = ",".join(m for m in (getattr(lane, "map", None) or [])
+                                if m != "NONE") or "no T#"
+                spool = getattr(lane, "spool_id", None)
+                lanes.append(f"{lname} {maps}"
+                             + (f" spool {spool}" if spool else ""))
+            where = "online" if pu.get("bound") else "offline"
+            lines.append(f"  {pu['name']} [{fam}] {uid} {where}: "
+                         + ("; ".join(lanes) or "no lanes"))
+        counts = [f"{n} {fam}" for fam, n in free.items() if n]
+        if counts:
+            lines.append(f"  free bays: {', '.join(counts)}")
+        elif not getattr(self, "_pool_units", None):
+            lines.append("  no pool bays (pool_ams / pool_ht)")
+        return lines
 
     def cmd_AFC_BRIDGEBOX_RESET_WIFI(self, gcmd: Any) -> None:
         """
