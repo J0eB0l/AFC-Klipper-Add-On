@@ -289,8 +289,12 @@ A second `[AFC_BridgeBox]` chain needs its own `serial_port`; with `auto` it
 takes the BridgeBox no other chain uses. Its unit names
 default to `Bambu_AMS_<chain name>_N` and `Bambu_AMS_<chain name>_HT_N`, and
 its buffer to `Bambu_AMS_<chain name>_Buffer`, so they do not collide with the
-first chain's; that prefix is saved in the state file, so the chain keeps its
-names if the chains above it change. Set `unit_prefix` to choose another, and
+first chain's. Each chain saves its prefix in the state file, `Bambu_AMS` too,
+so a chain keeps its names when chains are added above it or the chains above
+it change: a chain added above one that saved `Bambu_AMS` names its units
+after itself. Chains load in config order, so name their files and sections in
+toolhead order (`chain0` on `e0` and so on): AFC numbers T#s in that order when
+it resets the mapping. Set `unit_prefix` to choose another, and
 leave `ams_names` / `ht_names` out of the second chain, or give it names of
 its own. `lane_base` can stay automatic:
 each chain starts one past the last lane the chains above it built, and moves
@@ -837,6 +841,9 @@ known until then.
   bay are listed after the bays. Each gets a Replace button, placed ahead of
   the Unassign buttons, while its family has an offline-held bay (see [No free
   bay: Replace](#no-free-bay-replace)); there is none with a `roster:` option.
+- `AFC_BRIDGEBOX_STATUS` lists every chain in config order: its board, whether
+  it is on USB or WiFi and connected, its extruder, and each unit on a bay with
+  its lanes, T#s and spools, then the free bays. It takes no `CHAIN=`.
 - `AFC_BRIDGEBOX_FORGET UID=<uid>` (or `NAME=<unit name>`) `[FORCE=1]` retires
   a unit. It removes the unit from the recorded roster, releases its name and
   lane pin, and erases its learned values, its saved lane details and what is
