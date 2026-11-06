@@ -4333,7 +4333,7 @@ class afcBridgeBox:
             unit = None
         claimed = _norm_uid(getattr(unit, "unit_uid", None))
         if not uid or (claimed and claimed != uid):
-            self.logger.info(
+            self.logger.debug(
                 f"AFC_BridgeBox {self.name}: {key} for {unit_name} kept for "
                 f"this session only -- "
                 + (f"the bay is bound to {uid} but its unit carries {claimed}"
@@ -7310,7 +7310,7 @@ class afcBridgeBox:
                 if holder.current_map == cmd:
                     holder.current_map = holder.map[0] if holder.map else ""
                 afc.tool_cmds.pop(cmd, None)
-                self.logger.info(
+                self.logger.debug(
                     f"AFC_BridgeBox {self.name}: {lane.name} takes back its saved "
                     f"{cmd} from {holder.name}, which waits for its own pool lanes")
                 if holder not in out:
@@ -7486,7 +7486,7 @@ class afcBridgeBox:
             if tc is not None and tc.name in getattr(ext, "lanes", {}):
                 continue                      # self-lane still registered
             ext.no_lanes = False
-            self.logger.info(
+            self.logger.debug(
                 f"AFC_BridgeBox {self.name}: {ext.name} left standalone mode "
                 f"(claimed lanes attached)")
 
@@ -7562,7 +7562,7 @@ class afcBridgeBox:
                 pass
         if changed:
             self._state_set({sec: {"roster": ", ".join(refined)}})
-            self.logger.info(
+            self.logger.debug(
                 f"AFC_BridgeBox {self.name}: generation confirmed by bus "
                 f"dialect (0x3702): {', '.join(changed)} -- applied to the "
                 f"running unit and recorded. Lanes and names do not move."
@@ -7593,7 +7593,7 @@ class afcBridgeBox:
         self._ids_held = unit
         if first:
             try:
-                self.logger.info(
+                self.logger.debug(
                     f"AFC_BridgeBox {self.name}: {getattr(unit, 'name', '?')} "
                     f"bound in the bridge's RAM; the table is saved when the "
                     f"print ends (no flash write mid-print).")
@@ -7663,7 +7663,7 @@ class afcBridgeBox:
             if bool(getattr(obj, key, False)) == val:
                 continue
             setattr(obj, key, val)
-            self.logger.info(
+            self.logger.debug(
                 f"AFC_BridgeBox {self.name}: {getattr(obj, 'name', '?')} is a "
                 f"{model}; applied {key}={val} from [AFC_BridgeBox {model}] "
                 f"(the bay was fabricated as a spare, before its model was "
@@ -7802,7 +7802,7 @@ class afcBridgeBox:
                 f"{getattr(obj, 'name', '?')} (UID {uid}) not applied: {e}")
             return
         if used:
-            self.logger.info(
+            self.logger.debug(
                 f"AFC_BridgeBox {self.name}: {getattr(obj, 'name', '?')} "
                 f"takes the {', '.join(used)} that UID {uid} learned.")
 

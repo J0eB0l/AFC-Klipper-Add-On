@@ -375,7 +375,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
                 f"load will settle this.")
             return
         self._gate_latched = True
-        self.logger.info(
+        self.logger.debug(
             f"{self.name}: adopting {names} as loaded at the toolhead from "
             f"AFC's own record, buffer agreeing at {reading:.2f}")
 
@@ -435,7 +435,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
                    f"for {self._now_t - self._compressed_since:.1f}s)"
                    if resting and self._compressed_since is not None
                    else f"odometer still for {self._odom_still_for():.2f}s")
-            self.logger.info(
+            self.logger.debug(
                 f"{self.name}: load detected at {self._now_t:.2f} -- "
                 f"fps {self.fps_value:.2f} (smoothed {self.smoothed_fps:.2f}), "
                 f"{how} [{odoms}]")

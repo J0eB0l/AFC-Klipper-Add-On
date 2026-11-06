@@ -1329,7 +1329,7 @@ class BambuSpoolman:
                 _cap = (f" -- measured {pct}%, capped to the spool's "
                         f"{nominal} g nominal"
                         if pct > 100 and nominal else "")
-                self._u.logger.info(
+                self._u.logger.debug(
                     f"AFC bambu {self._u.name}: wrote {grams} g remaining to "
                     f"Spoolman spool {sid} ({source}){_cap}")
             except Exception as e:

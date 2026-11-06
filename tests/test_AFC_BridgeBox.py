@@ -1030,7 +1030,7 @@ def _p6_claim_log(uid: str, bay: str, model: str = "boxed",
         ("debug",
          f"AFC bambu {bay}: chain index not resolved yet (UID {uid}); "
          "holding this unit's registrations until the chain map arrives"),
-        ("info",
+        ("debug",
          f"AFC bambu {bay}: claimed UID {uid} as {model} and brought online "
          "live (ams_index=0)."),
         ("info",
@@ -3884,7 +3884,7 @@ class TestAfcBridgeBoxInit:
         ("debug", f"AFC bambu Bambu_AMS_2: chain index not resolved yet "
                   f"(UID {C}); holding this unit's registrations until the "
                   f"chain map arrives"),
-        ("info", f"AFC bambu Bambu_AMS_2: claimed UID {C} as boxed and "
+        ("debug", f"AFC bambu Bambu_AMS_2: claimed UID {C} as boxed and "
                  f"brought online live (ams_index=0)."),
         ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto "
                  f"Bambu_AMS_2 (4 lanes) -- live, no restart.")]
@@ -4178,7 +4178,7 @@ class TestAfcBridgeBoxInit:
                      f"(0 lanes) -- live, no restart."),
             ("info", f"AFC_BridgeBox chain1: released Bravo (UID {C}, "
                      f"AFC_BRIDGEBOX_ASSIGN); lanes dropped live"),
-            ("info", f"AFC_BridgeBox chain1: Charlie takes the "
+            ("debug", f"AFC_BridgeBox chain1: Charlie takes the "
                      f"afc_bowden_length 3632mm that UID {C} learned."),
             ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto "
                      f"Charlie (0 lanes) -- live, no restart.")]
@@ -6610,7 +6610,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
             ("debug", "AFC bambu Bravo: chain index not resolved yet (UID "
                       "AAAA); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("info", "AFC bambu Bravo: claimed UID AAAA as ams2 and brought "
+            ("debug", "AFC bambu Bravo: claimed UID AAAA as ams2 and brought "
                      "online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED AAAA as ams2 onto Bravo "
                      "(4 lanes) -- live, no restart.")]
@@ -6822,7 +6822,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
             ("debug", "AFC bambu Bravo: chain index not resolved yet (UID "
                       "CCCC); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("info", "AFC bambu Bravo: claimed UID CCCC as boxed and brought "
+            ("debug", "AFC bambu Bravo: claimed UID CCCC as boxed and brought "
                      "online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto Bravo "
                      "(4 lanes) -- live, no restart.")]
@@ -6950,7 +6950,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
             ("debug", "AFC bambu Bambu_AMS_3: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("info", "AFC bambu Bambu_AMS_3: claimed UID CCCC as boxed and "
+            ("debug", "AFC bambu Bambu_AMS_3: claimed UID CCCC as boxed and "
                      "brought online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_3 (4 lanes) -- live, no restart."),
@@ -7327,7 +7327,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
             ("debug", "AFC bambu Bambu_AMS_2: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("info", "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and "
+            ("debug", "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and "
                      "brought online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_2 (4 lanes) -- live, no restart."),
@@ -7361,7 +7361,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
             ("debug", "AFC bambu Bambu_AMS_2: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("info", "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and "
+            ("debug", "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and "
                      "brought online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_2 (4 lanes) -- live, no restart."),
@@ -7880,7 +7880,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
                   "(UID EEEE); holding this unit's registrations until "
                   "the chain map arrives"),
-        ("info", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
+        ("debug", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
                  "brought online live (ams_index=0)."),
         ("info", "AFC_BridgeBox chain1: CLAIMED EEEE as boxed onto "
                  "Bambu_AMS_4 (4 lanes) -- live, no restart.")]
@@ -7936,7 +7936,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
                       "(UID EEEE); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("info", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
+            ("debug", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
                      "brought online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED EEEE as boxed onto "
                      "Bambu_AMS_4 (4 lanes) -- live, no restart.")]
@@ -8168,7 +8168,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
                       "(UID EEEE); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("info", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
+            ("debug", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
                      "brought online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED EEEE as boxed onto "
                      "Bambu_AMS_4 (4 lanes) -- live, no restart.")]
@@ -8632,7 +8632,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             ("debug", "AFC bambu Hot: chain index not resolved yet (UID "
                       "JJJJ); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("info", "AFC bambu Hot: claimed UID JJJJ as ht and brought "
+            ("debug", "AFC bambu Hot: claimed UID JJJJ as ht and brought "
                      "online live (ams_index=0)."),
             ("info", "AFC_BridgeBox chain1: CLAIMED JJJJ as ht onto Hot (1 "
                      "lanes) -- live, no restart.")]
@@ -8664,7 +8664,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
                      "the reader or the spool; reseat it, or run "
                      "AFC_BAMBU_SCAN LANE=lane32"),
             # Claimed live: the bay goes to the insert path, once.
-            ("info", "AFC bambu Hot: slot 0 came up with a spool and no record "
+            ("debug", "AFC bambu Hot: slot 0 came up with a spool and no record "
                      "of it -- scanning it as a fresh insert")]
 
     def test_during_a_print_it_offers_no_force(self, tmp_path, monkeypatch):
@@ -9145,7 +9145,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_HT_1",
                              "afc_bowden_length", 3627.0)
         assert log == [
-            ("info", "AFC_BridgeBox chain1: afc_bowden_length for "
+            ("debug", "AFC_BridgeBox chain1: afc_bowden_length for "
                      "Bambu_AMS_HT_1 kept for this session only -- no unit "
                      "is bound to the bay")]
 
@@ -9159,7 +9159,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_HT_1",
                              "afc_bowden_length", 3627.0)
         assert log == [
-            ("info", "AFC_BridgeBox chain1: afc_bowden_length for "
+            ("debug", "AFC_BridgeBox chain1: afc_bowden_length for "
                      "Bambu_AMS_HT_1 kept for this session only -- the bay "
                      "is bound to HHHH but its unit carries "
                      "FFFFFFFFFFFFFFFFFFFFFFFF")]
@@ -9200,7 +9200,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_3", "afc_bowden_length",
                              1.0)
         assert log == [
-            ("info", "AFC_BridgeBox chain1: afc_bowden_length for "
+            ("debug", "AFC_BridgeBox chain1: afc_bowden_length for "
                      "Bambu_AMS_3 kept for this session only -- no unit is "
                      "bound to the bay")]
 
@@ -9819,7 +9819,7 @@ class TestAfcBridgeBoxFillHeldBays:
         ("debug", "AFC bambu Alpha: chain index not resolved yet (UID AAAA); "
                   "holding this unit's registrations until the chain map "
                   "arrives"),
-        ("info", "AFC bambu Alpha: claimed UID AAAA as boxed and brought "
+        ("debug", "AFC bambu Alpha: claimed UID AAAA as boxed and brought "
                  "online live (ams_index=0)."),
         ("info", "AFC_BridgeBox chain1: CLAIMED AAAA as boxed onto Alpha "
                  "(4 lanes) -- live, no restart.")]
@@ -10449,14 +10449,14 @@ class TestAfcBridgeBoxScoutTick:
             master's
         """
         learned: List[LogLine] = [] if takes is None else [
-            ("info",
+            ("debug",
              f"AFC_BridgeBox chain1: {bay} takes the {takes} that UID {uid} "
              "learned.")]
         return [
             ("debug",
              f"AFC bambu {bay}: chain index not resolved yet (UID {uid}); "
              "holding this unit's registrations until the chain map arrives"),
-            ("info",
+            ("debug",
              f"AFC bambu {bay}: claimed UID {uid} as {model} and brought "
              "online live (ams_index=0)."),
             *learned,
@@ -10881,7 +10881,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "ams2:AAAA"
         assert master._recorded_raw == "ams2:AAAA"
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams2 "
              "-- applied to the running unit and recorded. Lanes and names do not move."),
         ]
@@ -10895,7 +10895,7 @@ class TestAfcBridgeBoxScoutTick:
         self._tick(master, 100.0)
         assert self._roster(master) == "ams1:AAAA"
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams1 "
              "-- applied to the running unit and recorded. Lanes and names do not move."),
         ]
@@ -10926,7 +10926,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master.get_status()["pending_restart"] == []
         assert self._sent(bridge) == []
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams2 "
              "-- applied to the running unit and recorded. Lanes and names do not move."),
         ]
@@ -10982,7 +10982,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == (
             f"ams2:{A24}, ams1:{B24}, boxed:{C24}")
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
@@ -10992,7 +10992,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == (
             f"ams2:{A24}, ams1:{B24}, boxed:{C24}")
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
@@ -11002,11 +11002,11 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == (
             f"ams2:{A24}, ams1:{B24}, ams1:{C24}")
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{C24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11061,7 +11061,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == [{"cmd": "model", "unit": 0, "m": 1},
                                       bind, bind, {"cmd": "idsave"}]
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11078,7 +11078,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == [{"cmd": "model", "unit": 0, "m": 0},
                                       bind, bind, {"cmd": "idsave"}]
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11093,7 +11093,7 @@ class TestAfcBridgeBoxScoutTick:
         assert unit.ams_model == "ams1"
         assert self._sent(bridge) == []
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11117,7 +11117,7 @@ class TestAfcBridgeBoxScoutTick:
         else:
             assert self._sent(bridge) == []
         assert self._log(master) == [
-            ("info",
+            ("debug",
              f"AFC_BridgeBox chain1: generation confirmed by bus dialect "
              f"(0x3702): {A24} -> ams1 -- applied to the running unit and "
              f"recorded. Lanes and names do not move.")]
@@ -11133,11 +11133,11 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.ams_model, unit.measure_on_insert) == ("ams1", False)
         assert self._sent(bridge) == []
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11162,11 +11162,11 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "idsave"},
         ]
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11184,7 +11184,7 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "model", "unit": 0, "m": 0},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0}]
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move. The bridge has it in RAM and saves it at the next "
@@ -11216,7 +11216,7 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "idsave"},
         ]
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
@@ -11231,7 +11231,7 @@ class TestAfcBridgeBoxScoutTick:
                                          dry_max_temp=55)
         assert (unit.ams_model, unit.dry_max_temp) == ("ams2", 55)
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11246,7 +11246,7 @@ class TestAfcBridgeBoxScoutTick:
                                          dry_max_temp=80)
         assert (unit.ams_model, unit.dry_max_temp) == ("ams2", 65)
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11307,7 +11307,7 @@ class TestAfcBridgeBoxScoutTick:
         again = self._restart_unit(tmp_path, sections, **options)
         assert (again.has_heater, again.dry_max_temp) == expected
         assert self._log(master) == [
-            ("info",
+            ("debug",
              f"AFC_BridgeBox chain1: generation confirmed by bus dialect "
              f"(0x3702): {A24} -> ams2 -- applied to the running unit and "
              f"recorded. Lanes and names do not move.")]
@@ -11319,7 +11319,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.ams_model, unit.has_heater) == ("ams2", False)
         assert self._restart_unit(tmp_path, sections).has_heater is False
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11332,7 +11332,7 @@ class TestAfcBridgeBoxScoutTick:
         master, unit = self._live_ams2(tmp_path, monkeypatch, sections)
         assert (unit.has_heater, unit.dry_max_temp) == (True, 85)
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11346,7 +11346,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "ams1", False, 65)
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11504,11 +11504,11 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.ams_model, unit.measure_on_insert) == ("ams1", False)
         assert self._sent(bridge) == []
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -11536,7 +11536,7 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "model", "unit": 0, "m": 0},
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0}]
         assert self._log(master) == [
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move. The bridge has it in RAM and saves it at the next "
@@ -11807,7 +11807,7 @@ class TestAfcBridgeBoxScoutTick:
             ("debug",
              "AFC bambu Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
              "follower"),
-            ("info",
+            ("debug",
              "AFC bambu Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
              "the toolhead) -- mode:4, one-shot."),
             ("debug",
@@ -11874,7 +11874,7 @@ class TestAfcBridgeBoxScoutTick:
             ("debug",
              "AFC bambu Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
              "follower"),
-            ("info",
+            ("debug",
              "AFC bambu Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
              "the toolhead) -- mode:4, one-shot."),
             ("debug",
@@ -11897,7 +11897,7 @@ class TestAfcBridgeBoxScoutTick:
             ("debug",
              "AFC bambu Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
              "follower"),
-            ("info",
+            ("debug",
              "AFC bambu Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
              "the toolhead) -- mode:4, one-shot."),
             ("debug",
@@ -11986,7 +11986,7 @@ class TestAfcBridgeBoxScoutTick:
             "ams2", False, 50)
         assert self._log(master) == [
             *self._claim_log(A24, "Bambu_AMS_1"),
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
@@ -12056,7 +12056,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(A24, "Bambu_AMS_1"),
             ("debug", f"AFC bambu Bambu_AMS_1: UID {A24} confirmed at ams_index 0"),
-            ("info",
+            ("debug",
              "AFC_BridgeBox chain1: Bambu_AMS_1 bound in the bridge's RAM; the table is saved "
              "when the print ends (no flash write mid-print)."),
         ]
@@ -14491,7 +14491,7 @@ class TestAfcBridgeBoxScoutTick:
             ("debug",
              "AFC bambu Bambu_AMS_2: chain index not resolved yet (UID CCCC); holding this "
              "unit's registrations until the chain map arrives"),
-            ("info",
+            ("debug",
              "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and brought online live "
              "(ams_index=0)."),
             ("warning", "AFC_BridgeBox chain1: TcmdAssign lane28 failed: no tools"),
@@ -15217,7 +15217,7 @@ class TestAfcBridgeBoxRestoreReturned:
             ("debug",
              "AFC bambu Alpha: lane24 loaded at startup, re-asserting AMS "
              "loaded state + follower"),
-            ("info",
+            ("debug",
              "AFC bambu Alpha: restored the follower for lane24 (AFC records "
              "it loaded to the toolhead) -- mode:4, one-shot."),
             ("debug",
@@ -16768,7 +16768,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert (stand_in.map, stand_in.current_map) == (["T4"], "T4")
         claim = _p6_claim_log(A, "Alpha")
         assert _p6_log(m) == claim[:2] + [
-            ("info", "AFC_BridgeBox chain1: lane24 takes back its saved T3 "
+            ("debug", "AFC_BridgeBox chain1: lane24 takes back its saved T3 "
                      "from e2, which waits for its own pool lanes")
         ] + claim[2:]
         _p6_consistent(m)
@@ -17429,7 +17429,7 @@ class TestAfcBridgeBoxCheckMovedLoaded:
             ("debug",
              "AFC bambu Bambu_AMS_HT_1: lane40 loaded at startup, "
              "re-asserting AMS loaded state + follower"),
-            ("info",
+            ("debug",
              "AFC bambu Bambu_AMS_HT_1: restored the follower for lane40 "
              "(AFC records it loaded to the toolhead) -- mode:4, one-shot.")]
 
@@ -17464,7 +17464,7 @@ class TestAfcBridgeBoxReapplyModelOverride:
         bridge.sent.clear()
         _p6_quiet(m)
         applied = [(
-            "info",
+            "debug",
             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied "
             "measure_on_insert=False from [AFC_BridgeBox ams1] (the bay was "
             "fabricated as a spare, before its model was known)")]

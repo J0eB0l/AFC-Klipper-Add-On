@@ -1028,12 +1028,12 @@ class TestBambuSpoolmanBindLanded:
         :param matched: the relink went through the match-only lookup
         :return list: what the flap, its relink and the real removal log
         """
-        removed = ("info", f"{self.FLAP}: spool REMOVED from slot 3 (AMS bay 4)")
+        removed = ("debug", f"{self.FLAP}: spool REMOVED from slot 3 (AMS bay 4)")
         lines = [
             removed,
             ("debug", f"{self.FLAP}: unbinding lane15 from spool 136 -- the "
                       f"bay is empty"),
-            ("info", f"{self.FLAP}: spool INSERTED in slot 3 (AMS bay 4)"),
+            ("debug", f"{self.FLAP}: spool INSERTED in slot 3 (AMS bay 4)"),
             ("info", f"{self.FLAP}: applied tag to lane15: Bambu PLA Basic "
                      f"#0086D6"),
             ("debug", f"{self.FLAP}: lane15 tag -- PLA Basic GFA00 | color "
@@ -1048,7 +1048,7 @@ class TestBambuSpoolmanBindLanded:
     def _unread_lines(self) -> List[Tuple[str, str]]:
         """:return list: an unread reel going in mid-print, said once"""
         return [
-            ("info", f"{self.FLAP}: spool INSERTED in slot 3 (AMS bay 4)"),
+            ("debug", f"{self.FLAP}: spool INSERTED in slot 3 (AMS bay 4)"),
             ("info", f"{self.FLAP}: spool INSERTED in slot 3 during a print, "
                      f"and nothing has read it -- lane15 is on lane defaults "
                      f"and linked to no spool until it is read. The unit may "
@@ -1086,7 +1086,7 @@ class TestBambuSpoolmanBindLanded:
         self._feed(unit, gone)
         expected = self._flap_lines(matched=path == "match")
         expected.append(
-            ("info", f"{self.FLAP}: spool REMOVED from slot 3 (AMS bay 4)"))
+            ("debug", f"{self.FLAP}: spool REMOVED from slot 3 (AMS bay 4)"))
         if lands == "after-defaults":
             self._feed(unit, unread, dt=1.0, times=4)
             expected += self._unread_lines()
@@ -1574,7 +1574,7 @@ class TestBambuSpoolmanApplyRemainWeight:
         assert unit.logger.messages == [
             ("debug", "AFC bambu Bambu_AMS_1: lane12 bound to spool 163 after "
                       "its measurement; handing the measured 952 g to it"),
-            ("info", "AFC bambu Bambu_AMS_1: wrote 952.0 g remaining to "
+            ("debug", "AFC bambu Bambu_AMS_1: wrote 952.0 g remaining to "
                      "Spoolman spool 163 (physical AMS measurement) -- "
                      "measured 138%, capped to the spool's 1000 g nominal")]
         # Handed over once, not per frame.
@@ -1600,7 +1600,7 @@ class TestBambuSpoolmanApplyRemainWeight:
         assert unit.logger.messages == [
             ("debug", "AFC bambu Bambu_AMS_1: lane23 bound to spool 41 after "
                       "its measurement; handing the measured 640 g to it"),
-            ("info", "AFC bambu Bambu_AMS_1: wrote 640.0 g remaining to "
+            ("debug", "AFC bambu Bambu_AMS_1: wrote 640.0 g remaining to "
                      "Spoolman spool 41 (physical AMS measurement)")]
 
     def test_a_tag_record_is_never_written_at_all(self, monkeypatch):
@@ -1641,7 +1641,7 @@ class TestBambuSpoolmanApplyRemainWeight:
         assert unit.logger.messages == [
             ("debug", "AFC bambu Bambu_AMS_1: lane23 bound to spool 41 after "
                       "its measurement; handing the measured 230 g to it"),
-            ("info", "AFC bambu Bambu_AMS_1: wrote 230.0 g remaining to "
+            ("debug", "AFC bambu Bambu_AMS_1: wrote 230.0 g remaining to "
                      "Spoolman spool 41 (physical AMS measurement)")]
 
     def test_a_fresh_measurement_wins_over_the_tag_record(self, monkeypatch):
@@ -2897,7 +2897,7 @@ class TestBambuSpoolmanAdoptMeasuredRemain:
         :param tail: what follows the source, for a capped reading
         :return tuple: the line the Spoolman weight write logs
         """
-        return ("info", f"AFC bambu {unit}: wrote {grams} g remaining to "
+        return ("debug", f"AFC bambu {unit}: wrote {grams} g remaining to "
                         f"Spoolman spool {spool} (physical AMS "
                         f"measurement){tail}")
 

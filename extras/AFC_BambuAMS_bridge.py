@@ -333,46 +333,60 @@ _AMS_HUMAN = (
      lambda m: (f"AMS refused the drying command -- it was busy "
                 f"(state {m.group(1)}). Wait for it to settle and try again.")),
     (re.compile(r"\[AMS_CHMB\]set state CTC_STATE_SELF_CHECK.*?ref:(\d+)"),
-     lambda m: f"AMS drying: self-check started, target {m.group(1)}C"),
+     lambda m: f"AMS drying: self-check started, target {m.group(1)}C",
+     True),
     (re.compile(r"\[AMS_CHMB\]set state CTC_STATE_HEATING"),
-     lambda m: "AMS drying: self-check passed, now heating"),
+     lambda m: "AMS drying: self-check passed, now heating",
+     True),
     (re.compile(r"\[AMS_CHMB\]set state CTC_STATE_OFF"),
-     lambda m: "AMS drying: heater off"),
+     lambda m: "AMS drying: heater off",
+     True),
     (re.compile(r"\[AMS_SWITCH\]new tube_len:(\d+) mm.*?err:(-?\d+) mm"),
      lambda m: (f"AMS measured the PTFE path at {m.group(1)}mm "
-                f"(+/-{m.group(2)}mm)")),
+                f"(+/-{m.group(2)}mm)"),
+     True),
     # Prefix-agnostic from here: the generations share content, not bracket
     # tags. "read success" and "feed with rfid success" are left out because a
     # failed HT attempt emits both before retrying.
     (_STEP("card auth success"),
-     lambda m: "AMS: tag authenticated"),
+     lambda m: "AMS: tag authenticated",
+     True),
     (_STEP("auth card successful"),
-     lambda m: "AMS: tag authenticated"),
+     lambda m: "AMS: tag authenticated",
+     True),
     (_STEP("first detected"),
-     lambda m: "AMS: spool detected"),
+     lambda m: "AMS: spool detected",
+     True),
     (_STEP(r"select card fail, err (\d+)"),
-     lambda m: f"AMS could not read the spool tag (err {m.group(1)})"),
+     lambda m: f"AMS could not read the spool tag (err {m.group(1)})",
+     True),
     (_STEP(r"odom calib succ?ess(?:\s+exit\s+(\d+))?"),
-     lambda m: "AMS finished measuring the spool"),
+     lambda m: "AMS finished measuring the spool",
+     True),
     (re.compile(r"\[RF\]\s*tray(\d+): info write to flash"),
      lambda m: (f"AMS: tag for bay {int(m.group(1)) + 1} cached in the unit's "
-                f"flash (a later read returns it even after a swap)")),
+                f"flash (a later read returns it even after a swap)"),
+     True),
     (re.compile(r"preload\s+finish", re.IGNORECASE),
-     lambda m: "AMS staged the spool at its feeder"),
+     lambda m: "AMS staged the spool at its feeder",
+     True),
     # Plain-English renderings of the events an operator acts on. First, the
     # measurement result: of "odom C:..,R:..,P:79%" only the percent matters.
     (re.compile(r"odom\s+C:[0-9.]+\s*,\s*R:([0-9.]+)\s*,\s*P:(\d+)%"),
      lambda m: (f"AMS measured the spool: about {m.group(2)}% left "
-                f"(spool radius {float(m.group(1)) * 1000:.0f} mm)")),
+                f"(spool radius {float(m.group(1)) * 1000:.0f} mm)"),
+     True),
     # The stored per-tray value, read back at power-up from the unit's flash;
     # the only place the unit states it.
     (re.compile(r"odom\s+load\s+from\s+flash\s*(\d+)\s*,\s*"
                 r"R:[0-9.]+\s*,\s*P:(\d+)"),
      lambda m: (f"AMS: bay {int(m.group(1)) + 1} remembers about "
-                f"{m.group(2)}% left from its last measurement")),
+                f"{m.group(2)}% left from its last measurement"),
+     True),
     # The unit committing a fresh measure to flash.
     (re.compile(r"odom\s+save\s+tray:(\d+)"),
-     lambda m: f"AMS stored a new measurement for bay {int(m.group(1)) + 1}"),
+     lambda m: f"AMS stored a new measurement for bay {int(m.group(1)) + 1}",
+     True),
     # A stalled feed: len_det is how far it got, tube_len how far it should
     # have gone.
     (re.compile(r"feed\s+finish\s+-?\d+\s*,\s*stall\s*,\s*"
@@ -399,36 +413,47 @@ _AMS_HUMAN = (
      lambda m: "AMS cleared its error"),
     # A spool leaving the bay, and the calibration that goes with it.
     (re.compile(r"tray\s+(\d+)\s+out\s*,\s*clear\s+magic_num"),
-     lambda m: f"AMS: bay {int(m.group(1)) + 1} is now empty"),
+     lambda m: f"AMS: bay {int(m.group(1)) + 1} is now empty",
+     True),
     # Power-up. The self-check is the unit's boot, which is worth one line
     # because it means everything it knew about follower state is gone.
     (re.compile(r"ams\s+pmsm\s+cali\s+finish", re.IGNORECASE),
-     lambda m: "AMS finished its power-up self-check"),
+     lambda m: "AMS finished its power-up self-check",
+     True),
     (re.compile(r"pmsm\s+self\s+check\s+good", re.IGNORECASE),
-     lambda m: "AMS motor self-check passed"),
+     lambda m: "AMS motor self-check passed",
+     True),
     # The second odometer edge, one full turn of the spool; its absence is the
     # fast-path.
     (_STEP("second detected"),
-     lambda m: "AMS: spool turned a full revolution (measuring)"),
+     lambda m: "AMS: spool turned a full revolution (measuring)",
+     True),
     (_STEP(r"odom calib\s*,\s*tray (\d+)"),
-     lambda m: f"AMS started measuring bay {int(m.group(1)) + 1}"),
+     lambda m: f"AMS started measuring bay {int(m.group(1)) + 1}",
+     True),
     (_STEP(r"cali end"),
-     lambda m: "AMS finished its measuring cycle"),
+     lambda m: "AMS finished its measuring cycle",
+     True),
     (_STEP(r"Calibration rst:(\d+)"),
-     lambda m: f"AMS finished measuring (result {m.group(1)})"),
+     lambda m: f"AMS finished measuring (result {m.group(1)})",
+     True),
     # A tag the unit cannot open, almost always a non-Bambu spool.
     (_STEP(r"auth fail:-?(\d+)"),
      lambda m: ("AMS could not authenticate the tag -- third-party spool, "
-                "or the tag is unreadable")),
+                "or the tag is unreadable"),
+     True),
     (re.compile(r"\[RF\]\s*tray(\d+): info same as last read"),
      lambda m: (f"AMS: bay {int(m.group(1)) + 1} holds the same spool as "
-                f"before")),
+                f"before"),
+     True),
     # No stored calibration for this bay, so no fast-path.
     (_STEP(r"odom invalid tray (\d+)"),
      lambda m: (f"AMS: bay {int(m.group(1)) + 1} has no stored measurement "
-                f"yet")),
+                f"yet"),
+     True),
     (_STEP(r"odom load tray (\d+) info invailed"),
-     lambda m: f"AMS: bay {int(m.group(1)) + 1} has no stored measurement yet"),
+     lambda m: f"AMS: bay {int(m.group(1)) + 1} has no stored measurement yet",
+     True),
     # Log only: the unit drops its tray selection after every bay, so a clean
     # unload ends with it refusing the next command. The load path reports the
     # case that matters (see _AMS_NO_TRAY_RE).
@@ -440,25 +465,31 @@ _AMS_HUMAN = (
      lambda m: "AMS: TIMEOUT -- the unit gave up on the move"),
     # Feed milestones, with the distance that makes them meaningful.
     (re.compile(r"\bfeed tray:(\d+)\s*,"),
-     lambda m: f"AMS: feeding from bay {int(m.group(1)) + 1}"),
+     lambda m: f"AMS: feeding from bay {int(m.group(1)) + 1}",
+     True),
     # The assist giving up; the unit says whether it overfed or jammed.
     (re.compile(r"assist finish stall!\s*pos:(-?[0-9.]+)->(-?[0-9.]+)"),
      lambda m: (f"AMS stopped its assist (buffer {m.group(1)} -> "
                 f"{m.group(2)})"),
      True),
     (re.compile(r"feed to dw ok\s*,\s*len_det:([0-9.]+)\s*m"),
-     lambda m: f"AMS: filament reached the hub after {float(m.group(1)):.2f} m"),
+     lambda m: f"AMS: filament reached the hub after {float(m.group(1)):.2f} m",
+     True),
     (re.compile(r"feed finish\s*,\s*buff_pos:[0-9.]+\s*,\s*bldc_i:[0-9.]+A"
                 r"\s*,\s*t:([0-9.]+)s"),
-     lambda m: f"AMS finished feeding ({float(m.group(1)):.1f} s)"),
+     lambda m: f"AMS finished feeding ({float(m.group(1)):.1f} s)",
+     True),
     (re.compile(r"new tube_len:(\d+)\s*mm"),
-     lambda m: f"AMS learned the bay-to-hub path length: {m.group(1)} mm"),
+     lambda m: f"AMS learned the bay-to-hub path length: {m.group(1)} mm",
+     True),
     # Staging the spool at the feeder, and the bay lock that goes with it.
     (re.compile(r"preload start", re.IGNORECASE),
-     lambda m: "AMS is staging the spool at its feeder"),
+     lambda m: "AMS is staging the spool at its feeder",
+     True),
     # Power-up of the whole unit: its follower state is gone.
     (re.compile(r"\[AMS_ADA\]\s*init", re.IGNORECASE),
-     lambda m: "AMS powered up (any follower state it held is gone)"),
+     lambda m: "AMS powered up (any follower state it held is gone)",
+     True),
 )
 
 # The terminal success markers of a tag read. Every alternative goes through
@@ -1140,17 +1171,22 @@ class WifiLink:
         self._said = None
         self._creds_sent = False
 
-    def _say(self, state: str, message: str, warning: bool = False) -> None:
+    def _say(self, state: str, message: str, warning: bool = False,
+             console: bool = True) -> None:
         """
         Tell the console about a link state, once each time it changes.
 
         :param state: short name of the state the message describes
         :param message: the line, after the chain's label
         :param warning: log it as a warning
+        :param console: False to write it to AFC.log only
         """
         if state == self._said or self._bridge is None:
             return
         self._said = state
+        if not console:
+            self._bridge.logger.debug(f"{self.label}: {message}")
+            return
         log = self._bridge.logger.warning if warning \
             else self._bridge.logger.info
         log(f"{self.label}: {message}")
@@ -1392,7 +1428,7 @@ class WifiLink:
         self._bridge.reactor.register_async_callback(
             lambda et, a=addr: self._save(a))
         self._say("moving", f"the BridgeBox joined WiFi at {addr}; moving "
-                            f"the link there")
+                            f"the link there", console=False)
         self._bridge._drop_port()     # the reader reopens through open()
 
 
@@ -1424,6 +1460,8 @@ class BambuBridge:
     #: keep every raw line. Each model words the same event its own way, so
     #: raw lines read as noise to anyone not decoding them.
     RAW_NARRATION_CONSOLE = False
+    #: A link that comes back sooner than this is logged to AFC.log only.
+    RECONNECT_SAY_S = 10.0
 
     # An "unknown command" this soon after a link opens answers a line from
     # before it.
@@ -1755,7 +1793,7 @@ class BambuBridge:
         """
         try:
             self.send({"cmd": "info"})
-            self.logger.info("AFC bambu: request_info -> sent {\"cmd\":\"info\"}")
+            self.logger.debug("AFC bambu: request_info -> sent {\"cmd\":\"info\"}")
         except Exception:
             self.logger.warning("AFC bambu: request_info FAILED to send",
                                 traceback=traceback.format_exc())
@@ -2807,7 +2845,7 @@ class BambuBridge:
                 if self._active_unit is not None:
                     self._tube_by_unit[int(self._active_unit)] = mm
             if prev is None:
-                self.logger.info(
+                self.logger.debug(
                     f"AFC bambu {self.name}: AMS 0x{int(addr):04X} reports its "
                     f"measured filament path as {mm:.0f}mm -- using it to size "
                     f"move timeouts instead of the configured estimate")
@@ -2835,7 +2873,7 @@ class BambuBridge:
             and ("res:" in text
                  or "i_avr:" in text
                  or " i:" in text)):
-            self.logger.info(f"AFC bambu {self.name}: selfcheck | "
+            self.logger.debug(f"AFC bambu {self.name}: selfcheck | "
                              + text.split("[AMS_CHMB]", 1)[-1].strip()[:150])
         m = _CHMB_STATE_RE.search(text)
         if m:
@@ -2871,7 +2909,7 @@ class BambuBridge:
             if ma:
                 ad = (f", ad {ma.group(1)}"
                       + (f"/{ma.group(2)}" if ma.group(2) else ""))
-            self.logger.info(
+            self.logger.debug(
                 f"AFC bambu {self.name}: drying -- chamber {m.group(3)}C{ad}"
                 f"{hum}, target {m.group(2)}C")
 
@@ -3410,7 +3448,7 @@ class BambuBridge:
                             _quiet = True            # log-only from here
                             if not getattr(self, "_narr_said", False):
                                 self._narr_said = True
-                                self.logger.info(
+                                self.logger.debug(
                                     "AFC bambu: the AMS is narrating faster "
                                     "than the console can take "
                                     f"(>{self.NARRATION_CONSOLE_MAX_PER_S}/s); "
@@ -3420,7 +3458,7 @@ class BambuBridge:
             # The answer to a -store write. The key itself is never echoed.
             saved = obj.get("saved")
             if saved == 1:
-                self.logger.info(
+                self.logger.debug(
                     "AFC bambu: link key stored on the bridge; it is asked "
                     "for from the next connection")
             elif saved == 0:
@@ -3566,7 +3604,7 @@ class BambuBridge:
             # whether a firmware image is even loadable on this board.
             with self._lock:
                 self._info = dict(obj)
-            self.logger.info(
+            self.logger.debug(
                 f"AFC bambu: info REPLY chip={obj.get('chip')} "
                 f"fw={obj.get('fw')} up={obj.get('up')}")
             # Reboot or link hiccup: uptime going backwards is a reboot (every
@@ -3582,9 +3620,12 @@ class BambuBridge:
                 prev = self._fw_up_ms
                 if prev is not None and up < prev:
                     self._fw_rebooted = True
-                    self.logger.info(
+                    self.logger.debug(
                         f"AFC bambu: bridge REBOOTED (uptime {prev} -> {up} "
                         f"ms); units on the wire lost their master")
+                    self.logger.info(
+                        "AFC bambu: the BridgeBox restarted; "
+                        "reconnecting its AMS units")
                 self._fw_up_ms = up
         elif obj.get("evt") == "wifi":
             # A BB_WIFI board reporting its radio, logged when it changes:
@@ -3598,7 +3639,7 @@ class BambuBridge:
                     msg = (f"AFC bambu {self.name}: pico wifi "
                            f"link={obj.get('link')} ip={obj.get('ip')} "
                            f"assoc={obj.get('assoc')} tries={obj.get('tries')}")
-                self.logger.info(msg)
+                self.logger.debug(msg)
             except Exception:
                 pass
         elif obj.get("evt") == "cali":
@@ -4064,9 +4105,16 @@ class BambuBridge:
                     self._down_t = None
                     self._silence_logged_t = None
                     self._mark_connected()
-                    self.logger.info(
-                        f"AFC bambu: bridge reconnected"
-                        f"{f' after {down_for:.0f}s down' if down_for >= 1 else ''}")
+                    # A short drop is routine (a WiFi blip, a reconnect at
+                    # startup); the console hears only about a real outage.
+                    if down_for >= self.RECONNECT_SAY_S:
+                        self.logger.info(
+                            f"AFC bambu: the BridgeBox link is back "
+                            f"after {down_for:.0f}s")
+                    else:
+                        self.logger.debug(
+                            f"AFC bambu: bridge reconnected"
+                            f"{f' after {down_for:.0f}s down' if down_for >= 1 else ''}")
                     buf = b""
                     backoff = 0.5
                     # The firmware likely just booted (reflash/power-cycle): its
