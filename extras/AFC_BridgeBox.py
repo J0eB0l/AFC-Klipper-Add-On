@@ -1361,12 +1361,13 @@ class afcBridgeBox:
         The prefix of the chain's default unit names: option > stored >
         computed.
 
-        Computed is Bambu_AMS, or Bambu_AMS_<chain name> when a chain above
-        this one builds units under Bambu_AMS (a chain that only scouts builds
-        none, like for the buffer chip), so a second chain needs no
-        unit_prefix of its own. A computed Bambu_AMS_<chain name> is
-        remembered like the lane base (_fold_and_sweep persists it), so the
-        chain keeps its names when the chains above it change.
+        Computed is Bambu_AMS, or Bambu_AMS_<chain name> when another chain
+        has it: one above this one builds units under Bambu_AMS (a chain that
+        only scouts builds none, like for the buffer chip), or one below sets
+        or saved it, so a second chain needs no unit_prefix of its own. A
+        computed prefix, Bambu_AMS too, is remembered like the lane base
+        (_fold_and_sweep persists it), so the chain keeps its names when
+        chains are added above it or the chains above it change.
 
         :param config: this section's wrapper
         :return str: the prefix
@@ -1378,11 +1379,14 @@ class afcBridgeBox:
                                  "unit_prefix")
         if stored:
             return stored
-        if not any(getattr(m, "unit_prefix", None) == "Bambu_AMS"
-                   and getattr(m, "_fabricated_names", None)
-                   for m in self._earlier_chains()):
-            return "Bambu_AMS"
-        prefix = "Bambu_AMS_" + self.name
+        taken = (any(getattr(m, "unit_prefix", None) == "Bambu_AMS"
+                     and getattr(m, "_fabricated_names", None)
+                     for m in self._earlier_chains())
+                 or any((opts.get("unit_prefix")
+                         or saved.get("unit_prefix")) == "Bambu_AMS"
+                        for _name, opts, saved
+                        in self._later_chain_sections(config)))
+        prefix = "Bambu_AMS_" + self.name if taken else "Bambu_AMS"
         self._resolved_prefix = prefix        # _fold_and_sweep persists it
         return prefix
 
@@ -1756,20 +1760,9 @@ class afcBridgeBox:
         :param config: this section's wrapper
         :return dict: lane number -> the name of the later chain building it
         """
-        fc = getattr(config, "fileconfig", None)
         out: Dict[int, str] = {}
-        if fc is None:
-            return out
-        for name in self._later_chains(config):
-            sec = self._BASE_SECTION + " " + name
+        for name, opts, saved in self._later_chain_sections(config):
             try:
-                opts = dict(fc.items(sec))
-                path = opts.get("state_file")
-                path = (os.path.expanduser(path) if path
-                        else self._locate_own_file(name)
-                        or os.path.expanduser(self._DEFAULT_STATE))
-                cp = self._read_state(path)
-                saved = dict(cp.items(sec)) if cp.has_section(sec) else {}
                 base = (int(opts.get("lane_base") or 0)
                         or int(saved.get("lane_base") or 0))
                 if base <= 0:
@@ -1797,6 +1790,37 @@ class afcBridgeBox:
                     lanes |= set(range(first, first + span))
             for n in lanes:
                 out.setdefault(n, name)
+        return out
+
+    def _later_chain_sections(self, config: Any
+                              ) -> List[Tuple[str, Dict[str, str],
+                                              Dict[str, str]]]:
+        """
+        What the config and the saved state say about each chain below this
+        one, before it loads (see _later_chains).
+
+        :param config: this section's wrapper
+        :return list: (chain name, its section's options, its saved state
+            section), in config order; a chain whose section cannot be read
+            is left out
+        """
+        fc = getattr(config, "fileconfig", None)
+        if fc is None:
+            return []
+        out = []
+        for name in self._later_chains(config):
+            sec = self._BASE_SECTION + " " + name
+            try:
+                opts = dict(fc.items(sec))
+                path = opts.get("state_file")
+                path = (os.path.expanduser(path) if path
+                        else self._locate_own_file(name)
+                        or os.path.expanduser(self._DEFAULT_STATE))
+                cp = self._read_state(path)
+                saved = dict(cp.items(sec)) if cp.has_section(sec) else {}
+            except Exception:
+                continue
+            out.append((name, opts, saved))
         return out
 
     def _foreign_unit_names(self, config: Any) -> set:
