@@ -2577,8 +2577,8 @@ class TestAfcBambuAMSRegisterGcodeCommands:
             "AFC_BAMBU_HEATER_START", "AFC_BAMBU_HEATER_STOP",
             "AFC_BAMBU_PRIME", "AFC_BAMBU_RECOVER", "AFC_BAMBU_REID",
             "AFC_BAMBU_RELINK", "AFC_BAMBU_SAVEIDS", "AFC_BAMBU_SCAN",
-            "AFC_BAMBU_SNIFF", "AFC_BAMBU_UIDS", "UNIT_BOW_CALIBRATION",
-            "UNIT_CALIBRATION", "UNIT_LANE_CALIBRATION"}
+            "AFC_BAMBU_SNIFF", "AFC_BAMBU_UIDS", "BAMBU_CLEAR",
+            "UNIT_BOW_CALIBRATION", "UNIT_CALIBRATION", "UNIT_LANE_CALIBRATION"}
         assert not hasattr(unit, "cmd_AFC_BAMBU_RESTART")
 
     def test_a_bare_scan_offers_unit_and_the_rest_ask_for_the_lane(self):
@@ -3014,6 +3014,58 @@ class TestAfcBambuAMSCmdAFCBambuClearfault:
             unit.gcode.ready_gcode_handlers["AFC_BAMBU_CLEARFAULT"](gcmd)
         assert str(exc.value) == "AFC_BAMBU_CLEARFAULT: bridge not connected"
         assert (gcmd.messages, unit.logger.messages) == ([], [])
+
+
+class TestAfcBambuAMSCmdBambuClear:
+    CLEARED = ("respond_info",
+               "BAMBU_CLEAR: Bambu_AMS_1: cleared (state 7 -> 0); the unit "
+               "accepted the operation and left its park.")
+
+    @staticmethod
+    def _unit(state: int) -> afcBambuAMS:
+        """
+        A unit with lane0 reporting ``state``, which reads 0 once cleared.
+
+        :param state: the unit's state before the clear
+        :return afcBambuAMS: the unit
+        """
+        def answer(bridge: FakeBridge, frame: dict) -> None:
+            """The unit's state once the clear went out."""
+            bridge.status = {"units": [{"n": 0, "ustate": 0}]}
+
+        bridge = FakeBridge(status={"units": [{"n": 0, "ustate": state}]},
+                            on_send=answer)
+        return make_bambu_unit(bridge=bridge, lanes=["lane0"])
+
+    def test_alone_it_clears_the_faulted_unit(self):
+        unit = self._unit(0x07)
+        gcmd = unit.gcode.run("BAMBU_CLEAR")
+        assert unit._bridge.sent == [{"cmd": "clearfault", "unit": 0}]
+        assert gcmd.messages == [self.CLEARED]
+
+    def test_alone_it_leaves_a_healthy_unit_alone(self):
+        unit = self._unit(0x00)
+        gcmd = unit.gcode.run("BAMBU_CLEAR")
+        assert unit._bridge.sent == []
+        assert gcmd.messages == [
+            ("respond_info", "BAMBU_CLEAR: no Bambu unit reports a fault.")]
+
+    def test_a_lane_names_its_unit(self):
+        unit = self._unit(0x07)
+        gcmd = unit.gcode.run("BAMBU_CLEAR", LANE="lane0")
+        assert unit._bridge.sent == [{"cmd": "clearfault", "unit": 0}]
+        assert gcmd.messages == [self.CLEARED]
+
+    def test_an_unknown_lane_or_unit_is_refused(self):
+        unit = self._unit(0x07)
+        with pytest.raises(BambuPrinter.command_error) as exc:
+            unit.gcode.run("BAMBU_CLEAR", LANE="lane9")
+        assert str(exc.value) == (
+            "BAMBU_CLEAR: lane9 is not a lane on a Bambu unit")
+        with pytest.raises(BambuPrinter.command_error) as exc:
+            unit.gcode.run("BAMBU_CLEAR", UNIT="Turtle_1")
+        assert str(exc.value) == "BAMBU_CLEAR: no Bambu unit named Turtle_1"
+        assert unit._bridge.sent == []
 
 
 class TestAfcBambuAMSMcaddrAckStr:

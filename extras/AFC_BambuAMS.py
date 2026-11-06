@@ -1972,6 +1972,14 @@ class afcBambuAMS(afcUnit):
             desc="Stream the printer's 0E clear at a parked unit for ~2s, then "
                  "report whether it actually left its fault. An ATTEMPT -- it "
                  "fails if the jam is still there. AFC_BAMBU_CLEARFAULT UNIT=<unit>")
+        try:
+            self.gcode.register_command(
+                "BAMBU_CLEAR", self.cmd_BAMBU_CLEAR,
+                desc="Clear the fault on every Bambu unit that reports one, or "
+                     "on one unit or lane's unit: BAMBU_CLEAR [UNIT=<unit>] "
+                     "[LANE=<lane>]")
+        except Exception:
+            pass        # another [AFC_BambuAMS] on this printer registered it
         _register_lane_command(
             self, "AFC_BAMBU_REID", self.cmd_AFC_BAMBU_REID,
             desc="Send the printer menu's 're-identify' to one bay and nothing "
@@ -2879,6 +2887,62 @@ class afcBambuAMS(afcUnit):
         if self._bridge is None:
             error_str = "AFC_BAMBU_CLEARFAULT: bridge not connected"
             raise gcmd.error(error_str)
+        self._clear_fault(gcmd, "AFC_BAMBU_CLEARFAULT")
+
+    def cmd_BAMBU_CLEAR(self, gcmd: Any) -> None:
+        """
+        Clear the fault on every Bambu unit that reports one, the easy way.
+
+        With no parameter it finds the faulted units itself (state 6 or 7) on
+        every BridgeBox chain and runs AFC_BAMBU_CLEARFAULT's clear on each.
+        UNIT= or LANE= sends it to that one unit even when it reads healthy,
+        for a red light the unit does not report.
+
+        Usage
+        -------
+        `BAMBU_CLEAR [UNIT=<unit>] [LANE=<lane>]`
+
+        Example
+        -------
+        ```
+        BAMBU_CLEAR
+        BAMBU_CLEAR LANE=lane0
+        ```
+        """
+        units = self._bambu_units()
+        lane_name = gcmd.get("LANE", None)
+        unit_name = gcmd.get("UNIT", None)
+        if lane_name is not None:
+            lane = self.afc.lanes.get(lane_name)
+            unit = getattr(lane, "unit_obj", None)
+            if unit not in units:
+                raise gcmd.error(
+                    f"BAMBU_CLEAR: {lane_name} is not a lane on a Bambu unit")
+            unit_name = unit.name
+        if unit_name is not None:
+            units = [unit for unit in units if unit.name == unit_name]
+            if not units:
+                raise gcmd.error(f"BAMBU_CLEAR: no Bambu unit named {unit_name}")
+        else:
+            units = [unit for unit in units if unit._bridge is not None
+                     and unit._unit_state(unit._bridge.latest_status())
+                     in unit.AMS_STATES_FAULTED]
+            if not units:
+                gcmd.respond_info("BAMBU_CLEAR: no Bambu unit reports a fault.")
+                return
+        for unit in units:
+            if unit._bridge is None:
+                gcmd.respond_info(f"BAMBU_CLEAR: {unit.name}: bridge not connected")
+                continue
+            unit._clear_fault(gcmd, "BAMBU_CLEAR")
+
+    def _clear_fault(self, gcmd: Any, command: str) -> None:
+        """
+        Stream the clear at this unit, then report whether it left its fault.
+
+        :param gcmd: The Klipper GCodeCommand the verdict is reported on
+        :param command: the command name the verdict starts with
+        """
         before = self._unit_state(self._bridge.latest_status())
         # Addressed: the clear rides the drive channel, which targets
         # whichever unit was last fed or selected unless the command names
@@ -2890,7 +2954,7 @@ class afcBambuAMS(afcUnit):
         after = self._unit_state(self._bridge.latest_status())
         if after in self.AMS_STATES_FAULTED:
             gcmd.respond_info(
-                f"AFC_BAMBU_CLEARFAULT: {self.name}: STILL FAULTED (state {after}). "
+                f"{command}: {self.name}: STILL FAULTED (state {after}). "
                 f"The unit will not accept a fresh operation while the jam is "
                 f"there -- relieve the pressure (the buffer coming off the "
                 f"floor is the sign) and run this again.")
@@ -2900,7 +2964,7 @@ class afcBambuAMS(afcUnit):
         # this command does not reach.
         if before not in self.AMS_STATES_FAULTED:
             gcmd.respond_info(
-                f"AFC_BAMBU_CLEARFAULT: {self.name}: nothing to clear -- the "
+                f"{command}: {self.name}: nothing to clear -- the "
                 f"unit was not in a fault state before the burst (state "
                 f"{before}) and is not now ({after}). The clear was still sent "
                 f"to unit {getattr(self, 'ams_index', 0)}. If its LEDs are red, "
@@ -2909,7 +2973,7 @@ class afcBambuAMS(afcUnit):
                 f"cycle.")
             return
         gcmd.respond_info(
-            f"AFC_BAMBU_CLEARFAULT: {self.name}: cleared (state {before} -> "
+            f"{command}: {self.name}: cleared (state {before} -> "
             f"{after}); the unit accepted the operation and left its park.")
 
 
