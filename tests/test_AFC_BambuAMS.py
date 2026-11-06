@@ -28934,6 +28934,42 @@ class TestAfcBambuAMSAdoptMeasuredPath:
         assert unit.logger.messages == [
             self._adopted(3627, 3000, "odometer", "and saving it")]
 
+    def test_a_full_path_load_updates_a_changed_path(self, monkeypatch):
+        # A completed load that ran the whole path re-saves a path that moved
+        # by the tolerance or more.
+        master = self._Master()
+        unit, _ = self._rig(monkeypatch, master=master)
+        unit._adopt_measured_path(3627.0, "odometer")
+        unit._load_full_path = True
+        unit._adopt_measured_path(1867.0, "odometer", update=True)
+        assert unit.afc_bowden_length == 1867.0
+        assert unit.afc_unload_bowden_length == 1867.0
+        assert master.saved == {
+            ("Bambu_AMS_1", "afc_bowden_length"): "1867.0",
+            ("Bambu_AMS_1", "afc_unload_bowden_length"): "1867.0"}
+        assert unit.logger.messages[-1] == self._adopted(
+            1867, 3627, "odometer", "and saving it")
+
+    def test_an_update_within_tolerance_writes_nothing(self, monkeypatch):
+        master = self._Master()
+        unit, _ = self._rig(monkeypatch, master=master)
+        unit._adopt_measured_path(3627.0, "odometer")
+        unit._load_full_path = True
+        unit._adopt_measured_path(3610.0, "odometer", update=True)
+        assert unit.afc_bowden_length == 3627.0
+        assert len(unit.logger.messages) == 1
+
+    def test_a_partial_load_never_updates(self, monkeypatch):
+        # A lane staged at the hub, or a load re-homed partway, travels only
+        # part of the path.
+        master = self._Master()
+        unit, _ = self._rig(monkeypatch, master=master)
+        unit._adopt_measured_path(3627.0, "odometer")
+        unit._load_full_path = False
+        unit._adopt_measured_path(900.0, "odometer", update=True)
+        assert unit.afc_bowden_length == 3627.0
+        assert master.saved[("Bambu_AMS_1", "afc_bowden_length")] == "3627.0"
+
     # a claim waits for its own load
 
     def test_a_fresh_claim_skips_the_pre_load_adoption(self, monkeypatch):

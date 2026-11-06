@@ -13218,6 +13218,9 @@ class afcBambuAMS(afcUnit):
             feed_dist = self.afc_bowden_length
         else:
             feed_dist = self.afc_bowden_length + DIST_HUB_MM
+        # Only a load that runs the whole path from the bay, with no re-home,
+        # may change a path length already adopted (see _adopt_measured_path).
+        self._load_full_path = not getattr(cur_lane, "loaded_to_hub", False)
 
         lite = self._is_lite()
         sensor = not lite or self._has_toolhead_sensor(cur_lane)
@@ -13371,6 +13374,7 @@ class afcBambuAMS(afcUnit):
             # odometer moves with it, so a delta measured from before it would
             # be the re-home's motion plus the load's, not the path.
             self._load_odom_start = self._feed_odom_mm(cur_lane)
+            self._load_full_path = False         # restarts partway along
             self.feed(cur_lane, feed_dist)       # re-attempt the load
             loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm,
                                              expect_mm)
@@ -13558,10 +13562,11 @@ class afcBambuAMS(afcUnit):
         # fault. Reaching the toolhead sensor settles those stalls.
         self._ack_faults()
         # Adopt the path measurement again: the unit reports it at the end of a
-        # load. Latched per claim; odometer first, tube_len as fallback.
+        # load. Odometer first, tube_len as fallback. Every completed load may
+        # update it (see _adopt_measured_path).
         _mm, _src = self._path_measurement()
         self._path_wait_load = False
-        self._adopt_measured_path(_mm, _src)
+        self._adopt_measured_path(_mm, _src, update=True)
         afc.save_vars()
         return True
 
@@ -14776,7 +14781,7 @@ class afcBambuAMS(afcUnit):
         return span
 
     def _adopt_measured_path(self, measured: Optional[float] = None,
-                             source: str = "") -> None:
+                             source: str = "", update: bool = False) -> None:
         """
         Adopt the AMS's own path measurement as afc_bowden_length, in memory.
 
@@ -14799,7 +14804,12 @@ class afcBambuAMS(afcUnit):
         measured value instead of the default. The path length is otherwise
         advisory: the toolhead sensor and the unit's own report end every move.
 
-        Runs once per claim (once per session for a unit never claimed), and
+        The load-start lookup runs once per claim (once per session for a
+        unit never claimed). The end of every completed load calls it with
+        ``update``, so a path that changes (a tube cut or replaced) is
+        adopted and saved again; after the first adoption only a load that
+        ran the whole path from the bay with no re-home counts, since a load
+        from a lane staged at the hub travels only part of it. Either way it
         only writes when the figure differs by at least
         PATH_ADOPT_TOLERANCE_MM (the measurement wobbles by a few mm).
 
@@ -14808,9 +14818,12 @@ class afcBambuAMS(afcUnit):
 
         :param measured: length in mm to adopt; None looks one up
         :param source: short label for where the figure came from, for the log
+        :param update: True at the end of a completed load: look again even
+          after a figure was adopted this claim
         """
         if getattr(self, "_path_adopted", False):
-            return
+            if not update or not getattr(self, "_load_full_path", False):
+                return
         if measured is None and getattr(self, "_path_wait_load", False):
             return
         if measured is None:
