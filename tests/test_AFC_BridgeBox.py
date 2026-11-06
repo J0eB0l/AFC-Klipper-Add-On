@@ -2598,6 +2598,7 @@ class TestAfcBridgeBoxInit:
             "#~# [AFC_BridgeBox chain1]\n"
             f"#~# lane_map : {A}:24:1\n"
             f"#~# name_map : {A}:Bambu_AMS_HT_1\n"
+            "#~# unit_prefix : Bambu_AMS\n"
             f"#~# roster : ht:{A}\n"
             "#~# \n")
         assert m._state_get(SEC, "roster") == f"ht:{A}"
@@ -2669,6 +2670,7 @@ class TestAfcBridgeBoxInit:
             "#~# [AFC_BridgeBox chain1]\n"
             f"#~# lane_map : {A}:24:1\n"
             f"#~# name_map : {A}:Bambu_AMS_HT_1\n"
+            "#~# unit_prefix : Bambu_AMS\n"
             "#~# \n")
         m2 = _bbx_boot(tmp_path, roster=f"ht:{A}")
         assert m2._lanes_at_boot == {A: (24, 1)}
@@ -4045,7 +4047,7 @@ class TestAfcBridgeBoxInit:
         assert {s: dict(m._read_state().items(s))
                 for s in m._read_state().sections()} == {
             SEC: {"roster": f"boxed:{A}", "name_map": f"{A}:Bambu_AMS_1",
-                  "lane_map": f"{A}:24:4"},
+                  "lane_map": f"{A}:24:4", "unit_prefix": "Bambu_AMS"},
             self.LEARNED + A: {"afc_bowden_length": "3632.0"}}
         assert autov.read_text() == self.AUTOV_HEADER
         assert m._learned_notes == [
@@ -4774,7 +4776,8 @@ class TestAfcBridgeBoxInit:
             "AFC_buffer Bambu_AMS_chain2_Buffer"]
         assert m2._state_get("AFC_BridgeBox chain2",
                              "unit_prefix") == "Bambu_AMS_chain2"
-        assert m1._state_get("AFC_BridgeBox chain1", "unit_prefix") is None
+        assert m1._state_get("AFC_BridgeBox chain1",
+                             "unit_prefix") == "Bambu_AMS"
         _bbx_quiet(printer)
 
     def test_a_remembered_prefix_outlives_the_chain_above(self, tmp_path):
@@ -4786,6 +4789,32 @@ class TestAfcBridgeBoxInit:
         assert m2.unit_prefix == "Bambu_AMS_chain2"
         _bbx_quiet(printer)
         _bbx_quiet(alone)
+
+    def test_a_chain_added_above_never_takes_a_saved_prefix(self, tmp_path):
+        # chain1 enrolled alone and saved Bambu_AMS. A chain0 added above it
+        # in the config later names its units after itself, and chain1
+        # keeps its names.
+        _bbx_chain(tmp_path, make_printer(), "chain1")
+        printer = make_printer()
+        printer.add_section("AFC_BridgeBox chain1", {
+            "serial_port": "/dev/serial/by-id/usb-chain1-if00",
+            "state_file": str(tmp_path / "AFC_BridgeBox.cfg")})
+        m0 = _bbx_chain(tmp_path, printer, "chain0")
+        m1 = _bbx_chain(tmp_path, printer, "chain1")
+        assert (m0.unit_prefix, m1.unit_prefix) == ("Bambu_AMS_chain0",
+                                                    "Bambu_AMS")
+        assert m0._state_get("AFC_BridgeBox chain0",
+                             "unit_prefix") == "Bambu_AMS_chain0"
+        _bbx_quiet(printer)
+
+    def test_a_chain_below_with_the_prefix_set_keeps_it(self, tmp_path):
+        printer = make_printer()
+        printer.add_section("AFC_BridgeBox chain2", {
+            "serial_port": "/dev/serial/by-id/usb-chain2-if00",
+            "unit_prefix": "Bambu_AMS"})
+        m1 = _bbx_chain(tmp_path, printer, "chain1")
+        assert m1.unit_prefix == "Bambu_AMS_chain1"
+        _bbx_quiet(printer)
 
     def test_a_section_of_the_config_is_still_named_as_one(self, tmp_path):
         printer = _bbx_steppers(make_printer())
@@ -8781,6 +8810,7 @@ class TestAfcBridgeBoxFoldAndSweep:
             "#~# [AFC_BridgeBox chain1]",
             f"#~# lane_map : {self.UID}:24:1",
             f"#~# name_map : {self.UID}:Bambu_AMS_HT_1",
+            "#~# unit_prefix : Bambu_AMS",
             "#~# ",
             f"#~# [AFC_BridgeBox chain1 learned {self.UID}]",
             "#~# afc_bowden_length : 3632.0",
