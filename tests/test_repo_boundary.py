@@ -270,7 +270,7 @@ class TestRepoLayout:
         assert unit.afc_unload_bowden_length == 1234.0
         assert unit._path_wait_load is True
         assert master.logger.messages == [
-            ("info", f"AFC_BridgeBox chain1: Bambu_AMS_1 takes the "
+            ("debug", f"AFC_BridgeBox chain1: Bambu_AMS_1 takes the "
                      f"afc_bowden_length 1234mm that UID {self.HT_UID} learned.")]
 
     def test_the_bridge_registry_has_exactly_one_home(
@@ -311,7 +311,7 @@ class TestRepoLayout:
         assert bridge.sent == [{"cmd": "status"}]
         assert bridge.narration == [(str(tmp_path), "usb-chain2-if00")]
         assert owner.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: brought the bridge up as the pool "
+            ("debug", "AFC bambu Bambu_AMS_1: brought the bridge up as the pool "
                      "owner on /dev/serial/by-id/usb-chain2-if00 "
                      "(variant=auto); units claim onto it live.")]
 
@@ -334,7 +334,7 @@ class TestRepoLayout:
             ("debug", f"AFC bambu Bambu_AMS_3: chain index not resolved yet "
                       f"(UID {self.HT_UID}); holding this unit's "
                       f"registrations until the chain map arrives"),
-            ("info", f"AFC bambu Bambu_AMS_3: claimed UID {self.HT_UID} as ht "
+            ("debug", f"AFC bambu Bambu_AMS_3: claimed UID {self.HT_UID} as ht "
                      f"and brought online live (ams_index=0).")]
 
         assert unit_mod._bridge_log_tag(port) == "usb-chain2-if00"

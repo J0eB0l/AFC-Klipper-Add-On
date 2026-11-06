@@ -187,7 +187,7 @@ def feed_bambu_gate(buf: AFCBambuBuffer, unit: Optional[BambuGateUnit],
 # The line load 3 logs when the gate latches: the +2 mm step at 10.25 s ends
 # 0.5 s of stillness, and the buffer has settled near 0.94.
 BAMBU_GATE_LOAD3_DETECTED = (
-    "info",
+    "debug",
     "Bambu_AMS_Buffer: load detected at 10.25 -- fps 0.94 (smoothed 0.94), "
     "odometer still for 0.50s [Bambu_AMS_1=2545.0mm]")
 
@@ -671,7 +671,7 @@ class TestAFCBambuBufferAdcCallback:
 
     # The lines _adopt_recorded_load writes for lane28.
     ADOPTED_AT_081 = (
-        "info",
+        "debug",
         "Bambu_AMS_Buffer: adopting lane28 as loaded at the toolhead from AFC's "
         "own record, buffer agreeing at 0.81")
     REFUSED_AT_002 = (
@@ -805,7 +805,7 @@ class TestAFCBambuBufferAdcCallback:
         assert buf.logger.messages == [BAMBU_GATE_LOAD3_DETECTED]
         assert plain.logger.messages == [
             BAMBU_GATE_NO_ODOMETER,
-            ("info", "Bambu_AMS_Buffer: load detected at 8.50 -- fps 0.96 "
+            ("debug", "Bambu_AMS_Buffer: load detected at 8.50 -- fps 0.96 "
                      "(smoothed 0.79), odometer still for 0.00s []")]
 
     def test_a_bare_value_sample_still_carries_a_moving_clock(self):
@@ -847,7 +847,7 @@ class TestAFCBambuBufferAdcCallback:
 
         assert buf._gate_latched is True
         assert buf.logger.messages == [
-            ("info", "Bambu_AMS_Buffer: load detected at 110.25 -- fps 0.94 "
+            ("debug", "Bambu_AMS_Buffer: load detected at 110.25 -- fps 0.94 "
                      "(smoothed 0.94), odometer still for 0.50s "
                      "[Bambu_AMS_1=2545.0mm]")]
 
@@ -1209,7 +1209,7 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._record_checked is True
         assert buf.advance_state is True
         assert buf.logger.messages == [(
-            "info",
+            "debug",
             "Bambu_AMS_Buffer: adopting lane28 as loaded at the toolhead from "
             "AFC's own record, buffer agreeing at 0.30")]
 
@@ -1264,7 +1264,7 @@ class TestAFCBambuBufferAdcCallback:
         assert latched == [False] * 12 + [True] * 2
         assert buf.advance_state is True
         assert buf.logger.messages == [(
-            "info",
+            "debug",
             "Bambu_AMS_Buffer: load detected at 3.25 -- fps 0.94 (smoothed "
             "0.94), filament already at the gears (resting, compressed for "
             "3.0s) [Bambu_AMS_1=2624.0mm]")]
@@ -1313,7 +1313,7 @@ class TestAFCBambuBufferAdcCallback:
         assert buf._gate_latched is True
         assert buf.logger.messages == [
             BAMBU_GATE_NO_ODOMETER,
-            ("info", "Bambu_AMS_Buffer: load detected at 8.50 -- fps 0.96 "
+            ("debug", "Bambu_AMS_Buffer: load detected at 8.50 -- fps 0.96 "
                      "(smoothed 0.79), odometer still for 0.00s []")]
 
     def test_a_unit_claimed_during_the_grace_is_never_warned_about(self):
@@ -1362,7 +1362,7 @@ class TestAFCBambuBufferAdcCallback:
         feed_bambu_gate(buf, unit, BAMBU_GATE_LOAD3)
 
         assert buf.logger.messages == [(
-            "info",
+            "debug",
             "Bambu_AMS_Buffer: load detected at 10.25 -- fps 0.94 (smoothed "
             "0.94), odometer still for 0.50s [Bambu_AMS_1=2545.0mm, "
             "Bambu_AMS_HT_1=nanmm]")]
@@ -1575,7 +1575,7 @@ class TestAFCBambuBufferDisableBuffer:
         assert buf._gate_latched is False
         assert buf.advance_state is False
         assert buf.logger.messages == [(
-            "info",
+            "debug",
             "Bambu_AMS_Buffer: adopting lane28 as loaded at the toolhead from "
             "AFC's own record, buffer agreeing at 0.81")]
 
