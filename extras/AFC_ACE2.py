@@ -1223,20 +1223,23 @@ class afcACE2(afcACE):
         # Slots running rollback assist for an unload (see _start_unload_assist).
         self._rollback_assist_active: set[int] = set()
         # Staging: skip_factory_autostage turns the factory identify off on
-        # every slot, which skips the ACE's slow (~30-45 s) factory autostage;
-        # AFC then stages an insert itself, stage_initial_dist mm into the unit
-        # plus dist_hub. Both were [AFC_ACE2_rfid] options, which still sets them
-        # for a unit that doesn't.
-        legacy = (config.getsection("AFC_ACE2_rfid")
-                  if config.has_section("AFC_ACE2_rfid") else None)
-        self.skip_factory_autostage = config.getboolean(
-            "skip_factory_autostage",
-            legacy.getboolean("skip_factory_autostage", True) if legacy else True)
-        stage_dist = config.getfloat(
-            "stage_initial_dist",
-            legacy.getfloat("stage_initial_dist", 500.0, minval=0.0) if legacy else 500.0,
-            minval=0.0)
+        # every slot.  AFC then stages an insert itself, stage_initial_dist mm into the unit
+        # plus dist_hub.
+        legacy = config.getsection("AFC_ACE2_rfid") if config.has_section("AFC_ACE2_rfid") else None
+        skip_factory_stage = True
+        legacy_stage_dist = 330.0
+        if legacy:
+            skip_factory_stage = legacy.getboolean("skip_factory_autostage", True)
+            legacy_stage_dist = legacy.getfloat("stage_initial_dist", 330.0, minval=0.0)
+
+        self.skip_factory_autostage = config.getboolean("skip_factory_autostage",
+                                                        skip_factory_stage)
+        stage_dist = config.getfloat("stage_initial_dist", legacy_stage_dist, minval=0.0)
         self.stage_initial_dist = stage_dist if self.skip_factory_autostage else 0.0
+        # Force eject buffer to same as stage_initial_dist - 25, but still allow for users to
+        # override
+        if self.stage_initial_dist > 0.0:
+            self.eject_buffer = config.getfloat("eject_buffer", self.stage_initial_dist - 25, minval=0.0)
         # The unit turns the identify back on across a reset, so set it on every
         # connect and reconnect.
         self.printer.register_event_handler("afc_ace:connected", self._handle_ace_connected)
@@ -1261,7 +1264,7 @@ class afcACE2(afcACE):
 
     def _handle_ace_connected(self, unit: Any, reconnected: bool) -> None:
         """
-        ``afc_ace:connected`` handler: set this unit's factory identify, off for
+        `afc_ace:connected` handler: set this unit's factory identify, off for
         skip_factory_autostage, else on.
 
         :param unit: the ACE unit that connected.
@@ -1363,7 +1366,8 @@ class afcACE2(afcACE):
 
         :param slot: 0-based ACE slot index of the lane being unloaded.
         """
-        if not (self._ace and self._ace.connected):
+        if not (self._ace
+                and self._ace.connected):
             return
         try:
             self._wait_for_ace_ready()
@@ -1381,7 +1385,8 @@ class afcACE2(afcACE):
         """
         if slot in self._rollback_assist_active:
             self._rollback_assist_active.discard(slot)
-            if self._ace and self._ace.connected:
+            if (self._ace
+                and self._ace.connected):
                 try:
                     self._wait_for_ace_ready()
                     self._ace.stop_feed_assist_sync(slot)

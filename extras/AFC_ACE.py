@@ -260,9 +260,6 @@ class afcACE(afcUnit):
     # V1 ACE reads tags through the firmware (get_filament_info); AFC_ACE2 sets
     # this False since it reads them host-side (AFC_ACE2_rfid).
     _uses_firmware_rfid = True
-    # V1 ACE stages an insert in its own firmware, so AFC feeds no extra
-    # distance into the unit; AFC_ACE2 sets this when it skips the factory
-    # autostage.
     stage_initial_dist = 0.0
 
     def __init__(self, config: ConfigWrapper) -> None:
@@ -536,9 +533,6 @@ class afcACE(afcUnit):
                                and active_lane.get_toolhead_pre_sensor_state())
             except Exception:
                 at_toolhead = False
-            # A tool pickup schedules this just before its unload starts, so it can run
-            # after prepare_unload stopped assist; starting then pushes against the
-            # heat and tip forming. A load starts assist itself when it finishes.
             if (not self._operation_active
                 and active_lane is not None
                 and self._use_feed_assist(active_lane)
@@ -1910,9 +1904,6 @@ class afcACE(afcUnit):
                     if self._use_feed_assist(cur_lane):
                         self._start_feed_assist(slot, explicit=True)
 
-        # Filament at the sensor with no lane loaded is a tip an unload left behind
-        # (or one fed by hand); the next load would refuse it. Said on the
-        # extruder's first lane of this unit only, not once per lane.
         extruder = cur_lane.extruder_obj
         if (succeeded
             and extruder.tool_start != "buffer"
@@ -2101,8 +2092,7 @@ class afcACE(afcUnit):
         cur_lane.extruder_obj.clear_stale_sensor_state(cur_lane)
         self.afc.reactor.pause(self.afc.reactor.monotonic() + 2.0)
 
-        # Add 100mm extra to account for movement not being as accurate
-        unload_distance = distance + 100
+        unload_distance = distance
 
         if cur_lane.loaded_to_hub:
             dist_hub = cur_lane.dist_hub
@@ -2598,9 +2588,7 @@ class afcACE(afcUnit):
             self._wait_for_ace_ready()
             # Clear the tip from the gears
             self._stop_feed_assist(slot)
-            # With buffer ramming there is no sensor to read after the unwind, so as
-            # AFC's own unload does, first pull the lane back until the buffer
-            # collapses to trailing, proof the extruder still holds the filament.
+
             if (cur_extruder.tool_start == "buffer"
                 and not self._collapse_buffer(cur_lane, slot)):
                 return False
@@ -2615,8 +2603,7 @@ class afcACE(afcUnit):
             self._wait_for_feed_complete(slot, retract_dist, self.retract_speed)
             if cur_extruder.tool_stn_unload > 0:
                 afc.function.log_toolhead_pos("ACE STN unload after ")
-            # A finished unwind doesn't prove the tip left: one held in the gears
-            # stays at the toolhead sensor, and the next load would refuse it.
+
             if (cur_extruder.tool_start != "buffer"
                 and not self._clear_toolhead_sensor(cur_lane, cur_extruder, slot,
                                                     retract_dist)):

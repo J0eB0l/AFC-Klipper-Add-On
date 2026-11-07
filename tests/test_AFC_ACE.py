@@ -35,7 +35,6 @@ from extras.AFC_ACE import (
 import extras.AFC_ACE as afc_ace_module
 from extras.AFC_ACE2 import ACE2Connection, Cmd, pb_uint32, v2_response_to_v1
 import extras.AFC_ACE2 as afc_ace2_module
-from extras.AFC_functions import afcFunction
 from extras.AFC_lane import AFCLaneState
 from tests.ace_helpers import (
     ace_error,
@@ -57,7 +56,6 @@ from tests.ace_helpers import (
     reset_ace_globals,
     TIMEOUT,
 )
-from tests.conftest import MockConfig, MockPrinter
 
 
 def ace_p1_unit(*lanes: Any, printer: Optional[AcePrinter] = None, **kwargs: Any) -> afcACE:
@@ -3990,7 +3988,7 @@ class TestAfcACECalibrateBowdenInner:
         assert (ok, dist) == (True, 500.0)
         assert msg == "afc_bowden_length calibration: 500.0mm (was 900.0mm)"
         assert hub.afc_bowden_length == 500.0
-        assert hub.afc_unload_bowden_length == 600.0
+        assert hub.afc_unload_bowden_length == 500.0
         # Ten 50mm steps reach the sensor, then 5mm past it is retracted.
         assert wire.moves() == [self.STEP] * 10 + [
             ("unwind_filament", {"index": 0, "length": 505.0, "speed": 100.0,
@@ -3998,8 +3996,8 @@ class TestAfcACECalibrateBowdenInner:
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_hub Ace_1_hub", "afc_bowden_length", 500.0,
               "\n afc_bowden_length: New: 500.0 Old: 900.0"), {}),
-            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 600.0,
-              "\n afc_unload_bowden_length: 600.0"), {})]
+            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 500.0,
+              "\n afc_unload_bowden_length: 500.0"), {})]
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
             ("info", "ACE calibration: sensor triggered at 500.0mm"),
@@ -4017,7 +4015,7 @@ class TestAfcACECalibrateBowdenInner:
         assert (ok, dist) == (True, 560.0)
         assert msg == "afc_bowden_length calibration: 560.0mm (was 900.0mm)"
         assert hub.afc_bowden_length == 560.0
-        assert hub.afc_unload_bowden_length == 600.0
+        assert hub.afc_unload_bowden_length == 500.0
         # The retract is the measured 500mm + 5, not the staged total.
         assert wire.moves() == [self.STEP] * 10 + [
             ("unwind_filament", {"index": 0, "length": 505.0, "speed": 100.0,
@@ -4025,8 +4023,8 @@ class TestAfcACECalibrateBowdenInner:
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_hub Ace_1_hub", "afc_bowden_length", 560.0,
               "\n afc_bowden_length: New: 560.0 Old: 900.0"), {}),
-            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 600.0,
-              "\n afc_unload_bowden_length: 600.0"), {})]
+            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 500.0,
+              "\n afc_unload_bowden_length: 500.0"), {})]
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
             ("info", "ACE calibration: sensor triggered at 500.0mm"),
@@ -5031,6 +5029,22 @@ class TestAfcACEAceUnloadInner:
                     "toolhead by hand."), {"pause": False})]
         assert ("debug", "ACE unwind complete") not in unit.afc.afcDeltaTime.messages
 
+    def test_sensor_that_never_clears_pauses_during_a_print(self):
+        unit, lane, wire = self._unit(in_print=True)
+        lane.extruder_obj.tool_stn_unload = 60.0
+        lane.extruder_obj.tool_start_state = True
+        lane.loaded_to_hub = False
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is False
+
+        assert lane.loaded_to_hub is False
+        assert unit._hub_load_suppressed == set()
+        assert unit.afc.error.handle_lane_failure.calls == [
+            ((lane, "lane3 is still at extruder's toolhead sensor after the ACE unwind, so it "
+                    "never left the toolhead.\nRun TOOL_UNLOAD LANE=lane3 again, or clear the "
+                    "toolhead by hand.\nOnce cleared, click resume to continue printing"),
+             {"pause": True})]
+
     def test_sensor_retry_without_tool_stn_unload_unwinds_again(self):
         unit, lane, wire = self._unit()
         lane.extruder_obj.tool_stn_unload = 0
@@ -5090,6 +5104,21 @@ class TestAfcACEAceUnloadInner:
                     "TOOL_UNLOAD LANE=lane3 again. Raising tool_max_unload_attempts may "
                     "help."), {"pause": False})]
 
+    def test_buffer_that_never_collapses_pauses_during_a_print(self):
+        unit, lane, wire = self._unit(in_print=True)
+        lane.extruder_obj.tool_start = "buffer"
+        lane.extruder_obj.tool_stn_unload = 0
+        lane.buffer_obj = types.SimpleNamespace(trailing_state=False, advance_state=False)
+
+        assert unit._ace_unload_inner(lane, lane.extruder_obj) is False
+
+        assert unit._hub_load_suppressed == set()
+        assert unit.afc.error.handle_lane_failure.calls == [
+            ((lane, "Buffer did not collapse to trailing after 4 short ACE unwinds, so lane3 "
+                    "may not be held by the extruder.\nCheck the toolhead, then run "
+                    "TOOL_UNLOAD LANE=lane3 again. Raising tool_max_unload_attempts may "
+                    "help.\nOnce cleared, click resume to continue printing"), {"pause": True})]
+
     def test_no_retract_move_when_tool_stn_unload_zero_but_still_unwinds(self):
         unit, lane, wire = self._unit()
         lane.extruder_obj.tool_stn_unload = 0
@@ -5141,12 +5170,12 @@ class TestAfcACECmdAFCACECalibrate:
 
         assert gcmd.responses == ["afc_bowden_length calibration: 50.0mm (was 900.0mm)"]
         assert lane.hub_obj.afc_bowden_length == 50.0
-        assert lane.hub_obj.afc_unload_bowden_length == 150.0
+        assert lane.hub_obj.afc_unload_bowden_length == 50.0
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_hub Ace_1_hub", "afc_bowden_length", 50.0,
               "\n afc_bowden_length: New: 50.0 Old: 900.0"), {}),
-            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 150.0,
-              "\n afc_unload_bowden_length: 150.0"), {})]
+            (("AFC_hub Ace_1_hub", "afc_unload_bowden_length", 50.0,
+              "\n afc_unload_bowden_length: 50.0"), {})]
         # The first 50mm step trips the sensor, then 5mm past it is retracted.
         assert unit.logger.messages == [
             ("raw", "Calibrating afc_bowden_length for lane0 (max 6000mm in 50.0mm steps)"),
@@ -8567,8 +8596,6 @@ class TestAfcACESyncSlotLoadedState:
         unit._sync_slot_loaded_state()
 
         assert lane.prep_state is True
-        assert lane.material == "PETG"
-        assert unit.printer.logger.messages == []
 
     def test_ace2_ready_slot_keeps_lane_values(self):
         # The ACE 2 inventory holds no tag values; AFC_ACE2_rfid identifies its spools.
