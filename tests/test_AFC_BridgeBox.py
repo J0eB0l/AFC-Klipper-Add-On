@@ -5486,6 +5486,72 @@ class TestAfcBridgeBoxLaterChains:
         _bbx_quiet(printer)
 
 
+class TestAfcBridgeBoxLaterChainSections:
+    """What the config and the saved state say about each later chain."""
+
+    @staticmethod
+    def _config(tmp_path: pathlib.Path) -> Tuple[afcBridgeBox, BambuConfig]:
+        """
+        chain2 enrolled alone and saved its state; chain1 then loads above it.
+
+        :return tuple: (chain1, a config that sees chain2's section)
+        """
+        _bbx_chain(tmp_path, make_printer(), "chain2")
+        printer = _bbx_steppers(make_printer())
+        printer.add_section("AFC_BridgeBox chain2", {
+            "serial_port": "/dev/serial/by-id/usb-chain2-if00",
+            "state_file": str(tmp_path / "AFC_BridgeBox.cfg")})
+        config = BambuConfig(SEC, printer)
+        m1 = _bbx_chain(tmp_path, printer, "chain1")
+        _bbx_quiet(printer)
+        return m1, config
+
+    def test_a_later_chain_comes_with_its_options_and_saved_state(self, tmp_path):
+        m1, config = self._config(tmp_path)
+        assert m1._later_chain_sections(config) == [(
+            "chain2",
+            {"serial_port": "/dev/serial/by-id/usb-chain2-if00",
+             "state_file": str(tmp_path / "AFC_BridgeBox.cfg")},
+            {"lane_map": f"{B}:4:1", "name_map": f"{B}:Bambu_AMS_HT_1",
+             "lane_base": "0", "unit_prefix": "Bambu_AMS"})]
+
+    def test_a_later_chain_that_never_saved_has_no_saved_state(self, tmp_path):
+        printer = _bbx_steppers(make_printer())
+        printer.add_section("AFC_BridgeBox chain2", {
+            "serial_port": "/dev/serial/by-id/usb-chain2-if00",
+            "state_file": str(tmp_path / "chain2.cfg")})
+        config = BambuConfig(SEC, printer)
+        m1 = _bbx_chain(tmp_path, printer, "chain1")
+        assert m1._later_chain_sections(config) == [(
+            "chain2",
+            {"serial_port": "/dev/serial/by-id/usb-chain2-if00",
+             "state_file": str(tmp_path / "chain2.cfg")},
+            {})]
+        _bbx_quiet(printer)
+
+    def test_a_config_without_its_merged_file_has_none(self, tmp_path):
+        m1, config = self._config(tmp_path)
+        config.fileconfig = None
+        assert m1._later_chain_sections(config) == []
+
+    def test_a_section_that_cannot_be_read_is_left_out(self, tmp_path):
+        m1, config = self._config(tmp_path)
+        fc = config.fileconfig
+        items = fc.items
+        calls: List[str] = []
+
+        def failing_items(sec: str) -> Any:
+            """Read once (finding the chain), then fail."""
+            calls.append(sec)
+            if len(calls) > 1:
+                raise configparser.Error("unreadable")
+            return items(sec)
+
+        fc.items = failing_items
+        assert m1._later_chain_sections(config) == []
+        assert calls == ["AFC_BridgeBox chain2", "AFC_BridgeBox chain2"]
+
+
 class TestAfcBridgeBoxSetBayOwner:
     """Which unit a pool bay was last claimed onto, recorded per chain."""
 
@@ -7654,13 +7720,97 @@ class TestAfcBridgeBoxCmdAFCBridgeboxStatus:
         # AAAA is recorded on Alpha but not on the chain now; CCCC claimed
         # Bravo live and took the first free T#s.
         assert cmd.messages == [("respond_info", (
-            "BridgeBox chains --\n"
+            "BridgeBox chains:\n"
             "chain1: extruder, board, USB usb-chain1-if00, connected\n"
             "  Alpha [AMS] AAAA offline: lane24 no T#; lane25 no T#; "
             "lane26 no T#; lane27 no T#\n"
             "  Bravo [AMS] CCCC online: lane28 T0; lane29 T1; lane30 T2; "
             "lane31 T3\n"
             "  free bays: 1 AMS, 1 HT"))]
+
+    def test_status_lists_every_chain_in_config_order(self, tmp_path):
+        printer = make_printer()
+        _bbx_chain(tmp_path, printer, "chain1")
+        m2 = _bbx_chain(tmp_path, printer, "chain2")
+        cmd = _p3_cmd()
+        m2.cmd_AFC_BRIDGEBOX_STATUS(cmd)
+        # chain2 lists chain1 too, first
+        assert cmd.messages == [("respond_info", (
+            "BridgeBox chains:\n"
+            "chain1: extruder, board, USB usb-chain1-if00, not connected\n"
+            "  Bambu_AMS_HT_1 [HT] AAAA offline: lane4 no T#\n"
+            "  free bays: 1 AMS, 1 HT\n"
+            "chain2: extruder, board, USB usb-chain2-if00, not connected\n"
+            "  Bambu_AMS_chain2_HT_1 [HT] BBBB offline: lane10 no T#\n"
+            "  free bays: 1 AMS, 1 HT"))]
+        _bbx_quiet(printer)
+
+
+class TestAfcBridgeBoxStatusLines:
+    """One chain's part of STATUS: its head line, its units, its free bays."""
+
+    @staticmethod
+    def _chain(tmp_path, monkeypatch):
+        m = _p3_named(tmp_path, monkeypatch, online=(C,))
+        assert m._claim_pool_unit(C, "boxed") is not None
+        _p3_quiet(m)
+        return m
+
+    def test_board_and_wifi_link_head_the_chain(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        bridge = m._chain_bridge()
+        bridge._info = {"chip": "ESP32S3", "fw": "AFC-2.90"}
+        bridge.wifi = types.SimpleNamespace(on_wifi=True, addr="tcp://192.168.6.75:8888")
+        assert m._status_lines()[0] == (
+            "chain1: extruder, chip ESP32S3 fw AFC-2.90, "
+            "WiFi tcp://192.168.6.75:8888, connected")
+        assert _p3_log(m) == []
+
+    def test_wifi_off_reads_the_usb_port(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._chain_bridge().wifi = types.SimpleNamespace(on_wifi=False, addr="tcp://x:1")
+        assert m._status_lines()[0] == (
+            "chain1: extruder, board, USB usb-chain1-if00, connected")
+
+    def test_a_tcp_port_with_no_bridge_is_a_wifi_link_not_connected(
+            self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m.serial_port = "tcp://192.168.6.32:8888"
+        m.extruder = None
+        assert m._status_lines()[0] == (
+            "chain1: no extruder, board, WiFi tcp://192.168.6.32:8888, "
+            "not connected")
+
+    def test_an_auto_port_with_no_board_says_so(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m.serial_port = "auto:chain1"
+        assert m._status_lines()[0] == (
+            "chain1: extruder, board, USB, no board found yet, not connected")
+
+    def test_a_disconnected_bridge_reads_not_connected(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._chain_bridge().connected = False
+        assert m._status_lines()[0] == (
+            "chain1: extruder, board, USB usb-chain1-if00, not connected")
+
+    def test_a_lane_with_a_spool_shows_it(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m.printer.lookup_object("AFC_lane lane28").spool_id = 102
+        assert m._status_lines()[2] == (
+            "  Bravo [AMS] CCCC online: lane28 T0 spool 102; lane29 T1; "
+            "lane30 T2; lane31 T3")
+
+    def test_every_bay_taken_leaves_no_free_line(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._pool_units = [{"name": "Hot", "family": "ht", "uid": D,
+                          "lanes": [], "bound": True}]
+        assert m._status_lines()[1:] == [f"  Hot [HT] {D} online: no lanes"]
+
+    def test_a_chain_with_no_pool_says_so(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._pool_units = []
+        assert m._status_lines()[1:] == ["  no pool bays (pool_ams / pool_ht)"]
+
 
 class TestAfcBridgeBoxCmdAFCBridgeboxBays:
     """BAYS pops the bay manager: each bay, its unit, and what it offers."""

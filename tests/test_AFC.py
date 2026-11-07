@@ -5316,6 +5316,19 @@ class TestAfcInitResumeToolchange:
         assert obj.resume_toolchange is None
 
 
+class TestAfcInitPreResumeMacro:
+    def test_unset_by_default(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter()))
+        assert obj.pre_resume_macro is None
+
+    def test_reads_the_configured_macro(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter(),
+                             values={"pre_resume_macro": "SNAPMAKER_EXIT_DISCARD_BIN"}))
+        assert obj.pre_resume_macro == "SNAPMAKER_EXIT_DISCARD_BIN"
+
+
 class TestNoteInterruptedToolchange:
     def _make(self):
         obj, cur_lane, _ = _make_afc_for_change_tool()

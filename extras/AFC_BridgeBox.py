@@ -1792,9 +1792,8 @@ class afcBridgeBox:
                 out.setdefault(n, name)
         return out
 
-    def _later_chain_sections(self, config: Any
-                              ) -> List[Tuple[str, Dict[str, str],
-                                              Dict[str, str]]]:
+    def _later_chain_sections(
+            self, config: Any) -> List[Tuple[str, Dict[str, str], Dict[str, str]]]:
         """
         What the config and the saved state say about each chain below this
         one, before it loads (see _later_chains).
@@ -1807,7 +1806,7 @@ class afcBridgeBox:
         fc = getattr(config, "fileconfig", None)
         if fc is None:
             return []
-        out = []
+        out: List[Tuple[str, Dict[str, str], Dict[str, str]]] = []
         for name in self._later_chains(config):
             sec = self._BASE_SECTION + " " + name
             try:
@@ -2632,7 +2631,7 @@ class afcBridgeBox:
                     "AFC_BRIDGEBOX_STATUS", self.cmd_AFC_BRIDGEBOX_STATUS,
                     desc="Show every BridgeBox chain in one list: its board, "
                          "link, extruder, and each unit with its lanes, T#s "
-                         "and spools -- AFC_BRIDGEBOX_STATUS")
+                         "and spools: AFC_BRIDGEBOX_STATUS")
             except Exception:
                 pass                  # a second chain: the first one lists all
         self._register_mux(
@@ -2667,7 +2666,7 @@ class afcBridgeBox:
         lines: List[str] = []
         for chain in chains:
             lines += chain._status_lines()
-        gcmd.respond_info("BridgeBox chains --\n" + "\n".join(lines))
+        gcmd.respond_info("BridgeBox chains:\n" + "\n".join(lines))
 
     def _status_lines(self) -> List[str]:
         """
@@ -2682,7 +2681,8 @@ class afcBridgeBox:
                          if info.get(k)) or "board"
         port = str(self.serial_port or "")
         wifi = getattr(bridge, "wifi", None) if bridge else None
-        if wifi is not None and getattr(wifi, "on_wifi", False):
+        if (wifi is not None
+            and getattr(wifi, "on_wifi", False)):
             link = f"WiFi {wifi.addr}"
         elif port.lower().startswith("tcp://"):
             link = f"WiFi {port}"
@@ -2690,8 +2690,9 @@ class afcBridgeBox:
             link = "USB, no board found yet"
         else:
             link = f"USB {os.path.basename(port)}"
-        state = ("connected" if bridge is not None and bridge.is_connected()
-                 else "not connected")
+        connected = (bridge is not None
+                     and bridge.is_connected())
+        state = "connected" if connected else "not connected"
         lines = [f"{self.name}: {self.extruder or 'no extruder'}, {board}, "
                  f"{link}, {state}"]
         free = {"AMS": 0, "HT": 0}

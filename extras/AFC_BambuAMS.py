@@ -2891,7 +2891,7 @@ class afcBambuAMS(afcUnit):
 
     def cmd_BAMBU_CLEAR(self, gcmd: Any) -> None:
         """
-        Clear the fault on every Bambu unit that reports one, the easy way.
+        Clear the fault on every Bambu unit that reports one.
 
         With no parameter it finds the faulted units itself (state 6 or 7) on
         every BridgeBox chain and runs AFC_BAMBU_CLEARFAULT's clear on each.
@@ -2916,17 +2916,19 @@ class afcBambuAMS(afcUnit):
             lane = self.afc.lanes.get(lane_name)
             unit = getattr(lane, "unit_obj", None)
             if unit not in units:
-                raise gcmd.error(
-                    f"BAMBU_CLEAR: {lane_name} is not a lane on a Bambu unit")
+                error_str = f"BAMBU_CLEAR: {lane_name} is not a lane on a Bambu unit"
+                raise gcmd.error(error_str)
             unit_name = unit.name
         if unit_name is not None:
             units = [unit for unit in units if unit.name == unit_name]
             if not units:
-                raise gcmd.error(f"BAMBU_CLEAR: no Bambu unit named {unit_name}")
+                error_str = f"BAMBU_CLEAR: no Bambu unit named {unit_name}"
+                raise gcmd.error(error_str)
         else:
-            units = [unit for unit in units if unit._bridge is not None
-                     and unit._unit_state(unit._bridge.latest_status())
-                     in unit.AMS_STATES_FAULTED]
+            units = [unit for unit in units
+                     if (unit._bridge is not None
+                         and unit._unit_state(unit._bridge.latest_status())
+                         in unit.AMS_STATES_FAULTED)]
             if not units:
                 gcmd.respond_info("BAMBU_CLEAR: no Bambu unit reports a fault.")
                 return

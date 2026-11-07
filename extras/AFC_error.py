@@ -333,7 +333,8 @@ class afcError:
             if self.afc.function.is_homed(for_move=True):
                 # The user's RESUME puts the head back where it paused, which during a tool
                 # change is the load area; leave it before moving back to the print
-                if self.pause_in_toolchange and self.afc.pre_resume_macro:
+                if (self.pause_in_toolchange
+                    and self.afc.pre_resume_macro):
                     self.afc.gcode.run_script_from_command(self.afc.pre_resume_macro)
                 self.afc.restore_pos(False)
             self.pause = False
