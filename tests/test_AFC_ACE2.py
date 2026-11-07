@@ -2469,7 +2469,7 @@ class TestAfcACE2Staging:
 
     def test_defaults_skip_the_factory_autostage(self):
         unit = make_ace2_unit()
-        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (True, 500.0)
+        assert (unit.skip_factory_autostage, unit.stage_initial_dist) == (True, 330.0)
 
     def test_factory_staging_has_no_initial_load(self):
         unit = make_ace2_unit(values={"skip_factory_autostage": False,
@@ -2557,7 +2557,7 @@ class TestAfcACE2Staging:
         assert ("afc_ace:connected", (unit, False)) in unit.printer.events
 
     @pytest.mark.parametrize("values,initial", [
-        ({}, 500.0), ({"stage_initial_dist": 250.0}, 250.0),
+        ({}, 330.0), ({"stage_initial_dist": 250.0}, 250.0),
         ({"skip_factory_autostage": False}, 0.0)])
     def test_staging_starts_from_the_initial_load(self, values, initial):
         unit = make_ace2_unit(lanes=[LaneSpec("lane0", prep=True)], values=values)
@@ -2932,4 +2932,109 @@ class TestAfcACE2UnloadRollbackAssist:
         unit._stop_feed_assist(0)
         assert [m for m in self._methods(unit) if m != "get_status"] == ["stop_feed_assist"]
         assert unit._rollback_assist_active == set()
+
+
+class TestAfcACE2StartUnloadAssist:
+    @staticmethod
+    def _unit() -> afcACE2:
+        return make_ace2_unit(lanes=[LaneSpec("lane1", prep=True, tool_loaded=True)])
+
+    def test_no_connection_returns_without_starting(self):
+        unit = self._unit()
+        unit._ace = None
+
+        unit._start_unload_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert unit.printer.logger.messages == []
+
+    def test_not_connected_returns_without_starting(self):
+        unit = self._unit()
+        unit._ace.connected = False
+
+        unit._start_unload_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert [m for m, _p in unit._ace.commands] == []
+        assert unit.printer.logger.messages == []
+
+    def test_success_adds_slot_and_logs_debug(self):
+        unit = self._unit()
+
+        unit._start_unload_assist(0)
+
+        assert unit._rollback_assist_active == {0}
+        assert [m for m, _p in unit._ace.commands if m != "get_status"] == [
+            "start_rollback_assist"]
+        assert unit.printer.logger.messages == [
+            ("debug", f"ACE {unit.name}: rollback assist on slot 0 for the unload")]
+
+    def test_exception_logs_warning_and_does_not_mark_active(self):
+        unit = self._unit()
+        unit._ace.set_reply("start_rollback_assist", RuntimeError("boom"))
+
+        unit._start_unload_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert unit.printer.logger.messages == [
+            ("warning", f"ACE {unit.name}: rollback assist on slot 0 failed: boom")]
+
+
+class TestAfcACE2StopFeedAssist:
+    @staticmethod
+    def _unit() -> afcACE2:
+        return make_ace2_unit(lanes=[LaneSpec("lane1", prep=True, tool_loaded=True)])
+
+    def test_slot_not_in_rollback_assist_active_delegates_to_super(self):
+        unit = self._unit()
+        unit._feed_assist_active.add(0)
+
+        unit._stop_feed_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert [m for m, _p in unit._ace.commands if m != "get_status"] == ["stop_feed_assist"]
+        assert unit._feed_assist_active == set()
+        assert unit.printer.logger.messages == []
+
+    def test_no_connection_skips_stop_but_still_discards_and_delegates(self):
+        unit = self._unit()
+        unit._rollback_assist_active.add(0)
+        unit._feed_assist_active.add(0)
+        unit._ace = None
+
+        unit._stop_feed_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert unit._feed_assist_active == {0}
+        assert unit.printer.logger.messages == []
+
+    def test_not_connected_skips_stop_but_still_discards_and_delegates(self):
+        unit = self._unit()
+        unit._rollback_assist_active.add(0)
+        unit._feed_assist_active.add(0)
+        unit._ace.connected = False
+
+        unit._stop_feed_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert unit._feed_assist_active == {0}
+        assert [m for m, _p in unit._ace.commands] == []
+        assert unit.printer.logger.messages == []
+
+    def test_exception_logs_error_and_still_delegates(self):
+        unit = self._unit()
+        unit._rollback_assist_active.add(0)
+        unit._feed_assist_active.add(0)
+        unit._ace.set_reply("stop_feed_assist", RuntimeError("boom"))
+
+        unit._stop_feed_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        # One failing call here, then another from super()._stop_feed_assist.
+        assert [m for m, _p in unit._ace.commands if m != "get_status"] == (
+            ["stop_feed_assist", "stop_feed_assist"])
+        assert unit._feed_assist_active == {0}
+        assert unit.printer.logger.messages == [
+            ("error", "Failed to stop rollback assist slot 0: boom"),
+            ("error", "Failed to stop feed assist slot 0: boom")]
 
