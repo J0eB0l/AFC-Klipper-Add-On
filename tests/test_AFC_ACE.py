@@ -9090,6 +9090,8 @@ class TestACEConnectionResolveConnectPort:
     def test_auto_fast_path_reuses_a_still_matching_resolved_port(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
         conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates",
+                            lambda: ["/dev/ttyACM3", "/dev/ttyACM9"])
         monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
                             Recorder(result=2))
         full_scan = Recorder()
@@ -9101,6 +9103,8 @@ class TestACEConnectionResolveConnectPort:
     def test_auto_fast_path_falls_back_when_the_probe_mismatches(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
         conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates",
+                            lambda: ["/dev/ttyACM3", "/dev/ttyACM9"])
         monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
                             Recorder(result=1))
         monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
@@ -9111,12 +9115,28 @@ class TestACEConnectionResolveConnectPort:
     def test_auto_fast_path_falls_back_when_the_probe_raises(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
         conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates",
+                            lambda: ["/dev/ttyACM3", "/dev/ttyACM9"])
         monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
                             Recorder(raises=RuntimeError("boom")))
         monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
                             Recorder(result="/dev/ttyACM3"))
 
         assert conn._resolve_connect_port() == "/dev/ttyACM3"
+
+    def test_auto_fast_path_skips_a_resolved_port_that_is_no_longer_an_ace(self, monkeypatch):
+        # The unit is gone and its ttyACM number now belongs to another USB
+        # serial device: the retry must not open that device.
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
+        conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates", lambda: [])
+        probe = Recorder(result=2)
+        monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id", probe)
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
+                            Recorder(result="/dev/ttyACM3"))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM3"
+        assert probe.calls == []
 
     def test_auto_scan_finding_nothing_raises(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=3)
