@@ -4967,14 +4967,19 @@ class ACEConnection:
 
         Fast path on reconnect: re-check the last-resolved port first (one quick
         probe) so the common case doesn't run the full settle-window scan; only
-        fall back to the scan if that unit has moved/renumbered.
+        fall back to the scan if that unit has moved/renumbered. The last port
+        is only re-checked while it is still an ACE by id: once the unit is
+        gone, Linux hands its ttyACM number to the next USB serial device
+        plugged in, and probing it would open that device and send it ACE
+        frames on every retry.
 
         :param logger: logger to use from the worker thread
         :return str: the serial port to open
         """
         if not self._auto:
             return self._serial_port
-        if self._resolved_port:
+        if (self._resolved_port
+            and self._resolved_port in _ace_scan_candidates()):
             with contextlib.suppress(Exception):
                 if probe_ace_get_info_id(self._resolved_port, self._baud_rate) == self._ace_index:
                     return self._resolved_port

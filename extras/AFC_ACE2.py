@@ -934,15 +934,18 @@ class ACE2Connection(ACEConnection):
         """
         ACE2 override: resolve serial_port: auto with the V2 discover probe
         (V1's uses a JSON get_info). Cache-first on reconnect: re-check the
-        last port before the full settle-window scan. Runs on a worker thread,
-        so it logs to `logger`.
+        last port before the full settle-window scan, while that port is still
+        an ACE 2 by id (a gone unit's ttyACM number goes to the next USB serial
+        device, which must not be opened and sent V2 frames on every retry).
+        Runs on a worker thread, so it logs to `logger`.
 
         :param logger: logger to use from the worker thread
         :return str: the serial port to open
         """
         if not self._auto:
             return self._serial_port
-        if self._resolved_port:
+        if (self._resolved_port
+            and self._resolved_port in _ace2_scan_candidates()):
             with contextlib.suppress(Exception):
                 uid = probe_ace2_uid(self._resolved_port, self._baud_rate)
                 want = self._ace_uid or self._bound_uid
