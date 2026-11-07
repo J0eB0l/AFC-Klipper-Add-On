@@ -146,23 +146,23 @@ bench flash, send any request within a minute.
 | key | default | AFC option it comes from |
 |---|---|---|
 | `link_timeout_ms` | 2000 | |
-| `assist_high`, `assist_low` | 1.15, 0.85 | `multiplier_high`, `multiplier_low` |
-| `assist_fault_mm` | 80 | `filament_error_sensitivity` ((11 - s) * 10 mm; 0 = off) |
+| `assist_high`, `assist_low` | 1.05, 0.95 | `multiplier_high`, `multiplier_low` |
+| `assist_fault_mm` | 0 | `filament_error_sensitivity` ((11 - s) * 10 mm; 0 = off) |
 | `assist_fallback_speed` | 30 | assist speed with no extruder updates |
 | `assist_max_speed` | 80 | |
 | `espool_fwd`, `espool_rwd` | 0.5, 0.5 | `fwd_speed_multiplier`, `rwd_speed_multiplier` |
 | `espool_kick_ms` | 70 | `kick_start_time` |
-| `espool_brake_ms` | 50 | `n20_break_delay_time` |
-| `espool_cycle_us` | 4000 | `cycle_time` (taken before the first espooler use; later changes need a reboot) |
+| `espool_brake_ms` | 200 | `n20_break_delay_time` |
+| `espool_cycle_us` | 100000 | `cycle_time` (taken before the first espooler use; later changes need a reboot) |
 | `espool_pulse_mm`, `espool_pulse_ms` | 0, 0 | print assist: `delta_movement` and the cruise time AFC works out from the spool weight |
 | `espool_follow` | true | espoolers follow lane moves when not set by hand |
 | `job_tries` | 2 | |
 | `job_backoff_mm`, `job_snag_backoff_mm`, `job_repush_mm` | 20, 30, 10 | |
 | `verify_mm`, `verify_relax_mm`, `verify_settle_mm` | 8, 30, 2 | |
 
-The firmware's defaults match the stock BoxTurtle config
-(`templates/AFC_Turtle_1.cfg` in AFC) so it boots safely; AFC sends its own
-values every time it connects.
+The firmware's defaults match a stock BoxTurtle in AFC
+(`templates/AFC_Turtle_1.cfg` and the installer's TurtleNeck buffer) so it
+boots safely; AFC sends its own values every time it connects.
 
 ## Espoolers
 

@@ -955,9 +955,9 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         # TurtleNeck on the board (AFC_buffer's TurtleNeck options). With
         # turtleneck False and no buffer here, lanes use their extruder's.
         self.use_turtleneck = config.getboolean('turtleneck', True)
-        self.multiplier_high = config.getfloat('multiplier_high', 1.15, minval=1.)
-        self.multiplier_low = config.getfloat('multiplier_low', 0.85, minval=0., maxval=1.)
-        sensitivity = config.getfloat('filament_error_sensitivity', 3.0, minval=0., maxval=10.)
+        self.multiplier_high = config.getfloat('multiplier_high', 1.05, minval=1.)
+        self.multiplier_low = config.getfloat('multiplier_low', 0.95, minval=0., maxval=1.)
+        sensitivity = config.getfloat('filament_error_sensitivity', 0., minval=0., maxval=10.)
         self.assist_fault_mm = 0.0 if sensitivity == 0 else (11 - sensitivity) * 10
         self.assist_fallback_speed = config.getfloat('assist_fallback_speed', 30., above=0.)
         self.assist_max_speed = config.getfloat('assist_max_speed', 80., above=0.)
@@ -969,9 +969,9 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.job_repush_mm = config.getfloat('job_repush_mm', 10., minval=0.)
 
         # Espooler PWM cycle (AFC's cycle_time for the motor pins)
-        self.espool_cycle_time = config.getfloat('espool_cycle_time', 0.004, above=0.)
+        self.espool_cycle_time = config.getfloat('espool_cycle_time', 0.100, above=0.)
 
-        # Switches: None keeps the board's default (printer 1's wiring)
+        # Switches: None keeps the board's default (the stock BoxTurtle wiring)
         self.switch_invert = {}
         for key, names in (('prep_invert', ['prep1', 'prep2', 'prep3', 'prep4']),
                            ('load_invert', ['load1', 'load2', 'load3', 'load4']),

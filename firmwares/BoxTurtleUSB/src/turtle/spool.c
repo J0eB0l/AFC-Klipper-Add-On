@@ -1,6 +1,6 @@
 // Espooler (N20 respooler) control and TurtleNeck feed assist.
 //
-// Espoolers: FWD/RWD are hardware PWM (4 ms cycle, espool_cycle_time's default),
+// Espoolers: FWD/RWD are hardware PWM (AFC's cycle_time, 100 ms by default),
 // EN is a plain output. Off brakes the motor briefly (both sides high) like
 // AFC's break_espooler. When the host has not taken an espooler over by
 // hand, it follows its lane: rewind while the lane retracts, forward while
@@ -86,19 +86,19 @@ static struct espool esp[NUM_LANES];
 
 // Settings (cfg command).
 static int32_t esp_fwd_duty = 500, esp_rwd_duty = 500;   // permille
-static uint32_t esp_kick_ms = 70, esp_brake_ms = 50;
+static uint32_t esp_kick_ms = 70, esp_brake_ms = 200;
 static int32_t esp_pulse_mm = 0;      // 0 = no print assist pulses
 static uint32_t esp_pulse_ms = 0;
 static int esp_follow = 1;            // follow lane moves when not manual
 // PWM cycle (AFC cycle_time). The timers are set up on first use, so the
 // host's cfg at connect picks it; a later change needs a reboot.
-static uint32_t esp_cycle_us = 4000;
+static uint32_t esp_cycle_us = 100000;
 static uint8_t esp_ready;
 
-static int32_t assist_high = 1150, assist_low = 850;     // permille
+static int32_t assist_high = 1050, assist_low = 950;     // permille
 static int32_t assist_fallback = 30000;                  // milli-mm/s
 static int32_t assist_max = 80000;                       // milli-mm/s
-static int32_t assist_fault_mm = 80000;                  // milli-mm, 0 = off
+static int32_t assist_fault_mm = 0;                      // milli-mm, 0 = off
 
 /****************************************************************
  * Espooler outputs

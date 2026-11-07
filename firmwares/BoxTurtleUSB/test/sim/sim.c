@@ -750,8 +750,8 @@ t_assist_pulses(void)
     }
     // 10 mm/s for 10 s is ~100 mm: a pulse every 20 mm.
     CHECK(pulses >= 4 && pulses <= 5, "%d pulses in 100 mm", pulses);
-    // Each pulse: 300 ms on, then the 50 ms brake (both sides high).
-    CHECK(abs(on_ms - pulses * 350) <= pulses * 20, "%d ms on for %d pulses",
+    // Each pulse: 300 ms on, then the 200 ms brake (both sides high).
+    CHECK(abs(on_ms - pulses * 500) <= pulses * 20, "%d ms on for %d pulses",
           on_ms, pulses);
     // -1 goes back to the cfg default (no pulses).
     send("{\"cmd\":\"lane_cfg\",\"lane\":1,\"espool_pulse_ms\":-1}");
@@ -1201,6 +1201,10 @@ main(int argc, char **argv)
     next_model_ms = now + MS;
     next_task = now;
     next_host = now + 200 * MS;
+    // The TurtleNeck checks are written for these settings, sent the way
+    // AFC sends its config; the firmware's own defaults are stock.
+    send("{\"cmd\":\"cfg\",\"assist_high\":1.15,\"assist_low\":0.85,"
+         "\"assist_fault_mm\":80}");
     t_info();
     t_switch_events();
     t_move_until();

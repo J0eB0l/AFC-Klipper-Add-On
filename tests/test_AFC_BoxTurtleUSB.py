@@ -1445,7 +1445,9 @@ class TestInit:
         assert (unit.rotation_distance, unit.microsteps, unit.full_steps) == (4.65, 16, 200)
         assert unit.invert_dir is True
         assert unit.use_turtleneck is True
-        assert unit.assist_fault_mm == 80.0
+        assert (unit.multiplier_high, unit.multiplier_low) == (1.05, 0.95)
+        assert unit.assist_fault_mm == 0.0
+        assert unit.espool_cycle_time == 0.1
         assert unit.switch_invert == {}
         assert unit.switch_debounce_ms is None
         assert unit.led_chains == {1: (4, "GRBW"), 2: (0, "GRB"), 3: (0, "GRB"), 4: (0, "GRB")}
@@ -1663,13 +1665,13 @@ class TestHandleLinkUp:
         cmds = [c for c, _ in unit.link.requests]
         assert cmds == ["cfg", "cfg", "lane_cfg", "sw_cfg", "sw_cfg", "sw_cfg", "sw_cfg",
                         "led_cfg", "led_cfg", "led_cfg", "led_cfg", "status"]
-        # Through job_tries the first line is 250 bytes with a 7 digit id;
-        # job_backoff_mm (24 more) would make it 274.
+        # Through job_tries the first line is 251 bytes with a 7 digit id;
+        # job_backoff_mm (24 more) would make it 275.
         assert unit.link.requests[0][1] == {
-            "link_timeout_ms": 2000, "assist_high": 1.15, "assist_low": 0.85,
-            "assist_fault_mm": 80.0, "assist_fallback_speed": 30.0,
+            "link_timeout_ms": 2000, "assist_high": 1.05, "assist_low": 0.95,
+            "assist_fault_mm": 0.0, "assist_fallback_speed": 30.0,
             "assist_max_speed": 80.0, "espool_kick_ms": 70, "espool_brake_ms": 200,
-            "espool_cycle_us": 4000, "job_tries": 2}
+            "espool_cycle_us": 100000, "job_tries": 2}
         assert unit.link.requests[1][1] == {"job_backoff_mm": 20.0, "job_snag_backoff_mm": 30.0,
                                             "job_repush_mm": 10.0}
         assert unit.link.requests[3][1] == {"sw": "prep1", "invert": True, "debounce_ms": 15}
