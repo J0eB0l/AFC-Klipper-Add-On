@@ -1,0 +1,5 @@
+## The hub's USB class driver. 2.0.x runs on the USB Host Library built into
+## ESP-IDF 5.3; 2.2+ needs the separate espressif/usb component.
+dependencies:
+  idf: ">=5.3,<5.4"
+  espressif/usb_host_cdc_acm: "2.0.6"

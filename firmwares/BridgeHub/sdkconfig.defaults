@@ -1,0 +1,13 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# The S3's own USB port is the hub's host port, so the console (the hub's
+# status lines and ESP-IDF's log) stays on UART0, the board's other USB port
+# on a DevKitC.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Phones send long request headers to the setup page.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
