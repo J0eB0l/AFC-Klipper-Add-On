@@ -1,0 +1,10 @@
+# BoxTurtle standalone firmware (AFC serial unit, not a Klipper MCU)
+
+config TURTLE_STANDALONE
+    bool "BoxTurtle standalone firmware (AFC serial unit)"
+    depends on MACH_STM32H723 && USBSERIAL
+    default n
+    help
+        Replace Klipper's host protocol with the boxturtle-1 JSON line
+        protocol, so the AFC-Lite runs its lanes on its own and the host
+        can unplug it at any time.
