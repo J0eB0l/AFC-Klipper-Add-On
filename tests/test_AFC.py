@@ -5398,3 +5398,41 @@ class TestToolLoadZeroesEOnSnapmakerPause:
         assert self._g92_calls(afc) == []
         afc.error.point_snapmaker_resume_at.assert_not_called()
         assert afc.logger.messages == [("info", "Loading lane1")]
+
+
+class TestAFCLedColorValidation:
+    OPTIONS = {
+        "led_fault": "led_fault",
+        "led_ready": "led_ready",
+        "led_not_ready": "led_not_ready",
+        "led_loading": "led_loading",
+        "led_unloading": "led_unloading",
+        "led_tool_loaded": "led_tool_loaded",
+        "led_tool_loaded_idle": "led_tool_loaded_idle",
+        "led_tool_unloaded": "led_tool_unloaded",
+        "led_buffer_advancing": "led_buffer_advancing",
+        "led_buffer_trailing": "led_buffer_trailing",
+        "led_buffer_neutral": "led_buffer_neutral",
+        "led_buffer_disable": "led_buffer_disabled",
+        "led_spool_illuminate": "led_spool_illum",
+    }
+
+    @staticmethod
+    def _build(values):
+        from tests.conftest import MockConfig, MockPrinter
+        config = MockConfig(name="AFC", printer=MockPrinter(), values=values)
+        return afc(config)
+
+    @pytest.mark.parametrize("option", list(OPTIONS))
+    def test_invalid_color_raises_at_init(self, option):
+        from configfile import error
+        with pytest.raises(error) as exc:
+            self._build({option: "0.1.0,0,0"})
+        assert str(exc.value) == (
+            f"[AFC] option '{option}' has invalid LED color '0.1.0,0,0', "
+            f"expected 3 or 4 comma separated numbers from 0 to 1 (R,G,B[,W])")
+
+    @pytest.mark.parametrize("option", list(OPTIONS))
+    def test_valid_color_stored_on_attribute(self, option):
+        obj = self._build({option: "0.2,0.4,0.6,0.8"})
+        assert getattr(obj, self.OPTIONS[option]) == "0.2,0.4,0.6,0.8"
