@@ -29,9 +29,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from extras import AFC_BoxTurtleUSB as mod
+from extras import AFC_bhub_link as hub_link
+from extras.AFC_bhub_link import check_link_key
 from extras.AFC_BoxTurtle import afcBoxTurtle
 from extras.AFC_BoxTurtleUSB import (
-    HUB_PORT,
     LINE_MAX,
     PROTO,
     TurtleDrive,
@@ -39,11 +40,9 @@ from extras.AFC_BoxTurtleUSB import (
     TurtleNeck,
     TurtleRotation,
     afcBoxTurtleUSB,
-    check_link_key,
     encode_line,
     led_hex,
     load_config_prefix,
-    parse_tcp,
     parse_turtle_led,
     split_fields,
 )
@@ -587,49 +586,6 @@ class TestParseTurtleLed:
             parse_turtle_led(spec, self.COUNTS)
         assert str(e.value) == (f"turtle_led {part} is past the {count} LEDs "
                                 f"of rgb{header}_chain_count")
-
-
-class TestParseTcp:
-    @pytest.mark.parametrize("spec, expected", [
-        ("tcp://192.168.1.50:4001", ("192.168.1.50", 4001)),
-        ("tcp://192.168.1.50:4001/", ("192.168.1.50", 4001)),
-        ("tcp://[fe80::1]:4002", ("fe80::1", 4002)),
-        ("tcp://::1:65535", ("::1", 65535)),
-        ("tcp://192.168.1.50", ("192.168.1.50", HUB_PORT)),
-        ("tcp://192.168.1.50/", ("192.168.1.50", HUB_PORT)),
-        ("tcp://[fe80::1]", ("fe80::1", HUB_PORT)),
-        ("tcp://fe80::1", ("fe80::1", HUB_PORT)),
-    ])
-    def test_good(self, spec, expected):
-        assert parse_tcp(spec) == expected
-
-    def test_hub_port(self):
-        assert HUB_PORT == 4001
-
-    @pytest.mark.parametrize("spec", [
-        "tcp://192.168.1.50:",
-        "tcp://[fe80::1]x",
-        "tcp://[fe80::1]:",
-        "tcp://192.168.1.50:0",
-        "tcp://192.168.1.50:65536",
-        "tcp://192.168.1.50:abc",
-        "tcp://hub.local:4001",
-        "tcp://:4001",
-    ])
-    def test_bad(self, spec):
-        with pytest.raises(ValueError) as e:
-            parse_tcp(spec)
-        assert str(e.value) == f"serial_port {spec} is not tcp://<ip address>[:<port>]"
-
-
-class TestCheckLinkKey:
-    @pytest.mark.parametrize("key", ["a", "x" * 64, "!~#$%&'()*+,-./09:;<=>?@AZ[]^_`az{|}"])
-    def test_good(self, key):
-        assert check_link_key(key) is True
-
-    @pytest.mark.parametrize("key", ["", "x" * 65, "a b", 'a"b', "a\\b", "a\tb", "caf\u00e9"])
-    def test_bad(self, key):
-        assert check_link_key(key) is False
 
 
 class TestTurtleLinkInit:
@@ -1818,7 +1774,7 @@ class TestLinkKey:
     def test_makes_and_saves(self, unit):
         with open(unit.link_key_file(), "w") as f:
             json.dump({"Turtle_2": "other"}, f)
-        with patch.object(mod.secrets, "token_hex", return_value=HUB_KEY) as token:
+        with patch.object(hub_link.secrets, "token_hex", return_value=HUB_KEY) as token:
             assert unit.link_key(make=True) == HUB_KEY
         token.assert_called_once_with(16)
         assert self.saved(unit) == {"Turtle_2": "other", "Turtle_1": HUB_KEY}
@@ -1832,7 +1788,7 @@ class TestLinkKey:
     def test_reads_the_saved_key(self, unit):
         with open(unit.link_key_file(), "w") as f:
             json.dump({"Turtle_1": HUB_KEY}, f)
-        with patch.object(mod.secrets, "token_hex") as token:
+        with patch.object(hub_link.secrets, "token_hex") as token:
             assert unit.link_key(make=True) == HUB_KEY
         token.assert_not_called()
 
@@ -1841,7 +1797,7 @@ class TestLinkKey:
     def test_unusable_file_makes_a_new_key(self, unit, text):
         with open(unit.link_key_file(), "w") as f:
             f.write(text)
-        with patch.object(mod.secrets, "token_hex", return_value=HUB_KEY):
+        with patch.object(hub_link.secrets, "token_hex", return_value=HUB_KEY):
             assert unit.link_key(make=True) == HUB_KEY
         assert self.saved(unit)["Turtle_1"] == HUB_KEY
 
