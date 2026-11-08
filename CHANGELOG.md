@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Fixed unload so that ACE units are no longer fighting toolhead extruder when unloading
 
+## [11-04-2026]
+### Added
+- Added a `SET_FILAMENT_INFO` macro to optionally set filament vendor and name when not using spoolman. 
+
 ## [11-02-2026]
 ### Fixed
 - Fixed a bug where a lane without an extruder stepper could error out if the `QUERY_BUFFER` macro was run. 
