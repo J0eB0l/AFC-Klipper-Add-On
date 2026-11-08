@@ -55,6 +55,9 @@ Name the hub's address as the unit's `serial_port`:
 serial_port: tcp://192.168.1.50
 ```
 
+An ACE takes the same line in its `[AFC_ACE ...]` or `[AFC_ACE2 ...]`
+section.
+
 AFC takes the hub's port, 4001, when none is given; `tcp://<ip>:<port>`
 names another, as for a raw TCP serial server such as ser2net. Use the IP
 address, not a host name: AFC checks it at startup, and a name lookup would

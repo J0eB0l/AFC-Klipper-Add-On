@@ -537,6 +537,12 @@ class TestModuleImportGuards:
         assert str(exc_info.value).startswith(
             "Error trying to import AFC_unit, please rerun install-afc.sh")
 
+    def test_afc_bhub_link_import_failure_raises_configparser_error(self):
+        with pytest.raises(configparser.Error) as exc_info:
+            _exec_afc_ace_with_blocked_dependency("extras.AFC_bhub_link")
+        assert str(exc_info.value).startswith(
+            "Error trying to import AFC_bhub_link, please rerun install-afc.sh")
+
 
 class TestAfcACEInit:
     def test_invalid_mode_raises_configparser_error(self):
@@ -555,6 +561,67 @@ class TestAfcACEInit:
         assert [r.getMessage() for r in caplog.records] == [
             "AFC_ACE: temperature_ace factory not registered (heaters boom); "
             "use [temperature_ace <name>] config sections instead"]
+
+
+class TestAfcACEHubLink:
+    """serial_port tcp:// (a BridgeHub) and the unit's link key."""
+
+    def test_tcp_port_and_key_are_read(self):
+        unit = ace_p1_unit("lane0", values={"serial_port": "tcp://10.0.0.5",
+                                            "tcp_key": "abc123"}, connect=False)
+
+        assert unit.serial_port == "tcp://10.0.0.5"
+        assert unit.tcp_key == "abc123"
+
+    def test_no_tcp_key_by_default(self):
+        unit = ace_p1_unit("lane0", connect=False)
+
+        assert unit.tcp_key is None
+
+    def test_bad_tcp_address_raises(self):
+        with pytest.raises(configparser.Error) as exc_info:
+            ace_p1_unit("lane0", values={"serial_port": "tcp://10.0.0.5:99999"})
+        assert str(exc_info.value) == (
+            "[AFC_ACE Ace_1] serial_port tcp://10.0.0.5:99999 is not "
+            "tcp://<ip address>[:<port>]")
+
+    def test_bad_tcp_key_raises(self):
+        with pytest.raises(configparser.Error) as exc_info:
+            ace_p1_unit("lane0", values={"tcp_key": "has space"})
+        assert str(exc_info.value) == (
+            "[AFC_ACE Ace_1] tcp_key must be 1 to 64 characters with no spaces, "
+            "quotes or backslashes")
+
+    def test_link_key_is_tcp_key_when_set(self, tmp_path):
+        unit = ace_p1_unit("lane0", values={"tcp_key": "mine"}, connect=False)
+        unit.afc.VarFile = str(tmp_path / "AFC.var")
+
+        assert unit.link_key(True) == "mine"
+        assert not (tmp_path / "AFC.var.hub").exists()
+
+    def test_link_key_made_once_and_saved_by_unit_name(self, tmp_path, monkeypatch):
+        unit = ace_p1_unit("lane0", connect=False)
+        unit.afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.hub").write_text(json.dumps({"Turtle_1": "t" * 32}))
+        monkeypatch.setattr("extras.AFC_bhub_link.secrets.token_hex", lambda n: "k" * 32)
+
+        assert unit.link_key(False) is None
+        assert unit.link_key(True) == "k" * 32
+        assert unit.link_key(False) == "k" * 32
+        assert json.loads((tmp_path / "AFC.var.hub").read_text()) == {
+            "Turtle_1": "t" * 32, "Ace_1": "k" * 32}
+
+    def test_failed_save_goes_to_the_logger_given(self, tmp_path):
+        unit = ace_p1_unit("lane0", connect=False)
+        unit.afc.VarFile = str(tmp_path / "missing" / "AFC.var")
+        held = AceLogger()
+
+        assert unit.link_key(True, held) is None
+        path = tmp_path / "missing" / "AFC.var.hub"
+        assert [level for level, _ in held.messages] == ["warning"]
+        assert held.messages[0][1].startswith(
+            f"Ace_1: cannot save the hub's link key in {path}: ")
+        assert unit.logger.messages == []
 
 
 class TestAmsBoxLogo:
@@ -1057,6 +1124,7 @@ class TestAfcACEDeferredAceConnect:
         assert unit._prev_states_stale is True
         assert link.status_callback == unit._on_hw_status_callback
         assert link.reconnect_callback == unit._on_ace_reconnect
+        assert link.key_owner is unit
         assert unit.logger.messages == self.CONNECTED
 
     def test_all_attempts_fail_logs_error(self):
@@ -1148,6 +1216,7 @@ class TestAfcACEWatchForAce:
             unit._watch_for_ace(unit.printer.reactor.monotonic())
 
         assert unit._ace is not None and unit._ace.connected is True
+        assert unit._ace.key_owner is unit
         assert unit.logger.messages == (
             [("info", "ACE Ace_1: found it, connecting late")]
             + TestAfcACEDeferredAceConnect.CONNECTED)
@@ -9439,6 +9508,149 @@ class TestACEConnectionConnect:
             ("debug", "ACE2 TX: id=1 get_info {}"),
             ("info", "ACE device info: {'model': 'ACE 2 Pro'}")]
         assert set(log.threads) == {main}
+
+    class _KeyOwner:
+        """A unit as ACEConnection.key_owner sees it."""
+
+        def __init__(self, log: Any, tcp_key: Optional[str] = None) -> None:
+            """
+            :param log: the unit's logger
+            :param tcp_key: the unit's tcp_key
+            """
+            self.name = "Ace_2"
+            self.tcp_key = tcp_key
+            self.logger = log
+            self.asked: List[Tuple[bool, Any]] = []
+
+        def link_key(self, make: bool, logger: Any = None) -> str:
+            """
+            :param make: make one when none is saved
+            :param logger: where a failed save goes
+            :return str: the key
+            """
+            self.asked.append((make, logger))
+            return "k" * 32
+
+    def _hub_conn(self, monkeypatch: pytest.MonkeyPatch, cls: type = ACEConnection,
+                  hub: Any = None, *responses: Dict[str, Any]) -> Tuple[Any, Any, Any, List[Any]]:
+        """
+        A serial_port tcp:// connection on a threaded reactor, open_hub faked.
+
+        :param monkeypatch: pytest monkeypatch
+        :param cls: connection class
+        :param hub: what the fake open_hub does: an exception to raise, a
+            callable run first with the connection, or None to just connect
+        :param responses: the unit's answers once open
+        :return tuple: (connection, serial log, unit log, open_hub calls)
+        """
+        reactor = AceP2ThreadedReactor()
+        serial_log = self._ThreadLog()
+        unit_log = self._ThreadLog()
+        conn = cls(reactor, "tcp://10.0.0.5", logger=serial_log, ace_index=1)
+        calls: List[Any] = []
+
+        def open_hub(spec: str, link_key: Any, name: str, logger: Any,
+                     tcp_key: Optional[str] = None) -> FakeSerial:
+            """A hub that takes the key the unit gives it."""
+            calls.append((threading.get_ident(), spec, name, tcp_key,
+                          link_key(True) if link_key else None))
+            logger.info(f"{name}: link key stored on the hub at {spec}")
+            if isinstance(hub, BaseException):
+                raise hub
+            if callable(hub):
+                hub(conn)
+            port = FakeSerial()
+            ace_p2_answer(conn, port, *responses)
+            calls.append(port)
+            return port
+        monkeypatch.setattr(afc_ace_module, "open_hub", open_hub)
+        return conn, serial_log, unit_log, calls
+
+    def test_tcp_opens_the_hub_off_reactor_with_the_units_key(self, monkeypatch):
+        conn, serial_log, unit_log, calls = self._hub_conn(
+            monkeypatch, ACEConnection, None, {"code": 0, "result": {"model": "x"}})
+        owner = self._KeyOwner(unit_log, tcp_key="k" * 32)
+        conn.key_owner = owner
+        main = threading.get_ident()
+
+        conn.connect()
+
+        thread, spec, name, tcp_key, key = calls[0]
+        assert thread != main
+        assert (spec, name, tcp_key, key) == ("tcp://10.0.0.5", "Ace_2", "k" * 32, "k" * 32)
+        assert conn._serial is calls[1]
+        assert conn.connected is True
+        assert conn.device_info == {"model": "x"}
+        assert conn._resolved_port == "tcp://10.0.0.5"
+        # The key is asked for with the worker's held log, not the unit's.
+        assert owner.asked[0][0] is True and owner.asked[0][1] is not unit_log
+        assert afc_ace_module._ACE_CLAIMED_PORTS == set()
+        # The exchange's lines go to the unit's log, on the reactor thread.
+        assert unit_log.messages == [("info", "Ace_2: link key stored on the hub at tcp://10.0.0.5")]
+        assert set(unit_log.threads) == {main}
+        assert serial_log.messages == [
+            ("info", "ACE serial connected: tcp://10.0.0.5"),
+            ("debug", "ACE TX: {'id': 0, 'method': 'get_info'}"),
+            ("info", "ACE device info: {'model': 'x'}")]
+
+    def test_tcp_with_no_key_owner(self, monkeypatch):
+        conn, serial_log, unit_log, calls = self._hub_conn(
+            monkeypatch, ACEConnection, None, {"code": 0, "result": {}})
+
+        conn.connect()
+
+        assert calls[0][1:] == ("tcp://10.0.0.5", "ACE", None, None)
+        assert conn.connected is True
+        assert serial_log.messages[0] == ("info", "ACE: link key stored on the hub at tcp://10.0.0.5")
+
+    def test_tcp_ace2_connects_the_same_way(self, monkeypatch):
+        conn, serial_log, unit_log, calls = self._hub_conn(
+            monkeypatch, ACE2Connection, None, {"code": 0, "result": {"model": "ACE 2 Pro"}})
+        conn.key_owner = self._KeyOwner(unit_log)
+
+        conn.connect()
+
+        assert conn.connected is True
+        assert serial_log.messages == [
+            ("info", "ACE serial connected: tcp://10.0.0.5"),
+            ("debug", "ACE2 TX: id=0 discover_device {}"),
+            ("debug", "ACE2 TX: id=1 get_info {}"),
+            ("info", "ACE device info: {'model': 'ACE 2 Pro'}")]
+
+    @pytest.mark.parametrize("failure", [
+        ConnectionRefusedError(111, "Connection refused"),
+        afc_ace_module.HubLinkError("the hub refused the link key"),
+    ])
+    def test_tcp_failure_raises_and_clears_the_flag(self, monkeypatch, failure):
+        conn, serial_log, unit_log, calls = self._hub_conn(
+            monkeypatch, ACEConnection, failure, {"code": 0, "result": {}})
+        conn.key_owner = self._KeyOwner(unit_log)
+
+        with pytest.raises(ACESerialError) as excinfo:
+            conn.connect()
+
+        assert str(excinfo.value) == f"Failed to open ACE serial port tcp://10.0.0.5: {failure}"
+        assert conn.connected is False
+        assert conn._connecting is False
+        assert conn._serial is None
+        # What the worker logged before it failed still reaches the unit's log.
+        assert unit_log.messages == [("info", "Ace_2: link key stored on the hub at tcp://10.0.0.5")]
+
+    def test_tcp_already_connected_after_open_closes_the_new_link(self, monkeypatch):
+        # A concurrent reconnect landed while this connect talked to the hub.
+        def connected_meanwhile(conn: ACEConnection) -> None:
+            """Another connect finishes while this one is with the hub."""
+            conn._connected = True
+        conn, serial_log, unit_log, calls = self._hub_conn(
+            monkeypatch, ACEConnection, connected_meanwhile)
+
+        conn.connect()
+
+        assert calls[1].closed is True
+        assert conn._serial is None
+        assert conn.device_info == {}
+        assert serial_log.messages == [
+            ("info", "ACE: link key stored on the hub at tcp://10.0.0.5")]
 
     def test_already_connected_noop(self, monkeypatch):
         conn = ace_p2_connection()

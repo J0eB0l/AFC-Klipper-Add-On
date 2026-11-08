@@ -57,6 +57,11 @@ except:
     error_str = ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc())
     raise error(error_str)
 
+try: from extras.AFC_bhub_link import TCP_SCHEME, HubLinkError, bad_tcp_key, open_hub, parse_tcp, stored_link_key
+except:
+    error_str = ERROR_STR.format(import_lib="AFC_bhub_link", trace=traceback.format_exc())
+    raise error(error_str)
+
 try:
     from extras.AFC_RFID import (
         rgb_array_to_hex, apply_filament_defaults,
@@ -280,6 +285,16 @@ class afcACE(afcUnit):
         # /dev/serial/by-path/..., or use serial_port: auto to bind the unit whose
         # firmware id (cable order) matches ace_index, re-resolved on reconnect.
         self.serial_port = config.get("serial_port")
+        # serial_port: tcp://<ip>[:<port>] reaches the unit on a BridgeHub,
+        # which AFC gives a link key (see AFC_bhub_link); tcp_key sets it by hand.
+        self.tcp_key = config.get("tcp_key", None)
+        if bad_tcp_key(self.tcp_key):
+            raise error(f"[{config.get_name()}] {bad_tcp_key(self.tcp_key)}")
+        if self.serial_port.startswith(TCP_SCHEME):
+            try:
+                parse_tcp(self.serial_port)
+            except ValueError as e:
+                raise error(f"[{config.get_name()}] {e}")
         # Which ACE in cable order this section is (= the firmware's get_info
         # id). Used only when serial_port: auto; harmless otherwise. Defaults to
         # 1 (the head/only unit), matching the firmware's 1-based numbering.
@@ -608,6 +623,17 @@ class afcACE(afcUnit):
         return ACEConnection(reactor=reactor, serial_port=serial_port, logger=logger,
                              baud_rate=baud_rate, ace_index=self.ace_index)
 
+    def link_key(self, make: bool, logger: Optional[Any] = None) -> Optional[str]:
+        """
+        The key for this unit's BridgeHub (see AFC_bhub_link.stored_link_key).
+
+        :param make: Make and save a key when none is saved
+        :param logger: Takes a failed save; the unit's logger when None
+        :return str: The key, or None
+        """
+        return stored_link_key(self.afc.VarFile, self.name, self.tcp_key, make,
+                               logger or self.logger)
+
     def _deferred_ace_connect(self, eventtime: float) -> None:
         """
         Connect to ACE hardware after reactor is fully running.
@@ -620,6 +646,7 @@ class afcACE(afcUnit):
             try:
                 self._ace = self._make_connection(self.afc.reactor, self.serial_port, serial_logger,
                                                   self.baud_rate)
+                self._ace.key_owner = self
                 try:
                     self._ace.connect()
                 finally:
@@ -660,6 +687,7 @@ class afcACE(afcUnit):
             self._ace = self._make_connection(self.afc.reactor, self.serial_port,
                                               self._create_serial_logger() or self.logger,
                                               self.baud_rate)
+            self._ace.key_owner = self
             self._ace.connect()
         except Exception as e:
             self._ace = None
@@ -4856,6 +4884,9 @@ class ACEConnection:
     - Periodic heartbeat to detect dead connections
     - Communication health supervision (timeout/unsolicited tracking)
     """
+    #: For serial_port tcp://, the unit whose link key opens the BridgeHub
+    #: (its name, tcp_key, logger and link_key); set by the unit.
+    key_owner: Optional[Any] = None
 
     def __init__(self, reactor: Reactor, serial_port: str, logger: Optional[Any] = None,
                  baud_rate: int = DEFAULT_BAUD, ace_index: int = 1,
@@ -4876,6 +4907,8 @@ class ACEConnection:
         # 'auto' resolves to a real tty on every connect via the unit's
         # firmware id; _resolved_port holds the last-resolved path for logs.
         self._auto = (isinstance(serial_port, str) and serial_port.strip().lower() == "auto")
+        # tcp://<ip>[:<port>]: the unit sits on a BridgeHub, reached over the network.
+        self._tcp = isinstance(serial_port, str) and serial_port.startswith(TCP_SCHEME)
         self._ace_index = ace_index
         # Optional per-box pin (ACE2 only: the STM32 UID tuple from discover).
         self._ace_uid = ace_uid
@@ -4943,50 +4976,58 @@ class ACEConnection:
         if self._connected:
             return
 
-        try:
-            import serial as pyserial
-        except ImportError:
-            error_str = "pyserial not installed. Install with: pip install pyserial"
-            raise ACESerialError(error_str)
-
         # Resolve serial_port: auto on every (re)connect, off the reactor; a
         # second connect arriving while one waits is refused.
         if self._connecting:
             error_str = "ACE connect already in progress"
             raise ACESerialError(error_str)
-        self._connecting = True
-        held = _HeldLog()
-        try:
-            port = run_off_reactor(self._reactor, lambda: self._resolve_connect_port(held))
-        finally:
-            self._connecting = False
-            held.replay(self._logger)
-        if self._connected:
-            return
+        if self._tcp:
+            self._connecting = True
+            self._connect_hub()
+            if self._connected:
+                return
+        else:
+            try:
+                import serial as pyserial
+            except ImportError:
+                error_str = "pyserial not installed. Install with: pip install pyserial"
+                raise ACESerialError(error_str)
 
-        try:
-            self._serial = pyserial.Serial(
-                port=port,
-                baudrate=self._baud_rate,
-                timeout=0,           # Non-blocking reads
-                write_timeout=0.5,
-            )
-            self._serial.reset_input_buffer()
-            self._serial.reset_output_buffer()
-        except Exception as e:
-            error_str = f"Failed to open ACE serial port {port}: {e}"
-            raise ACESerialError(error_str)
+            self._connecting = True
+            held = _HeldLog()
+            try:
+                port = run_off_reactor(self._reactor, lambda: self._resolve_connect_port(held))
+            finally:
+                self._connecting = False
+                held.replay(self._logger)
+            if self._connected:
+                return
 
-        # Claim the resolved tty so another unit's autodetect never double-opens
-        # it. Tracked by realpath; released in disconnect().
-        self._resolved_port = port
-        with contextlib.suppress(Exception):
-            _ACE_CLAIMED_PORTS.add(os.path.realpath(port))
+            try:
+                self._serial = pyserial.Serial(
+                    port=port,
+                    baudrate=self._baud_rate,
+                    timeout=0,           # Non-blocking reads
+                    write_timeout=0.5,
+                )
+                self._serial.reset_input_buffer()
+                self._serial.reset_output_buffer()
+            except Exception as e:
+                error_str = f"Failed to open ACE serial port {port}: {e}"
+                raise ACESerialError(error_str)
+
+            # Claim the resolved tty so another unit's autodetect never double-opens
+            # it. Tracked by realpath; released in disconnect().
+            self._resolved_port = port
+            with contextlib.suppress(Exception):
+                _ACE_CLAIMED_PORTS.add(os.path.realpath(port))
+        port = self._resolved_port
 
         self._fd_handle = self._reactor.register_fd(self._serial.fileno(), self._handle_read)
         self._connected = True
         self._last_rx_time = self._reactor.monotonic()
-        self._logger.info(f"ACE serial connected: {port} @ {self._baud_rate}" +
+        self._logger.info(f"ACE serial connected: {port}" +
+                          ("" if self._tcp else f" @ {self._baud_rate}") +
                           (f" (auto, ace_index {self._ace_index})" if self._auto else ""))
 
         # Query device info (V2 needs a discover handshake first, see the
@@ -5001,6 +5042,38 @@ class ACEConnection:
         self._reconnect_backoff = RECONNECT_BACKOFF_MIN
 
         self._start_heartbeat()
+
+    def _connect_hub(self) -> None:
+        """
+        Opens serial_port tcp:// (the unit on a BridgeHub) off the reactor,
+        with the key_owner's link key. Lines from the exchange go to the
+        key_owner's logger.
+
+        :raises ACESerialError: When the hub can't be reached or refuses the key
+        """
+        port = self._serial_port
+        owner = self.key_owner
+        held = _HeldLog()
+        if owner is None:
+            def _open() -> Any:
+                return open_hub(port, None, "ACE", held)
+        else:
+            def _open() -> Any:
+                return open_hub(port, lambda make: owner.link_key(make, held), owner.name,
+                                held, owner.tcp_key)
+        try:
+            hub = run_off_reactor(self._reactor, _open, what="BridgeHub connect")
+        except (OSError, HubLinkError) as e:
+            error_str = f"Failed to open ACE serial port {port}: {e}"
+            raise ACESerialError(error_str)
+        finally:
+            self._connecting = False
+            held.replay(getattr(owner, "logger", None) or self._logger)
+        if self._connected:
+            hub.close()
+            return
+        self._serial = hub
+        self._resolved_port = port
 
     def _resolve_connect_port(self, logger: Optional[Any] = None) -> str:
         """
