@@ -5,7 +5,7 @@
 
 /**
  * Joins the saved network, or raises the setup hotspot when none is saved,
- * and watches the BOOT button (held 10 s: forget the network). Needs NVS,
- * esp_netif and the default event loop.
+ * and watches the BOOT button (held 10 s: forget the network and the link
+ * key). Needs NVS, esp_netif and the default event loop.
  */
 void wifi_start(void);

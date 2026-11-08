@@ -7,13 +7,19 @@
 Flash a BoxTurtleUSB (an AFC-Lite running firmwares/BoxTurtleUSB) that is
 plugged into a BridgeHub, over the hub's TCP port, with Katapult's flashtool.
 
-Usage: python3 hub_katapult.py <hub ip>:<port> <firmware.bin> [--flashtool PATH]
+Usage: python3 hub_katapult.py <hub ip>[:<port>] <firmware.bin>
+       [--unit NAME [--key-file PATH] | --key KEY] [--flashtool PATH]
+
+A hub that holds a link key wants it first: --unit reads the key AFC saved
+for that unit (AFC.var.hub next to AFC.var), --key takes it as typed.
 
 Stop Klipper first: the hub serves one TCP client at a time, and AFC would
 take the port back.
 """
 import argparse
 import errno
+import hashlib
+import hmac
 import json
 import os
 import pty
@@ -26,7 +32,11 @@ import tty
 from typing import List, Optional, Tuple
 
 DEFAULT_FLASHTOOL = os.path.expanduser("~/katapult/scripts/flashtool.py")
+DEFAULT_KEY_FILE = os.path.expanduser("~/printer_data/config/AFC/AFC.var.hub")
+HUB_PORT = 4001
 CONNECT_TIMEOUT = 5.0
+GREETING_WAIT = 1.0
+AUTH_WAIT = 3.0
 REPLY_WAIT = 2.0
 BOOT_WAIT = 4.0
 INFO_TRIES = 3
@@ -43,15 +53,48 @@ def log(msg: str) -> None:
 
 def parse_target(spec: str) -> Tuple[str, int]:
     """
-    Split `<host>:<port>` into its parts.
+    Split `<host>[:<port>]` into its parts, the port being the hub's (4001)
+    when none is given. A bare IPv6 address takes the default port;
+    brackets make a port plain ([::1]:4001).
 
     :param spec: the hub's address and TCP port
     :return Tuple[str, int]: host and port
     """
-    host, sep, port = spec.rpartition(":")
-    if not sep or not host or not port.isdigit() or not 0 < int(port) < 65536:
-        raise ValueError(f"{spec} is not <host>:<port>")
-    return host.strip("[]"), int(port)
+    port = str(HUB_PORT)
+    bad = False
+    if spec.startswith("["):
+        host, _, tail = spec[1:].partition("]")
+        if tail:
+            bad = not tail.startswith(":")
+            port = tail[1:]
+    elif spec.count(":") == 1:
+        host, _, port = spec.partition(":")
+    else:
+        host = spec
+    if bad or not host or not port.isdigit() or not 0 < int(port) < 65536:
+        raise ValueError(f"{spec} is not <host>[:<port>]")
+    return host, int(port)
+
+
+def saved_key(path: str, unit: str) -> Optional[str]:
+    """
+    The link key AFC made for a unit's hub and saved in its key file.
+
+    :param path: AFC's key file (AFC.var.hub)
+    :param unit: the AFC unit's name, such as Turtle_1
+    :return Optional[str]: the key, or None (logged) when there is none
+    """
+    try:
+        with open(path) as f:
+            keys = json.load(f)
+    except (OSError, ValueError) as e:
+        log(f"cannot read {path}: {e}")
+        return None
+    key = keys.get(unit) if isinstance(keys, dict) else None
+    if not isinstance(key, str) or not key:
+        log(f"{path} has no link key for {unit}")
+        return None
+    return key
 
 
 def read_lines(sock: socket.socket, secs: float) -> List[dict]:
@@ -84,6 +127,79 @@ def read_lines(sock: socket.socket, secs: float) -> List[dict]:
                 log(f"< {text}")
                 found.append(obj)
     return found
+
+
+def read_line(sock: socket.socket, secs: float) -> Optional[dict]:
+    """
+    Read one line, a byte at a time so nothing after it leaves the socket.
+
+    :param sock: connection to the hub
+    :param secs: how long to wait for the whole line
+    :return Optional[dict]: the line's JSON object, or None (no line in
+        time, or not an object)
+    """
+    buf = b""
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        ready, _, _ = select.select([sock], [], [], 0.05)
+        if not ready:
+            continue
+        byte = sock.recv(1)
+        if not byte:
+            raise ConnectionError("the hub closed the connection")
+        if byte != b"\n":
+            buf += byte
+            continue
+        try:
+            obj = json.loads(buf.decode(errors="replace"))
+        except ValueError:
+            return None
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
+def hub_auth(sock: socket.socket, key: Optional[str]) -> bool:
+    """
+    Pass the hub's greeting, which comes before any of the unit's bytes: a
+    hub that holds a link key sends a challenge, answered with the first 32
+    bytes of HMAC-SHA512(key, nonce); an open hub, or a plain TCP serial
+    server that greets with nothing, needs no key.
+
+    :param sock: connection to the hub
+    :param key: the hub's link key, or None
+    :return bool: True when the unit may be talked to
+    """
+    greeting = read_line(sock, GREETING_WAIT)
+    if greeting is None or greeting.get("evt") != "auth":
+        return True
+    if greeting.get("open"):
+        if key:
+            log("the hub has no link key, so the key given is not used")
+        return True
+    if "nonce" not in greeting:
+        log(f"the hub sent an unknown greeting {greeting}")
+        return False
+    if not key:
+        log("the hub holds a link key: pass --unit <AFC unit name> or --key <key>")
+        return False
+    try:
+        nonce = bytes.fromhex(str(greeting["nonce"]))
+    except ValueError:
+        log("the hub sent a bad challenge")
+        return False
+    mac = hmac.new(key.encode(), nonce, hashlib.sha512).digest()[:32]
+    # Compact, as the hub reads it.
+    line = json.dumps({"cmd": "auth", "mac": mac.hex()}, separators=(",", ":"))
+    sock.sendall(line.encode() + b"\n")
+    reply = read_line(sock, AUTH_WAIT)
+    if reply is None:
+        log("no answer from the hub to the link key")
+        return False
+    if reply.get("ok") != 1:
+        log("the hub refused the link key")
+        return False
+    log("the hub took the link key")
+    return True
 
 
 def ask(sock: socket.socket, rid: int, cmd: str, secs: float) -> Optional[dict]:
@@ -192,10 +308,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     """
     parser = argparse.ArgumentParser(
         description="Flash a BoxTurtleUSB through a BridgeHub with Katapult.")
-    parser.add_argument("target", help="the hub's <ip>:<port>")
+    parser.add_argument("target", help="the hub's <ip>[:<port>]")
     parser.add_argument("firmware", help="the firmware .bin")
     parser.add_argument("--flashtool", default=DEFAULT_FLASHTOOL,
                         help="Katapult's flashtool.py")
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument("--unit", help="the AFC unit whose saved link key to use")
+    which.add_argument("--key", help="the hub's link key")
+    parser.add_argument("--key-file", default=DEFAULT_KEY_FILE,
+                        help="where AFC saves link keys (with --unit)")
     args = parser.parse_args(argv)
     try:
         host, port = parse_target(args.target)
@@ -205,6 +326,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not os.path.isfile(path):
             log(f"{path} not found")
             return 1
+    key = args.key
+    if args.unit:
+        key = saved_key(args.key_file, args.unit)
+        if key is None:
+            return 1
     try:
         sock = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
     except OSError as e:
@@ -213,6 +339,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     log(f"connected to {host}:{port}")
     try:
+        if not hub_auth(sock, key):
+            return 1
         return flash(sock, args.flashtool, args.firmware)
     except ConnectionError as e:
         log(str(e))

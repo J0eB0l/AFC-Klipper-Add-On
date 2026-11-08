@@ -8,7 +8,8 @@
 // network on another channel moves the hotspot and the phone may drop off it
 // for a moment.
 //
-// Holding BOOT for 10 s forgets the network and restarts into setup.
+// Holding BOOT for 10 s forgets the network and the link key (hub.c) and
+// restarts into setup.
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -38,7 +39,7 @@
 #define JOIN_TRIES    2
 #define RESTART_MS    15000     // after a join: time to read the address
 #define MAX_NETS      20
-#define HUB_PORT      4001      // hub.c's TCP port, shown on the setup page
+#define HUB_PORT      4001      // hub.c's TCP port, AFC's default for a hub
 
 #define EV_GOT_IP     BIT0
 #define EV_FAILED     BIT1
@@ -113,8 +114,8 @@ static void forget_net(void) {
 }
 
 /**
- * Restarts into setup, forgetting the network, once BOOT has been held for
- * BOOT_HOLD_MS.
+ * Restarts into setup, forgetting the network and the link key (all of the
+ * hub's NVS), once BOOT has been held for BOOT_HOLD_MS.
  */
 static void boot_task(void *arg) {
     (void)arg;
@@ -133,10 +134,10 @@ static void boot_task(void *arg) {
         }
         held += 100;
         if (held == 1000)
-            printf("{\"evt\":\"boot\",\"msg\":\"keep holding to forget the network\"}\n");
+            printf("{\"evt\":\"boot\",\"msg\":\"keep holding to forget the network and key\"}\n");
         if (held >= BOOT_HOLD_MS) {
             forget_net();
-            printf("{\"evt\":\"boot\",\"msg\":\"network forgotten, restarting\"}\n");
+            printf("{\"evt\":\"boot\",\"msg\":\"network and key forgotten, restarting\"}\n");
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();
         }
@@ -328,8 +329,8 @@ static esp_err_t page_status(httpd_req_t *req) {
     } else if (s_state == JOIN_DONE) {
         send_head(req, 0);
         snprintf(buf, sizeof buf, "<p>Joined <b>%s</b>. The hub's address is "
-                 "<b>%s</b>.<p>In AFC:<p><code>serial_port: tcp://%s:%d</code>", esc,
-                 s_ip, s_ip, HUB_PORT);
+                 "<b>%s</b>.<p>In AFC:<p><code>serial_port: tcp://%s</code>", esc,
+                 s_ip, s_ip);
         httpd_resp_sendstr_chunk(req, buf);
         httpd_resp_sendstr_chunk(req,
             "<p>Reserve this address for the hub in your router, so it stays the "

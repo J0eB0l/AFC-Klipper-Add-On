@@ -9,6 +9,8 @@ script that talks over the real pseudo terminal the tool makes.
 from __future__ import annotations
 
 import errno
+import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -83,8 +85,16 @@ def pair():
     b.close()
 
 
+# The firmware's host test (firmwares/BridgeHub/test) checks the same answer.
+HUB_KEY = "0123456789abcdef0123456789abcdef"
+HUB_NONCE = bytes(range(16))
+HUB_MAC = "84aa390f3f68d40d3b8f2b5ee2ad3517c13e31649284a43e867a8fa5974500bc"
+
+
 @pytest.fixture
 def fast(monkeypatch):
+    monkeypatch.setattr(hk, "GREETING_WAIT", 0.2)
+    monkeypatch.setattr(hk, "AUTH_WAIT", 0.3)
     monkeypatch.setattr(hk, "REPLY_WAIT", 0.3)
     monkeypatch.setattr(hk, "BOOT_WAIT", 0.2)
     monkeypatch.setattr(hk, "INFO_TRIES", 2)
@@ -142,27 +152,201 @@ class TestLog:
 # ── parse_target ─────────────────────────────────────────────────────────────
 
 class TestParseTarget:
-    def test_ip_and_port(self):
-        assert hk.parse_target("192.168.1.50:4001") == ("192.168.1.50", 4001)
-
-    def test_bracketed_ipv6(self):
-        assert hk.parse_target("[::1]:4001") == ("::1", 4001)
-
-    def test_highest_port(self):
-        assert hk.parse_target("10.0.0.2:65535") == ("10.0.0.2", 65535)
+    @pytest.mark.parametrize("spec, expected", [
+        ("192.168.1.50:4002", ("192.168.1.50", 4002)),
+        ("[::1]:4002", ("::1", 4002)),
+        ("10.0.0.2:65535", ("10.0.0.2", 65535)),
+        ("192.168.1.50", ("192.168.1.50", 4001)),     # the hub's port
+        ("hub.local", ("hub.local", 4001)),
+        ("[fe80::1]", ("fe80::1", 4001)),
+        ("fe80::1", ("fe80::1", 4001)),
+    ])
+    def test_good(self, spec, expected):
+        assert hk.parse_target(spec) == expected
 
     @pytest.mark.parametrize("spec", [
-        "192.168.1.50",         # no colon
+        "",                     # nothing
         ":4001",                # no host
+        "[]:4001",              # no host
+        "[::1]x",               # junk after the brackets
         "192.168.1.50:abc",     # port not a number
-        "192.168.1.50:",        # no port
+        "192.168.1.50:",        # colon but no port
+        "[::1]:",               # colon but no port
         "192.168.1.50:0",       # port too low
         "192.168.1.50:65536",   # port too high
     ])
     def test_rejects(self, spec):
         with pytest.raises(ValueError) as e:
             hk.parse_target(spec)
-        assert str(e.value) == f"{spec} is not <host>:<port>"
+        assert str(e.value) == f"{spec} is not <host>[:<port>]"
+
+
+# ── saved_key ────────────────────────────────────────────────────────────────
+
+class TestSavedKey:
+    def test_reads_the_units_key(self, tmp_path):
+        path = tmp_path / "AFC.var.hub"
+        path.write_text(json.dumps({"Turtle_1": HUB_KEY, "Turtle_2": "other"}))
+        assert hk.saved_key(str(path), "Turtle_1") == HUB_KEY
+
+    def test_missing_file(self, tmp_path, capsys):
+        path = str(tmp_path / "AFC.var.hub")
+        assert hk.saved_key(path, "Turtle_1") is None
+        assert lines(capsys) == [
+            f"hub: cannot read {path}: [Errno 2] No such file or directory: '{path}'"]
+
+    def test_not_json(self, tmp_path, capsys):
+        path = tmp_path / "AFC.var.hub"
+        path.write_text("nope")
+        assert hk.saved_key(str(path), "Turtle_1") is None
+        assert lines(capsys) == [
+            f"hub: cannot read {path}: Expecting value: line 1 column 1 (char 0)"]
+
+    @pytest.mark.parametrize("text", ["[1]", "{}", '{"Turtle_1": 5}', '{"Turtle_1": ""}'])
+    def test_no_key_for_the_unit(self, tmp_path, capsys, text):
+        path = tmp_path / "AFC.var.hub"
+        path.write_text(text)
+        assert hk.saved_key(str(path), "Turtle_1") is None
+        assert lines(capsys) == [f"hub: {path} has no link key for Turtle_1"]
+
+
+# ── read_line ────────────────────────────────────────────────────────────────
+
+class TestReadLine:
+    def test_one_line_only(self, pair):
+        a, b = pair
+        b.sendall(b'{"evt":"auth","open":1}\n{"id":1}\n')
+        assert hk.read_line(a, 1.0) == {"evt": "auth", "open": 1}
+        assert a.recv(100) == b'{"id":1}\n'
+
+    def test_nothing_arrives(self, pair):
+        a, _ = pair
+        assert hk.read_line(a, 0.1) is None
+
+    def test_half_a_line(self, pair):
+        a, b = pair
+        b.sendall(b'{"evt":')
+        assert hk.read_line(a, 0.1) is None
+
+    @pytest.mark.parametrize("data", [b"AT\n", b"[1]\n"])
+    def test_not_an_object(self, pair, data):
+        a, b = pair
+        b.sendall(data)
+        assert hk.read_line(a, 1.0) is None
+
+    def test_closed(self, pair):
+        a, b = pair
+        b.close()
+        with pytest.raises(ConnectionError) as e:
+            hk.read_line(a, 1.0)
+        assert str(e.value) == "the hub closed the connection"
+
+
+# ── hub_auth ─────────────────────────────────────────────────────────────────
+
+class FakeAuthHub(threading.Thread):
+    """A BridgeHub's greeting and its check of the answer."""
+
+    def __init__(self, sock: socket.socket, greeting, key=HUB_KEY, answer=True):
+        super().__init__(daemon=True)
+        self.sock = sock
+        self.greeting = greeting
+        self.key = key
+        self.answer = answer
+        self.got: List[dict] = []
+        self.raw: List[bytes] = []
+
+    def run(self) -> None:
+        if self.greeting is not None:
+            self.sock.sendall(json.dumps(self.greeting).encode() + b"\n")
+        buf = b""
+        self.sock.settimeout(2)
+        while b"\n" not in buf:
+            try:
+                data = self.sock.recv(4096)
+            except OSError:
+                return
+            if not data:
+                return
+            buf += data
+        self.raw.append(buf.split(b"\n")[0])
+        self.got.append(json.loads(self.raw[0]))
+        if self.answer:
+            want = hmac.new(self.key.encode(), HUB_NONCE, hashlib.sha512).hexdigest()[:64]
+            ok = int(self.got[0].get("mac") == want)
+            self.sock.sendall(json.dumps({"evt": "auth", "ok": ok}).encode() + b"\n")
+
+
+KEYED = {"evt": "auth", "nonce": HUB_NONCE.hex()}
+
+
+class TestHubAuth:
+    def run(self, pair, greeting, key, **kw):
+        a, b = pair
+        hub = FakeAuthHub(b, greeting, **kw)
+        hub.start()
+        result = hk.hub_auth(a, key)
+        hub.join(3)
+        return result, hub
+
+    def test_answers_the_challenge(self, pair, fast, capsys):
+        ok, hub = self.run(pair, KEYED, HUB_KEY)
+        assert ok is True
+        # Byte for byte what the hub's firmware reads.
+        assert hub.raw == [f'{{"cmd":"auth","mac":"{HUB_MAC}"}}'.encode()]
+        assert lines(capsys) == ["hub: the hub took the link key"]
+
+    def test_wrong_key(self, pair, fast, capsys):
+        ok, hub = self.run(pair, KEYED, "not-the-key")
+        assert ok is False
+        assert lines(capsys) == ["hub: the hub refused the link key"]
+
+    def test_no_answer(self, pair, fast, capsys):
+        ok, _ = self.run(pair, KEYED, HUB_KEY, answer=False)
+        assert ok is False
+        assert lines(capsys) == ["hub: no answer from the hub to the link key"]
+
+    def test_keyed_hub_without_a_key(self, pair, fast, capsys):
+        a, b = pair
+        b.sendall(json.dumps(KEYED).encode() + b"\n")
+        assert hk.hub_auth(a, None) is False
+        assert lines(capsys) == [
+            "hub: the hub holds a link key: pass --unit <AFC unit name> or --key <key>"]
+
+    def test_bad_challenge(self, pair, fast, capsys):
+        a, b = pair
+        b.sendall(b'{"evt":"auth","nonce":"zz"}\n')
+        assert hk.hub_auth(a, HUB_KEY) is False
+        assert lines(capsys) == ["hub: the hub sent a bad challenge"]
+
+    def test_unknown_greeting(self, pair, fast, capsys):
+        a, b = pair
+        b.sendall(b'{"evt":"auth","open":0}\n')
+        assert hk.hub_auth(a, HUB_KEY) is False
+        assert lines(capsys) == ["hub: the hub sent an unknown greeting {'evt': 'auth', 'open': 0}"]
+
+    def test_open_hub(self, pair, fast, capsys):
+        a, b = pair
+        b.sendall(b'{"evt":"auth","open":1}\n')
+        assert hk.hub_auth(a, None) is True
+        assert lines(capsys) == []
+
+    def test_open_hub_with_a_key(self, pair, fast, capsys):
+        a, b = pair
+        b.sendall(b'{"evt":"auth","open":1}\n')
+        assert hk.hub_auth(a, HUB_KEY) is True
+        assert lines(capsys) == ["hub: the hub has no link key, so the key given is not used"]
+
+    def test_no_greeting(self, pair, fast, capsys):
+        a, _ = pair
+        assert hk.hub_auth(a, HUB_KEY) is True
+        assert lines(capsys) == []
+
+    def test_unit_line_first_means_no_hub(self, pair, fast, capsys):
+        a, b = pair
+        b.sendall(b'{"ev":"switch","sw":"prep1"}\n')
+        assert hk.hub_auth(a, None) is True
+        assert lines(capsys) == []
 
 
 # ── read_lines ───────────────────────────────────────────────────────────────
@@ -407,10 +591,26 @@ class TestMain:
     def test_bad_target(self, files, capsys):
         fw, tool = files
         with pytest.raises(SystemExit) as e:
-            hk.main(["hub", fw, "--flashtool", tool])
+            hk.main(["hub:x", fw, "--flashtool", tool])
         assert e.value.code == 2
         assert capsys.readouterr().err.splitlines()[-1].endswith(
-            "error: hub is not <host>:<port>")
+            "error: hub:x is not <host>[:<port>]")
+
+    def test_unit_and_key_are_one_or_the_other(self, files, capsys):
+        fw, tool = files
+        with pytest.raises(SystemExit) as e:
+            hk.main(["127.0.0.1", fw, "--unit", "Turtle_1", "--key", HUB_KEY])
+        assert e.value.code == 2
+        assert capsys.readouterr().err.splitlines()[-1].endswith(
+            "error: argument --key: not allowed with argument --unit")
+
+    def test_unit_with_no_saved_key(self, files, tmp_path, capsys):
+        fw, tool = files
+        path = str(tmp_path / "AFC.var.hub")
+        assert hk.main(["127.0.0.1", fw, "--flashtool", tool, "--unit", "Turtle_1",
+                        "--key-file", path]) == 1
+        assert lines(capsys) == [
+            f"hub: cannot read {path}: [Errno 2] No such file or directory: '{path}'"]
 
     def test_missing_firmware(self, files, tmp_path, capsys):
         _, tool = files
@@ -435,7 +635,7 @@ class TestMain:
         assert out[0].startswith(f"hub: cannot connect to 127.0.0.1:{port}: ")
         assert "Connection refused" in out[0]
 
-    def test_connects_and_flashes(self, files, listener, monkeypatch, capsys):
+    def test_connects_and_flashes(self, files, listener, fast, monkeypatch, capsys):
         fw, tool = files
         port = listener.getsockname()[1]
         seen = []
@@ -453,7 +653,42 @@ class TestMain:
         assert conn.recv(10) == b""     # the tool closed its end
         conn.close()
 
-    def test_connection_lost(self, files, listener, monkeypatch, capsys):
+    def run_keyed(self, files, listener, monkeypatch, argv):
+        fw, tool = files
+        port = listener.getsockname()[1]
+        hubs = []
+
+        def serve():
+            conn, _ = listener.accept()
+            hub = FakeAuthHub(conn, KEYED)
+            hubs.append(hub)
+            hub.run()
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        monkeypatch.setattr(hk, "flash", lambda sock, flashtool, firmware: 0)
+        rc = hk.main([f"127.0.0.1:{port}", fw, "--flashtool", tool] + argv)
+        thread.join(3)
+        hubs[0].sock.close()
+        return rc, hubs[0], port
+
+    def test_unit_key_answers_a_keyed_hub(self, files, listener, fast, monkeypatch,
+                                          tmp_path, capsys):
+        path = tmp_path / "AFC.var.hub"
+        path.write_text(json.dumps({"Turtle_1": HUB_KEY}))
+        rc, hub, port = self.run_keyed(files, listener, monkeypatch,
+                                       ["--unit", "Turtle_1", "--key-file", str(path)])
+        assert rc == 0
+        assert hub.got == [{"cmd": "auth", "mac": HUB_MAC}]
+        assert lines(capsys) == [f"hub: connected to 127.0.0.1:{port}",
+                                 "hub: the hub took the link key"]
+
+    def test_refused_key_stops(self, files, listener, fast, monkeypatch, capsys):
+        rc, _, port = self.run_keyed(files, listener, monkeypatch, ["--key", "wrong"])
+        assert rc == 1
+        assert lines(capsys) == [f"hub: connected to 127.0.0.1:{port}",
+                                 "hub: the hub refused the link key"]
+
+    def test_connection_lost(self, files, listener, fast, monkeypatch, capsys):
         fw, tool = files
         port = listener.getsockname()[1]
 
@@ -465,7 +700,7 @@ class TestMain:
                                  "hub: the hub closed the connection"]
 
     def test_run_as_script(self):
-        res = subprocess.run([sys.executable, str(TOOL), "hub", "fw.bin"],
+        res = subprocess.run([sys.executable, str(TOOL), "hub:x", "fw.bin"],
                              capture_output=True, text=True, timeout=30)
         assert res.returncode == 2
-        assert res.stderr.splitlines()[-1].endswith("error: hub is not <host>:<port>")
+        assert res.stderr.splitlines()[-1].endswith("error: hub:x is not <host>[:<port>]")

@@ -40,35 +40,58 @@ To build it yourself, with ESP-IDF 5.3: `idf.py build`, then
    restarts onto your network and the hotspot goes away.
 4. Reserve that address for the hub in your router, so it never changes.
 
-Hold BOOT for 10 seconds to forget the network and bring the hotspot back.
+Hold BOOT for 10 seconds to forget the network and the link key and bring
+the hotspot back.
 
 The UART port prints the hub's state as JSON lines at 115200 baud: its
 address, and each unit as it comes and goes.
 
 ## Use it in AFC
 
-Name the hub's address and port as the unit's `serial_port`:
+Name the hub's address as the unit's `serial_port`:
 
 ```
 [AFC_BoxTurtleUSB Turtle_1]
-serial_port: tcp://192.168.1.50:4001
+serial_port: tcp://192.168.1.50
 ```
 
-Use the IP address, not a host name: AFC checks it at startup, and a name
-lookup would stall Klipper. The rest of the unit's config stays as it would
-be over USB. If the hub or its WiFi drops for a moment, AFC reconnects on its
-own.
+AFC takes the hub's port, 4001, when none is given; `tcp://<ip>:<port>`
+names another, as for a raw TCP serial server such as ser2net. Use the IP
+address, not a host name: AFC checks it at startup, and a name lookup would
+stall Klipper. The rest of the unit's config stays as it would be over USB.
+If the hub or its WiFi drops for a moment, AFC reconnects on its own.
+
+## The link key
+
+There is nothing to type. The first time AFC reaches a new hub, it makes a
+random link key, saves it in `AFC.var.hub` next to AFC's `AFC.var`, and
+stores it on the hub. From then on the hub challenges every connection and
+lets in only one that proves it holds the key, so nothing else on the
+network can talk to the unit or push AFC off the hub.
+
+- To pick the key yourself, set `tcp_key: <key>` in the unit's section
+  before AFC first reaches the hub: 1 to 64 characters, with no spaces,
+  quotes or backslashes. AFC then gives the hub that key instead of making
+  one.
+- To move the hub to another printer, or after AFC lost its key (a fresh
+  install), hold BOOT for 10 seconds. That clears the key along with the
+  network; join the hub to your WiFi again and the next AFC to connect
+  stores its own key. Or copy the key from the old printer's `AFC.var.hub`
+  into the new printer's `tcp_key`.
+- A hub with no key (new, or after BOOT) takes the first key it is given,
+  so bring AFC up soon after the hub joins your network.
+- The key proves who connects. The unit's bytes still cross the network
+  unencrypted, as they would cross a USB cable.
 
 ## How it behaves
 
-- One unit per hub, and one TCP client at a time: a new connection replaces
-  the old one. Point only one program at a hub, or the two keep pushing each
-  other off.
+- One unit per hub, and one TCP client at a time: a new connection that
+  passes the key check replaces the old one. Point only one printer at a
+  hub.
 - Raw TCP carries no baud rate, so the hub picks one: 230400 for a WCH
   (1a86) serial chip, as an ACE uses, and 115200 for anything else. A
   BoxTurtleUSB ignores the speed.
 - The connection stays up while the unit is unplugged and plugged back in.
-- Port 4001 has no password. Keep the hub on a network you trust.
 
 ## Update a BoxTurtleUSB through the hub
 
@@ -78,9 +101,14 @@ it back in the middle of the flash:
 
 ```
 sudo systemctl stop klipper
-python3 hub_katapult.py 192.168.1.50:4001 ../BoxTurtleUSB/boxturtle.bin
+python3 hub_katapult.py 192.168.1.50 ../BoxTurtleUSB/boxturtle.bin --unit Turtle_1
 sudo systemctl start klipper
 ```
+
+`--unit` names the AFC unit whose link key to use, read from
+`~/printer_data/config/AFC/AFC.var.hub` (`--key-file` names another file);
+`--key <key>` takes the key as typed instead. A hub with no key needs
+neither.
 
 The tool asks the running firmware into Katapult, runs flashtool over the
 same connection, then asks the new build for its info, which also passes the
@@ -91,4 +119,6 @@ same way. It needs pyserial and Katapult's `flashtool.py`, by default at
 ## Source
 
 `main/main.c` starts the hub, `main/hub.c` runs the USB host and the TCP
-port, and `main/wifi.c` joins the network or serves the setup page. GPLv3.
+port, `main/linkkey.c` checks the link key, and `main/wifi.c` joins the
+network or serves the setup page. `make -C test && test/test_linkkey` runs
+the link key's host test (it needs OpenSSL). GPLv3.

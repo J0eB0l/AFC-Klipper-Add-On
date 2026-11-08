@@ -23,9 +23,12 @@ from __future__ import annotations
 import errno
 import fcntl
 import glob
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
+import secrets
 import select
 import socket
 import termios
@@ -50,6 +53,10 @@ PROTO = "boxturtle-1"
 PORT_GLOB = "/dev/serial/by-id/usb-AFC_BoxTurtle_*-if00"
 # serial_port prefix for a board on a raw TCP serial server.
 TCP_SCHEME = "tcp://"
+# A BridgeHub's port, taken when serial_port names none.
+HUB_PORT = 4001
+# Longest link key a BridgeHub takes.
+LINK_KEY_MAX = 64
 # The AFC-Lite's LED headers, RGB1 to RGB4, and the color orders the board
 # drives.
 LED_HEADERS = 4
@@ -117,25 +124,51 @@ def split_fields(cmd: str, fields: Dict[str, Any], keep: tuple = ()) -> list:
 
 def parse_tcp(spec: str) -> Tuple[str, int]:
     """
-    Splits a tcp://<ip>:<port> serial_port into its address and port. The
-    address must be an IP: a name lookup would block Klipper's reactor.
+    Splits a tcp://<ip>[:<port>] serial_port into its address and port, the
+    port being a BridgeHub's (4001) when none is given. The address must be
+    an IP: a name lookup would block Klipper's reactor. An IPv6 address that
+    reads as a whole address takes the default port; brackets make the port
+    plain ([::1]:4001).
 
     :param spec: The serial_port value
     :return tuple: (address, port)
-    :raises ValueError: When the address or the port is missing or bad
+    :raises ValueError: When the address or the port is bad
     """
-    host, sep, port = spec[len(TCP_SCHEME):].rstrip("/").rpartition(":")
-    if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1]
+    rest = spec[len(TCP_SCHEME):].rstrip("/")
+    if rest.startswith("["):
+        host, _, tail = rest[1:].partition("]")
+        sep, port = tail[:1], tail[1:]
+        bad = tail and sep != ":"
+    elif rest.count(":") == 1:
+        host, sep, port = rest.partition(":")
+        bad = False
+    else:
+        host, sep, port, bad = rest, "", "", False
+        try:
+            ipaddress.ip_address(rest)
+        except ValueError:
+            host, sep, port = rest.rpartition(":")
     try:
         ipaddress.ip_address(host)
-        number = int(port)
+        number = int(port) if sep else HUB_PORT
     except ValueError:
         number = 0
-    if not sep or not 0 < number < 65536:
-        error_string = f"serial_port {spec} is not tcp://<ip address>:<port>"
+    if bad or not 0 < number < 65536:
+        error_string = f"serial_port {spec} is not tcp://<ip address>[:<port>]"
         raise ValueError(error_string)
     return host, number
+
+
+def check_link_key(key: str) -> bool:
+    """
+    A link key a BridgeHub takes: 1 to 64 printable characters with no
+    space, quote or backslash.
+
+    :param key: The key
+    :return bool: True if the hub takes it
+    """
+    return (0 < len(key) <= LINK_KEY_MAX
+            and all("!" <= c <= "~" and c not in "\\\"" for c in key))
 
 
 def parse_turtle_led(spec: str, counts: Dict[int, int]) -> list:
@@ -199,6 +232,11 @@ class TurtleLink:
     """
     PING_TIME = 0.5
     RX_TIMEOUT = 3.0
+    # A BridgeHub greets a connection at once; a server that hasn't by then
+    # (ser2net) doesn't. The hub's answer to a key takes a flash write; the
+    # wait stays under RX_TIMEOUT so its own message is the one logged.
+    GREETING_TIME = 1.0
+    AUTH_REPLY_TIME = 2.0
     CONNECT_POLL_TIME = 0.05
     RETRY_TIME = 2.0
     FAST_RETRY_TIME = 0.1
@@ -231,6 +269,11 @@ class TurtleLink:
         self._waiters: list = []
         self._last_rx = 0.0
         self._dropped_at: Optional[float] = None
+        # A BridgeHub's auth lines, the handshake waiting for one, and
+        # whether a tcp_key with no hub to take it was logged.
+        self._auth_lines: list = []
+        self._auth_wait = None
+        self._key_unused_logged = False
         self.timer = self.reactor.register_timer(self._timer_cb)
 
     def start(self) -> None:
@@ -404,6 +447,7 @@ class TurtleLink:
         self.fd = fd
         self.port = port
         self._rx = self._tx = b""
+        self._auth_lines = []
         self._last_rx = self.reactor.monotonic()
         self.fd_handle = self.reactor.register_fd(fd, self._read_cb)
 
@@ -420,11 +464,14 @@ class TurtleLink:
 
     def _handshake(self, eventtime: float) -> None:
         """
-        Ends any half line in the board's buffer, asks for info and checks
-        the protocol, then lets the unit push its settings.
+        Passes a BridgeHub's link key check (TCP only), ends any half line in
+        the board's buffer, asks for info and checks the protocol, then lets
+        the unit push its settings.
 
         :param eventtime: Reactor time
         """
+        if self.sock is not None and not self._hub_auth():
+            return
         self._write(b"\n")
         reply = self.request("info", timeout=2.0)
         if not reply.get("ok"):
@@ -440,6 +487,75 @@ class TurtleLink:
         self.last_error = ""
         if not self.unit.handle_link_up(reply):
             self.close("settings were refused")
+
+    def _auth_line(self, timeout: float) -> Optional[Dict[str, Any]]:
+        """
+        Waits for the hub's next auth line.
+
+        :param timeout: Seconds to wait
+        :return dict: The line, or None on timeout or a closed link
+        """
+        if not self._auth_lines and self.fd is not None:
+            self._auth_wait = self.reactor.completion()
+            self._auth_wait.wait(self.reactor.monotonic() + timeout, None)
+            self._auth_wait = None
+        return self._auth_lines.pop(0) if self._auth_lines else None
+
+    def _hub_auth(self) -> bool:
+        """
+        A BridgeHub greets each connection before any of the unit's bytes:
+        with a challenge when it holds a link key, which is answered with
+        HMAC-SHA512(key, nonce), or as open, when it is claimed with this
+        unit's key (made and saved the first time). A server that sends no
+        greeting, such as ser2net, is used as it is.
+
+        :return bool: False when the link was closed
+        """
+        name = self.unit.name
+        greeting = self._auth_line(self.GREETING_TIME)
+        if self.fd is None:
+            return False
+        if greeting is None:
+            if self.unit.tcp_key and not self._key_unused_logged:
+                self.logger.warning(f"{name}: {self.port} asked for no link key, "
+                                    f"so tcp_key is not used")
+                self._key_unused_logged = True
+            return True
+        claimed = False
+        if "nonce" in greeting:
+            key = self.unit.link_key(make=False)
+            if not key:
+                self.close("the hub holds a link key this printer doesn't have; "
+                           "hold the hub's BOOT button for 10 s to clear it")
+                return False
+            try:
+                nonce = bytes.fromhex(str(greeting["nonce"]))
+            except ValueError:
+                self.close("the hub sent a bad challenge")
+                return False
+            mac = hmac.new(key.encode(), nonce, hashlib.sha512).digest()[:32]
+            self._write(encode_line({"cmd": "auth", "mac": mac.hex()}))
+        elif greeting.get("open"):
+            key = self.unit.link_key(make=True)
+            if not key:
+                self.close("no link key to give the hub")
+                return False
+            self._write(encode_line({"cmd": "linkkey", "key": key}))
+            claimed = True
+        else:
+            self.close(f"the hub sent an unknown greeting {greeting}")
+            return False
+        reply = self._auth_line(self.AUTH_REPLY_TIME)
+        if self.fd is None:
+            return False
+        if reply is None or reply.get("ok") != 1:
+            self.close("the hub refused the link key; hold the hub's BOOT button "
+                       "for 10 s to clear it" if reply is not None
+                       else "no answer from the hub to the link key")
+            return False
+        if claimed:
+            self.logger.info(f"{name}: link key stored on the hub at {self.port}")
+        return True
 
     def close(self, reason: str, notify: bool = True) -> None:
         """
@@ -468,6 +584,8 @@ class TurtleLink:
         self.sock = None
         self.connecting = False
         self.connected = False
+        if self._auth_wait is not None:
+            self._auth_wait.complete(None)
         for completion in self._pending.values():
             completion.complete({"ok": False, "err": "disconnected"})
         self._pending = {}
@@ -529,6 +647,12 @@ class TurtleLink:
         try:
             msg = json.loads(line)
         except ValueError:
+            return
+        if msg.get("evt") == "auth":
+            # A BridgeHub's link key exchange (see _hub_auth).
+            self._auth_lines.append(msg)
+            if self._auth_wait is not None:
+                self._auth_wait.complete(msg)
             return
         if "ev" in msg:
             for waiter in list(self._waiters):
@@ -939,6 +1063,13 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                 raise error(str(e))
         self.serial_uid = config.get('serial_uid', None)
         self.link_timeout = config.getfloat('link_timeout', 2.0, minval=0.5)
+        # A BridgeHub's link key. Unset, AFC makes one the first time it
+        # reaches an open hub and saves it in <VarFile>.hub.
+        self.tcp_key = config.get('tcp_key', None)
+        if self.tcp_key is not None and not check_link_key(self.tcp_key):
+            error_string = (f"tcp_key must be 1 to {LINK_KEY_MAX} characters "
+                            f"with no spaces, quotes or backslashes")
+            raise error(error_string)
 
         # Lane drivers (each lane's [AFC_lane] section can override these)
         self.rotation_distance = config.getfloat('rotation_distance', 4.65, above=0.)
@@ -1156,6 +1287,50 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         except (TypeError, ZeroDivisionError):
             return delta, 0
         return delta, max(0, min(pulse_ms, 5000))
+
+    def link_key_file(self) -> str:
+        """
+        :return str: Where the link keys AFC made for BridgeHubs are kept,
+            next to AFC's other saved state
+        """
+        return os.path.expanduser(f"{self.afc.VarFile}.hub")
+
+    def link_key(self, make: bool) -> Optional[str]:
+        """
+        The key for this unit's BridgeHub: tcp_key when set, else the one
+        AFC saved for this unit, else (with make) a new one, saved first so
+        a hub never holds a key AFC lost.
+
+        :param make: Make and save a key when none is saved
+        :return str: The key, or None (none saved, or it could not be saved)
+        """
+        if self.tcp_key:
+            return self.tcp_key
+        path = self.link_key_file()
+        try:
+            with open(path) as f:
+                keys = json.load(f)
+        except (OSError, ValueError):
+            keys = {}
+        if not isinstance(keys, dict):
+            keys = {}
+        key = keys.get(self.name)
+        if isinstance(key, str) and check_link_key(key):
+            return key
+        if not make:
+            return None
+        key = secrets.token_hex(16)
+        keys[self.name] = key
+        tmp = f"{path}.tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(keys, f, indent=2)
+            os.replace(tmp, path)
+        except OSError as e:
+            self.logger.warning(f"{self.name}: cannot save the hub's link key in "
+                                f"{path}: {e}")
+            return None
+        return key
 
     def handle_link_up(self, info: Dict[str, Any]) -> bool:
         """
