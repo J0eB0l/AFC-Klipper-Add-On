@@ -11,15 +11,16 @@ AMS bus, so unplugging it, even mid-print, changes nothing on the printer.
 
 ## The files
 
-Both are version AFC-1.46, in this folder, `firmwares/BridgeBox_Display/`.
+Both are version AFC-1.57, in this folder, `firmwares/BridgeBox_Display/`.
 
 | file | flash at | keeps the saved WiFi and printer | use it for |
 |---|---|---|---|
-| `bridgebox-full-0x0.bin` | `0x0` | no | the first flash, and recovery |
+| `bridgebox-full-0x0.bin` | `0x0` | no over USB, yes from the update page | the first flash, recovery, and bootloader changes |
 | `bridgebox-update-app-0x10000.bin` | `0x10000` | yes | every update after that |
 
-The full image erases the saved network and printer address, so after it the
-display starts in setup again.
+Flashed over USB, the full image erases the saved network and printer address,
+so after it the display starts in setup again. Uploaded from the update page
+(see Updating) it keeps them.
 
 ## First flash
 
@@ -121,10 +122,21 @@ version.
 
 **Over USB**, with the port and esptool from the first flash:
 
-    ~/esptool-venv/bin/esptool --chip esp32s3 -p /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 -b 460800 --after watchdog-reset write-flash 0x10000 bridgebox-update-app-0x10000.bin
+    ~/esptool-venv/bin/esptool --chip esp32s3 -p /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 -b 460800 --after no-reset write-flash 0x10000 bridgebox-update-app-0x10000.bin
+    ~/esptool-venv/bin/esptool --chip esp32s3 -p /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --after watchdog-reset erase-region 0xe000 0x2000
 
-Use only the update image on the update page. It refuses the full image,
-because the full image cannot boot from there.
+The second command makes the panel start the image just written. After a
+browser update it may be running from its other slot, and without it the USB
+update would change nothing.
+
+**The full image from the update page.** Since AFC-1.50 the page also takes
+`bridgebox-full-0x0.bin`, and still keeps the saved network and printer. Use it
+when a release changes the bootloader, as AFC-1.50 did (faster flash reads):
+the app image alone leaves the old bootloader in place. The new app is checked
+before anything else changes, and the bootloader is written last, in under a
+second, from memory, so it does not depend on WiFi. Do not switch the panel off
+while it says `Updating 100%`. A panel on AFC-1.49 or older refuses the full
+image: upload the update image first, then the full one.
 
 If a new version fails to start, the panel goes back to the version it was
 running on the next start. This protection comes with the full image, so it
