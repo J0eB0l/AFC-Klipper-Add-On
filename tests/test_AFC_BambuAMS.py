@@ -23455,6 +23455,180 @@ class TestAfcBambuAMSCheckLiteClog:
         assert "_clog_t" not in vars(unit)
 
 
+class TestAfcBambuAMSCheckFeedStopped:
+    """A boxed unit in a print: the extruder pushing while its buffer holds."""
+
+    STOPPED = ("AFC bambu Bambu_AMS_1: lane1 is not feeding: the extruder "
+               "pushed {mm}mm, but the AMS buffer never moved (a printing "
+               "extruder drains it every ~20mm). The filament may not have "
+               "reached the extruder gears, the gears may be slipping, or the "
+               "nozzle may be clogged. Clear it, then resume.")
+
+    @staticmethod
+    def _frame(buff: int, odom: float = 1510.0) -> Dict[str, Any]:
+        """
+        :param buff: the buffer (0 stretched .. 100 compressed)
+        :param odom: the odometer, mm
+        :return dict: a status frame with a real buffer reading
+        """
+        frame = _p6_frame(ustate=4, odom=odom)
+        frame.update(buff=buff, buffn=5)
+        return frame
+
+    def _unit(self, monkeypatch: pytest.MonkeyPatch, *, model: str = "ams2",
+              print_state: Optional[str] = "printing", following: bool = True,
+              **values: Any) -> afcBambuAMS:
+        """
+        An AMS 2 printing from lane1, followed, its extruder the active one.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param model: ams_model
+        :param print_state: print_stats state
+        :param following: the unit follows lane1
+        :param values: further config options
+        :return afcBambuAMS: the unit
+        """
+        unit = _p6_unit(monkeypatch, model=model, print_state=print_state,
+                        lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
+                        bridge=FakeBridge(status=self._frame(61)),
+                        values=values)
+        monkeypatch.setattr(unit.afc.function, "get_current_extruder",
+                            lambda: "extruder")
+        if following:
+            unit._following_lane = unit.lanes["lane1"]
+        return unit
+
+    def _tick(self, unit: afcBambuAMS, e: float, buff: Optional[int] = None,
+              dt: float = 1.0, odom: float = 1510.0) -> None:
+        """
+        One follower tick after the extruder has reached ``e``.
+
+        :param unit: the unit
+        :param e: the toolhead's E position
+        :param buff: a new buffer reading, if it moved
+        :param dt: seconds since the last tick
+        :param odom: the odometer, mm
+        """
+        unit.reactor.now += dt
+        unit.afc.toolhead.e_pos = e
+        if buff is None:
+            buff = unit._bridge.status["buff"]
+        unit._bridge.status = self._frame(buff, odom)
+        unit._run_stall_checks(unit.lanes["lane1"])
+
+    def test_an_extruder_pushing_into_a_still_buffer_pauses(self,
+                                                            monkeypatch):
+        unit = self._unit(monkeypatch)
+        for e in (0.0, 30.0, 60.0, 99.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        self._tick(unit, 101.0)
+        assert unit.afc.error.messages == [
+            ("AFC_error", self.STOPPED.format(mm=101))]
+        assert unit._follow_fault_hold is True
+        assert unit._fault_lane is unit.lanes["lane1"]
+        assert unit._resume_needs_reload is True
+
+    def test_a_printing_buffer_keeps_the_count_at_zero(self, monkeypatch):
+        # Drained by the extruder, refilled by the AMS every ~20mm.
+        unit = self._unit(monkeypatch)
+        e = 0.0
+        for _cycle in range(20):
+            for buff in (73, 50, 30, 10, 73):
+                e += 5.0
+                self._tick(unit, e, buff)
+        assert e == 500.0
+        assert unit.afc.error.messages == []
+
+    def test_buffer_jitter_is_not_movement(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        for e, buff in ((0.0, 61), (40.0, 64), (80.0, 58), (101.0, 62)):
+            self._tick(unit, e, buff)
+        assert unit.afc.error.messages == [
+            ("AFC_error", self.STOPPED.format(mm=101))]
+
+    def test_a_swing_starts_the_count_over(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        self._tick(unit, 0.0)
+        self._tick(unit, 90.0)
+        self._tick(unit, 95.0, buff=40)            # the extruder drew on it
+        self._tick(unit, 190.0)
+        assert unit.afc.error.messages == []
+        self._tick(unit, 196.0)
+        assert unit.afc.error.messages == [
+            ("AFC_error", self.STOPPED.format(mm=101))]
+
+    def test_an_odometer_step_counts_as_movement(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        self._tick(unit, 0.0)
+        self._tick(unit, 90.0)
+        self._tick(unit, 95.0, odom=1530.0)
+        self._tick(unit, 190.0, odom=1530.0)
+        assert unit.afc.error.messages == []
+
+    def test_a_retract_and_its_unretract_cancel_out(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        for e in (0.0, 60.0, 0.0, 60.0, 0.0, 60.0, 95.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+
+    def test_a_gap_between_ticks_starts_over(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        self._tick(unit, 0.0)
+        self._tick(unit, 90.0)
+        self._tick(unit, 150.0, dt=6.0)
+        self._tick(unit, 240.0)
+        assert unit.afc.error.messages == []
+
+    def test_paused_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch, print_state="paused")
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        assert unit._feed_stop_base is None
+
+    def test_a_lane_this_unit_is_not_following_is_not_counted(self,
+                                                              monkeypatch):
+        # The buffer reading is the followed unit's, not this one's.
+        unit = self._unit(monkeypatch, following=False)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        assert unit._feed_stop_base is None
+
+    def test_another_extruder_active_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        monkeypatch.setattr(unit.afc.function, "get_current_extruder",
+                            lambda: "extruder1")
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit._feed_stop_base is None
+
+    def test_no_buffer_reading_is_not_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        for e in (0.0, 100.0, 200.0):
+            unit.reactor.now += 1.0
+            unit.afc.toolhead.e_pos = e
+            unit._bridge.status = dict(self._frame(61), buffn=0)
+            unit._run_stall_checks(unit.lanes["lane1"])
+        assert unit.afc.error.messages == []
+        assert unit._feed_stop_base is None
+
+    def test_with_fault_detect_off_nothing_is_counted(self, monkeypatch):
+        unit = self._unit(monkeypatch, fault_detect=False)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert unit.afc.error.messages == []
+        assert "_feed_stop_t" not in vars(unit)
+
+    def test_an_ams_lite_is_left_to_its_own_check(self, monkeypatch):
+        unit = self._unit(monkeypatch, model="lite")
+        unit._bridge.status = dict(self._frame(61), seltray=0)
+        for e in (0.0, 100.0, 200.0):
+            self._tick(unit, e)
+        assert "_feed_stop_t" not in vars(unit)
+
+
 class TestAfcBambuAMSDetectorTick:
     RESUMED = ("debug", "AFC bambu Bambu_AMS_1: print resumed, re-arming the "
                        "follower.")

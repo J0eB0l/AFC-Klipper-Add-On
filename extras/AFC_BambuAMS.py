@@ -1102,6 +1102,12 @@ LITE_CLEAR_S = 0.3
 #: the stepper by the queued moves. A gap this long between checks starts over.
 LITE_CLOG_MM = 60.0
 LITE_CLOG_GAP_S = 5.0
+#: In a print, on a boxed unit (AMS, AMS 2, AMS HT): how far the extruder may
+#: push while the AMS buffer holds still before the filament counts as stopped,
+#: and the buffer swing that counts as movement. A printing extruder drains the
+#: buffer and the AMS refills it about every 20mm, swinging it ~0.6 each time.
+FEED_STOP_MM = 100.0
+FEED_STOP_SWING = 0.15
 #: The AMS Lite's own error bytes (reply [33:35]).
 _LITE_ERRORS = {(2, 1): "its feed stalled", (2, 2): "its retract stalled"}
 #: AMS Lite `mode`: combined runs its trays through one splitter into one
@@ -1581,8 +1587,9 @@ class afcBambuAMS(afcUnit):
         self.rollcall_span_ht = config.getint(
             "rollcall_span_ht", None, minval=0, maxval=8)
         #   fault_detect : act on the AMS's own stall reports ("feed finish -1,
-        # stall", "rocker stall", "bdc stall"). The unit names these itself, so
-        # this is a report, not an inference.
+        # stall", "rocker stall", "bdc stall"), which the unit names itself, and
+        # pause a print whose filament stops moving while the extruder pushes
+        # (an AMS Lite's odometer, a boxed unit's buffer).
         self.fault_detect = config.getboolean("fault_detect", True)
         #   fault_pause : pause the print on a stall. Off leaves it a warning.
         self.fault_pause = config.getboolean("fault_pause", True)
@@ -11861,6 +11868,8 @@ class afcBambuAMS(afcUnit):
             return
         if self._check_lite_clog(lane):
             return
+        if self._check_feed_stopped(lane):
+            return
         self._check_ams_fault(lane)
 
     def _check_lite_clog(self, lane: Any) -> bool:
@@ -11910,6 +11919,76 @@ class afcBambuAMS(afcUnit):
                f"extruder pushed {pushed:.0f}mm, but the AMS Lite's odometer "
                f"saw no filament leave the tray. The nozzle may be clogged, "
                f"the extruder gears slipping, or the spool snagged. Clear it, "
+               f"then resume.")
+        self._raise_ams_fault(lane, msg)
+        return True
+
+    def _check_feed_stopped(self, lane: Any) -> bool:
+        """
+        Pause a print whose filament from a boxed unit has stopped moving.
+
+        A printing extruder drains the AMS buffer and the AMS's assist refills
+        it about every 20mm, so the buffer keeps swinging while filament is
+        used. An extruder that pushes FEED_STOP_MM while the buffer holds still
+        is not moving the filament: a tip that never reached the gears, gears
+        slipping on it, or a clogged nozzle. The odometer counts commanded
+        feeds, not the assist, so it alone cannot tell; a step of it still
+        counts as movement.
+
+        Counted only while printing (not paused), with this unit following the
+        lane on the active extruder, from E at the last swing, so a retract
+        and its unretract cancel out.
+
+        :param lane: The lane threaded to the toolhead from this unit
+        :return bool: True if a fault was raised
+        """
+        if (not getattr(self, "fault_detect", False)
+            or afcBambuAMS._is_lite(self)):
+            return False
+        now = _mono(getattr(self, "afc", None))
+        last_t = getattr(self, "_feed_stop_t", None)
+        self._feed_stop_t = now
+        e = fps = odom = None
+        try:
+            ext = getattr(lane, "extruder_obj", None)
+            if (getattr(self, "_following_lane", None) is lane
+                and self.afc.function.is_printing()
+                and not self.afc.function.is_paused()
+                and (self.afc.function.get_current_extruder()
+                     == getattr(ext, "th_extruder_name", None))):
+                fps = self.fps_buffer_value()
+                odom = self._odom_now_mm()
+                e = float(self.afc.toolhead.get_position()[3])
+        except Exception:
+            fps = None               # cannot tell: start over next tick
+        base = getattr(self, "_feed_stop_base", None)
+        if (fps is None
+            or e is None
+            or base is None
+            or base[0] is not lane
+            or last_t is None
+            or now - last_t > LITE_CLOG_GAP_S):
+            self._feed_stop_base = ((lane, e, fps, fps, odom)
+                                    if fps is not None and e is not None
+                                    else None)
+            return False
+        _lane, e0, lo, hi, odom0 = base
+        lo, hi = min(lo, fps), max(hi, fps)
+        if (hi - lo >= FEED_STOP_SWING
+            or (odom is not None and odom0 is not None
+                and abs(odom - odom0) >= LITE_ODOM_STEP_MM)):
+            self._feed_stop_base = (lane, e, fps, fps, odom)
+            return False
+        self._feed_stop_base = (lane, e0, lo, hi, odom0)
+        pushed = e - e0
+        if pushed < FEED_STOP_MM:
+            return False
+        self._feed_stop_base = None
+        msg = (f"AFC bambu {self.name}: {lane.name} is not feeding: the "
+               f"extruder pushed {pushed:.0f}mm, but the AMS buffer never "
+               f"moved (a printing extruder drains it every ~20mm). The "
+               f"filament may not have reached the extruder gears, the gears "
+               f"may be slipping, or the nozzle may be clogged. Clear it, "
                f"then resume.")
         self._raise_ams_fault(lane, msg)
         return True
