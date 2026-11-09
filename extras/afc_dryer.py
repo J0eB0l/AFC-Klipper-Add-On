@@ -1,11 +1,14 @@
-# AFC Unit Heaters, one web panel for every filament dryer on the printer
+# AFCProject Automated Filament Changer
 #
-# Bambu AMS 2 Pro / AMS HT and Anycubic ACE units all have drying heaters, and
-# all of them are otherwise driven by typed G-code with different names, units
-# and argument spellings (AFC_BAMBU_HEATER_START ... TIME=minutes vs
-# AFC_ACE_DRY ... DURATION=minutes). This serves a single control panel for all of
-# them, discovered from the printer config at startup: whatever dryers exist in
-# AFC.cfg appear here, drawn to match their hardware.
+# Copyright (C) 2026 AFCProject
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+#
+# AFC Unit Heaters: one web panel for every filament dryer on the printer
+#
+# Bambu AMS 2 Pro / AMS HT and Anycubic ACE dryers are otherwise driven by typed G-code
+# with different names and arguments. This serves one panel for all of them, found in
+# the printer config at startup.
 #
 # Configuration:
 #
@@ -13,32 +16,16 @@
 #   port: 8093              # HTTP port to serve on
 #   bind: 0.0.0.0           # 127.0.0.1 to restrict to the host
 #   poll: 2.0               # seconds between status snapshots
-#   show_heaterless: False  # also list every other AFC unit (BoxTurtle,
-#                           # HTLF, OpenAMS and so on) read-only, so the
-#                           # panel can show the whole machine at once
+#   show_heaterless: False  # also list every other AFC unit read-only
 #
-# Then add it to Mainsail/Fluidd as a webcam with service type "iframe" and
-# URL http://<printer-host>:8093/, an iframe camera is the only way to get an
-# interactive panel into either UI, neither having a plugin API. It is also
-# just a web page, so that URL works on its own in any browser.
+# Add it to Mainsail/Fluidd as a webcam with service type "iframe" and URL
+# http://<printer-host>:8093/. The URL also works on its own in any browser.
 #
-# Adding a vendor
-# ---------------
-# Subclass _Backend, fill in the six hooks, and add it to _BACKENDS. Nothing
-# else in the module knows what an AMS or an ACE is; the page renders from
-# the descriptor each backend returns.
+# A new vendor subclasses _Backend, fills in its six hooks and joins _BACKENDS.
 #
-# Threading
-# ---------
-# The HTTP server runs on its own thread and Klipper's reactor is emphatically
-# not thread-safe, so this module never touches printer objects from a request:
-#
-#   * status is snapshotted by a reactor timer into a plain dict under a lock,
-#     and requests only ever read that dict;
-#   * commands are handed back to the reactor with register_async_callback and
-#     run there, never inline in the handler.
-#
-# This file may be distributed under the terms of the GNU GPLv3 license.
+# The HTTP server runs on its own thread and Klipper's reactor is not thread-safe, so
+# requests only read a snapshot a reactor timer takes, and commands go back to the
+# reactor through register_async_callback.
 
 from __future__ import annotations
 
@@ -56,8 +43,7 @@ from typing import Any, Dict, List, Optional
 # Offered in the UI. The per-unit ceiling disables the rest, so an ACE (55 C by
 # default) and an AMS HT (85 C) share one list without either being wrong.
 TEMP_CHOICES = (40, 45, 50, 55, 60, 65, 70, 75, 80, 85)
-# Minutes, 1..12 h in whole hours. Both vendors' commands take minutes; the
-# labels are hours because that is how dry cycles are quoted.
+# Both vendors' commands take minutes; the labels are hours.
 TIME_CHOICES = tuple((h * 60, "%d h" % h) for h in range(1, 13))
 
 
@@ -77,17 +63,20 @@ def _css_color(value: Any) -> str:
     :param value: vendor colour field.
     :return str: a CSS colour, or "" when there isn't a usable one.
     """
-    if isinstance(value, (list, tuple)) and len(value) >= 3:
+    if (isinstance(value, (list, tuple))
+        and len(value) >= 3):
         try:
             r, g, b = (max(0, min(255, int(c))) for c in value[:3])
         except (TypeError, ValueError):
             return ""
         return "" if (r, g, b) == (0, 0, 0) else "rgb(%d,%d,%d)" % (r, g, b)
-    if isinstance(value, str) and value:
+    if (isinstance(value, str)
+        and value):
         v = value.strip().lstrip("#")[:6]
         # Check each digit: int(v, 16) would also accept a sign, underscores
         # or trailing spaces, none of which is valid CSS.
-        if len(v) == 6 and all(c in string.hexdigits for c in v):
+        if (len(v) == 6
+            and all(c in string.hexdigits for c in v)):
             return "" if v.upper() == "000000" else "#" + v
     return ""
 
@@ -112,8 +101,7 @@ def _lane_bays(unit: Any, nslots: int) -> List[Dict[str, str]]:
     """
     bays: List[Dict[str, str]] = [{"color": "", "material": ""}
                                   for _ in range(nslots)]
-    # Everything below colour/material is for the hover tooltip, the same data
-    # Mainsail shows for the spool, so no Spoolman client is needed here.
+    # The rest is for the hover tooltip, the same data Mainsail shows for the spool.
     lanes = getattr(unit, "lanes", None) or {}
     slot_map = getattr(unit, "_slot_map", None) or {}
     for name, lane in lanes.items():
@@ -134,22 +122,19 @@ def _lane_bays(unit: Any, nslots: int) -> List[Dict[str, str]]:
             "color": _css_color(getattr(lane, "color", "") or ""),
             "material": str(getattr(lane, "material", "") or ""),
             "lane": str(name),
-            # filament_name is Spoolman's own name for the spool when one is
-            # linked; sub_type is the tag/Spoolman variant ("Matte").
+            # sub_type is the tag/Spoolman variant ("Matte").
             "filament": str(getattr(lane, "filament_name", "") or ""),
             "sub_type": str(getattr(lane, "sub_type", "") or ""),
             "vendor": str(getattr(lane, "spool_vendor", "") or ""),
             "spool_id": getattr(lane, "spool_id", None),
-            # Grams remaining. 0 means "not tracked" rather than "empty", so
-            # the tooltip omits it instead of claiming an empty spool.
+            # 0 means "not tracked", not empty.
             "weight": round(weight, 1) if weight > 0 else None,
             "temp": getattr(lane, "extruder_temp", None),
         }
     return bays
 
 
-def _merge_bays(vendor: List[Dict[str, Any]],
-                lane: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def _merge_bays(vendor: List[Dict[str, Any]], lane: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
     Overlay AFC lane colour/material onto the vendor's presence data.
 
@@ -169,10 +154,7 @@ def _merge_bays(vendor: List[Dict[str, Any]],
             "color": ln.get("color") or v.get("color") or "",
             "material": ln.get("material") or v.get("material") or "",
         }
-        # Tooltip detail comes from the lane only; a bay with no lane mapped
-        # carries none and the page shows no tooltip.
-        for k in ("lane", "filament", "sub_type", "vendor", "spool_id",
-                  "weight", "temp"):
+        for k in ("lane", "filament", "sub_type", "vendor", "spool_id", "weight", "temp"):
             if ln.get(k) not in (None, ""):
                 merged[k] = ln[k]
         out.append(merged)
@@ -301,8 +283,7 @@ class _Backend:
         """
         raise NotImplementedError
 
-    def start_script(self, name: str, temp: int, minutes: int,
-                     rotate: int) -> str:
+    def start_script(self, name: str, temp: int, minutes: int, rotate: int) -> str:
         """
         G-code that starts a cycle on this vendor.
 
@@ -393,13 +374,11 @@ class _BambuBackend(_Backend):
         out = []
         for s in (st.get("slots") or []):
             s = s or {}
-            out.append({"present": bool(s.get("present")),
-                        "color": _css_color(s.get("color")),
+            out.append({"present": bool(s.get("present")), "color": _css_color(s.get("color")),
                         "material": s.get("material") or ""})
         return out
 
-    def start_script(self, name: str, temp: int, minutes: int,
-                     rotate: int) -> str:
+    def start_script(self, name: str, temp: int, minutes: int, rotate: int) -> str:
         """
         G-code that starts a Bambu dry cycle.
 
@@ -409,8 +388,7 @@ class _BambuBackend(_Backend):
         :param rotate: 1 to spin spools while drying, 0 not to
         :return str: the AFC_BAMBU_HEATER_START command line
         """
-        return (f"AFC_BAMBU_HEATER_START UNIT={name} TEMP={temp} "
-                f"TIME={minutes} ROTATE={rotate}")
+        return f"AFC_BAMBU_HEATER_START UNIT={name} TEMP={temp} TIME={minutes} ROTATE={rotate}"
 
     def stop_script(self, name: str) -> str:
         """
@@ -507,7 +485,8 @@ class _AceBackend(_Backend):
         hum = _reading(st.get("ace_humidity"))
         # The V1 ACE has no humidity sensor, so fall back to an external sensor
         # like the generic backend does, only for the channel that is missing.
-        if temp is None or hum is None:
+        if (temp is None
+            or hum is None):
             env = _env_reading(unit)
             if temp is None:
                 temp = env["temperature"]
@@ -518,9 +497,8 @@ class _AceBackend(_Backend):
             "drying": running,
             "temperature": temp,
             "humidity": hum,
-            # Set-point and clock from dryer_status, only while a cycle runs: an
-            # idle ACE reports zeros, which mean "no cycle". remain_time is
-            # seconds on both generations; duration is not (see _cycle_length).
+            # Only while a cycle runs: an idle ACE reports zeros. remain_time is seconds on
+            # both generations; duration is not (see _cycle_length).
             "target": (st.get("ace_dryer_target") or None) if running else None,
             "remaining": _secs(st.get("ace_dryer_remain")) if running else None,
             "duration": (self._cycle_length(unit, st.get("ace_dryer_duration"))
@@ -547,8 +525,7 @@ class _AceBackend(_Backend):
             })
         return out
 
-    def start_script(self, name: str, temp: int, minutes: int,
-                     rotate: int) -> str:
+    def start_script(self, name: str, temp: int, minutes: int, rotate: int) -> str:
         """
         G-code that starts an ACE dry cycle.
 
@@ -592,8 +569,7 @@ def _env_reading(unit: Any) -> Dict[str, Optional[float]]:
     if printer is None:
         return empty
     names = [n for n in (getattr(unit, "environment_sensor", None),
-                         getattr(unit, "oams_name", None),
-                         getattr(unit, "name", None)) if n]
+                         getattr(unit, "oams_name", None), getattr(unit, "name", None)) if n]
     try:
         objects = list(printer.lookup_objects())
     except Exception:
@@ -602,7 +578,8 @@ def _env_reading(unit: Any) -> Dict[str, Optional[float]]:
         fallback = None
         for oname, obj in objects:
             part = str(oname).split(" ", 1)
-            if len(part) != 2 or part[1].lower() != str(want).lower():
+            if (len(part) != 2
+                or part[1].lower() != str(want).lower()):
                 continue
             try:
                 st = obj.get_status(None)
@@ -616,7 +593,8 @@ def _env_reading(unit: Any) -> Dict[str, Optional[float]]:
             hum = _reading(st.get("humidity"))
             if hum is not None:
                 return {"temperature": temp, "humidity": hum}
-            if temp is not None and fallback is None:
+            if (temp is not None
+                and fallback is None):
                 fallback = {"temperature": temp, "humidity": None}
         if fallback is not None:
             return fallback
@@ -685,8 +663,7 @@ class _GenericBackend(_Backend):
         :param unit: an AFC unit object
         :return Dict[str, Any]: model/label/max_temp/slots for the page
         """
-        # `type` is the unit's config-declared model, falling back to the class
-        # name. Strip underscores as the rest of AFC does (Box_Turtle -> BoxTurtle).
+        # Strip underscores as the rest of AFC does (Box_Turtle -> BoxTurtle).
         declared = str(getattr(unit, "type", "") or "")
         label = declared.replace("_", "") if declared else type(unit).__name__
         return {
@@ -733,8 +710,7 @@ class _GenericBackend(_Backend):
             })
         return out
 
-    def start_script(self, name: str, temp: int, minutes: int,
-                     rotate: int) -> str:
+    def start_script(self, name: str, temp: int, minutes: int, rotate: int) -> str:
         """
         Unreachable through the panel: has_heater() is False, so no start
         control renders. Raises rather than returning a broken g-code line.
@@ -777,8 +753,6 @@ class AFCDryer:
         self.port = config.getint("port", 8093, minval=1, maxval=65535)
         self.bind = config.get("bind", "0.0.0.0")
         self.poll = config.getfloat("poll", 2.0, minval=0.5)
-        # A dryer-less unit has nothing to control, but listing it keeps the
-        # panel a picture of the whole machine rather than a partial one.
         self.show_heaterless = config.getboolean("show_heaterless", False)
 
         self._server: Optional[ThreadingHTTPServer] = None
@@ -789,32 +763,24 @@ class AFCDryer:
         self._state: Dict[str, Any] = {"units": [], "ready": False}
 
         self.printer.lookup_object("gcode").register_command(
-            "AFC_DRYER_STATUS", self.cmd_STATUS,
-            desc="Show the AFC Unit Heaters panel status")
+            "AFC_DRYER_STATUS", self.cmd_STATUS, desc="Show the AFC Unit Heaters panel status")
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
-        self.printer.register_event_handler(
-            "klippy:disconnect", self._handle_disconnect)
-
-    # ---- lifecycle ----
+        self.printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
 
     def _handle_ready(self) -> None:
         """
         Discover units, start the snapshot timer and the HTTP server.
         """
-        # Switch to AFC's logger (AFC.log and console); the stdlib logger from
-        # __init__ covers the window before AFC exists.
-        afc_log = getattr(self.printer.lookup_object("AFC", None),
-                          "logger", None)
+        # The stdlib logger from __init__ covers the window before AFC exists.
+        afc_log = getattr(self.printer.lookup_object("AFC", None), "logger", None)
         if afc_log is not None:
             self.logger = afc_log
         self._discover()
         if not self._units:
-            self.logger.warning(
-                "afc_dryer: no units with a drying heater found; the panel "
-                "will be empty (set show_heaterless: True to list every other "
-                "AFC unit read-only)")
-        self._timer = self.reactor.register_timer(
-            self._snapshot, self.reactor.NOW)
+            self.logger.warning("afc_dryer: no units with a drying heater found; the panel "
+                                "will be empty (set show_heaterless: True to list every other "
+                                "AFC unit read-only)")
+        self._timer = self.reactor.register_timer(self._snapshot, self.reactor.NOW)
         self._start_server()
 
     def _handle_disconnect(self) -> None:
@@ -839,9 +805,7 @@ class AFCDryer:
             try:
                 found = backend.find(self.printer)
             except Exception as e:
-                self.logger.warning(
-                    f"afc_dryer: could not enumerate {backend.kind} "
-                    f"units: {e}")
+                self.logger.warning(f"afc_dryer: could not enumerate {backend.kind} units: {e}")
                 continue
             for unit in found:
                 # A subclass matches its parent's prefix too, so the same
@@ -851,16 +815,16 @@ class AFCDryer:
                 seen.add(id(unit))
                 try:
                     heated = backend.has_heater(unit)
-                    # A pool unit's heater is provisional until an AMS 2 claims
-                    # it, so keep pool units regardless; _snapshot hides the
-                    # unclaimed ones and refreshes has_heater/model/label live.
+                    # A pool unit's heater is provisional until an AMS 2 claims it; _snapshot hides
+                    # the unclaimed ones.
                     pooled = bool(getattr(unit, "pool", False))
-                    if not heated and not pooled and not self.show_heaterless:
+                    if (not heated
+                        and not pooled
+                        and not self.show_heaterless):
                         continue
                     desc = backend.describe(unit)
                 except Exception as e:
-                    self.logger.warning(
-                        f"afc_dryer: skipping a {backend.kind} unit: {e}")
+                    self.logger.warning(f"afc_dryer: skipping a {backend.kind} unit: {e}")
                     continue
                 desc.update({
                     "name": getattr(unit, "name", "?"),
@@ -882,8 +846,7 @@ class AFCDryer:
         Bind and start the HTTP server on its own daemon thread.
         """
         try:
-            self._server = ThreadingHTTPServer(
-                (self.bind, self.port), _make_handler(self))
+            self._server = ThreadingHTTPServer((self.bind, self.port), _make_handler(self))
             self._server.daemon_threads = True
             def _serve() -> None:
                 """
@@ -897,25 +860,19 @@ class AFCDryer:
                     pass
                 self._server.serve_forever()
 
-            self._thread = threading.Thread(
-                target=_serve, daemon=True, name="afc_dryer_http")
+            self._thread = threading.Thread(target=_serve, daemon=True, name="afc_dryer_http")
             self._thread.start()
-            self.logger.info(
-                f"afc_dryer: serving on http://{self.bind}:{self.port}/")
-            self.logger.info(
-                f"  Mainsail/Fluidd: add a webcam, service 'iframe', URL "
-                f"http://<printer-host>:{self.port}/")
+            self.logger.info(f"afc_dryer: serving on http://{self.bind}:{self.port}/")
+            self.logger.info(f"  Mainsail/Fluidd: add a webcam, service 'iframe', URL "
+                             f"http://<printer-host>:{self.port}/")
         except Exception as e:
-            self.logger.error(
-                f"afc_dryer: failed to start HTTP server on "
-                f"{self.bind}:{self.port}: {e}")
+            self.logger.error(f"afc_dryer: failed to start HTTP server on "
+                              f"{self.bind}:{self.port}: {e}")
             # A thread failure comes after the bind, so release the port now:
             # with _server cleared, _handle_disconnect can no longer close it.
             if self._server is not None:
                 self._server.server_close()
             self._server = None
-
-    # ---- status snapshot (reactor thread) ----
 
     def _snapshot(self, eventtime: float) -> float:
         """
@@ -929,8 +886,7 @@ class AFCDryer:
         units = []
         for desc in self._units:
             unit, backend = desc["_obj"], desc["_backend"]
-            # A Bambu pool unit is inert until it claims a physical AMS (claim
-            # clears .pool), so unclaimed or pulled units are not shown.
+            # A Bambu pool unit is inert until it claims a physical AMS.
             if getattr(unit, "pool", False):
                 continue
             try:
@@ -938,22 +894,17 @@ class AFCDryer:
                 view = backend.snapshot(unit, st)
                 # Vendor data decides which bays are occupied; the AFC lanes
                 # supply the colour, matching the rest of the UI.
-                slots = _merge_bays(backend.slots(unit, st),
-                                    _lane_bays(unit, desc["slots"]))
+                slots = _merge_bays(backend.slots(unit, st), _lane_bays(unit, desc["slots"]))
             except Exception as e:
-                self.logger.debug(
-                    f"afc_dryer: status failed for {desc['name']}: {e}")
+                self.logger.debug(f"afc_dryer: status failed for {desc['name']}: {e}")
                 view, slots = {"online": False, "drying": False}, []
             slots = slots[:desc["slots"]]
-            # Pad so the artwork always draws the unit's full complement of
-            # bays, empty ones included.
             while len(slots) < desc["slots"]:
                 slots.append({"present": False, "color": "", "material": ""})
             row = {k: desc[k] for k in
                    ("name", "kind", "model", "label", "max_temp", "slots",
                     "has_heater", "rotate")}
-            # Refresh the identity fields live: a Bambu pool slot changes model,
-            # ceiling and heater when an AMS claims it. Both calls are attribute reads.
+            # A Bambu pool slot changes model, ceiling and heater when an AMS claims it.
             try:
                 fresh = backend.describe(unit)
                 row["model"] = fresh.get("model", row["model"])
@@ -968,8 +919,6 @@ class AFCDryer:
                 "temperature": _reading(view.get("temperature")),
                 "humidity": _reading(view.get("humidity")),
                 "target": view.get("target"),
-                # Seconds left and the requested cycle length; None on a unit
-                # that reports no clock.
                 "remaining": _secs(view.get("remaining")),
                 "duration": _secs(view.get("duration")),
                 "note": view.get("note") or "",
@@ -993,10 +942,7 @@ class AFCDryer:
         state["page_version"] = PAGE_VERSION
         return state
 
-    # ---- command dispatch (HTTP thread -> reactor) ----
-
-    def request_dry(self, name: str, action: str, temp: int, minutes: int,
-                    rotate: int) -> str:
+    def request_dry(self, name: str, action: str, temp: int, minutes: int, rotate: int) -> str:
         """
         Validate a panel request and queue the matching G-code on the reactor.
 
@@ -1042,8 +988,7 @@ class AFCDryer:
         else:
             error_str = f"unknown action {action!r}"
             raise ValueError(error_str)
-        self.reactor.register_async_callback(
-            lambda e, s=script: self._run_script(s))
+        self.reactor.register_async_callback(lambda e, s=script: self._run_script(s))
         return script
 
     def _run_script(self, script: str) -> None:
@@ -1056,8 +1001,6 @@ class AFCDryer:
             self.printer.lookup_object("gcode").run_script(script)
         except Exception as e:
             self.logger.error(f"afc_dryer: {script!r} failed: {e}")
-
-    # ---- gcode / status ----
 
     def cmd_STATUS(self, gcmd: Any) -> None:
         """
@@ -1079,9 +1022,8 @@ class AFCDryer:
         for u in units:
             st = "drying" if u["drying"] else ("idle" if u["online"] else "offline")
             states.append(f'{u["name"]} [{u["label"]}] {st}')
-        gcmd.respond_info(
-            f"AFC Unit Heaters: {running} on http://{self.bind}:{self.port}/, "
-            f"{len(units)} dryer(s): {', '.join(states) or 'none'}")
+        gcmd.respond_info(f"AFC Unit Heaters: {running} on http://{self.bind}:{self.port}/, "
+                          f"{len(units)} dryer(s): {', '.join(states) or 'none'}")
 
     def get_status(self, eventtime: Any = None) -> Dict[str, Any]:
         """
@@ -1201,12 +1143,11 @@ def _make_handler(panel: AFCDryer) -> type:
                 self._json(400, {"error": f"bad request body: {e}"})
                 return
             try:
-                script = panel.request_dry(
-                    name=str(body.get("unit", "")),
-                    action=str(body.get("action", "")),
-                    temp=int(body.get("temp", 55)),
-                    minutes=int(body.get("minutes", 480)),
-                    rotate=int(body.get("rotate", 0)))
+                script = panel.request_dry(name=str(body.get("unit", "")),
+                                           action=str(body.get("action", "")),
+                                           temp=int(body.get("temp", 55)),
+                                           minutes=int(body.get("minutes", 480)),
+                                           rotate=int(body.get("rotate", 0)))
             except (ValueError, TypeError, OverflowError) as e:
                 self._json(400, {"error": str(e)})
                 return
@@ -1565,7 +1506,6 @@ fetch('api/options').then(function(r){ return r.json(); })
 # different one, so an open browser picks up a deploy.
 PAGE_VERSION = hashlib.md5(_PAGE_TEMPLATE.encode("utf-8")).hexdigest()[:8]
 PAGE = _PAGE_TEMPLATE.replace("__PAGE_VERSION__", PAGE_VERSION)
-
 
 
 def load_config(config: Any) -> AFCDryer:

@@ -88,8 +88,7 @@ UF2_FAMILY_CHIP = {
     UF2_FAMILY_RP2350_NS: "RP2350",
 }
 RP2040_FLASH_BASE = 0x10000000
-# Where a no_flash image's blocks point (same on RP2040 and RP2350). Used only
-# to refuse such an image by name rather than as a generic "not a whole image".
+# Only to refuse a no_flash image by name.
 SRAM_BASE = 0x20000000
 # The largest hole uf2_to_image will fill rather than refuse. A sparse image
 # legitimately skips erased regions; a jump of megabytes is a file holding two
@@ -97,10 +96,8 @@ SRAM_BASE = 0x20000000
 FW_MAX_GAP = 64 * 1024
 
 
-#: ESP-IDF app image: magic in byte 0, chip id at byte 12 of the extended
-#: header. The S3 and C3 bridges (BridgeBox S3, BridgeBox C3) take the .bin
-#: exactly as built, with nothing to flatten -- each writes it into its spare
-#: OTA slot. The chip id is ESP-IDF's (esp_chip_id_t).
+#: ESP-IDF app image: magic in byte 0, chip id (esp_chip_id_t) at byte 12. The S3 and
+#: C3 bridges take the .bin exactly as built and write it into their spare OTA slot.
 ESP_IMAGE_MAGIC = 0xE9
 ESP_CHIP_IDS = {5: "ESP32C3", 9: "ESP32S3"}
 
@@ -117,12 +114,12 @@ def firmware_image(blob: bytes) -> Tuple[bytes, Optional[str]]:
     :param blob: The whole file
     :return tuple: The image, and its chip (None when the file does not say)
     """
-    if len(blob) >= 24 and blob[0] == ESP_IMAGE_MAGIC:
+    if (len(blob) >= 24
+        and blob[0] == ESP_IMAGE_MAGIC):
         chip_id = struct.unpack_from("<H", blob, 12)[0]
         chip = ESP_CHIP_IDS.get(chip_id)
         if chip is None:
-            error_str = (f"an ESP image for chip id {chip_id}, which no "
-                         f"bridge uses")
+            error_str = f"an ESP image for chip id {chip_id}, which no bridge uses"
             raise ValueError(error_str)
         return blob, chip
     return uf2_to_image(blob)
@@ -136,7 +133,8 @@ def uf2_to_image(blob: bytes) -> Tuple[bytes, Optional[str]]:
     :return tuple: The image, starting at the first byte of flash, and the chip
                    the image targets (None when no block names one)
     """
-    if len(blob) < UF2_BLOCK or len(blob) % UF2_BLOCK:
+    if (len(blob) < UF2_BLOCK
+        or len(blob) % UF2_BLOCK):
         error_str = f"not a UF2: {len(blob)} bytes is not whole 512-byte blocks"
         raise ValueError(error_str)
     out = bytearray()
@@ -148,16 +146,14 @@ def uf2_to_image(blob: bytes) -> Tuple[bytes, Optional[str]]:
         if (m0 != UF2_MAGIC0
             or m1 != UF2_MAGIC1
             or struct.unpack("<I", b[-4:])[0] != UF2_MAGIC_END):
-            error_str = (f"block {off // UF2_BLOCK} has no UF2 magic -- "
-                         "is this really a .uf2?")
+            error_str = f"block {off // UF2_BLOCK} has no UF2 magic -- is this really a .uf2?"
             raise ValueError(error_str)
         if flags & UF2_FLAG_NOT_MAIN:
             continue                     # metadata, not flash content
         if flags & UF2_FLAG_FAMILY:
             if (fam not in UF2_FAMILY_CHIP
                 and fam not in (UF2_FAMILY_ABSOLUTE, UF2_FAMILY_DATA)):
-                error_str = (f"block {blkno} has unknown chip family "
-                             f"0x{fam:08X}")
+                error_str = f"block {blkno} has unknown chip family 0x{fam:08X}"
                 raise ValueError(error_str)
             if fam in (UF2_FAMILY_ABSOLUTE, UF2_FAMILY_DATA):
                 # picotool's --abs-block marker (block 0 of an RP2350 image:
@@ -167,14 +163,13 @@ def uf2_to_image(blob: bytes) -> Tuple[bytes, Optional[str]]:
                 continue
             chip = UF2_FAMILY_CHIP.get(fam)
             if chip is not None:
-                if chips and chip not in chips:
-                    error_str = (f"image mixes chips: {sorted(chips)[0]} and "
-                                 f"{chip}")
+                if (chips
+                    and chip not in chips):
+                    error_str = f"image mixes chips: {sorted(chips)[0]} and {chip}"
                     raise ValueError(error_str)
                 chips.add(chip)
         if size > UF2_BLOCK - 36:
-            error_str = (f"block {blkno} claims {size} payload bytes, "
-                         "more than a block holds")
+            error_str = f"block {blkno} claims {size} payload bytes, more than a block holds"
             raise ValueError(error_str)
         if want is None:
             if addr != RP2040_FLASH_BASE:
@@ -230,8 +225,7 @@ try: from extras.AFC_BambuAMS_bridge import (
     split_tcp_key,
     )
 except:
-    err_str = ERROR_STR.format(import_lib="AFC_BambuAMS_bridge",
-                               trace=traceback.format_exc())
+    err_str = ERROR_STR.format(import_lib="AFC_BambuAMS_bridge", trace=traceback.format_exc())
     raise error(err_str)
 
 from extras import AFC_BambuAMS_bridge as _bridge_mod  # noqa: E402
@@ -255,11 +249,6 @@ try: from extras.AFC_RFID import (
 except:
     err_str = ERROR_STR.format(import_lib="AFC_RFID", trace=traceback.format_exc())
     raise error(err_str)
-
-# Spoolman lives in AFC_BambuAMS_rfid, enabled by an [AFC_BambuAMS_rfid]
-# section and reached only through the shims further down.
-
-
 
 
 #: Bambu's own filament brand. The reader only returns Bambu tags, so the brand
@@ -302,32 +291,26 @@ def _materials_differ(lane_material: Any, tag_material: Any) -> bool:
     lane = [t for t in re.findall(r"[a-z0-9]+",
                                   str(lane_material or "").lower())
             if len(t) > 1]
-    if not tag or not lane:
+    if (not tag
+        or not lane):
         return False
     return not any(t.startswith(tag[0]) or tag[0].startswith(t) for t in lane)
 
 
 SLOTS_PER_UNIT = 4
 
-# Bambu's bus limit: up to 4 four-slot AMS (AMS1/AMS2) + up to 8 single-slot AMS
-# HT = 12 units total. Each physical AMS is one AFC unit with a distinct ams_index
-# in 0..MAX_AMS-1. Must match the firmware's MAX_AMS.
+# Bambu's bus limit: up to 4 four-slot AMS + up to 8 single-slot AMS HT = 12 units.
+# Must match the firmware's MAX_AMS.
 MAX_AMS = 12
 MAX_AMS_4SLOT = 4          # never more than 4 four-slot AMS (AMS1/AMS2)
-MAX_AMS_HT = 8             # up to 8 AMS HT
+MAX_AMS_HT = 8
 
-# Upper bound accepted for `dry_max_temp`: no Bambu drying heater exceeds it,
-# so it only guards a fat-fingered config. A higher requested TEMP is clamped
-# to the unit's ceiling, not rejected.
+# Only guards a fat-fingered config; a higher requested TEMP is clamped to the ceiling.
 DRY_TEMP_HARD_MAX = 85
 
 # AMS type -> (has_heater, dry_dev_addr, dry_ams_id, dry_max_temp), picked by
-# `ams_model`; `heater:`/`dry_max_temp:` override. The 0x2C drying command is
-# routed by device address; ams_id None derives it with mc_id_for_index.
-#   ams1: regular AMS, no heater (drying rejected)
-#   ams2: AMS2 Pro, drying at device 0x0700, 65 C ceiling
-#   ht:   AMS HT, drying at device 0x1800, 85 C ceiling (single slot)
-# Boxed AMS / AMS 2 Pro ceiling; the test suite reads it as the model default.
+# `ams_model`; `heater:`/`dry_max_temp:` override. ams_id None derives it with
+# mc_id_for_index. Boxed AMS / AMS 2 Pro ceiling; the tests read it as the default.
 MAX_DRY_TEMP_C = 65
 
 # The id byte is the bus address the firmware derives from the chain index: 0-3
@@ -360,9 +343,8 @@ _AMS_MODELS = {
     "lite":    (False,  0x1200,   None,   65),   # AMS Lite (no heater)
 }
 
-# MC poll addressing: device = the unit class, id = the bus address (see
-# mc_id_for_index). An AMS 1 and AMS 2 share a class, so the model comes from
-# config. mc_id_base is an additive override, separate from dry_ams_id.
+# MC poll addressing: device = the unit class, id = the bus address. An AMS 1 and
+# an AMS 2 share a class, so the model comes from config.
 _MC_ADDRESSING = {m: (spec[1], 0x00) for m, spec in _AMS_MODELS.items()}
 
 _HT_MODELS = ("ht",)
@@ -389,8 +371,7 @@ def check_ams_limits(models: List[str]) -> Optional[str]:
     four = len(models) - ht
     problems = []
     if four > MAX_AMS_4SLOT:
-        problems.append(f"{four} four-slot AMS (ams1/ams2) exceeds "
-                        f"max {MAX_AMS_4SLOT}")
+        problems.append(f"{four} four-slot AMS (ams1/ams2) exceeds max {MAX_AMS_4SLOT}")
     if ht > MAX_AMS_HT:
         problems.append(f"{ht} AMS HT exceeds max {MAX_AMS_HT}")
     if len(models) > MAX_AMS:
@@ -398,7 +379,7 @@ def check_ams_limits(models: List[str]) -> Optional[str]:
     return "; ".join(problems) if problems else None
 
 
-# ── Prep logo (house-style aligned box, matches ACE2/OpenAMS) ───────────────────
+# Prep logo
 
 def _ams_box_logo(title: str, n_slots: int, name: str) -> str:
     """
@@ -455,8 +436,6 @@ def _ams_box_logo_error(title: str, n_slots: int, name: str) -> str:
     return f"<span class=error--text>{body}</span>\n   {name}\n"
 
 
-
-
 def bridge_color_to_rgb(color: Any) -> Optional[str]:
     """
     Normalize the bridge's 0xRRGGBBAA hex color to a 6-digit RRGGBB string.
@@ -464,7 +443,8 @@ def bridge_color_to_rgb(color: Any) -> Optional[str]:
     :param color: The bridge 'color' field (an 8-hex-digit string)
     :return Optional[str]: uppercase RRGGBB, or None if unusable/zero
     """
-    if not isinstance(color, str) or len(color) < 6:
+    if (not isinstance(color, str)
+        or len(color) < 6):
         return None
     try:
         int(color, 16)
@@ -506,7 +486,8 @@ def _lane_colour_is_records(lane: Any, info: dict) -> bool:
     """
     lc = _colour_key(getattr(lane, "color", ""))
     rc = _colour_key(info.get("color"))
-    if lc and lc == rc:
+    if (lc
+        and lc == rc):
         return True
     if (rc
         or not info.get("color_black")
@@ -567,13 +548,10 @@ def bridge_slot_to_info(slot: dict) -> dict:
         "temp_min": _temp(slot.get("tmin")),
         "temp_max": _temp(slot.get("tmax")),
         "weight": slot.get("weight") or None,
-        # Bed temperature (C): the tag's figure, else derived from the
-        # material. None when neither is known; "bed_temp_source" says which.
+        # None when neither the tag nor the material gives one; "bed_temp_source" says which.
         "bed_temp": bed_temp,
         "bed_temp_source": bed_temp_source,
-        # Remaining capacity (%) from the tag's persisted remain fraction, kept
-        # by the AMS during insert calibration. 0 is real; -1/absent means
-        # unread.
+        # From the tag's persisted remain fraction. 0 is real; -1/absent means unread.
         "remain_pct": (slot.get("remain")
                        if isinstance(slot.get("remain"), int)
                        and slot.get("remain") >= 0 else None),
@@ -599,18 +577,14 @@ def bridge_slot_to_info(slot: dict) -> dict:
                      and slot.get("mpct") >= 0 else None),
         "meas_seq": (slot.get("mseq")
                      if isinstance(slot.get("mseq"), int) else None),
-        # The radius (mm) that percent came from; it rides with meas_pct as one
-        # measurement. A restart only records this stamp (see
-        # _baseline_meas_stamp). 0/absent: the measurement stated no radius.
+        # The radius (mm) that percent came from. 0/absent: the measurement stated none.
         "meas_radius_mm": (slot.get("mrad")
                            if isinstance(slot.get("mrad"), int)
                            and slot.get("mrad") > 0 else None),
         # The firmware still owes this bay a re-read. While it does, an empty
         # record means "not fetched yet", never "no tag".
         "reread_pending": bool(slot.get("rrq")),
-        # The bay's outlet (hub) sensor, raw, from bridge firmware 2.83 on:
-        # the switch at the tray's exit into the hub (see HUB_EMPTY_MAX).
-        # None when the firmware does not publish it or has not read it.
+        # The bay's outlet (hub) sensor, raw, from bridge firmware 2.83 on (see HUB_EMPTY_MAX).
         "hub_raw": (slot.get("hubv")
                     if isinstance(slot.get("hubv"), int)
                     and slot.get("hubv") > 0 else None),
@@ -669,8 +643,7 @@ def prep_lane_state(info: dict, tool_loaded: bool, online: bool,
     else:
         msg = 'EMPTY READY FOR SPOOL'
     if not online:
-        msg += (" <span class=warning--text>(AMS offline, bridge "
-                "protocol bring-up)</span>")
+        msg += " <span class=warning--text>(AMS offline, bridge protocol bring-up)</span>"
     return present, present, bool(tool_loaded), msg
 
 
@@ -697,22 +670,12 @@ def unit_env(latest: Optional[dict], ams_index: int) -> tuple:
     return None, None
 
 
-# Buffer "fullness" thresholds (0..100) -> FPS-style state. 100 = full/compressed
-# (fed/satisfied), 0 = stretched/expanded (extruder pulling, demand). Mirrors the
-# AFC_buffer compressed/expanded wording so it reads the same in the UI.
-
-
-
-
-
-
 # How long after a STOP live chamber telemetry is ignored. The AMS keeps
 # narrating while it winds down; too long hides a stop that failed.
 DRY_STOP_GRACE = 25.0
 
-#: How long after a start command a refusal is ignored, in seconds. A narration
-#: line from before clear_dry_error() can arrive after it; a real refusal
-#: repeats and outlives this window.
+#: A narration line from before clear_dry_error() can arrive after a start; a real
+#: refusal repeats and outlives this window.
 DRY_REFUSE_GRACE = 20.0
 
 #: How long an HT dry may stay silent before it counts as never started, in
@@ -780,8 +743,7 @@ def _mono(obj: Any) -> float:
     return mono() if callable(mono) else 0.0
 
 
-def _refuse_while_printing(printer: Any, reactor: Any, gcmd: Any,
-                           cmd: str) -> None:
+def _refuse_while_printing(printer: Any, reactor: Any, gcmd: Any, cmd: str) -> None:
     """
     Raise a gcode error if a print is running or paused.
 
@@ -800,11 +762,8 @@ def _refuse_while_printing(printer: Any, reactor: Any, gcmd: Any,
     except Exception:
         state = None
     if state in ("printing", "paused"):
-        error_str = (f"{cmd}: not while a print is active "
-                     f"(print_stats state={state})")
+        error_str = f"{cmd}: not while a print is active (print_stats state={state})"
         raise gcmd.error(error_str)
-
-
 
 
 BUFFER_COMPRESSED_AT = 66
@@ -827,8 +786,7 @@ def _buffer_state(buff: Optional[int]) -> Optional[str]:
     return "neutral"
 
 
-# ── Virtual FPS-buffer ADC pin ──────────────────────────────────────────────────
-# The AMS buffer as a host ADC pin for a stock FPS buffer, no wiring needed:
+# Virtual FPS-buffer ADC pin: the AMS buffer as a host ADC pin for a stock FPS buffer:
 #   [AFC_buffer <name>] type: FPS_PSF / adc_pin: bambu_buffer:fps
 # The value is AMS fullness 0..1 (1.0 compressed), so `reversed` is not needed.
 _BUFFER_CHIP_NAME = "bambu_buffer"
@@ -943,8 +901,7 @@ class _BambuBufferChip:
         :return _BambuBufferADC: the new pin
         """
         if pin_type != "adc":
-            error_str = (f"{self._name} only provides 'adc' pins "
-                         f"(use adc_pin: {self._name}:fps)")
+            error_str = f"{self._name} only provides 'adc' pins (use adc_pin: {self._name}:fps)"
             raise self.printer.config_error(error_str)
         adc = _BambuBufferADC(self)
         self._pins.append(adc)
@@ -1007,18 +964,14 @@ def _register_bambu_buffer_chip(unit: Any) -> None:
 NOMINAL_MMPS = 20.0
 MAX_MMPS = 30.0
 
-# AMS bay -> hub staging distance. Not configurable: the hub is virtual, so
-# there is nothing to measure, and it only sizes a deadline.
+# Not configurable: the hub is virtual, and this only sizes a deadline.
 DIST_HUB_MM = 250.0
 
-# Default hub -> toolhead distance until the unit reports its own. Long on
-# purpose: it sizes the load deadline, and a short one would abort the first
-# load before the unit can measure its path.
+# Until the unit reports its own. Long on purpose: a short deadline would abort the
+# first load before the unit can measure its path.
 DEFAULT_BOWDEN_MM = 3000.0
 
-# How far the AMS's measurement must sit from the configured value before
-# it is worth rewriting the file. The unit's own figure moves a few mm
-# between calibrations and none of this needs that precision.
+# The unit's own figure moves a few mm between calibrations.
 PATH_ADOPT_TOLERANCE_MM = 25.0
 
 
@@ -1092,7 +1045,6 @@ LITE_FAULT_GRACE_S = 3.0
 LITE_GRIP_MIN_STN_MM = 10.0
 LITE_GRIP_SHARE = 0.25
 LITE_GRIP_WAIT_S = 2.0
-#: One odometer step on an AMS Lite.
 LITE_ODOM_STEP_MM = 1.5
 #: How long an AMS Lite that flagged its own stall is cleared (00) before it
 #: is told to hold its tray, as the A1 starts a retry.
@@ -1127,8 +1079,7 @@ LITE_MODE_COMBINED = "combined"
 LITE_MODE_DIRECT = "direct"
 
 
-def _gcmd_int(gcmd: Any, name: str, default: int,
-              minval: int, maxval: int) -> int:
+def _gcmd_int(gcmd: Any, name: str, default: int, minval: int, maxval: int) -> int:
     """
     Read an integer parameter that may be written in hex.
 
@@ -1162,7 +1113,8 @@ def _gcmd_int(gcmd: Any, name: str, default: int,
     except (TypeError, ValueError):
         error_str = f"Error on '{gcmd.get_commandline()}': unable to parse {raw}"
         raise gcmd.error(error_str)
-    if val < minval or val > maxval:
+    if (val < minval
+        or val > maxval):
         error_str = (f"Error on '{gcmd.get_commandline()}': {name}={raw} is outside "
                      f"{minval}..{maxval}")
         raise gcmd.error(error_str)
@@ -1182,8 +1134,6 @@ def clamp_speed(mmps: float, ceiling: float) -> float:
     return min(mmps, ceiling)
 
 
-
-
 #: Narration fragments that are link/keep-alive chatter, not a reason. The unit
 #: streams these continuously; they are in the buffer at the moment of a fault
 #: purely because they are in it at every moment.
@@ -1191,12 +1141,11 @@ _FAULT_NOISE = ("[AMS_COMMON]", "[AMS_LINK]", "[AMS_IDLE]", "[AMS_LED]TRAY")
 
 # The AMS 1 states its give-up verdict on keep-alive tags the chatter filter
 # would drop, so those fragments are kept for the message.
-_FAULT_SIGNAL = re.compile(
-    r"state:[67]|en:0,\s*mode:7|stall|finish -1|timeout error", re.I)
+_FAULT_SIGNAL = re.compile(r"state:[67]|en:0,\s*mode:7|stall|finish -1|timeout error", re.I)
 
 
-def _register_lane_command(unit: Any, cmd: str, handler: Callable,
-                           desc: str, unit_alone: bool = False) -> None:
+def _register_lane_command(unit: Any, cmd: str, handler: Callable, desc: str,
+                           unit_alone: bool = False) -> None:
     """
     Register a command that acts on one lane: UNIT= as usual, and LANE= alone.
 
@@ -1234,8 +1183,7 @@ def _register_lane_command(unit: Any, cmd: str, handler: Callable,
         pass                    # another unit on this printer claimed it
 
 
-def _run_by_lane(printer: Any, cmd: str, gcmd: Any,
-                 unit_alone: bool = False) -> None:
+def _run_by_lane(printer: Any, cmd: str, gcmd: Any, unit_alone: bool = False) -> None:
     """
     Run ``cmd`` on the Bambu unit holding the lane named by LANE=.
 
@@ -1259,9 +1207,8 @@ def _run_by_lane(printer: Any, cmd: str, gcmd: Any,
     # text holds one as "Unknown".
     if not lane_name:
         if unit_alone:
-            error_str = (
-                f"{cmd}: needs LANE= (one lane) or UNIT= (every slot on that "
-                f"unit). Bambu units: {names}")
+            error_str = (f"{cmd}: needs LANE= (one lane) or UNIT= (every slot on that "
+                         f"unit). Bambu units: {names}")
             raise gcmd.error(error_str)
         error_str = f"{cmd}: needs LANE= naming the lane"
         raise gcmd.error(error_str)
@@ -1269,9 +1216,7 @@ def _run_by_lane(printer: Any, cmd: str, gcmd: Any,
         if lane_name in (getattr(u, "lanes", None) or {}):
             u._lane_handlers[cmd](gcmd)
             return
-    error_str = (
-        f"{cmd}: no Bambu unit holds a lane named '{lane_name}' "
-        f"(Bambu units: {names})")
+    error_str = f"{cmd}: no Bambu unit holds a lane named '{lane_name}' (Bambu units: {names})"
     raise gcmd.error(error_str)
 
 
@@ -1310,8 +1255,7 @@ def _fault_reason(text: str) -> str:
 
 # "assist finish stall! pos:-0.27->0.64": the assist stopped with the buffer
 # moved from the first position to the second.
-_ASSIST_STALL_RE = re.compile(
-    r"assist finish stall!\s*pos:(-?\d+(?:\.\d+)?)->(-?\d+(?:\.\d+)?)")
+_ASSIST_STALL_RE = re.compile(r"assist finish stall!\s*pos:(-?\d+(?:\.\d+)?)->(-?\d+(?:\.\d+)?)")
 
 #: Narration that states a stall, as opposed to a unit still parked from one.
 _STALL_WORDS_RE = re.compile(r"stall|finish -1|timeout error")
@@ -1349,11 +1293,6 @@ def _overfeed_stall(text: str) -> Optional[Tuple[float, float]]:
     return (start, end)
 
 
-# The bridge registry lives in AFC_BambuAMS_bridge. Reached as
-# _bridge_mod._BRIDGES, never imported by name, so a rebind is seen by every
-# reader.
-
-
 #: How long the bridge link may be down during a load before feeding stops.
 #: Outlasts an ordinary reconnect (backoff caps at 5 s) while staying well
 #: under the load timeout.
@@ -1361,8 +1300,7 @@ LINK_DOWN_GRACE_S = 12.0
 
 #: What an operator does after clearing a failed load. Named in every failure
 #: message, because that message is the only place the recovery is explained.
-_RETRY_HINT =("Once the path is clear, run AFC_BAMBU_FAULT_RELOAD to retry "
-               "the load")
+_RETRY_HINT = "Once the path is clear, run AFC_BAMBU_FAULT_RELOAD to retry the load"
 
 
 def _bridge_log_tag(serial_port: str) -> str:
@@ -1385,7 +1323,7 @@ def _bridge_log_tag(serial_port: str) -> str:
     return safe[-24:].strip("_") or "alt"
 
 
-# ── AFC unit ────────────────────────────────────────────────────────────────────
+# AFC unit
 
 class afcBambuAMS(afcUnit):
     """
@@ -1419,7 +1357,6 @@ class afcBambuAMS(afcUnit):
     # seating.
     DEFAULTS_SETTLE_S = 2.0
 
-    #: Alias of the module constant, for discoverability on the class.
     DRY_STOP_GRACE = DRY_STOP_GRACE
 
     def __init__(self, config: Any) -> None:
@@ -1430,153 +1367,82 @@ class afcBambuAMS(afcUnit):
         """
         super().__init__(config)
         self.type = config.get("type", "BambuAMS")
-        # Optional, and None fails soft (unit offline). ConfigRewrite can leave
-        # a section behind in AFC_auto_vars.cfg for a renamed or removed unit,
-        # and that remnant must not stop the printer booting.
+        # Optional: a renamed or removed unit can leave a section behind in AFC_auto_vars.cfg,
+        # and that must not stop the printer booting.
         self.serial_port = config.get("serial_port", None)
-        # tcp_key: the link key a tcp:// bridge demands, when set by hand. A
-        # USB cable needs none; blank leaves the link open, matching a board
-        # with no key stored. A BridgeBox chain makes its own (see WifiLink).
-        self.tcp_key, self._tcp_key_store = split_tcp_key(
-            config.get("tcp_key", None))
+        # Only when set by hand; a BridgeBox chain makes its own (see WifiLink).
+        self.tcp_key, self._tcp_key_store = split_tcp_key(config.get("tcp_key", None))
         self.baud = config.getint("baud", 115200)
-        # These lanes have no drive stepper, the AMS motors do the feeding, so
-        # AFC_lane.move_to routes moves to our lane_move() (bridge feed/retract).
+        # The AMS motors do the feeding, so AFC_lane.move_to routes moves to lane_move().
         self.stepperless_drive = True
-        # Load/unload distances (mm), commanded open-loop; the toolhead sensor
-        # confirms the load. The default is long on purpose: a short one kills
-        # good loads, and the unit writes its measured path back after the
-        # first load.
-        self.afc_bowden_length = config.getfloat(
-            "afc_bowden_length", DEFAULT_BOWDEN_MM, above=0.0)
-        self.afc_unload_bowden_length = config.getfloat(
-            "afc_unload_bowden_length", self.afc_bowden_length, above=0.0)
-        # Post-feed load recovery: pulse this many mm at a time, up to this many
-        # seconds, to nudge filament onto the toolhead sensor if the main feed
-        # under-shot it (mirrors AFC_ACE load_retry_pulse/timeout).
-        self.load_retry_pulse = config.getfloat(
-            "load_retry_pulse", 100.0, minval=1.0)
-        # Total patience for the load to reach the toolhead sensor, leaving
-        # room for the AMS's own feed/stall/retract retries.
-        self.load_retry_timeout = config.getfloat(
-            "load_retry_timeout", 40.0, minval=1.0)
-        # How often the host re-kicks the feed while waiting. Spaced to let one
-        # AMS stall-retry cycle finish; each push resets the AMS mid-retry.
-        self.load_retry_interval = config.getfloat(
-            "load_retry_interval", 4.0, minval=0.5)
-        # Reel a load that never reaches the sensor back into the bay before
-        # reporting. Off by default: reeling back fights the AMS's own retries.
-        self.reel_back_on_load_fail = config.getboolean(
-            "reel_back_on_load_fail", False)
-        # When a load stalls without the AMS declaring a fault, run the
-        # printer's "Retry" (a 0F/0E re-home, then re-feed) this many times. A
-        # declared fault gets none: the AMS already ran its own retries. 0
-        # fails straight to handle_lane_failure.
-        self.load_recover_attempts = config.getint(
-            "load_recover_attempts", 2, minval=0)
-        # How far the extruder bites before the follower is armed, so the gears
-        # grip without being mid-advance when the AMS pulls back. 0 disables
-        # it.
+        # Long on purpose: a short one kills good loads, and the unit writes its measured
+        # path back after the first load.
+        self.afc_bowden_length = config.getfloat("afc_bowden_length", DEFAULT_BOWDEN_MM, above=0.0)
+        self.afc_unload_bowden_length = config.getfloat("afc_unload_bowden_length",
+                                                        self.afc_bowden_length, above=0.0)
+        # Pulse this many mm at a time, up to this many seconds, when the main feed
+        # under-shot the toolhead sensor (as AFC_ACE does).
+        self.load_retry_pulse = config.getfloat("load_retry_pulse", 100.0, minval=1.0)
+        self.load_retry_timeout = config.getfloat("load_retry_timeout", 40.0, minval=1.0)
+        # Spaced to let one AMS stall-retry cycle finish; each push resets the AMS mid-retry.
+        self.load_retry_interval = config.getfloat("load_retry_interval", 4.0, minval=0.5)
+        # Off by default: reeling back fights the AMS's own retries.
+        self.reel_back_on_load_fail = config.getboolean("reel_back_on_load_fail", False)
+        # A stall the AMS did not declare gets the printer's "Retry" (re-home, then re-feed)
+        # this many times; a declared fault already ran the AMS's own retries.
+        self.load_recover_attempts = config.getint("load_recover_attempts", 2, minval=0)
+        # So the gears grip without being mid-advance when the AMS pulls back. 0 disables it.
         self.tool_bite_mm = config.getfloat("tool_bite_mm", 0.0, minval=0.0)
-        # Cap (s) on waiting for the unit to stop after the toolhead sensor
-        # trips, before the assist (see _wait_arrival_settle). 0 skips;
-        # AFC_BAMBU_ARRIVAL changes it live.
-        self.arrival_assist_delay_s = config.getfloat(
-            "arrival_assist_delay_s", 4.0, minval=0.0)
-        # Extra mm (beyond bowden + DIST_HUB_MM) to retract when ejecting a lane so
-        # the filament clears the hub and pulls fully back into the AMS bay.
+        # Cap (s) on waiting for the unit to stop after the toolhead sensor trips.
+        self.arrival_assist_delay_s = config.getfloat("arrival_assist_delay_s", 4.0, minval=0.0)
         self.eject_buffer = config.getfloat("eject_buffer", 200.0, minval=0.0)
-        # The bus the firmware drives: boxed by default (auto|ams), "lite" for
-        # an AMS Lite. ams_model: lite sets it (see below).
-        self.variant = config.getchoice(
-            "variant", {"auto": "auto", "ams": "ams", "lite": "lite"}, "auto")
-        # Which AMS on the daisy-chain this unit represents (0..MAX_AMS-1).
-        # Multiple [AFC_BambuAMS] units on the same serial_port share one
-        # bridge.
-        self.ams_index = config.getint("ams_index", 0, minval=0,
-                                       maxval=MAX_AMS - 1)
-        # The configured index, frozen before UID resolution changes ams_index.
-        # It ranks units in the uid-binding table, deciding which boxed unit
-        # takes wire id 0 on the next fresh enrollment.
+        self.variant = config.getchoice("variant",
+                                        {"auto": "auto", "ams": "ams", "lite": "lite"}, "auto")
+        self.ams_index = config.getint("ams_index", 0, minval=0, maxval=MAX_AMS - 1)
+        # Frozen before UID resolution: it decides which boxed unit takes wire id 0 on the
+        # next fresh enrollment.
         self._bind_rank = self.ams_index
-        # Pin this unit to its physical AMS by UID (hex from the bridge `chain`
-        # command). Chain indices reshuffle across power cycles, so on connect
-        # the index carrying this UID becomes ams_index.
+        # Chain indices reshuffle across power cycles, so the index carrying this UID
+        # becomes ams_index on connect.
         self.unit_uid = (config.get("unit_uid", "") or "").strip().upper() or None
-        # A pool unit (AFC_BridgeBox hot-enroll) is inert until claimed: no
-        # listener, no chain index, lanes `unassigned`, no uid. Claiming it
-        # (bring_online) runs the ready-time registration live.
+        # A pool unit (AFC_BridgeBox hot-enroll) is inert until claimed; bring_online runs the
+        # ready-time registration live.
         self.pool = config.getboolean("pool", False)
-        # Scan the tag when a spool is newly inserted, so material and colour
-        # fill in without AMS_SCAN. Gated to idle and latched once per
-        # insertion.
+        # Gated to idle and latched once per insertion.
         self.auto_scan = config.getboolean("auto_scan", True)
-        # Insert while another lane on the unit is loaded: when idle, drop the follower,
-        # prime the new bay (no scan), then re-engage. The scan waits until it unloads.
+        # While another lane on the unit is loaded: drop the follower, prime the new bay, then
+        # re-engage. The scan waits until it unloads.
         self.insert_pullin = config.getboolean("insert_pullin", True)
-        # Create a Spoolman spool from a Bambu tag whose UID Spoolman does not
-        # know. Off by default; binding to an existing spool always happens.
-        # Per-lane auto_spoolman_create still overrides.
-        self.auto_spoolman_create = config.getboolean(
-            "auto_spoolman_create", False)
-        # Write the AMS's physical remaining measurement (P:NN% by radius) back
-        # to a bound Spoolman spool's remaining_weight. On by default; turn it
-        # off to stop the AMS correcting Spoolman.
-        self.sync_measured_to_spoolman = config.getboolean(
-            "sync_measured_to_spoolman", True)
-        # Hold a following AMS HT with the dense statu-0F poll (as the printer
-        # does) rather than the HT re-poke. On by default; set it
-        # False to fall back to the re-poke.
+        # Binding to an existing spool always happens; per-lane auto_spoolman_create overrides.
+        self.auto_spoolman_create = config.getboolean("auto_spoolman_create", False)
+        self.sync_measured_to_spoolman = config.getboolean("sync_measured_to_spoolman", True)
+        # The dense statu-0F poll, as the printer does; False falls back to the HT re-poke.
         self.ht_0f_hold = config.getboolean("ht_0f_hold", True)
-        # Also measure spool capacity on insert (op-04 byte 4). Off by default:
-        # the unit pulls filament for 8-25 s. AFC_BAMBU_CAPSCAN still measures.
+        # Off by default: the unit pulls filament for 8-25 s.
         self.measure_on_insert = config.getboolean("measure_on_insert", False)
-        # Run the CALIBRATE choreography for an insert measurement instead of
-        # the plain capscan. Opt-in: on an AMS 2 Pro it can wedge the
-        # controller until AFC_BAMBU_RELINK.
-        self.calibrate_on_insert = config.getboolean(
-            "calibrate_on_insert", False)
-        # The AMS idles its follower when the buffer centres and re-arming every poll
+        # Opt-in: on an AMS 2 Pro it can wedge the controller until AFC_BAMBU_RELINK.
+        self.calibrate_on_insert = config.getboolean("calibrate_on_insert", False)
+        # The AMS idles its follower when the buffer centres, and re-arming every poll
         # twitches the feeder, so re-select only when the extruder advances.
-        #   follow_poll_interval : how often to sample the extruder (s)
-        #   follow_min_extrude   : mm of extrusion since last re-engage to fire
-        self.follow_poll_interval = config.getfloat(
-            "follow_poll_interval", 0.1, above=0.0)
-        self.follow_min_extrude = config.getfloat(
-            "follow_min_extrude", 0.1, above=0.0)
-        # True keeps the follower armed whenever a lane is loaded (a small idle
-        # twitch, but the extruder can always pull); False arms it only while
-        # extruding. The AMS self-limits at its buffer centre either way.
+        self.follow_poll_interval = config.getfloat("follow_poll_interval", 0.1, above=0.0)
+        self.follow_min_extrude = config.getfloat("follow_min_extrude", 0.1, above=0.0)
+        # False arms the follower only while extruding; the AMS self-limits either way.
         self.follow_when_loaded = config.getboolean("follow_when_loaded", True)
-        #   auto_error_recovery : on a stall mid-print, unload the lane, reload the
-        #     same spool, then RESUME. Off by default, as it moves the toolhead
-        #     unasked. One attempt per fault, and resumes only when the reload took.
-        self.auto_error_recovery = config.getboolean(
-            "auto_error_recovery", False)
-        #   auto_error_recovery_limit : how many unattended resumes in a row before
-        #     the print is left paused (default 1), so an uncleared jam cannot loop
-        #     and grind filament. A manual resume resets it; 0 never resumes.
-        self.auto_error_recovery_limit = config.getint(
-            "auto_error_recovery_limit", 1, minval=0)
-        #   bus_serial : the 15-character printer serial the bridge sends in the
-        #     op-05 announce (shorter is padded). If units stop answering after a
-        #     change, restore the previous value.
+        # Off by default, as it moves the toolhead unasked. One attempt per fault.
+        self.auto_error_recovery = config.getboolean("auto_error_recovery", False)
+        # So an uncleared jam cannot loop and grind filament. A manual resume resets it.
+        self.auto_error_recovery_limit = config.getint("auto_error_recovery_limit", 1, minval=0)
+        # If units stop answering after a change, restore the previous value.
         self.bus_serial = config.get("bus_serial", "").strip()
         self._auto_recover_armed = False
-        # Automatic resumes since the last hand-driven one, counted against
-        # auto_error_recovery_limit. _reload_before_resume zeroes it, because a
-        # human pressing resume is the intervention the cap exists to wait for.
+        # A human pressing resume is the intervention the cap waits for.
         self._auto_resume_count = 0
-        # Set when a Bambu fault paused the print, cleared once the lane is fed
-        # again. RESUME reloads only while it is set, so an ordinary pause
-        # resumes unchanged.
+        # RESUME reloads only while this is set, so an ordinary pause resumes unchanged.
         self._resume_needs_reload = False
         # The lane whose load last failed outside a print, cleared by the next
         # load that arrives. AFC_BAMBU_FAULT_RELOAD retries it while idle.
         self._failed_load_lane = None
-        # Set by any status frame carrying byte[19] == 0x07, cleared when a
-        # fault is armed. A latch because the signal is intermittent (see
-        # _on_status).
+        # A latch because the signal is intermittent (see _on_status).
         self._declared_since_fault = False
         # True while auto recovery's own unload+reload runs; unit_load_lane
         # would otherwise clear _auto_recover_armed and let the next fault
@@ -1590,116 +1456,74 @@ class afcBambuAMS(afcUnit):
         # pair above, which would wipe the load's range mid-load.
         self._load_odom_lo: Optional[float] = None
         self._load_odom_hi: Optional[float] = None
-        #   rollcall_span_boxed / rollcall_span_ht : ids of each class the roll-call
-        #     walks. Unset: the configured units plus one spare per class, so the next
-        #     hot-plugged unit works. 0: all of the class (~8 ms per empty id).
-        self.rollcall_span_boxed = config.getint(
-            "rollcall_span_boxed", None, minval=0, maxval=4)
-        self.rollcall_span_ht = config.getint(
-            "rollcall_span_ht", None, minval=0, maxval=8)
-        #   fault_detect : act on the AMS's own stall reports ("feed finish -1,
-        # stall", "rocker stall", "bdc stall"), which the unit names itself, and
-        # pause a print whose filament stops moving while the extruder pushes
-        # (an AMS Lite's odometer, a boxed unit's buffer).
+        # Unset: the configured units plus one spare per class. 0: all of the class (~8 ms
+        # per empty id).
+        self.rollcall_span_boxed = config.getint("rollcall_span_boxed", None, minval=0, maxval=4)
+        self.rollcall_span_ht = config.getint("rollcall_span_ht", None, minval=0, maxval=8)
+        # Also pauses a print whose filament stops moving while the extruder pushes.
         self.fault_detect = config.getboolean("fault_detect", True)
-        #   fault_pause : pause the print on a stall. Off leaves it a warning.
         self.fault_pause = config.getboolean("fault_pause", True)
-        #   link_loss_pause_s : pause the print after this long with no word from
-        #     the bridge; 0 disables. The bridge streams status many times a second,
-        #     and an undriven AMS grinds, so this is much shorter than a reconnect.
-        self.link_loss_pause_s = config.getfloat("link_loss_pause_s", 5.0,
-                                                 minval=0.)
-        # Last fault sequence handled, so one stall raises one error.
+        # The bridge streams status many times a second, and an undriven AMS grinds.
+        self.link_loss_pause_s = config.getfloat("link_loss_pause_s", 5.0, minval=0.)
         self._fault_seen: int = 0
-        # The lane the last stall was raised on, so the reload on resume is
-        # aimed at the slot that stalled.
         self._fault_lane: Any = None
-        # AMS type: picks heater, drying address, temperature ceiling and bus
-        # addressing (see _AMS_MODELS). `heater:` and `dry_max_temp:` override.
         self.ams_model = config.get("ams_model", "ams2").strip().lower()
-        # The follower is the same for every model. An unknown model is a typo:
-        # refuse it and name the valid spellings rather than guess an
-        # addressing.
+        # An unknown model is a typo: refuse it rather than guess an addressing.
         if self.ams_model not in _AMS_MODELS:
-            error_str = (
-                f"[{config.get_name()}] ams_model: {self.ams_model!r} is not a "
-                f"known model. Valid: {', '.join(sorted(_AMS_MODELS))}")
+            error_str = (f"[{config.get_name()}] ams_model: {self.ams_model!r} is not a "
+                         f"known model. Valid: {', '.join(sorted(_AMS_MODELS))}")
             raise config.error(error_str)
         _is_ht = self.ams_model in _HT_MODELS
         _spec = _AMS_MODELS[self.ams_model]
         _model_heater, self.dry_dev_addr, self.dry_ams_id, _dry_default_max = _spec
         self.has_heater = config.getboolean("heater", _model_heater)
-        # The drying id byte follows the bus address unless the type pins it,
-        # so UID pinning can update it on connect. Above chain index 3 this is
-        # untested.
+        # Above chain index 3 this is untested.
         self._dry_id_follows_index = self.dry_ams_id is None
-        # The AMS Lite is its own bus variant, and the only device on it.
         if self._is_lite():
             if self.variant == "ams":
-                error_str = (
-                    f"[{config.get_name()}] variant: ams is a boxed AMS's bus, "
-                    f"and ams_model: lite is an AMS Lite. Leave variant out.")
+                error_str = (f"[{config.get_name()}] variant: ams is a boxed AMS's bus, "
+                             f"and ams_model: lite is an AMS Lite. Leave variant out.")
                 raise config.error(error_str)
             self.variant = "lite"
         elif self.variant == "lite":
-            error_str = (
-                f"[{config.get_name()}] variant: lite is the AMS Lite's bus; "
-                f"set ams_model: lite for an AMS Lite.")
+            error_str = (f"[{config.get_name()}] variant: lite is the AMS Lite's bus; "
+                         f"set ams_model: lite for an AMS Lite.")
             raise config.error(error_str)
-        # How far an AMS Lite unload pulls past the toolhead sensor. Its spool
-        # holder is spring-loaded and takes back only a little, so the
-        # filament is never reeled home: it stops just clear of the sensor
-        # and the place the trays' tubes join. AMS Lite only.
-        self.unload_past_sensor = config.getfloat(
-            "unload_past_sensor", 30.0, minval=0.0)
+        # Its spring-loaded spool holder takes back only a little, so the filament stops just
+        # clear of the sensor and the place the trays' tubes join.
+        self.unload_past_sensor = config.getfloat("unload_past_sensor", 30.0, minval=0.0)
         if self._is_lite():
-            # How its trays reach the printer. combined: all of them through
-            # one splitter into one toolhead, past one shared sensor. direct
-            # waits on whether a tray the AMS Lite is not driving still turns
-            # freely when another toolhead pulls on it. AMS Lite only.
+            # combined: every tray through one splitter into one toolhead, past one sensor.
             self.mode = config.get("mode", LITE_MODE_COMBINED).lower().strip()
             if self.mode == LITE_MODE_DIRECT:
-                error_str = (
-                    f"[{config.get_name()}] mode: direct, one tray per "
-                    f"toolhead, is not supported on the AMS Lite yet. Use "
-                    f"mode: combined, its trays through one splitter into one "
-                    f"toolhead.")
+                error_str = (f"[{config.get_name()}] mode: direct, one tray per "
+                             f"toolhead, is not supported on the AMS Lite yet. Use "
+                             f"mode: combined, its trays through one splitter into one toolhead.")
                 raise config.error(error_str)
             if self.mode != LITE_MODE_COMBINED:
                 error_str = (f"[{config.get_name()}] invalid mode "
                              f"'{self.mode}'. Use '{LITE_MODE_COMBINED}'.")
                 raise config.error(error_str)
-            # Nothing to wait for at the sensor: the AMS Lite holds the tray
-            # with its motor released the moment the feed stops, as the A1
-            # leaves it for the extruder.
-            self.arrival_assist_delay_s = config.getfloat(
-                "arrival_assist_delay_s", 0.0, minval=0.0)
+            # The AMS Lite holds the tray with its motor released the moment the feed stops.
+            self.arrival_assist_delay_s = config.getfloat("arrival_assist_delay_s", 0.0, minval=0.0)
             self._check_lite_config(config)
-        # Real bay count: 1 for an HT, 4 for boxed units. Arrays stay
-        # SLOTS_PER_UNIT long, but everything user-visible is clamped to
-        # unit_slots.
+        # Arrays stay SLOTS_PER_UNIT long, but everything user-visible is clamped to unit_slots.
         self.unit_slots = 1 if self.ams_model in _HT_MODELS else SLOTS_PER_UNIT
-        # MC poll addressing (see _MC_ADDRESSING).
         _mc = _MC_ADDRESSING.get(self.ams_model, (0x0700, 0x00))
-        self.mc_dev_addr = config.getint("mc_dev_addr", _mc[0],
-                                         minval=0, maxval=0xFFFF)
-        self.mc_id_base = config.getint("mc_id_base", _mc[1],
-                                        minval=0, maxval=0xFF)
-        # Explicit override wins outright; -1 means derive it as
-        # mc_id_base | mc_id_for_index(ams_index).
+        self.mc_dev_addr = config.getint("mc_dev_addr", _mc[0], minval=0, maxval=0xFFFF)
+        self.mc_id_base = config.getint("mc_id_base", _mc[1], minval=0, maxval=0xFF)
+        # -1 derives it as mc_id_base
+        #  mc_id_for_index(ams_index).
         self.mc_ams_id = config.getint("mc_ams_id", -1, minval=-1, maxval=0xFF)
         if self._dry_id_follows_index:
             self.dry_ams_id = mc_id_for_index(self.ams_index)
-        self.dry_max_temp = config.getint(
-            "dry_max_temp", _dry_default_max, minval=1, maxval=DRY_TEMP_HARD_MAX)
-        # One bus-powered dryer at a time. A second AMS 2 Pro heating off the
-        # bus wire collapses the supply and takes the whole bus down, and
-        # nothing on the wire refuses it (see _bus_supply_conflict).
+        self.dry_max_temp = config.getint("dry_max_temp", _dry_default_max, minval=1,
+                                          maxval=DRY_TEMP_HARD_MAX)
+        # A second AMS 2 Pro heating off the bus wire collapses the supply and takes the whole
+        # bus down (see _bus_supply_conflict).
         self.dry_bus_interlock = config.getboolean("dry_bus_interlock", True)
         self._following_lane: Optional[Any] = None
-        # True while unit_unload_lane / eject_lane reels filament back; the
-        # follower auto-arm stands down, since its assist-on cancels the
-        # retract.
+        # The follower auto-arm stands down while set: its assist-on cancels the retract.
         self._unload_in_progress = False
         self._load_in_progress = False
         # Lanes whose spool ran out (handle_runout): their next unload cannot
@@ -1713,9 +1537,7 @@ class afcBambuAMS(afcUnit):
         # because _ams_declared_fault consumes the sequence. Cleared at the
         # start of each load.
         self._declared_fault_text = None
-        # True while a drying cycle runs. The firmware holds the follower off
-        # while drying; mirroring it stops the keep-alive tick sending frames
-        # the firmware would drop.
+        # The firmware holds the follower off while drying, so the keep-alive tick stops too.
         self._drying: bool = False
         #: Last (dryrem, when) seen from the unit. A frozen countdown repeats,
         #: a live one ticks (see _dryrem_says_drying).
@@ -1725,9 +1547,7 @@ class afcBambuAMS(afcUnit):
         # wind-down lines do not revive the cycle. 0.0 at boot adopts a dry
         # already running.
         self._dry_adopt_after: float = 0.0
-        # Whether this cycle has ever reported chamber telemetry. Required
-        # before a silence can be read as "the cycle ended": a freshly started
-        # dry has not reported yet and must not be released as finished.
+        # A freshly started dry has not reported yet and must not be released as finished.
         self._dry_seen_live: bool = False
         self._follow_last_e: Optional[float] = None
         self._follow_timer = None
@@ -1738,178 +1558,111 @@ class afcBambuAMS(afcUnit):
         #: resolved; a pool spare waits for its claim.
         self._id_resolved = False
         self._announce_deferred = False
-        # When the hold started, and whether it was reported stuck: deferring
-        # is normal, never resolving is not.
         self._announce_defer_t0: float = 0.0
         self._announce_defer_warned: bool = False
         self._follow_last_log: float = 0.0
-        # Log buffer position and follower state while following (s between
-        # lines). Off by default: get_status shows them live. Logs only on
-        # change.
-        self.follow_debug_interval = config.getfloat(
-            "follow_debug_interval", 0.0, minval=0.0)
+        # Off by default: get_status shows them live.
+        self.follow_debug_interval = config.getfloat("follow_debug_interval", 0.0, minval=0.0)
         self._follow_last_dbg: Optional[tuple] = None
-        # Last status-apply failure text. Status frames arrive continuously, so
-        # a stuck fault would warn on every frame; only a changed message is
-        # logged.
+        # Only a changed message is logged, or a stuck fault would warn on every frame.
         self._status_err_last: Optional[str] = None
-        # Latched by AFC_BAMBU_FOLLOWER ENABLE=0 to hold the AMS out of mode:4;
-        # otherwise the auto-arm re-engages on the next tick. Cleared by
-        # ENABLE=1 or the next load.
+        # Set by AFC_BAMBU_FOLLOWER ENABLE=0 to keep the auto-arm off; cleared by ENABLE=1 or a load
         self._follow_manual_off: bool = False
-        # A lane that ran out whose leftover the follower is still pushing
-        # after its unload (_start_runout_drain), or None.
+        # A run-out lane whose leftover the follower still pushes after its unload, or None.
         self._runout_drain: Optional[Any] = None
-        # A lane still recorded at the toolhead whose bay ran out and whose
-        # hub now reads clear: the follow tick leaves it unfollowed
-        # (_check_runout_drain), or None.
+        # A run-out lane still at the toolhead whose hub reads clear; left unfollowed, or None.
         self._runout_cleared: Optional[Any] = None
-        #   follow_rearm_window : how long after real extrusion a dropped follower
-        #     is still re-armed. state:0 is the AMS's resting state after an assist,
-        #     so re-arming on state alone would loop and nudge the motor each time.
-        self.follow_rearm_window = config.getfloat(
-            "follow_rearm_window", 3.0, above=0.0)
+        # state:0 is the AMS's resting state after an assist, so the follower re-arms only this long
+        # after real extrusion, or it would loop and nudge the motor.
+        self.follow_rearm_window = config.getfloat("follow_rearm_window", 3.0, above=0.0)
         self._follow_last_demand: float = 0.0
-        # Latched when a stall pauses the print. Re-arming the follower against
-        # a jam just makes the AMS grind on filament it cannot move, so the
-        # auto-arm holds off until the print resumes (see _fault_hold_active).
+        # Set when a stall pauses the print: re-arming against a jam only grinds the filament.
         self._follow_fault_hold: bool = False
         self._follow_fault_saw_pause: bool = False
-        # Latched when a link loss paused the print, so the detector fires once
-        # per outage rather than every follower tick.
+        # So a link loss pauses once per outage, not every tick.
         self._link_loss_paused: bool = False
         self._slot_map: Dict[str, int] = {}
         self._bridge: Optional[BambuBridge] = None
         self._slots: List[dict] = [{} for _ in range(self.SLOTS_PER_UNIT)]
         self._prev_present: List[bool] = [False] * self.SLOTS_PER_UNIT
         self._auto_scanned: List[bool] = [False] * self.SLOTS_PER_UNIT
-        # Built here as well as in _handle_disconnect, so the first connection
-        # after a boot has them too: a held scan is replayed and a live claim
-        # re-arms its untagged bays.
+        # Also built in _handle_disconnect; here so the first connection after boot has them too.
         self._untagged_rearmed: List[bool] = [False] * self.SLOTS_PER_UNIT
         self._scan_defer: List[bool] = [False] * self.SLOTS_PER_UNIT
-        # When this slot's scan was commanded; this is the hold. While set,
-        # nothing from the bay reaches the lane (it still shows the previous
-        # spool). _scan_verdict turns it and the narration into the answer.
+        # When this slot's scan was commanded; while set, the lane keeps showing the previous spool.
         self._scan_t0: List[Optional[float]] = [None] * self.SLOTS_PER_UNIT
-        # Latch: the scan finished with no tag. Stops defaults being re-applied
-        # every frame; cleared by a removal or a new scan.
+        # The scan ended with no tag; stops defaults being re-applied every frame.
         self._scan_notag: List[bool] = [False] * self.SLOTS_PER_UNIT
-        # Bays whose lane AFC already owns (occupied, restored with a profile
-        # or Spoolman link at PREP). Left alone until removal or a scan
-        # answers.
+        # Bays whose lane AFC already owns at PREP; left alone until removal or a scan answers.
         self._afc_owned: set = set()
-        # Has PREP walked this unit's lanes yet? The bridge polls well before
-        # prep restores the var file, so the status path holds its filament
-        # half until prep has run. Presence and lane status still mirror through.
+        # The bridge polls before PREP restores the var file, so filament data waits for PREP.
         self._prep_seen: bool = False
-        # Separate from _scan_t0: when the scan's physical motion began.
-        # _scan_t0 is cleared on read success; this one is not.
-        self._scan_motion_t0: List[Optional[float]] = (
-            [None] * self.SLOTS_PER_UNIT)
-        # False until the startup presence baseline is recorded, so spools
-        # already inserted at boot don't fire a scan (see _maybe_auto_scan).
+        # When the scan's motion began; unlike _scan_t0, kept after a read.
+        self._scan_motion_t0: List[Optional[float]] = ([None] * self.SLOTS_PER_UNIT)
+        # Set once the boot presence baseline is taken, so spools in at boot don't scan.
         self._scan_primed: bool = False
-        # Whether the bridge on this connection has answered a presence poll
-        # from this unit yet (see _presence_known), and whether scan priming
-        # came due before it had and is waiting for it.
+        # Presence answered on this connection, and priming waiting for it.
         self._presence_ok: bool = False
         self._presence_wait_said: bool = False
         self._prime_waiting: bool = False
         self._reread_wait_t0: Optional[float] = None
-        # Bays given defaults on this connection, or whose held record is only
-        # defaults: a tag arriving later is a read, not restored state
-        # (_boot_hold).
+        # Bays given defaults on this connection: a later tag is a read, not restored state.
         self._defaulted_bays: set = set()
-        # Bays whose lane kept its held record at scan priming with no tag
-        # read yet: the first tag the unit reports there is checked against
-        # the record (_settle_restored_bay).
+        # Bays that kept their held record at priming; the first tag there is checked against it.
         self._restored_bays: set = set()
-        # The lane records a master handed with a claim (hold_lanes), applied
-        # at the claim, checked at scan priming, then emptied. None without a
-        # master.
+        # Lane records a master handed over with a claim; None without a master.
         self._held_lanes: Optional[Dict[str, Dict[str, Any]]] = None
-        # Set by frames from a bridge that had not polled the unit, or by a
-        # reconnect: the next answered frame re-checks open scans and presence.
+        # A bridge that had not polled this unit, or a reconnect: re-check scans and presence.
         self._booted_under_us: bool = False
         self._scans_to_check: bool = False
         self._seed_present_seen: bool = False
-        # Bays a scan has run on this connection. Until then the unit's cached
-        # tag record is the one the lane was saved from (see
-        # _surface_slot_info).
+        # Until a bay scans on this connection, its cached tag is the one the lane was saved from.
         self._scanned_bays: set = set()
-        # Bays whose Spoolman lookup has gone out on this connection. Created
-        # here: a missing latch reads as "no bind coming", which would let a
-        # bind load Spoolman's stored weight over a fresh measurement.
+        # Bays whose Spoolman lookup went out; without it a bind could overwrite a fresh weight.
         self._spoolman_latched: set = set()
-        # Bays seen occupied on this connection, and those whose removal it
-        # then saw; a mid-print insert into one waits on defaults for its read.
-        # A rebooted bridge reports every bay empty at first, which is not a
-        # removal seen here.
+        # Bays seen occupied, and those seen removed, on this connection. A rebooted bridge
+        # reports every bay empty at first, which is not a removal.
         self._present_seen: set = set()
         self._removed_bays: set = set()
         self._defaults_due: dict = {}
-        # Of those, bays whose insert line already said how to have the spool
-        # read (the scan held for a lane at the toolhead).
+        # Bays whose insert line already said how to have the spool read.
         self._defaults_quiet: set = set()
-        # Bays whose lane such a removal cleared. Nothing on the lane is
-        # restored state, so the boot hold does not keep the next read off it.
-        # Survives a link drop.
+        # Bays whose lane such a removal cleared, so the boot hold does not block the next read.
         self._cleared_bays: set = set()
-        # slot -> (meas_seq, meas_pct) the bay carried when its spool came out.
-        # A presence flap hands it back on re-insert as the departed spool's,
-        # not a new measurement (see _sync_lanes).
+        # slot -> (meas_seq, meas_pct) at removal, handed back if the spool flaps back in.
         self._meas_departed: dict = {}
-        # _lookup_unbound's state: slot -> when an unanswered lookup may retry,
-        # and slot -> (uid, spool id) for a match not bound for lack of weight.
-        # Kept as long as the latch (_handle_disconnect), not the link.
+        # slot -> retry time of an unanswered lookup; slot -> (uid, spool id) held for lack of grams
         self._lookup_retry: dict = {}
         self._lookup_refused: dict = {}
-        # Bays whose measurement stamp has been looked at on this connection.
-        # The first look only records the stamp: a measurement already in the
-        # firmware predates the connection (see _baseline_meas_stamp).
+        # Bays whose measurement stamp was looked at; the first look only records it.
         self._stamp_looked: set = set()
-        # Bays whose _meas_seen entry came from that first look, not an apply,
-        # so _sync_lanes may not treat a repeat as nothing new. Kept with
-        # _meas_seen.
+        # Bays whose _meas_seen came from that first look, not an apply.
         self._meas_baselined: set = set()
-        # PREP renders these after testing each lane; set early so they always
-        # exist no matter which handler runs first.
         self.logo = self._make_logo(error=False)
         self.logo_error = self._make_logo(error=True)
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
-        self.printer.register_event_handler("klippy:disconnect",
-                                            self._handle_disconnect)
-        # Expose the AMS buffer as a 'bambu_buffer' ADC pin (adc_pin:
-        # bambu_buffer:fps). Best-effort, since a buffer is optional. A second
-        # bus names its own chip.
-        self.buffer_chip_name = config.get("buffer_chip_name",
-                                           _BUFFER_CHIP_NAME)
+        self.printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
+        # A buffer is optional, so the 'bambu_buffer' ADC pin is best-effort; each bus names a chip.
+        self.buffer_chip_name = config.get("buffer_chip_name", _BUFFER_CHIP_NAME)
         try:
             _register_bambu_buffer_chip(self)
         except Exception as e:
             self.logger.warning(f"AFC bambu {self.name}: buffer pin unavailable: {e}")
-        # User-facing commands, mux'd by UNIT= (matches AFC_ACE).
         self.gcode = self.printer.lookup_object('gcode')
         self._register_gcode_commands()
 
-        # Register the temperature_bambu sensor factory, so humidity and
-        # chamber temperature show on the Mainsail/Fluidd card like OpenAMS and
-        # ACE.
+        # Humidity and chamber temperature on the Mainsail/Fluidd card.
         try:
             from extras.temperature_bambu import TemperatureBambu
             from extras.temperature_afc import register_on_heaters
             pheaters = self.printer.load_object(config, "heaters")
             pheaters.add_sensor_factory("temperature_bambu", TemperatureBambu)
-            # Fluidd shows humidity only for sensor types it knows. The shared
-            # aht2x type sends a section with bambu_unit to TemperatureBambu.
+            # Fluidd shows humidity only for sensor types it knows.
             register_on_heaters(pheaters)
         except Exception as e:
-            self.logger.warning(
-                f"AFC_BambuAMS: temperature_bambu factory not registered ({e}); "
-                "use a [temperature_bambu <name>] section instead")
-    # ── lifecycle ──
-
+            self.logger.warning(f"AFC_BambuAMS: temperature_bambu factory not registered ({e}); "
+                                "use a [temperature_bambu <name>] section instead")
+    # Lifecycle
 
     def _register_gcode_commands(self) -> None:
         """
@@ -1972,9 +1725,7 @@ class afcBambuAMS(afcUnit):
             "AFC_BAMBU_AUTOSCAN", "UNIT", self.name, self.cmd_AFC_BAMBU_AUTOSCAN,
             desc="Turn this unit's insert-edge tag scan on/off at runtime. "
                  "AFC_BAMBU_AUTOSCAN UNIT=<unit> ON=<0|1>")
-        # Registered once per printer with no UNIT: a fault is printer-wide and
-        # the command finds the unit holding it. Not guarded by a module flag,
-        # which would survive a RESTART and leave the new printer without it.
+        # Printer-wide, without UNIT. No module flag: it would survive a RESTART.
         try:
             self.gcode.register_command(
                 "AFC_BAMBU_FAULT_RELOAD", self.cmd_AFC_BAMBU_FAULT_RELOAD,
@@ -1984,7 +1735,7 @@ class afcBambuAMS(afcUnit):
                      "when nothing is wrong: it returns silently. "
                      "AFC_BAMBU_FAULT_RELOAD")
         except Exception:
-            pass        # another [AFC_BambuAMS] on this printer registered it
+            pass
         self.gcode.register_mux_command(
             "AFC_BAMBU_CLEARFAULT", "UNIT", self.name, self.cmd_AFC_BAMBU_CLEARFAULT,
             desc="Stream the printer's 0E clear at a parked unit for ~2s, then "
@@ -1997,7 +1748,7 @@ class afcBambuAMS(afcUnit):
                      "on one unit or lane's unit: BAMBU_CLEAR [UNIT=<unit>] "
                      "[LANE=<lane>]")
         except Exception:
-            pass        # another [AFC_BambuAMS] on this printer registered it
+            pass
         _register_lane_command(
             self, "AFC_BAMBU_REID", self.cmd_AFC_BAMBU_REID,
             desc="Send the printer menu's 're-identify' to one bay and nothing "
@@ -2017,22 +1768,19 @@ class afcBambuAMS(afcUnit):
             "AFC_BAMBU_BUFFER_PROBE", "UNIT", self.name, self.cmd_AFC_BAMBU_BUFFER_PROBE,
             desc="Dump the raw AMS motion reply + buffer decode state. "
                  "AFC_BAMBU_BUFFER_PROBE UNIT=<unit>")
-        # Registered directly: a [gcode_macro Bambu_Heater_Start] would
-        # collide, since Klipper upper-cases macro names.
+        # Not a gcode_macro: Klipper upper-cases macro names, so Bambu_Heater_Start would collide.
         self.gcode.register_mux_command(
             "AFC_BAMBU_HEATER_START", "UNIT", self.name, self.cmd_AFC_BAMBU_HEATER_START,
             desc="Start AMS drying (AMS2 Pro / AMS HT). "
                  "AFC_BAMBU_HEATER_START UNIT=<unit> [TEMP=55] [TIME=480] [ROTATE=0]")
-        self.gcode.register_mux_command(
-            "AFC_BAMBU_HEATER_STOP", "UNIT", self.name, self.cmd_AFC_BAMBU_HEATER_STOP,
-            desc="Stop AMS drying. AFC_BAMBU_HEATER_STOP UNIT=<unit>")
+        self.gcode.register_mux_command("AFC_BAMBU_HEATER_STOP", "UNIT", self.name,
+                                        self.cmd_AFC_BAMBU_HEATER_STOP,
+                                        desc="Stop AMS drying. AFC_BAMBU_HEATER_STOP UNIT=<unit>")
         self.gcode.register_mux_command(
             "AFC_BAMBU_SNIFF", "UNIT", self.name, self.cmd_AFC_BAMBU_SNIFF,
             desc="Put this unit's bridge into passive listen-only mode, or back. "
                  "AFC_BAMBU_SNIFF UNIT=<unit> ON=<0 or 1>")
-        # Bus-wide UID list (not per-unit). Reads the UIDs straight off the wire
-        # so you can copy them into each unit's `unit_uid`. Registered once;
-        # guarded because every daisy-chained unit runs this init.
+        # Bus-wide UID list, read off the wire for each unit's `unit_uid`; all chained units run it.
         try:
             self.gcode.register_command(
                 "AFC_BAMBU_UIDS", self.cmd_AFC_BAMBU_UIDS,
@@ -2040,9 +1788,8 @@ class afcBambuAMS(afcUnit):
                      "each holds) so you can pin units via unit_uid. "
                      "AFC_BAMBU_UIDS [CHAIN=<chain>]")
         except Exception:
-            pass        # another [AFC_BambuAMS] on this bus already registered it
-    def _gcmd_lane_slot(self, cmd: str, gcmd: Any,
-                        lane_name: Optional[str]) -> Tuple[Any, int]:
+            pass
+    def _gcmd_lane_slot(self, cmd: str, gcmd: Any, lane_name: Optional[str]) -> Tuple[Any, int]:
         """
         Resolve a lane command's LANE to this unit's lane and AMS slot.
 
@@ -2056,9 +1803,8 @@ class afcBambuAMS(afcUnit):
         """
         lane = (getattr(self, "lanes", None) or {}).get(lane_name)
         if lane is None:
-            error_str = (
-                f"{cmd}: lane '{lane_name}' not on unit {self.name} "
-                f"(lanes: {', '.join(getattr(self, 'lanes', None) or {}) or 'none'})")
+            error_str = (f"{cmd}: lane '{lane_name}' not on unit {self.name} "
+                         f"(lanes: {', '.join(getattr(self, 'lanes', None) or {}) or 'none'})")
             raise gcmd.error(error_str)
         if self._bridge is None:
             error_str = f"{cmd}: bridge not connected for {self.name}"
@@ -2092,9 +1838,8 @@ class afcBambuAMS(afcUnit):
         lane_name = gcmd.get("LANE")
         lane, slot = self._gcmd_lane_slot("AFC_BAMBU_PRIME", gcmd, lane_name)
         self._bridge.send({"cmd": "prime", "unit": self.ams_index, "slot": slot})
-        gcmd.respond_info(
-            f"AFC_BAMBU_PRIME: sent feeder-only prime (~2s, reader dormant) to "
-            f"{lane_name} (slot {slot}) on {self.name}")
+        gcmd.respond_info(f"AFC_BAMBU_PRIME: sent feeder-only prime (~2s, reader dormant) to "
+                          f"{lane_name} (slot {slot}) on {self.name}")
 
     def cmd_AFC_BAMBU_FOLLOWER(self, gcmd: Any) -> None:
         """
@@ -2123,25 +1868,20 @@ class afcBambuAMS(afcUnit):
         if enable:
             self._follow_manual_off = False
             self._follow_fault_hold = False
-            self._auto_recover_armed = False   # re-arm auto recovery
+            self._auto_recover_armed = False
             self._follow_fault_saw_pause = False
             self._engage_follower(lane)
-            gcmd.respond_info(
-                f"AFC_BAMBU_FOLLOWER: engaged follower (mode:4) for {lane_name} on "
-                f"{self.name}; LED should flash. If it stays solid, the tray did "
-                f"not reach mode:4.")
+            gcmd.respond_info(f"AFC_BAMBU_FOLLOWER: engaged follower (mode:4) for {lane_name} on "
+                              f"{self.name}; LED should flash. If it stays solid, the tray did "
+                              f"not reach mode:4.")
         else:
-            # Latch it off, or the auto-arm re-engages on the next tick and the
-            # stop appears to do nothing.
+            # Latched, or the auto-arm re-engages on the next tick.
             self._follow_manual_off = True
-            afcBambuAMS._end_runout_drain(self, "AFC_BAMBU_FOLLOWER ENABLE=0",
-                                          drop=False)
+            afcBambuAMS._end_runout_drain(self, "AFC_BAMBU_FOLLOWER ENABLE=0", drop=False)
             self.set_feed_assist(lane, False)
-            gcmd.respond_info(
-                f"AFC_BAMBU_FOLLOWER: stopped follower for {lane_name} on "
-                f"{self.name}; LED should go solid. Stays off until "
-                f"AFC_BAMBU_FOLLOWER LANE={lane_name} ENABLE=1 or the next "
-                f"load.")
+            gcmd.respond_info(f"AFC_BAMBU_FOLLOWER: stopped follower for {lane_name} on "
+                              f"{self.name}; LED should go solid. Stays off until "
+                              f"AFC_BAMBU_FOLLOWER LANE={lane_name} ENABLE=1 or the next load.")
 
     def cmd_AFC_BAMBU_BITE(self, gcmd: Any) -> None:
         """
@@ -2207,10 +1947,9 @@ class afcBambuAMS(afcUnit):
         if delay is not None:
             self.arrival_assist_delay_s = delay
         note = "" if delay is None else "  (runtime only)"
-        gcmd.respond_info(
-            f"AFC_BAMBU_ARRIVAL {self.name}: "
-            f"assist-delay={self.arrival_assist_delay_s:.2f}s "
-            f"(the printer waits ~4s){note}")
+        gcmd.respond_info(f"AFC_BAMBU_ARRIVAL {self.name}: "
+                          f"assist-delay={self.arrival_assist_delay_s:.2f}s "
+                          f"(the printer waits ~4s){note}")
 
     def cmd_AFC_BAMBU_RECOVER(self, gcmd: Any) -> None:
         """
@@ -2238,13 +1977,11 @@ class afcBambuAMS(afcUnit):
         """
         lane_name = gcmd.get("LANE")
         lane, _slot = self._gcmd_lane_slot("AFC_BAMBU_RECOVER", gcmd, lane_name)
-        gcmd.respond_info(
-            f"AFC_BAMBU_RECOVER: stopping and reeling {lane_name} back to the bay...")
+        gcmd.respond_info(f"AFC_BAMBU_RECOVER: stopping and reeling {lane_name} back to the bay...")
         self._recover_to_bay(lane)
-        gcmd.respond_info(
-            f"AFC_BAMBU_RECOVER: {lane_name} reset. If a load still stalls the "
-            f"feeder, the bay filament tip is jammed -- open the AMS, trim the "
-            f"tip, and reinsert.")
+        gcmd.respond_info(f"AFC_BAMBU_RECOVER: {lane_name} reset. If a load still stalls the "
+                          f"feeder, the bay filament tip is jammed -- open the AMS, trim the "
+                          f"tip, and reinsert.")
 
     def cmd_AFC_BAMBU_SAVEIDS(self, gcmd: Any) -> None:
         """
@@ -2281,9 +2018,8 @@ class afcBambuAMS(afcUnit):
         do_reset = gcmd.get_int("RESET", 1) != 0
         do_restart = gcmd.get_int("RESTART", 1) != 0
         do_wipe = gcmd.get_int("WIPE", 0) != 0
-        # Not while printing: this drops the bus and restarts the host.
-        _refuse_while_printing(self.printer, self.afc.reactor, gcmd,
-                               "AFC_BAMBU_SAVEIDS")
+        # This drops the bus and restarts the host.
+        _refuse_while_printing(self.printer, self.afc.reactor, gcmd, "AFC_BAMBU_SAVEIDS")
         bridge = self._bridge
         if bridge is None:
             error_str = "AFC_BAMBU_SAVEIDS: bridge not connected"
@@ -2294,14 +2030,11 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
         if do_wipe:
-            # Erase instead of store: the next power-up enrols from announce
-            # order. For a chain whose units were swapped, or to exercise the
-            # write path.
+            # Erase: the next power-up enrolls from announce order.
             bridge.send({"cmd": "idwipe"})
         else:
-            self._send_bindings(bridge)      # binds + the idsave that follows
-        # Wait for the firmware's answer. reactor.pause yields, so this does
-        # not hold the reactor (as the UID resolve at ready does).
+            self._send_bindings(bridge)
+        # reactor.pause yields, so the wait does not hold the reactor.
         reactor = self.afc.reactor
         end = reactor.monotonic() + 5.0
         got = None
@@ -2329,23 +2062,20 @@ class afcBambuAMS(afcUnit):
             + {"written": "stored", "wiped": "ERASED"}.get(state,
                                                            "already stored"))
         if not do_reset:
-            self.gcode.respond_info(
-                "AFC_BAMBU_SAVEIDS: RESET=0 -- they take effect at the next "
-                "power-up.")
+            self.gcode.respond_info("AFC_BAMBU_SAVEIDS: RESET=0 -- they take effect at the next "
+                                    "power-up.")
             return
         try:
-            bridge.send({"cmd": "reset"})    # reboot into the same firmware
+            bridge.send({"cmd": "reset"})
         except Exception as e:
             error_str = f"AFC_BAMBU_SAVEIDS: reset failed: {e}"
             raise gcmd.error(error_str)
         if not do_restart:
-            self.gcode.respond_info(
-                "AFC_BAMBU_SAVEIDS: Pico rebooting; RESTART=0, so the bridge "
-                "stays offline until you restart Klipper.")
+            self.gcode.respond_info("AFC_BAMBU_SAVEIDS: Pico rebooting; RESTART=0, so the bridge "
+                                    "stays offline until you restart Klipper.")
             return
-        self.gcode.respond_info(
-            "AFC_BAMBU_SAVEIDS: Pico rebooting onto the stored identities; "
-            "restarting Klipper onto the result.")
+        self.gcode.respond_info("AFC_BAMBU_SAVEIDS: Pico rebooting onto the stored identities; "
+                                "restarting Klipper onto the result.")
         self.gcode.run_script_from_command("FIRMWARE_RESTART")
 
     def _resolve_uf2(self, name: str) -> str:
@@ -2373,8 +2103,7 @@ class afcBambuAMS(afcUnit):
             return name
         cfg_dir = ""
         try:
-            cfg_dir = os.path.dirname(
-                self.printer.get_start_args().get("config_file", "") or "")
+            cfg_dir = os.path.dirname(self.printer.get_start_args().get("config_file", "") or "")
         except Exception:
             cfg_dir = ""
         if not cfg_dir:
@@ -2385,8 +2114,7 @@ class afcBambuAMS(afcUnit):
             raise ValueError(error_str)
         return full
 
-    def _wait_fw(self, bridge: Any, want: tuple, timeout: float,
-                 skip: tuple = ()) -> tuple:
+    def _wait_fw(self, bridge: Any, want: tuple, timeout: float, skip: tuple = ()) -> tuple:
         """
         Wait for the bridge's next {"evt":"fw"} line.
 
@@ -2404,20 +2132,19 @@ class afcBambuAMS(afcUnit):
         while reactor.monotonic() < end:
             with bridge._lock:
                 got = bridge._last_fw
-            if got is not None and got[0]:
+            if (got is not None
+                and got[0]):
                 if got[0] in skip:
                     with bridge._lock:
                         if bridge._last_fw == got:
-                            bridge._last_fw = None      # consume, keep waiting
+                            bridge._last_fw = None
                     reactor.pause(reactor.monotonic() + 0.02)
                     continue
                 if got[0] in want:
                     return got
-                return got                       # a real answer, just not ours
+                return got
             reactor.pause(reactor.monotonic() + 0.02)
         return ("", "no answer")
-
-
 
     def cmd_AFC_BAMBU_FLASH(self, gcmd: Any) -> None:
         """
@@ -2460,14 +2187,11 @@ class afcBambuAMS(afcUnit):
                 error_str = "AFC_BAMBU_FLASH: bridge not connected"
                 raise gcmd.error(error_str)
             bridge.send({"cmd": "fwabort"})
-            gcmd.respond_info(
-                "AFC_BAMBU_FLASH: sent fwabort; any staged transfer is dropped")
+            gcmd.respond_info("AFC_BAMBU_FLASH: sent fwabort; any staged transfer is dropped")
             return
 
-        # Not while printing: the write stops the bus for a second or two and
-        # then reboots the master.
-        _refuse_while_printing(self.printer, self.afc.reactor, gcmd,
-                               "AFC_BAMBU_FLASH")
+        # The write stops the bus for a second or two, then reboots the master.
+        _refuse_while_printing(self.printer, self.afc.reactor, gcmd, "AFC_BAMBU_FLASH")
 
         bridge = self._bridge
         if bridge is None:
@@ -2478,37 +2202,33 @@ class afcBambuAMS(afcUnit):
             path = self._resolve_uf2(name)
             with open(path, "rb") as fh:
                 blob = fh.read()
-            # Images are sent as plain UF2 (Pico) or the app .bin (S3); the
-            # signed manifest below is what gates an update.
+            # UF2 (Pico) or app .bin (S3); the signed manifest gates the update.
             img, img_chip = firmware_image(blob)
         except (OSError, ValueError) as e:
             error_str = f"AFC_BAMBU_FLASH: {e}"
             raise gcmd.error(error_str)
 
-        # A wrong-chip image bricks the board, and RP2040 and RP2350 bridges
-        # both exist, so check the image against the chip the bridge reports.
+        # RP2040 and RP2350 bridges both exist, and a wrong-chip image bricks the board.
         bridge_chip = None
         try:
             bridge_chip = bridge.chip()
         except AttributeError:
             bridge_chip = None
-        if img_chip and bridge_chip and img_chip != bridge_chip:
-            error_str = (f"AFC_BAMBU_FLASH: image is for {img_chip}, the "
-                         f"bridge is {bridge_chip}")
+        if (img_chip
+            and bridge_chip
+            and img_chip != bridge_chip):
+            error_str = f"AFC_BAMBU_FLASH: image is for {img_chip}, the bridge is {bridge_chip}"
             raise gcmd.error(error_str)
-        if img_chip and not bridge_chip:
-            self.gcode.respond_info(
-                f"AFC_BAMBU_FLASH: bridge does not report its chip (older "
-                f"firmware); sending a {img_chip} image unchecked")
+        if (img_chip
+            and not bridge_chip):
+            self.gcode.respond_info(f"AFC_BAMBU_FLASH: bridge does not report its chip (older "
+                                    f"firmware); sending a {img_chip} image unchecked")
 
         crc = zlib.crc32(img) & 0xFFFFFFFF
-        self.gcode.respond_info(
-            f"AFC_BAMBU_FLASH: {os.path.basename(path)} -> {len(img)} bytes, "
-            f"crc 0x{crc:08X}")
+        self.gcode.respond_info(f"AFC_BAMBU_FLASH: {os.path.basename(path)} -> {len(img)} bytes, "
+                                f"crc 0x{crc:08X}")
 
-        # Signed update: the release's .manifest.json goes ahead of the
-        # transfer, so the bridge refuses fwapply for an unsigned image. A
-        # missing manifest is reported up front.
+        # The manifest goes first so the bridge refuses fwapply for an unsigned image.
         man = None
         man_path = path + ".manifest.json"
         try:
@@ -2516,35 +2236,28 @@ class afcBambuAMS(afcUnit):
                 man = json.load(fh)
         except (OSError, ValueError):
             man = None
-        if man and man.get("format") in ("BBFW1", "BBFW2"):
+        if (man
+            and man.get("format") in ("BBFW1", "BBFW2")):
             with bridge._lock:
                 bridge._last_fw = None
             bridge.send({"cmd": "fwsha", "hex": man["sha512"]})
-            # Relay flags only when the manifest carries them; the host
-            # passes the manifest through unchanged.
-            sig_cmd = {"cmd": "fwsig", "ver": int(man["ver"]),
-                       "hex": man["sig"]}
+            sig_cmd = {"cmd": "fwsig", "ver": int(man["ver"]), "hex": man["sig"]}
             if man.get("flags"):
                 sig_cmd["flags"] = int(man["flags"])
             bridge.send(sig_cmd)
-            # Consume the manifest's sha_ok/sig_ok here, so the fwbegin wait
-            # does not read a stale sig_ok as "would not start".
+            # Consumed here so the fwbegin wait does not read a stale sig_ok.
             got = self._wait_fw(bridge, ("sig_ok",), 5.0, skip=("sha_ok",))
             if got[0] != "sig_ok":
                 error_str = (f"AFC_BAMBU_FLASH: the bridge rejected the "
                              f"manifest ({got[0] or 'silence'}: {got[1]})")
                 raise gcmd.error(error_str)
-            self.gcode.respond_info(
-                f"AFC_BAMBU_FLASH: signed manifest v{man['ver']} accepted")
+            self.gcode.respond_info(f"AFC_BAMBU_FLASH: signed manifest v{man['ver']} accepted")
         else:
-            self.gcode.respond_info(
-                "AFC_BAMBU_FLASH: no .manifest.json beside the image -- a "
-                "signed-update bridge (>= AFC-1.20) will refuse APPLY. Use "
-                "the published image together with its .manifest.json")
+            self.gcode.respond_info("AFC_BAMBU_FLASH: no .manifest.json beside the image -- a "
+                                    "signed-update bridge (>= AFC-1.20) will refuse APPLY. Use "
+                                    "the published image together with its .manifest.json")
 
-        # The port is exclusive from here: the reactor keeps running, and any
-        # send during the transfer would land inside the image. Released in the
-        # finally.
+        # The port is exclusive until the finally: any other send would land inside the image.
         reactor = self.afc.reactor
         bridge._fw_raw = True
         try:
@@ -2557,16 +2270,14 @@ class afcBambuAMS(afcUnit):
                              f"({got[0] or 'silence'}: {got[1]}); nothing was changed")
                 raise gcmd.error(error_str)
 
-            # Paced so the reactor keeps running: a g-code that blocks for the
-            # whole transfer would stall every other timer in Klipper with it.
+            # Paced so the reactor keeps running.
             with bridge._lock:
                 bridge._last_fw = None
             chunk = 1024
             for i in range(0, len(img), chunk):
                 if not bridge.write_raw(img[i:i + chunk]):
                     error_str = ("AFC_BAMBU_FLASH: the link died mid-transfer; the "
-                                 "bridge discards a partial image, so nothing was "
-                                 "changed")
+                                 "bridge discards a partial image, so nothing was changed")
                     raise gcmd.error(error_str)
                 reactor.pause(reactor.monotonic() + 0.002)
 
@@ -2580,35 +2291,31 @@ class afcBambuAMS(afcUnit):
 
         if not do_apply:
             bridge.send({"cmd": "fwabort"})
-            self.gcode.respond_info(
-                "AFC_BAMBU_FLASH: APPLY=0 -- the image transferred and "
-                "verified, and was then discarded. The bridge is still "
-                "running what it was running.")
+            self.gcode.respond_info("AFC_BAMBU_FLASH: APPLY=0 -- the image transferred and "
+                                    "verified, and was then discarded. The bridge is still "
+                                    "running what it was running.")
             return
 
         with bridge._lock:
             bridge._last_fw = None
         bridge.send({"cmd": "fwapply"})
         got = self._wait_fw(bridge, ("applying",), 5.0)
-        # Silence is normal after a successful apply: the board reboots from
-        # the flash it is rewriting. A refusal answers with a state and errors
-        # below; no answer is reported as unconfirmed.
-        if got[0] and got[0] != "applying":
+        # Silence is normal after an apply, since the board reboots; a refusal answers with a state.
+        if (got[0]
+            and got[0] != "applying"):
             error_str = (f"AFC_BAMBU_FLASH: the bridge refused the image "
                          f"({got[0]}: {got[1]}); nothing was changed")
             raise gcmd.error(error_str)
         if not got[0]:
-            self.gcode.respond_info(
-                "AFC_BAMBU_FLASH: apply sent; the bridge stopped answering "
-                "without confirming. That is the NORMAL outcome -- it reboots "
-                "into the new image before its reply can land. NOT confirmed "
-                "either way here: check the firmware line once the link is "
-                "back (AFC_BAMBU_UIDS, or the info REPLY in the log).")
+            self.gcode.respond_info("AFC_BAMBU_FLASH: apply sent; the bridge stopped answering "
+                                    "without confirming. That is the NORMAL outcome -- it reboots "
+                                    "into the new image before its reply can land. NOT confirmed "
+                                    "either way here: check the firmware line once the link is "
+                                    "back (AFC_BAMBU_UIDS, or the info REPLY in the log).")
             return
-        self.gcode.respond_info(
-            "AFC_BAMBU_FLASH: the bridge is writing its own flash and will "
-            "reboot. The link drops for a few seconds; AFC_BAMBU_UIDS shows "
-            "the new build once it is back.")
+        self.gcode.respond_info("AFC_BAMBU_FLASH: the bridge is writing its own flash and will "
+                                "reboot. The link drops for a few seconds; AFC_BAMBU_UIDS shows "
+                                "the new build once it is back.")
 
     def cmd_AFC_BAMBU_RELINK(self, gcmd: Any) -> None:
         """
@@ -2633,8 +2340,7 @@ class afcBambuAMS(afcUnit):
             msg = f"AFC_BAMBU_RELINK: bridge not connected for {self.name}"
             raise gcmd.error(msg)
         self.relink()
-        gcmd.respond_info(
-            f"AFC_BAMBU_RELINK: sent AMS relink/reset for {self.name}.")
+        gcmd.respond_info(f"AFC_BAMBU_RELINK: sent AMS relink/reset for {self.name}.")
 
     def cmd_AFC_BAMBU_FEED(self, gcmd: Any) -> None:
         """
@@ -2664,9 +2370,8 @@ class afcBambuAMS(afcUnit):
         speed = gcmd.get_float("SPEED", 0.0, minval=0.0)
         lane, _slot = self._gcmd_lane_slot("AFC_BAMBU_FEED", gcmd, lane_name)
         ok = self.feed(lane, mm, speed if speed > 0 else None)
-        gcmd.respond_info(
-            f"AFC_BAMBU_FEED: {'issued' if ok else 'FAILED to issue'} {mm:.0f}mm on "
-            f"{lane_name} ({self.name}).")
+        gcmd.respond_info(f"AFC_BAMBU_FEED: {'issued' if ok else 'FAILED to issue'} {mm:.0f}mm on "
+                          f"{lane_name} ({self.name}).")
 
     def cmd_AFC_BAMBU_AUTOSCAN(self, gcmd: Any) -> None:
         """
@@ -2693,14 +2398,8 @@ class afcBambuAMS(afcUnit):
         """
         on = gcmd.get_int("ON", 1, minval=0, maxval=1)
         self.auto_scan = bool(on)
-        gcmd.respond_info(
-            f"AFC_BAMBU_AUTOSCAN: {self.name} insert-edge scan "
-            f"{'ON' if on else 'OFF -- the AMS is left to run its own sequence'}")
-
-
-
-
-
+        gcmd.respond_info(f"AFC_BAMBU_AUTOSCAN: {self.name} insert-edge scan "
+                          f"{'ON' if on else 'OFF -- the AMS is left to run its own sequence'}")
 
     def cmd_AFC_BAMBU_FAULT_RELOAD(self, gcmd: Any) -> None:
         """
@@ -2742,12 +2441,11 @@ class afcBambuAMS(afcUnit):
                 return
             self._reload_before_resume(gcmd)
         except self.printer.command_error:
-            raise                   # refused on purpose; the message says why
+            raise
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: reload-after-fault check failed "
-                f"({e}); resuming anyway. If the toolhead is empty, pause and "
-                f"load the lane by hand.")
+            self.logger.warning(f"AFC bambu {self.name}: reload-after-fault check failed "
+                                f"({e}); resuming anyway. If the toolhead is empty, pause and "
+                                f"load the lane by hand.")
 
     def _retry_failed_load(self, gcmd: Any) -> bool:
         """
@@ -2770,11 +2468,10 @@ class afcBambuAMS(afcUnit):
             lane = getattr(unit, "_failed_load_lane", None)
             if lane is None:
                 continue
-            unit._failed_load_lane = None        # a new failure sets it again
+            unit._failed_load_lane = None
             if getattr(lane, "tool_loaded", False):
-                return True                      # loaded since; nothing to do
-            gcmd.respond_info(
-                f"{unit.name}: retrying the load of {lane.name}...")
+                return True
+            gcmd.respond_info(f"{unit.name}: retrying the load of {lane.name}...")
             self.gcode.run_script_from_command(f"CHANGE_TOOL LANE={lane.name}")
             return True
         return False
@@ -2798,8 +2495,7 @@ class afcBambuAMS(afcUnit):
                 return
         except Exception:
             return
-        # A manual resume hands back a full auto_error_recovery_limit budget.
-        # Skipped while the recovery resumes by itself (_in_auto_recover).
+        # A manual resume restores the full auto_error_recovery_limit budget.
         try:
             units = list(self._bambu_units())
             if not any(getattr(u, "_in_auto_recover", False) for u in units):
@@ -2808,24 +2504,24 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
         unit, lane = self._resume_reload_target()
-        if unit is None or lane is None:
+        if (unit is None
+            or lane is None):
             return
         name = getattr(lane, "name", None)
         if not name:
             return
         if getattr(lane, "tool_loaded", False):
             unit._resume_needs_reload = False
-            return                  # already fed; nothing for us to do
-        gcmd.respond_info(
-            f"{unit.name}: reloading {name} before resuming (a Bambu fault "
-            f"left the toolhead empty)...")
+            return
+        gcmd.respond_info(f"{unit.name}: reloading {name} before resuming (a Bambu fault "
+                          f"left the toolhead empty)...")
         self.gcode.run_script_from_command(f"CHANGE_TOOL LANE={name}")
         if not getattr(lane, "tool_loaded", False):
             error_str = (f"{unit.name}: {name} did NOT reload -- the toolhead is empty, "
                          f"so the print stays PAUSED. Clear the jam and resume again.")
             raise gcmd.error(error_str)
         unit._resume_needs_reload = False
-        unit._auto_recover_armed = False     # a fresh fault may retry
+        unit._auto_recover_armed = False
 
     def _resume_reload_target(self) -> tuple:
         """
@@ -2843,14 +2539,14 @@ class afcBambuAMS(afcUnit):
             lane = getattr(unit, "_fault_lane", None)
             if lane is not None:
                 return unit, lane
-            # The fault latch cleared its lane (buffer auto-reset does that)
-            # but the reload is still owed. Fall back to what AFC thinks is
-            # current, and only if it belongs to this unit.
+            # The fault latch cleared its lane but the reload is still owed: use AFC's current lane
+            # if it is ours.
             try:
                 cur = getattr(self.afc, "current", None)
             except Exception:
                 cur = None
-            if cur and cur in unit.lanes:
+            if (cur
+                and cur in unit.lanes):
                 return unit, unit.lanes[cur]
         return None, None
 
@@ -2868,13 +2564,12 @@ class afcBambuAMS(afcUnit):
         try:
             for lane in self.afc.lanes.values():
                 unit = getattr(lane, "unit_obj", None)
-                if isinstance(unit, type(self)) and unit not in units:
+                if (isinstance(unit, type(self))
+                    and unit not in units):
                     units.append(unit)
         except Exception:
             pass
         return units
-
-
 
     def cmd_AFC_BAMBU_CLEARFAULT(self, gcmd: Any) -> None:
         """
@@ -2964,51 +2659,29 @@ class afcBambuAMS(afcUnit):
         :param command: the command name the verdict starts with
         """
         before = self._unit_state(self._bridge.latest_status())
-        # Addressed: the clear rides the drive channel, which targets
-        # whichever unit was last fed or selected unless the command names
-        # one, so without a unit the clear goes to that last unit.
-        self._bridge.send({"cmd": "clearfault",
-                           "unit": int(getattr(self, "ams_index", 0) or 0)})
-        # The burst is ~2s; wait it out plus a little for the state to settle.
+        # Addressed, or the clear goes to whichever unit was last fed or selected.
+        self._bridge.send({"cmd": "clearfault", "unit": int(getattr(self, "ams_index", 0) or 0)})
+        # The burst is ~2 s, plus time for the state to settle.
         self.afc.reactor.pause(self.afc.reactor.monotonic() + 2.6)
         after = self._unit_state(self._bridge.latest_status())
         if after in self.AMS_STATES_FAULTED:
-            gcmd.respond_info(
-                f"{command}: {self.name}: STILL FAULTED (state {after}). "
-                f"The unit will not accept a fresh operation while the jam is "
-                f"there -- relieve the pressure (the buffer coming off the "
-                f"floor is the sign) and run this again.")
+            gcmd.respond_info(f"{command}: {self.name}: STILL FAULTED (state {after}). "
+                              f"The unit will not accept a fresh operation while the jam is "
+                              f"there -- relieve the pressure (the buffer coming off the "
+                              f"floor is the sign) and run this again.")
             return
-        # A unit that was not faulted before the burst is not reported as
-        # "cleared": whatever the operator is seeing is caused by something
-        # this command does not reach.
+        # A unit not faulted before the burst is not reported as cleared.
         if before not in self.AMS_STATES_FAULTED:
-            gcmd.respond_info(
-                f"{command}: {self.name}: nothing to clear -- the "
-                f"unit was not in a fault state before the burst (state "
-                f"{before}) and is not now ({after}). The clear was still sent "
-                f"to unit {getattr(self, 'ams_index', 0)}. If its LEDs are red, "
-                f"the cause is not a parked feeder: try AFC_BAMBU_RELINK "
-                f"UNIT={self.name}, which re-registers the unit without a power "
-                f"cycle.")
+            gcmd.respond_info(f"{command}: {self.name}: nothing to clear -- the "
+                              f"unit was not in a fault state before the burst (state "
+                              f"{before}) and is not now ({after}). The clear was still sent "
+                              f"to unit {getattr(self, 'ams_index', 0)}. If its LEDs are red, "
+                              f"the cause is not a parked feeder: try AFC_BAMBU_RELINK "
+                              f"UNIT={self.name}, which re-registers the unit without a power "
+                              f"cycle.")
             return
-        gcmd.respond_info(
-            f"{command}: {self.name}: cleared (state {before} -> "
-            f"{after}); the unit accepted the operation and left its park.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        gcmd.respond_info(f"{command}: {self.name}: cleared (state {before} -> "
+                          f"{after}); the unit accepted the operation and left its park.")
 
     def cmd_AFC_BAMBU_BUFFER_PROBE(self, gcmd: Any) -> None:
         """
@@ -3036,7 +2709,6 @@ class afcBambuAMS(afcUnit):
             msg = f"AFC_BAMBU_BUFFER_PROBE: bridge not connected for {self.name}"
             raise gcmd.error(msg)
         self._bridge.send({"cmd": "reply"})
-        # The reply lands on the reader thread; give it a moment to arrive.
         self.afc.reactor.pause(self.afc.reactor.monotonic() + 0.3)
         latest = self._bridge.latest_status() or {}
         with self._bridge._lock:
@@ -3045,26 +2717,19 @@ class afcBambuAMS(afcUnit):
             f"{self.name}: buff={latest.get('buff')} raw={latest.get('buffraw')} "
             f"replylen={latest.get('bufflen')} reads={latest.get('buffn')} "
             f"fstate={latest.get('fstate')} fstate_reads={latest.get('fstaten')} "
-            # Per-unit receipt for this unit's follower arm; fstate above is
-            # bus-wide, so the two can disagree.
+            # Per-unit; fstate above is bus-wide, so the two can disagree.
             f"arm_acked={self._follow_arm_acked(latest)} "
-            # Narration counters: polls = drain requests sent, frames =
-            # narration-shaped replies, texts = replies that carried text.
-            # Distinguishes "the AMS has nothing to say" from "not asking".
+            # polls = drain requests, frames = narration replies, texts = replies with text.
             f"dbg_polls={latest.get('dbgpolls')} "
             f"dbg_frames={latest.get('dbgframes')} "
             f"dbg_texts={latest.get('dbgtexts')} "
             f"dbg_cut={latest.get('dbgtrunc')} "
-            # The MC-address announce as acknowledged by the firmware. Without
-            # it the drain polls default to 0x0700, so an HT at 0x1800 is never
-            # asked and dbg_texts stays 0 on an otherwise healthy bus.
+            # Without the MC-address announce the drain polls 0x0700 and never asks an HT at 0x1800.
             f"mcack={self._mcaddr_ack_str()} "
-            # The buffer as the unit measures it, finer than the 0..100 status
-            # field: buff_pos is its instantaneous position and refill is
-            # (sagged_to, recovered_to, mm_fed) from its last on-demand top-up.
+            # buff_pos is the live position; refill = (sagged_to, recovered_to, mm_fed) of a top-up.
             f"tube_len={self.measured_path_mm()} "
-            # The unit's end-of-feed length, the second source _path_measurement
-            # tries for the bowden length. n= is the sample count.
+            # The unit's end-of-feed length, the second source for the bowden length; n= is the
+            # sample count.
             f"dw_len={self._dw_len_str()} "
             f"bowden={self.afc_bowden_length:.0f} "
             f"buff_pos={self._bridge_call('last_buff_pos')} "
@@ -3151,48 +2816,37 @@ class afcBambuAMS(afcUnit):
             raise gcmd.error(msg)
         lane_name = gcmd.get("LANE", None)
         if lane_name is not None:
-            lane, slot = self._gcmd_lane_slot("AFC_BAMBU_SCAN", gcmd,
-                                              lane_name)
+            lane, slot = self._gcmd_lane_slot("AFC_BAMBU_SCAN", gcmd, lane_name)
             busy = self._measure_in_flight_slot()
             if busy is not None:
-                error_str = (
-                    f"AFC_BAMBU_SCAN: {self.name} is already measuring slot "
-                    f"{busy} (AMS bay {busy + 1}) -- one bay at a time, so this "
-                    f"would be dropped. Wait ~40s, then retry.")
+                error_str = (f"AFC_BAMBU_SCAN: {self.name} is already measuring slot "
+                             f"{busy} (AMS bay {busy + 1}) -- one bay at a time, so this "
+                             f"would be dropped. Wait ~40s, then retry.")
                 raise gcmd.error(error_str)
-            # Drop the latch so a manual scan always re-reads, and open the
-            # scan so it resolves like an auto-scan; else the leftover record
-            # is the answer.
+            # A manual scan always re-reads and resolves like an auto-scan.
             if 0 <= slot < len(self._auto_scanned):
                 self._auto_scanned[slot] = False
-            # A manual scan also measures. Open the window only after the
-            # capscan is accepted, or a refused claim leaves it armed and the
-            # backstop wipes the lane.
+            # Opened once the capscan is accepted, or a refused claim leaves it armed to wipe lanes.
             if not afcBambuAMS._start_capscan(self, slot):
-                msg = (f"AFC_BAMBU_SCAN: scan command not issued for {lane_name} "
-                       f"on {self.name}")
+                msg = f"AFC_BAMBU_SCAN: scan command not issued for {lane_name} on {self.name}"
                 raise gcmd.error(msg)
             self._open_scan(slot)
-            gcmd.respond_info(
-                f"AFC_BAMBU_SCAN: scanning {lane_name} (slot {slot}) on {self.name} "
-                f"at 0x{getattr(self, 'dry_dev_addr', 0):04X}; material lands "
-                f"when the tag reads, remaining % when the measurement "
-                f"finishes (~30s).")
+            gcmd.respond_info(f"AFC_BAMBU_SCAN: scanning {lane_name} (slot {slot}) on {self.name} "
+                              f"at 0x{getattr(self, 'dry_dev_addr', 0):04X}; material lands "
+                              f"when the tag reads, remaining % when the measurement "
+                              f"finishes (~30s).")
             return
-        nslots = min(len(self._auto_scanned),
-                     getattr(self, "unit_slots", len(self._auto_scanned)))
+        nslots = min(len(self._auto_scanned), getattr(self, "unit_slots", len(self._auto_scanned)))
         for i in range(nslots):
             self._auto_scanned[i] = False
-            # Only a bay with a spool in it: an empty one has no question to
-            # answer, and opening a scan on it would just walk it to "no tag".
+            # An empty bay has nothing to answer.
             if (self._slots[i] or {}).get("present"):
                 self._open_scan(i)
         if not self.scan(None):
             msg = f"AFC_BAMBU_SCAN: scan command not issued for {self.name}"
             raise gcmd.error(msg)
-        gcmd.respond_info(
-            f"AFC_BAMBU_SCAN: scanning {nslots} slot(s) on {self.name} at "
-            f"0x{getattr(self, 'dry_dev_addr', 0):04X}.")
+        gcmd.respond_info(f"AFC_BAMBU_SCAN: scanning {nslots} slot(s) on {self.name} at "
+                          f"0x{getattr(self, 'dry_dev_addr', 0):04X}.")
 
     def _run_calibrate(self, lane: Any, slot: int) -> Optional[str]:
         """
@@ -3216,12 +2870,10 @@ class afcBambuAMS(afcUnit):
             return f"slot {slot} is not on this unit"
         if not (self._slots[slot] or {}).get("present"):
             return f"no spool present in slot {slot} (AMS bay {slot + 1})"
-        # A measurement pulls the spool, so never run it while anything else
-        # is moving filament.
+        # A measurement pulls the spool.
         if afcBambuAMS._afc_motion_busy(self):
             return "a lane is loading/unloading"
-        # ...and never into a measurement already under way: interrupting the
-        # unit's own pull aborts it and leaves the assist grinding.
+        # Interrupting the unit's own pull aborts it and leaves the assist grinding.
         try:
             if self._bridge.cap_calibrating(int(getattr(self, "dry_dev_addr", 0))):
                 return "the unit is already measuring"
@@ -3229,27 +2881,19 @@ class afcBambuAMS(afcUnit):
             pass
         if 0 <= slot < len(self._auto_scanned):
             self._auto_scanned[slot] = False
-        # A calibrate never arms the follower: armed, the firmware runs the
-        # load sequence instead and never reads the tag. An existing follower
-        # is kept.
+        # Armed, the firmware runs the load sequence and never reads the tag.
         if not afcBambuAMS._start_capscan(self, slot, cali=True):
             return "another spool operation owns the bus"
-        # Mark this pending epoch as a calibrate's own, or the auto-measure
-        # would take a one-edged calibrate for a failed cycle and chain
-        # calibrates.
+        # So the auto-measure does not take a one-edged calibrate for a failed cycle.
         self._cali_epoch = getattr(self, "_cap_pending_t0", 0.0)
-        # No _open_scan here, in either caller: a scan window resolves as tag
-        # or defaults, and the defaults branch would overwrite the
-        # measurement just taken. Identity is already on the lane.
+        # No _open_scan: its defaults branch would overwrite the measurement just taken.
         return None
 
-    #: A measure holds the unit ~40 s and the unit drops a second one inside
-    #: this window, so a manual command refuses instead. Past it, a stale
-    #: marker counts as done.
+    #: A measure holds the unit ~40 s and the unit drops a second one inside this window.
+    #: Past it, a stale marker counts as done.
     _MEASURE_WINDOW_S = 50.0
 
-    #: How long a bay waits on the pending list for its measurement. Longer
-    #: than _MEASURE_WINDOW_S: a measurement can land after that window closes.
+    #: How long a bay waits for its measurement; a measurement can land after _MEASURE_WINDOW_S.
     _PENDING_MAX_S = 180.0
 
     def _cap_open_pending(self, slot: int, asked: bool = False) -> None:
@@ -3275,8 +2919,7 @@ class afcBambuAMS(afcUnit):
         pend = getattr(self, "_cap_pending", None)
         if pend is None:
             pend = self._cap_pending = {}
-        # Prune on the way in so no separate sweep is needed: a bay that never
-        # got its answer must not claim a measurement minutes later.
+        # Pruned here: a bay that never got its answer must not claim a later measurement.
         afcBambuAMS._cap_expire_pending(self, pend, now)
         pend[slot] = now
         self._cap_pending_slot: Optional[int] = slot
@@ -3289,7 +2932,6 @@ class afcBambuAMS(afcUnit):
             asked_set.add(slot)
         else:
             asked_set.discard(slot)
-        # A new window needs a new answer.
         (getattr(self, "_cap_answered", None) or set()).discard(slot)
 
     def _cap_close_pending(self, slot: Optional[int]) -> None:
@@ -3303,9 +2945,9 @@ class afcBambuAMS(afcUnit):
             pend.pop(slot, None)
             (getattr(self, "_cap_pending_asked", None) or set()).discard(slot)
             (getattr(self, "_cap_answered", None) or set()).discard(slot)
-        if slot is None or getattr(self, "_cap_pending_slot", None) == slot:
-            # Fall back to whatever is still waiting, newest first, so the
-            # "is a measure running" callers keep a truthful answer.
+        if (slot is None
+            or getattr(self, "_cap_pending_slot", None) == slot):
+            # Newest still waiting, so "is a measure running" stays true.
             if pend:
                 nxt = max(pend, key=lambda s: pend[s])
                 self._cap_pending_slot = nxt
@@ -3333,7 +2975,8 @@ class afcBambuAMS(afcUnit):
         except Exception:
             now = 0.0
         afcBambuAMS._cap_expire_pending(self, pend, now)
-        if not pend and getattr(self, "_cap_pending_slot", None) is not None:
+        if (not pend
+            and getattr(self, "_cap_pending_slot", None) is not None):
             self._cap_pending_slot = None
         return pend
 
@@ -3372,8 +3015,7 @@ class afcBambuAMS(afcUnit):
                          else f"slot {s}")
                 msg = (f"AFC bambu {self.name}: {where} capscan ended without "
                        f"a measurement (no reading within "
-                       f"{self._PENDING_MAX_S:.0f} s); it is no longer waiting "
-                       f"for one")
+                       f"{self._PENDING_MAX_S:.0f} s); it is no longer waiting for one")
                 if loud:
                     self.logger.info(msg)
                 else:
@@ -3429,15 +3071,17 @@ class afcBambuAMS(afcUnit):
         :param t0: monotonic time the measure was started
         :return bool: True if this unit narrated a terminal after ``t0``
         """
-        if self._bridge is None or not t0:
+        if (self._bridge is None
+            or not t0):
             return False
         try:
             owner = self._bridge.bus_owner()
-            if owner is not None and owner != self.name:
+            if (owner is not None
+                and owner != self.name):
                 return False
             term = self._bridge.last_terminal(getattr(self, "dry_dev_addr", 0))
         except Exception:
-            return False                    # never block on a bridge hiccup
+            return False
         return term is not None and term > t0
 
     def _measure_in_flight_slot(self) -> Optional[int]:
@@ -3472,8 +3116,7 @@ class afcBambuAMS(afcUnit):
             return None
         return pend
 
-    def _start_capscan(self, slot: int, cali: bool = False,
-                       insert: bool = False) -> bool:
+    def _start_capscan(self, slot: int, cali: bool = False, insert: bool = False) -> bool:
         """
         Kick the capacity choreography for one slot: one tag read, then the spool
         measurement, with the narrated percent attributed back to this slot
@@ -3491,11 +3134,9 @@ class afcBambuAMS(afcUnit):
         if self._bridge is None:
             return False
         if self._is_lite():
-            # Alone on its bus, with no measurement and no scan motion: a scan
-            # is a fresh tag read.
+            # Alone on its bus with nothing running, a scan is a fresh tag read.
             return self.scan(slot)
-        # One spool operation on the bus at a time: two units scanning at once
-        # can take Klipper down. The printer serialises these the same way.
+        # One spool operation per bus: two units scanning at once can take Klipper down.
         claim = getattr(self._bridge, "try_claim_bus", None)
         if callable(claim):
             try:
@@ -3504,9 +3145,7 @@ class afcBambuAMS(afcUnit):
                 now = 0.0
             if not claim(self.name, now):
                 who = self._bridge.bus_owner()
-                # Log the defer at INFO once per scan sequence; retries
-                # re-enter here every 5s for up to 2 minutes, so a retry (this
-                # slot already has a claim-try counter) logs at DEBUG.
+                # Retries come every 5 s for up to 2 minutes, so only the first defer logs at INFO.
                 retrying = getattr(self, "_scan_claim_tries", {}).get(slot, 0)
                 msg = (f"AFC bambu {self.name}: deferring the scan of slot "
                        f"{slot} -- {who} has a spool operation running on this "
@@ -3518,24 +3157,18 @@ class afcBambuAMS(afcUnit):
                 return False
         afcBambuAMS._cap_open_pending(self, slot, asked=not insert)
         if self._is_ht():
-            # The HT's scan is firmware-armed and opens its own measurement
-            # window; cali is ignored, since the HT measures on every scan.
+            # The HT measures on every scan, so cali is ignored.
             return self.scan(slot)
         if cali:
-            # The printer's screen-calibrate sequence: forces a two-edge
-            # measure and odom save even on a stored tray. "auto":1 for an
-            # insert leaves the capacity byte to measure_on_insert.
-            self._bridge.send({"cmd": "cali", "auto": 1 if insert else 0,
-                               "unit": self.ams_index, "slot": slot})
+            # The printer's screen-calibrate sequence. "auto":1 leaves the capacity byte to
+            # measure_on_insert.
+            self._bridge.send({"cmd": "cali", "auto": 1 if insert else 0, "unit": self.ams_index,
+                               "slot": slot})
             return True
-        # Insert and re-read sequences differ and only the host knows which
-        # this is: commands use the re-read, the insert edge passes
-        # insert=True.
-        self._bridge.send({"cmd": "capscan", "trig": 1,
-                           "ins": 1 if insert else 0,
+        # Only the host knows whether this is an insert or a re-read.
+        self._bridge.send({"cmd": "capscan", "trig": 1, "ins": 1 if insert else 0,
                            "unit": self.ams_index, "slot": slot})
         return True
-
 
     def cmd_AFC_BAMBU_REID(self, gcmd: Any) -> None:
         """
@@ -3564,9 +3197,8 @@ class afcBambuAMS(afcUnit):
         lane_name = gcmd.get("LANE")
         lane, slot = self._gcmd_lane_slot("AFC_BAMBU_REID", gcmd, lane_name)
         self._bridge.send({"cmd": "reid", "unit": self.ams_index, "slot": slot})
-        gcmd.respond_info(
-            f"AFC_BAMBU_REID: sent re-identify to {self.name} bay {slot} "
-            f"({lane_name}). Watch for 'second detected' and a measurement.")
+        gcmd.respond_info(f"AFC_BAMBU_REID: sent re-identify to {self.name} bay {slot} "
+                          f"({lane_name}). Watch for 'second detected' and a measurement.")
 
     def cmd_AFC_BAMBU_CAPSCAN(self, gcmd: Any) -> None:
         """
@@ -3601,9 +3233,8 @@ class afcBambuAMS(afcUnit):
         if self._bridge is None:
             error_str = "AFC_BAMBU_CAPSCAN: bridge not connected"
             raise gcmd.error(error_str)
-        # HT units are allowed: they take the same enable at unit byte 0x80
-        # (068005008000, streamed through the scan window for both classes;
-        # an HT without it reports "tray capacity no en").
+        # HT units take the same enable at unit byte 0x80 (068005008000); without it an HT
+        # reports "tray capacity no en".
         try:
             if self.afc.function.in_print():
                 error_str = "AFC_BAMBU_CAPSCAN: refused while printing"
@@ -3618,23 +3249,19 @@ class afcBambuAMS(afcUnit):
         lane, slot = self._gcmd_lane_slot("AFC_BAMBU_CAPSCAN", gcmd, lane_name)
         busy = self._measure_in_flight_slot()
         if busy is not None:
-            error_str = (
-                f"AFC_BAMBU_CAPSCAN: {self.name} is already measuring slot "
-                f"{busy} (AMS bay {busy + 1}) -- one bay at a time, so this "
-                f"would be dropped. Wait ~40s, then retry.")
+            error_str = (f"AFC_BAMBU_CAPSCAN: {self.name} is already measuring slot "
+                         f"{busy} (AMS bay {busy + 1}) -- one bay at a time, so this "
+                         f"would be dropped. Wait ~40s, then retry.")
             raise gcmd.error(error_str)
-        # No card-cache clear first: it does not reach a boxed unit's record.
-        # Every explicit measure goes through _run_calibrate for its guards;
-        # the plain AMS 2 branch never ends its enable ladder.
+        # No card-cache clear: it misses a boxed unit's record. _run_calibrate has the guards.
         why = afcBambuAMS._run_calibrate(self, lane, slot)
         if why is not None:
             error_str = f"AFC_BAMBU_CAPSCAN: not started -- {why}"
             raise gcmd.error(error_str)
-        gcmd.respond_info(
-            f"AFC_BAMBU_CAPSCAN: capacity re-scan armed for {lane_name} "
-            f"(slot {slot}) on {self.name} -- the AMS pulls the spool, "
-            f"re-reads the tag and measures remain%; check the slot's "
-            f"remain_pct in about a minute")
+        gcmd.respond_info(f"AFC_BAMBU_CAPSCAN: capacity re-scan armed for {lane_name} "
+                          f"(slot {slot}) on {self.name} -- the AMS pulls the spool, "
+                          f"re-reads the tag and measures remain%; check the slot's "
+                          f"remain_pct in about a minute")
         afcBambuAMS._warn_bound_without_spoolman(self, lane)
 
     def _warn_bound_without_spoolman(self, lane: Any) -> None:
@@ -3664,13 +3291,11 @@ class afcBambuAMS(afcUnit):
             if self._spool is not None:
                 return
             name = getattr(lane, "name", "?")
-            self.logger.warning(
-                f"AFC bambu {self.name}: {name} is bound to Spoolman spool "
-                f"{sid}, and with the Spoolman module ([AFC_BambuAMS_rfid]) "
-                f"off this measurement stays on the lane and is not written "
-                f"to that spool. AFC reloads a bound lane's weight from "
-                f"Spoolman at restart, so {name} and spool {sid} can "
-                f"disagree.")
+            self.logger.warning(f"AFC bambu {self.name}: {name} is bound to Spoolman spool "
+                                f"{sid}, and with the Spoolman module ([AFC_BambuAMS_rfid]) "
+                                f"off this measurement stays on the lane and is not written "
+                                f"to that spool. AFC reloads a bound lane's weight from "
+                                f"Spoolman at restart, so {name} and spool {sid} can disagree.")
         except Exception:
             pass
 
@@ -3685,7 +3310,8 @@ class afcBambuAMS(afcUnit):
         :return tuple: (volts or None, whether it is recent enough to act on)
         """
         rec = self._chamber_record() if self._bridge is not None else None
-        if not isinstance(rec, dict) or rec.get("ad_v") is None:
+        if (not isinstance(rec, dict)
+            or rec.get("ad_v") is None):
             return None, False
         mono = getattr(self.reactor, "monotonic", None)
         nowm = mono() if callable(mono) else 0.0
@@ -3708,9 +3334,7 @@ class afcBambuAMS(afcUnit):
         rec = self._chamber_record() if self._bridge is not None else None
         if not isinstance(rec, dict):
             return False
-        # Past the last start/stop plus the wind-down grace, as get_status's
-        # fresh_for_this_cycle reads it: a stopping unit emits another line
-        # or two, which must not read as a running cycle.
+        # A stopping unit emits another line or two, which must not read as a running cycle.
         return (self._record_fresh(rec)
                 and rec.get("seen", 0.0) > getattr(self, "_dry_adopt_after",
                                                    0.0))
@@ -3741,34 +3365,37 @@ class afcBambuAMS(afcUnit):
 
         :return str: the refusal, or "" to allow the start.
         """
-        if not self.dry_bus_interlock or not self.has_heater or self._is_ht():
+        if (not self.dry_bus_interlock
+            or not self.has_heater
+            or self._is_ht()):
             return ""
         for _n, u in self.printer.lookup_objects("AFC_BambuAMS"):
-            if u is self or not getattr(u, "has_heater", False):
+            if (u is self
+                or not getattr(u, "has_heater", False)):
                 continue
-            # An unclaimed pool unit is not on the wire and owns no chamber
-            # (see _chamber_record); judging one would read another unit's
-            # telemetry as its own.
+            # An unclaimed pool unit owns no chamber and would read another unit's telemetry.
             if getattr(u, "pool", False):
                 continue
             try:
-                if u._is_ht() or u._bridge is not self._bridge:
-                    continue        # another bridge is another bus
+                if (u._is_ht()
+                    or u._bridge is not self._bridge):
+                    continue
                 if not u._heating_now():
                     continue
             except Exception:
                 continue
             volts, fresh = u._supply_reading()
-            if volts is not None and fresh and volts >= EXT_SUPPLY_MIN_V:
-                continue            # on its own adapter: not our problem
-            if volts is None or not fresh:
-                # Drying, but has not reported how it is powered: refuse
-                # rather than guess. The unit narrates every ~10s.
+            if (volts is not None
+                and fresh
+                and volts >= EXT_SUPPLY_MIN_V):
+                continue
+            if (volts is None
+                or not fresh):
+                # Drying without reporting its power: refuse, not guess. It narrates every ~10 s.
                 return (f"{u.name} is drying and has not reported its power "
                         f"source yet, so there is no way to tell whether it is "
                         f"running off the bus. Wait ~10s for it to report and "
-                        f"start again, or add FORCE=1 if you know it is on its "
-                        f"own 24V adapter.")
+                        f"start again, or add FORCE=1 if you know it is on its own 24V adapter.")
             return (f"{u.name} is already drying off the BUS ({volts:.1f}V at "
                     f"its 24V jack, so nothing is plugged into it). Two units "
                     f"heating off the bus wire collapse the supply and reset "
@@ -3801,27 +3428,21 @@ class afcBambuAMS(afcUnit):
             msg = f"AFC_BAMBU_HEATER_START: bridge not connected for {self.name}"
             raise gcmd.error(msg)
         if not self.has_heater:
-            gcmd.respond_info(
-                f"AFC_BAMBU_HEATER_START: {self.name} has no drying heater "
-                f"(heater: false). Only the AMS2 Pro can dry -- ignoring.")
+            gcmd.respond_info(f"AFC_BAMBU_HEATER_START: {self.name} has no drying heater "
+                              f"(heater: false). Only the AMS2 Pro can dry -- ignoring.")
             return
-        # Checked first, before the frame goes out: a supply collapse happens
-        # ~3s after the second heater engages, before any reading could show
-        # it, so it can only be prevented here.
+        # Checked before the frame goes out: the supply collapses ~3 s after the second heater
+        # engages, before any reading could show it.
         conflict = (self._bus_supply_conflict()
                     if gcmd.get_int("FORCE", 0) != 1 else "")
         if conflict:
-            # Stored where the HT's refusals go, so the panel shows it as the
-            # reason the dry did not start.
+            # Where the HT's refusals go, so the panel shows it as the reason.
             self._dry_host_refusal = conflict
             gcmd.respond_info(f"AFC_BAMBU_HEATER_START: {conflict}")
             return
 
-        # Both refusals come before anything is changed, so a refused start
-        # leaves the unit as it was: not drying, its follower and its last
-        # refusal untouched.
-        # AMSID/ADDR overrides are diagnostic. A mismatch would target another
-        # unit's heater, so it needs FORCE=1.
+        # Both refusals come before anything changes, so a refused start leaves the unit as it was.
+        # AMSID/ADDR are diagnostic; a mismatch targets another unit's heater, so it needs FORCE=1.
         amsid = _gcmd_int(gcmd, "AMSID", self.dry_ams_id, 0, 0xFFFF)
         addr = _gcmd_int(gcmd, "ADDR", self.dry_dev_addr, 0, 0xFFFF)
         if ((amsid != self.dry_ams_id or addr != self.dry_dev_addr)
@@ -3832,79 +3453,68 @@ class afcBambuAMS(afcUnit):
                          f"unit's heater would be targeted. Drop the override, or add "
                          f"FORCE=1 for deliberate diagnostics.")
             raise gcmd.error(error_str)
-        # Only command a unit that has answered. Refuse only when telemetry
-        # says it is absent.
+        # Refused only when telemetry says the unit is absent.
         online = getattr(self, "_unit_online", None)
         getst = getattr(self._bridge, "latest_status", None)
         latest = getst() if callable(getst) else None
-        if latest and callable(online) and not online(latest):
+        if (latest
+            and callable(online)
+            and not online(latest)):
             error_str = (f"AFC_BAMBU_HEATER_START: {self.name} is not online -- nothing on "
                          f"the bus is answering for it, so the heater command would go "
                          f"nowhere. Check the unit is powered and chained, then retry.")
             raise gcmd.error(error_str)
-        # Clear the previous attempt's refusal; nothing else clears it on an
-        # HT, so it would otherwise be reported over a dry that started fine.
+        # Nothing else clears an HT's last refusal, which would then show over a dry that started.
         try:
             self._bridge.clear_dry_error(self.ams_index)
         except Exception:
             pass
-        # Clamp (not error) to this unit's drying ceiling (dry_max_temp: 65 for
-        # AMS2 Pro, 85 for AMS HT); more would be rejected by the AMS or risk
-        # the spools.
+        # Clamped to dry_max_temp (65 AMS 2 Pro, 85 AMS HT); more is rejected or risks the spools.
         temp = gcmd.get_int("TEMP", 55, minval=0)
         if temp > self.dry_max_temp:
-            gcmd.respond_info(
-                f"AFC_BAMBU_HEATER_START: TEMP {temp}C exceeds {self.name}'s drying "
-                f"max {self.dry_max_temp}C -- clamping to {self.dry_max_temp}C.")
+            gcmd.respond_info(f"AFC_BAMBU_HEATER_START: TEMP {temp}C exceeds {self.name}'s drying "
+                              f"max {self.dry_max_temp}C -- clamping to {self.dry_max_temp}C.")
             temp = self.dry_max_temp
         tmin = gcmd.get_int("TIME", 480, minval=0, maxval=65535)
         rot = gcmd.get_int("ROTATE", 0, minval=0, maxval=1)
-        # The unit will not turn a spool that has filament in its feeder, so
-        # drop the flag and tell the operator rather than send a flag it will
-        # ignore.
+        # The unit will not turn a spool with filament in its feeder, so the flag is dropped.
         if rot:
             committed = self._committed_lanes()
             if committed:
                 rot = 0
                 names = ", ".join(getattr(ln, "name", "?") for ln in committed)
-                gcmd.respond_info(
-                    f"AFC_BAMBU_HEATER_START: ROTATE disabled for {self.name} -- "
-                    f"{names} still has filament in the feeder, and the unit "
-                    f"will not turn a spool that does. Unload the bays and "
-                    f"leave the spools free to spin to dry with rotation. "
-                    f"Drying without it.")
-        # Quiet the follower unless a lane on this unit is printing. An HT with
-        # a loaded lane is not refused: newer HT firmware heats while printing,
-        # and older firmware's refusal is caught by the last_dry_error watch.
+                gcmd.respond_info(f"AFC_BAMBU_HEATER_START: ROTATE disabled for {self.name} -- "
+                                  f"{names} still has filament in the feeder, and the unit "
+                                  f"will not turn a spool that does. Unload the bays and "
+                                  f"leave the spools free to spin to dry with rotation. "
+                                  f"Drying without it.")
+        # Follower quiet unless a lane on this unit prints. A loaded HT is not refused: newer
+        # firmware heats while printing, and older firmware's refusal is caught by the
+        # last_dry_error watch.
         self._dry_host_refusal = ""
         self._drying = True
-        # A new cycle: telemetry from before now belongs to the old one.
+        # Telemetry from before now belongs to the old cycle.
         self._dry_adopt_after = _mono(self)
         self._dry_seen_live = False
-        self._dryrem_at_stop = None   # a new cycle retires the stop stamp
-        if self._following_lane is not None and self._tool_loaded_lane() is None:
+        self._dryrem_at_stop = None
+        if (self._following_lane is not None
+            and self._tool_loaded_lane() is None):
             try:
                 self.set_feed_assist(self._following_lane, False)
             except Exception:
                 pass
             self._following_lane = None
-        self._bridge.send({"cmd": "dry", "unit": self.ams_index, "on": 1,
-                           "temp": temp, "time": tmin, "rotate": rot,
-                           "addr": addr, "amsid": amsid})
-        # Record when this cycle was commanded and for how long, so a display
-        # can show time remaining; the AMS does not report the duration, so it
-        # exists only in the command sent here.
+        self._bridge.send({"cmd": "dry", "unit": self.ams_index, "on": 1, "temp": temp,
+                           "time": tmin, "rotate": rot, "addr": addr, "amsid": amsid})
+        # The AMS does not report the duration, so time remaining exists only here.
         self._dry_started_at = _mono(self)
         self._dry_minutes = int(tmin)
         self._dry_rotate = 1 if rot else 0
-        # The commanded setpoint, kept because a boxed dry deafens the bridge's
-        # receiver while the heater draws, so the telemetry that carries the
-        # target may never arrive.
+        # A boxed dry deafens the bridge's receiver while heating, so the target may never arrive.
         self._dry_temp = int(temp)
-        gcmd.respond_info(
-            f"AFC_BAMBU_HEATER_START: {self.name} drying at {temp}C for {tmin}min"
-            f"{' with spool rotation' if rot else ''}"
-            f" (addr 0x{addr:04X}, id {amsid}).")
+        gcmd.respond_info(f"AFC_BAMBU_HEATER_START: {self.name} drying at {temp}C for {tmin}min"
+                          f"{' with spool rotation' if rot else ''}"
+                          f" (addr 0x{addr:04X}, id {amsid}).")
 
     def cmd_AFC_BAMBU_HEATER_STOP(self, gcmd: Any) -> None:
         """
@@ -3924,29 +3534,27 @@ class afcBambuAMS(afcUnit):
             msg = f"AFC_BAMBU_HEATER_STOP: bridge not connected for {self.name}"
             raise gcmd.error(msg)
         if not self.has_heater:
-            gcmd.respond_info(
-                f"AFC_BAMBU_HEATER_STOP: {self.name} has no drying heater "
-                f"(heater: false) -- nothing to stop.")
+            gcmd.respond_info(f"AFC_BAMBU_HEATER_STOP: {self.name} has no drying heater "
+                              f"(heater: false) -- nothing to stop.")
             return
-        # Same addr/amsid as the start, or an HT never hears the stop. A stop
-        # also retires any host-side refusal note.
+        # Same addr/amsid as the start, or an HT never hears the stop.
         self._dry_host_refusal = ""
-        self._bridge.send({"cmd": "dry", "unit": self.ams_index, "on": 0,
-                           "addr": self.dry_dev_addr, "amsid": self.dry_ams_id})
+        self._bridge.send({"cmd": "dry", "unit": self.ams_index, "on": 0, "addr": self.dry_dev_addr,
+                           "amsid": self.dry_ams_id})
         self._drying = False
         self._dry_started_at = None
         self._dry_minutes = 0
         self._dry_rotate = 0
-        # Stamp the stop plus a grace, so wind-down telemetry does not re-adopt
-        # the cycle. A unit still reporting past the grace is still drying.
+        # So wind-down telemetry does not re-adopt the cycle; a unit reporting past the grace is
+        # still drying.
         self._dry_adopt_after = _mono(self) + DRY_STOP_GRACE
         self._dry_seen_live = False
-        # Stamp the countdown at stop: dryrem freezes when replies stop
-        # decoding, so get_status re-arms on it only once it ticks.
+        # dryrem freezes when replies stop decoding, so get_status re-arms on it only once it ticks.
         self._dryrem_at_stop = None
         try:
             u = afcBambuAMS._unit_entry(self, self._bridge.latest_status() or {})
-            if u is not None and u.get("dryrem") is not None:
+            if (u is not None
+                and u.get("dryrem") is not None):
                 self._dryrem_at_stop = int(u["dryrem"])
         except Exception:
             pass
@@ -3986,27 +3594,23 @@ class afcBambuAMS(afcUnit):
             raise gcmd.error(msg)
         on = gcmd.get_int("ON", 1, minval=0, maxval=1)
         if on:
-            # Refuse rather than warn: a bridge that silently stops driving
-            # mid-print costs the print.
+            # A bridge that silently stops driving mid-print costs the print.
             try:
                 printing = bool(self.afc.function.in_print())
             except Exception:
                 printing = False
             if printing:
-                error_str = (
-                    f"AFC_BAMBU_SNIFF: refusing to sniff on {self.name} while "
-                    f"a print is running -- sniff mode transmits nothing, so "
-                    f"every load and unload on this bridge would go nowhere.")
+                error_str = (f"AFC_BAMBU_SNIFF: refusing to sniff on {self.name} while "
+                             f"a print is running -- sniff mode transmits nothing, so "
+                             f"every load and unload on this bridge would go nowhere.")
                 raise gcmd.error(error_str)
         self._bridge.send({"cmd": "sniff", "on": on})
         if on:
-            gcmd.respond_info(
-                f"AFC_BAMBU_SNIFF: {self.name} bridge going listen-only. It "
-                f"will NOT drive its AMS units until ON=0 (or a reboot). "
-                f"Captured frames go to AFC.log as SNIFF lines.")
+            gcmd.respond_info(f"AFC_BAMBU_SNIFF: {self.name} bridge going listen-only. It "
+                              f"will NOT drive its AMS units until ON=0 (or a reboot). "
+                              f"Captured frames go to AFC.log as SNIFF lines.")
         else:
-            gcmd.respond_info(
-                f"AFC_BAMBU_SNIFF: {self.name} bridge back to driving the bus.")
+            gcmd.respond_info(f"AFC_BAMBU_SNIFF: {self.name} bridge back to driving the bus.")
 
     def cmd_AFC_BAMBU_UIDS(self, gcmd: Any) -> None:
         """
@@ -4044,12 +3648,12 @@ class afcBambuAMS(afcUnit):
         if self._bridge is None:
             error_str = "AFC_BAMBU_UIDS: bridge not connected"
             raise gcmd.error(error_str)
-        self._bridge.send({"cmd": "chain"})        # refresh the enrollment map
-        try:                                        # report after the reply lands
-            self.afc.reactor.register_callback(
-                self._report_uids, self.afc.reactor.monotonic() + 0.5)
+        self._bridge.send({"cmd": "chain"})
+        try:
+            self.afc.reactor.register_callback(self._report_uids,
+                                               self.afc.reactor.monotonic() + 0.5)
         except Exception:
-            self._report_uids(0)                    # no reactor (tests)
+            self._report_uids(0)
 
     def _report_uids(self, eventtime: float) -> None:
         """
@@ -4066,8 +3670,7 @@ class afcBambuAMS(afcUnit):
         slots = latest.get("slots", []) or []
         diag = getattr(self._bridge, "chain_diag", None) if self._bridge else None
         htmask, fw, sel = diag() if callable(diag) else (0, "", (-1, 0, 0))
-        # Read straight off the bridge like the other chain diagnostics below.
-        # None = this firmware does not report it (not "nothing measures").
+        # None means this firmware does not report it, not that nothing measures.
         capmask = (getattr(self._bridge, "_chain_capmask", None)
                    if self._bridge else None)
         lines = [f"Bambu AMS bus (firmware {fw or 'pre-0.3.0'}) -- copy each "
@@ -4078,20 +3681,16 @@ class afcBambuAMS(afcUnit):
                    if s.get("unit") == i and s.get("present")]
             hint = ("  <- " + ", ".join(occ)) if occ else "  <- (empty)"
             ht = "  [HT-flagged]" if htmask & (1 << i) else ""
-            # Announce-reply tag byte, shown for observation only; nothing acts
-            # on it. It may indicate unit class, but is not a stable per-unit
-            # id (the same unit can report different values).
+            # Announce-reply tag byte, for observation only: one unit can report different values.
             tags = (getattr(self._bridge, "_chain_tags", "") or "").split(",")
             tg = f"  tag={tags[i]}" if i < len(tags) and tags[i] else ""
             lines.append(f"  chain index {i}: {u or '(none)'}{ht}{tg}{hint}")
-        # Capacity diagnostics: capn = lifetime capacity frames, capdiag =
-        # (last op-04 poll unit byte)<<8 | boxed-burst-ran. A poll byte of 00
-        # while an HT scans means the poll leaks to the boxed AMS.
+        # capn = lifetime capacity frames; capdiag = (last op-04 poll unit byte)<<8
+        #  boxed-burst-ran.
+        # A poll byte of 00 while an HT scans means the poll leaks to the boxed AMS.
         cd = getattr(self._bridge, "_chain_capdiag", 0) if self._bridge else 0
         cn = getattr(self._bridge, "_chain_capn", 0) if self._bridge else 0
-        # Why the last capacity window did or did not open (which of the
-        # capacity window's guards refused it). None = firmware older than
-        # AFC-2.68.
+        # Which guard refused the last capacity window; None before AFC-2.68.
         cw = getattr(self._bridge, "_chain_capwhy", None) if self._bridge else None
         _CAPWHY = {0: "no measurement window requested since boot",
                    1: "a window opened",
@@ -4101,47 +3700,35 @@ class afcBambuAMS(afcUnit):
                       "scan did not force it",
                    5: "DEFERRED -- arrived while another window was running, "
                       "held and run when that one closed"}
-        lines.append(f"  capacity: capn={cn} poll_ub=0x{(cd>>8)&0xFF:02X} "
-                     f"boxed_burst={cd & 1}")
+        lines.append(f"  capacity: capn={cn} poll_ub=0x{(cd>>8)&0xFF:02X} boxed_burst={cd & 1}")
         if cw is not None:
             _wu = getattr(self._bridge, "_chain_capwhy_unit", None)
             _ws = getattr(self._bridge, "_chain_capwhy_slot", None)
-            # Name the bay, so "a window opened" can be told apart from an
-            # earlier window on another bay.
             _who = (f" [unit {_wu} slot {_ws}]"
                     if isinstance(_wu, int) and _wu < 8 else "")
-            lines.append(f"  last capacity window{_who}: "
-                         f"{_CAPWHY.get(cw, f'unknown ({cw})')}")
-        # Select-probe verdict: which id the HT acked its type-07 select at
-        # (-1 = still probing / never acked).
+            lines.append(f"  last capacity window{_who}: {_CAPWHY.get(cw, f'unknown ({cw})')}")
+        # The id the HT acked its type-07 select at (-1 = still probing or never acked).
         selid, selsent, selack = sel
         if selsent:
-            lines.append(
-                f"HT select probe: sent={selsent} acked={selack} "
-                f"locked_id={'none yet' if selid < 0 else hex(selid)}")
-        # The MC addressing the firmware actually holds per unit. The
-        # narration log drain goes per-unit only when this is set; otherwise
-        # it falls back to 0x0700, which never asks an AMS HT at 0x1800.
+            lines.append(f"HT select probe: sent={selsent} acked={selack} "
+                         f"locked_id={'none yet' if selid < 0 else hex(selid)}")
+        # Without it the narration drain falls back to 0x0700, which never asks an AMS HT at 0x1800.
         getter = getattr(self._bridge, "chain_mcaddr", None) \
             if self._bridge else None
         mcaddr = getter() if callable(getter) else None
-        if isinstance(mcaddr, list) and any(mcaddr):
-            shown = ", ".join(
-                f"{i}:0x{int(a):04X}" for i, a in enumerate(mcaddr) if a)
+        if (isinstance(mcaddr, list)
+            and any(mcaddr)):
+            shown = ", ".join(f"{i}:0x{int(a):04X}" for i, a in enumerate(mcaddr) if a)
             lines.append(f"Firmware MC addressing: {shown}")
         elif mcaddr is not None:
-            lines.append(
-                "Firmware MC addressing: NONE SET -- the log drain falls back "
-                "to 0x0700 only, so an HT at 0x1800 is never asked for "
-                "narration")
-        # Per-unit alignment: which chain index each configured unit resolved
-        # to, and whether an HT unit's flag landed on its index (an HT whose
-        # flag is missing gets no insert-scan).
+            lines.append("Firmware MC addressing: NONE SET -- the log drain falls back "
+                         "to 0x0700 only, so an HT at 0x1800 is never asked for narration")
+        # An HT whose flag is missing from its index gets no insert-scan.
         lines.append("Configured units:")
         try:
             for _, unit in self.printer.lookup_objects("AFC_BambuAMS"):
                 if getattr(unit, "_bridge", None) is not self._bridge:
-                    continue        # a unit on another bus
+                    continue
                 idx = getattr(unit, "ams_index", "?")
                 is_ht = bool(getattr(unit, "has_heater", False)
                              and getattr(unit, "dry_dev_addr", 0) == 0x1800)
@@ -4151,13 +3738,11 @@ class afcBambuAMS(afcUnit):
                     mark = ("  [HT, flag OK]" if flagged
                             else "  [HT, FLAG MISSING -- insert-scan will NOT "
                                  "fire]")
-                # measure_on_insert as the firmware holds it, beside the
-                # config. They differ only if a push was lost, which nothing
-                # else shows.
+                # They differ only if a push was lost, which nothing else shows.
                 want = bool(getattr(unit, "measure_on_insert", False))
                 if capmask is None:
                     meas = (f'  measure={("on" if want else "off")} (firmware pre-dates the '
-                        f'readback)')
+                            f'readback)')
                 elif not isinstance(idx, int):
                     meas = f'  measure={("on" if want else "off")}'
                 else:
@@ -4165,9 +3750,8 @@ class afcBambuAMS(afcUnit):
                     meas = f'  measure={("on" if got else "off")}'
                     if got != want:
                         meas += (f'  [MISMATCH -- config says {("on" if want else "off")}; re-push '
-                            f'with a Klipper restart]')
-                lines.append(f"  {getattr(unit, 'name', '?')} -> chain index "
-                             f"{idx}{mark}{meas}")
+                                 f'with a Klipper restart]')
+                lines.append(f"  {getattr(unit, 'name', '?')} -> chain index {idx}{mark}{meas}")
         except Exception:
             pass
         self.gcode.respond_info("\n".join(lines))
@@ -4182,27 +3766,22 @@ class afcBambuAMS(afcUnit):
 
         :param lane: The lane to recover
         """
-        # Clear any AMS TIMEOUT/error (state:7) first so the reel-back can run.
+        # A TIMEOUT/error (state:7) blocks the reel-back.
         try:
             self.relink()
         except Exception:
             pass
-        # Drop the follower so the re-arm timer doesn't fight the reel-back.
+        # So the re-arm timer doesn't fight the reel-back.
         try:
             self.set_feed_assist(lane, False)
         except Exception:
             pass
-        # Shared reel-back: halt any in-flight feed/retry, then wind the filament
-        # all the way back into the AMS bay (stop -> select -> long retract).
         try:
             self.eject_lane(lane)
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: recover reel-back for "
-                f"{getattr(lane, 'name', '?')} did not complete: {e}")
-        # Clear toolhead-loaded, then re-derive from presence: a reeled-back
-        # spool stays in the bay, so a present bay is LOADED and only an empty
-        # one NONE.
+            self.logger.warning(f"AFC bambu {self.name}: recover reel-back for "
+                                f"{getattr(lane, 'name', '?')} did not complete: {e}")
+        # A reeled-back spool stays in the bay, so a present bay is LOADED.
         try:
             lane.tool_loaded = False
             slot = self._slot_of(lane)
@@ -4225,7 +3804,7 @@ class afcBambuAMS(afcUnit):
                 except Exception:
                     pass
             if self._is_virtual_hub(lane):
-                lane._load_state = False          # not threaded to the toolhead
+                lane._load_state = False
         except Exception:
             pass
         try:
@@ -4251,56 +3830,41 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
         self._bridge = None
-        # Reset per-unit caches so the fresh connect re-seeds cleanly.
         self._slots = [{} for _ in range(self.SLOTS_PER_UNIT)]
         self._prev_present = [False] * self.SLOTS_PER_UNIT
         self._auto_scanned = [False] * self.SLOTS_PER_UNIT
         self._scan_notag = [False] * self.SLOTS_PER_UNIT
-        # Bays handed back to the insert path by _restore_untagged_defaults,
-        # so that happens once per bay per connection. See there.
         self._untagged_rearmed = [False] * self.SLOTS_PER_UNIT
-        # Inserts whose scan was held back because a lane on this unit was
-        # threaded to the toolhead. Retried once the unit is free; see
-        # _maybe_auto_scan.
+        # Inserts held back while a lane on this unit was at the toolhead; retried once it is free.
         self._scan_defer = [False] * self.SLOTS_PER_UNIT
-        # When the current dry was commanded, for how long, and whether it
-        # spins the spool. Set here because get_status reads them from the
-        # start.
+        # Set here because get_status reads them from the start.
         self._dry_started_at = None
         self._dry_minutes = 0
         self._dry_rotate = 0
         self._dry_refusal_logged = False
         self._scan_t0 = [None] * self.SLOTS_PER_UNIT
         self._scan_motion_t0 = [None] * self.SLOTS_PER_UNIT
-        # One Spoolman lookup per insert: this runs every frame, and blocking
-        # HTTP here risks "Timer too close". Only removal or reconnect clears
-        # the latch.
+        # One lookup per insert: this runs every frame, and blocking HTTP risks "Timer too close".
         self._spoolman_latched = set()
-        self._scan_primed = False           # re-prime the baseline after reconnect
-        self._prime_waiting = False         # and its wait on presence with it
-        self._stamp_looked = set()          # and the measurement baseline with it
-        # A reconnect is a fresh look at the hardware, so no bay counts as
-        # scanned; the boot hold re-engages until a bay is read again.
+        self._scan_primed = False
+        self._prime_waiting = False
+        self._stamp_looked = set()
+        # A reconnect is a fresh look at the hardware, so the boot hold re-engages.
         sb = getattr(self, "_scanned_bays", None)
         if isinstance(sb, set):
             sb.clear()
-        # ...and the one-shot in _restore_untagged_defaults, so a still
-        # unidentified bay gets another attempt on the next connection.
+        # So a still unidentified bay gets another attempt.
         ra = getattr(self, "_untagged_rearmed", None)
         if ra is not None:
             for i in range(len(ra)):
                 ra[i] = False
-        # Identity and lookup memos reset with the connection: a spool swapped
-        # while the bridge was down leaves no removal edge.
+        # A spool swapped while the bridge was down leaves no removal edge.
         latch = getattr(self, "_spoolman_latched", None)
         if isinstance(latch, set):
             latch.clear()
-        # With the rfid module on, the lookup memos live on the Spoolman
-        # delegate, not the unit, so clear them wherever they were built
-        # (as release() does).
+        # With the rfid module on these live on the Spoolman delegate.
         for obj in afcBambuAMS._built_measure_objs(self):
-            for name in ("_bound_uid", "_binding_check", "_measured_remain",
-                         "_meas_seen",
+            for name in ("_bound_uid", "_binding_check", "_measured_remain", "_meas_seen",
                          "_pending_summary", "_scan_seq0", "_scan_claim_tries"):
                 memo = getattr(obj, name, None)
                 if isinstance(memo, dict):
@@ -4308,11 +3872,9 @@ class afcBambuAMS(afcUnit):
             miss = getattr(obj, "_spoolman_no_match", None)
             if isinstance(miss, set):
                 miss.clear()
-        # Which of those _meas_seen entries were baselined goes with them.
         bl = getattr(self, "_meas_baselined", None)
         if isinstance(bl, set):
             bl.clear()
-        # And the presence history, and the lookup state the latch explains.
         afcBambuAMS._reset_connection_state(self)
         afcBambuAMS._reset_lookup_state(self)
 
@@ -4329,8 +3891,7 @@ class afcBambuAMS(afcUnit):
         self._defaults_due = {}
         self._defaults_quiet = set()
         self._meas_departed = {}
-        # Nothing this bridge says about the bays counts until it has asked
-        # the unit (_presence_known).
+        # Nothing about the bays counts until this bridge has asked the unit.
         self._presence_ok = False
         self._presence_wait_said = False
 
@@ -4347,8 +3908,7 @@ class afcBambuAMS(afcUnit):
         self._lookup_retry = {}
         self._lookup_refused = {}
         self._match_only_bays = set()
-        # Like _cleared_bays: defaults put on a lane nothing knew about still
-        # stand in for a read after a reconnect (_boot_hold).
+        # Defaults on a lane nothing knew about still stand in for a read after a reconnect.
         self._defaulted_bays = set()
         self._restored_bays = set()
 
@@ -4366,26 +3926,21 @@ class afcBambuAMS(afcUnit):
 
         :param _et: reactor time of this firing (unused)
         """
-        # Wait until the bridge has polled the unit (before that every bay
-        # reads empty) and owed re-reads have landed (a blank record would give
-        # the lane defaults and hold the real tag off). Bounded, so it cannot
-        # wait forever.
+        # Before the first poll every bay reads empty, and a blank record would give the lane
+        # defaults over the real tag. Bounded.
         if (not getattr(self, "_presence_ok", True)
             or afcBambuAMS._rereads_owed(self)):
             if not getattr(self, "_prime_waiting", False):
                 self._prime_waiting = True
-                self.logger.debug(
-                    f"AFC bambu {self.name}: scan priming waits until the "
-                    f"bridge has polled this unit and re-read its bays")
+                self.logger.debug(f"AFC bambu {self.name}: scan priming waits until the "
+                                  f"bridge has polled this unit and re-read its bays")
             return
         self._prime_waiting = False
         self._reread_wait_t0 = None
         self._scan_primed = True
-        # A pool unit claimed live missed PREP's lane test, so run its data
-        # half now; otherwise bays full at claim never reach their lanes.
+        # A pool unit claimed live missed PREP's lane test.
         claimed_live = not getattr(self, "_prep_seen", False)
-        # The records a claim put on its lanes are checked against the bays
-        # first, before the passes below read those lanes.
+        # Checked before the passes below read those lanes.
         if getattr(self, "_held_lanes", None):
             self._resolve_held_lanes()
         if claimed_live:
@@ -4394,14 +3949,11 @@ class afcBambuAMS(afcUnit):
             self._print_claimed_prep()
         self._reconcile_empty_bays()
         self._restore_untagged_defaults(claimed_live=claimed_live)
-        # A claim's records are checked once: a reconnect primes again, and
-        # must not bring back a lane the user has cleared since.
+        # Once only: a reconnect must not bring back a lane the user has cleared.
         if getattr(self, "_held_lanes", None):
             self._held_lanes = {}
 
-    # The fields AFC_prep copies out of VarFile.unit onto a lane, as
-    # (saved key, lane attribute), so the claim path restores what boot
-    # does.
+    # (saved key, lane attribute) pairs AFC_prep copies off VarFile.unit; a claim restores them too.
     _CLAIM_RESTORE_FIELDS = (
         ("material", "material"),
         ("color", "color"),
@@ -4416,9 +3968,7 @@ class afcBambuAMS(afcUnit):
     #: Of those, the ones AFC_prep reads as numbers ("" and NONE are none).
     _CLAIM_NUMERIC_FIELDS = ("weight", "bed_temp", "extruder_temp")
 
-    def _restore_claimed_lane_vars(self, lane: Any,
-                                   saved: Optional[Dict[str, Any]] = None
-                                   ) -> bool:
+    def _restore_claimed_lane_vars(self, lane: Any, saved: Optional[Dict[str, Any]] = None) -> bool:
         """
         Give a lane on a claimed pool unit the saved state PREP gives every
         AFC lane at boot.
@@ -4457,12 +4007,13 @@ class afcBambuAMS(afcUnit):
         if not saved:
             return False
         spool_id = saved.get("spool_id")
-        # A record naming no spool has nothing to give: its temperatures or
-        # weight are the last spool's.
+        # With no spool named, its temperatures and weight are the last spool's.
         spool = (spool_id not in (None, "", 0)
                  or saved.get("material") not in (None, ""))
         sub = str(saved.get("sub_type") or "").strip()
-        if spool and sub and not getattr(lane, "sub_type", ""):
+        if (spool
+            and sub
+            and not getattr(lane, "sub_type", "")):
             try:
                 lane.sub_type = sub
             except Exception:
@@ -4472,7 +4023,8 @@ class afcBambuAMS(afcUnit):
             val = saved.get(key)
             if val in (None, "", "NONE"):
                 continue
-            if key in numeric and not isinstance(val, (int, float)):
+            if (key in numeric
+                and not isinstance(val, (int, float))):
                 try:
                     val = float(val)
                 except (TypeError, ValueError):
@@ -4485,12 +4037,12 @@ class afcBambuAMS(afcUnit):
         linked = (spool_id not in (None, "", 0)
                   and getattr(afc, "spoolman", None) is not None)
         extras = []
-        if "need_purge" in saved and not linked:
+        if ("need_purge" in saved
+            and not linked):
             extras.append(("need_purge", bool(saved.get("need_purge"))))
         if "runout_lane" in saved:
             runout = saved.get("runout_lane")
-            extras.append(("runout_lane",
-                           None if runout in (None, "", "NONE") else runout))
+            extras.append(("runout_lane", None if runout in (None, "", "NONE") else runout))
         if isinstance(saved.get("td1_data"), dict):
             extras.append(("td1_data", dict(saved["td1_data"])))
         for attr, val in extras:
@@ -4508,18 +4060,15 @@ class afcBambuAMS(afcUnit):
                     fetch = afc.spool.set_spoolID
                     kw: Dict[str, Any] = {"save_vars": False}
                     try:
-                        takes_done = "on_done" in inspect.signature(
-                            fetch).parameters
+                        takes_done = "on_done" in inspect.signature(fetch).parameters
                     except (TypeError, ValueError):
                         takes_done = False
                     if takes_done:
-                        kw["on_done"] = lambda: afcBambuAMS._link_landed(
-                            self, lane, spool_id)
+                        kw["on_done"] = lambda: afcBambuAMS._link_landed(self, lane, spool_id)
                     fetch(lane, spool_id, **kw)
                 except Exception as e:
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: could not re-fetch spool "
-                        f"{spool_id} for {getattr(lane, 'name', lane)}: {e}")
+                    self.logger.debug(f"AFC bambu {self.name}: could not re-fetch spool "
+                                      f"{spool_id} for {getattr(lane, 'name', lane)}: {e}")
             return True
         return saved.get("material") not in (None, "")
 
@@ -4537,22 +4086,20 @@ class afcBambuAMS(afcUnit):
         tag off it.
         """
         held = getattr(self, "_held_lanes", None)
-        # A fetch from an earlier claim is not this one's (_link_landed).
         self._dropped_links = {}
-        # The lanes this claim's records save as loaded to a toolhead; None
-        # for a unit no master hands records, which trusts AFC's record.
+        # Lanes this claim's records save as loaded; None trusts AFC's record.
         self._toolhead_records = (
             None if held is None
             else {n for n, r in held.items() if (r or {}).get("tool_loaded")})
         for name, rec in (held or {}).items():
             lane = (getattr(self, "lanes", None) or {}).get(name)
-            if lane is None or not rec:
+            if (lane is None
+                or not rec):
                 continue
             try:
                 afcBambuAMS._restore_claimed_lane_vars(self, lane, rec)
             except Exception as e:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: claim restore {name}: {e}")
+                self.logger.debug(f"AFC bambu {self.name}: claim restore {name}: {e}")
         afcBambuAMS._restore_toolhead_lane(self)
 
     def _toolhead_record_is_mine(self, lane_name: str) -> bool:
@@ -4570,9 +4117,9 @@ class afcBambuAMS(afcUnit):
         :param lane_name: a lane of this unit
         :return bool: True when the record may be restored onto the lane
         """
-        moved = getattr(getattr(self, "_master", None), "loaded_lane_moved",
-                        None)
-        if callable(moved) and moved(lane_name):
+        moved = getattr(getattr(self, "_master", None), "loaded_lane_moved", None)
+        if (callable(moved)
+            and moved(lane_name)):
             return False
         mine = getattr(self, "_toolhead_records", None)
         return mine is None or lane_name in mine
@@ -4612,11 +4159,9 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
         if (rec
-            or (other
-                and str(other).strip().upper() != str(uid or "").strip().upper())):
+            or (other and str(other).strip().upper() != str(uid or "").strip().upper())):
             why = (f"{lane_name} was not saved loaded under this unit "
-                   f"({uid}), so the filament in {ext_name} is not from "
-                   f"this unit and")
+                   f"({uid}), so the filament in {ext_name} is not from this unit and")
         else:
             why = (f"no saved record of {lane_name} is attributed to this "
                    f"unit ({uid}), so AFC cannot tell which unit the "
@@ -4654,12 +4199,9 @@ class afcBambuAMS(afcUnit):
             if lane is None:
                 continue
             if not afcBambuAMS._toolhead_record_is_mine(self, name):
-                moved = getattr(getattr(self, "_master", None),
-                                "loaded_lane_moved", None)
+                moved = getattr(getattr(self, "_master", None), "loaded_lane_moved", None)
                 if not (callable(moved) and moved(name)):
-                    # The master warns about a lane it moved itself.
-                    self.logger.warning(afcBambuAMS._not_mine_text(
-                        self, ext_name, name))
+                    self.logger.warning(afcBambuAMS._not_mine_text(self, ext_name, name))
                 continue
             lane.tool_loaded = True
             if name == current:
@@ -4667,15 +4209,12 @@ class afcBambuAMS(afcUnit):
                     lane.sync_to_extruder()
                 except Exception:
                     pass
-            params = getattr(getattr(afc, "spool", None),
-                             "set_snapmaker_filament_params", None)
+            params = getattr(getattr(afc, "spool", None), "set_snapmaker_filament_params", None)
             if callable(params):
                 try:
                     params(lane)
                 except Exception as e:
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: print task config for "
-                        f"{name}: {e}")
+                    self.logger.debug(f"AFC bambu {self.name}: print task config for {name}: {e}")
 
     def _lane_on_defaults(self, lane: Any) -> bool:
         """
@@ -4703,7 +4242,7 @@ class afcBambuAMS(afcUnit):
         if material.lower() != dmat.lower():
             return False
         if _colour_key(getattr(lane, "color", "")) not in (
-                "", _colour_key(getattr(afc, "default_color", ""))):
+            "", _colour_key(getattr(afc, "default_color", ""))):
             return False
         if getattr(lane, "extruder_temp", None) not in (None, ""):
             return False
@@ -4713,10 +4252,10 @@ class afcBambuAMS(afcUnit):
             bed = None if bed in (None, "") else float(bed)
         except (TypeError, ValueError):
             return False
-        if weight and abs(weight - 1000.0) > 0.05:
+        if (weight
+            and abs(weight - 1000.0) > 0.05):
             return False
-        derived = {bed_temp_for_material(material),
-                   default_bed_temp_for_material(material)}
+        derived = {bed_temp_for_material(material), default_bed_temp_for_material(material)}
         return (bed is None
                 or any(d is not None and abs(bed - float(d)) < 0.05
                        for d in derived))
@@ -4744,17 +4283,25 @@ class afcBambuAMS(afcUnit):
         :return bool: True when the tag is another spool's
         """
         tag = info.get("material")
-        if not tag or str(tag).lower() == "unknown":
+        if (not tag
+            or str(tag).lower() == "unknown"):
             return False
         material, sub = _split_bambu_material(tag)
         lane_sub = str(getattr(lane, "sub_type", "") or "").strip().lower()
-        if lane_sub and sub and sub.strip().lower() != lane_sub:
+        if (lane_sub
+            and sub
+            and sub.strip().lower() != lane_sub):
             return True
         lc = _colour_key(getattr(lane, "color", ""))
         rc = _colour_key(info.get("color"))
-        if lc and rc and lc != rc:
+        if (lc
+            and rc
+            and lc != rc):
             return True
-        if lc and not rc and info.get("color_black") and lc != "000000":
+        if (lc
+            and not rc
+            and info.get("color_black")
+            and lc != "000000"):
             return True
         if (not lc
             and rc
@@ -4803,11 +4350,13 @@ class afcBambuAMS(afcUnit):
         """
         changed = False
         material, _sub = _split_bambu_material(info.get("material") or "")
-        if material and getattr(lane, "material", "") != material:
+        if (material
+            and getattr(lane, "material", "") != material):
             had = bool(getattr(lane, "material", ""))
             density = getattr(lane, "filament_density", None)
             lane.material = material
-            if had and density is not None:
+            if (had
+                and density is not None):
                 lane.filament_density = density
             changed = True
         color = info.get("color")
@@ -4843,8 +4392,7 @@ class afcBambuAMS(afcUnit):
         owned.add(slot)
         afcBambuAMS._check_kept_link(self, lane, info)
 
-    def _drop_held_record(self, lane: Any, info: dict,
-                          defaults: bool = False,
+    def _drop_held_record(self, lane: Any, info: dict, defaults: bool = False,
                           why: Optional[str] = None) -> None:
         """
         Clear a lane whose restored record the bay's tag shows is another
@@ -4861,9 +4409,8 @@ class afcBambuAMS(afcUnit):
         bay = f"bay {slot + 1}" if isinstance(slot, int) else "its bay"
         sid = getattr(lane, "spool_id", None)
         if defaults:
-            self.logger.info(
-                f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
-                f"replaces the AFC defaults saved for this lane")
+            self.logger.info(f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
+                             f"replaces the AFC defaults saved for this lane")
         else:
             was = " ".join(str(v) for v in (
                 getattr(lane, "material", ""), getattr(lane, "color", ""))
@@ -4896,15 +4443,14 @@ class afcBambuAMS(afcUnit):
 
         :param lane: the lane
         """
-        for attr, blank in (("extruder_temp", None), ("bed_temp", None),
-                            ("td1_data", {}), ("need_purge", False)):
+        for attr, blank in (("extruder_temp", None), ("bed_temp", None), ("td1_data", {}),
+                            ("need_purge", False)):
             try:
                 setattr(lane, attr, blank)
             except Exception:
                 pass
 
-    def _note_dropped_link(self, lane: Any, spool_id: Any,
-                           tagged: bool = True) -> None:
+    def _note_dropped_link(self, lane: Any, spool_id: Any, tagged: bool = True) -> None:
         """
         Remember a Spoolman link a record lost on this claim, so its fetch
         landing afterwards is undone (_link_landed).
@@ -4928,9 +4474,9 @@ class afcBambuAMS(afcUnit):
         if dropped is None:
             dropped = self._dropped_links = {}
         dropped[getattr(lane, "name", "")] = str(spool_id)
-        slot = (getattr(self, "_slot_map", None) or {}).get(
-            getattr(lane, "name", ""))
-        if tagged and slot is not None:
+        slot = (getattr(self, "_slot_map", None) or {}).get(getattr(lane, "name", ""))
+        if (tagged
+            and slot is not None):
             bays = getattr(self, "_match_only_bays", None)
             if bays is None:
                 bays = self._match_only_bays = set()
@@ -4955,10 +4501,8 @@ class afcBambuAMS(afcUnit):
             or str(getattr(lane, "spool_id", "")) != str(spool_id)):
             return
         del dropped[name]
-        self.logger.debug(
-            f"AFC bambu {self.name}: spool {spool_id}'s Spoolman data landed "
-            f"on {name} after its saved record was dropped -- clearing it "
-            f"again")
+        self.logger.debug(f"AFC bambu {self.name}: spool {spool_id}'s Spoolman data landed "
+                          f"on {name} after its saved record was dropped -- clearing it again")
         self._clear_lane_filament(lane)
         self._unbind_spool(lane, "its saved record was dropped")
         afcBambuAMS._forget_lane_extras(lane)
@@ -4966,7 +4510,8 @@ class afcBambuAMS(afcUnit):
         slots = getattr(self, "_slots", None) or []
         info = (slots[slot] if isinstance(slot, int)
                 and 0 <= slot < len(slots) else None) or {}
-        if info.get("present") and info.get("material"):
+        if (info.get("present")
+            and info.get("material")):
             (getattr(self, "_spoolman_latched", None) or set()).discard(slot)
             self._surface_slot_info(lane, info)
         try:
@@ -5001,7 +4546,8 @@ class afcBambuAMS(afcUnit):
         sp = getattr(self, "_spool", None)
         check = getattr(sp, "_binding_contradicted", None)
         run = getattr(sp, "_spoolman_bg", None)
-        if not callable(check) or not callable(run):
+        if (not callable(check)
+            or not callable(run)):
             return
         reactor = getattr(afc, "reactor", None)
 
@@ -5017,8 +4563,7 @@ class afcBambuAMS(afcUnit):
                 return
             post = getattr(reactor, "register_async_callback", None)
             if callable(post):
-                post(lambda _et: afcBambuAMS._kept_link_contradicted(
-                    self, slot, sid, uid, why))
+                post(lambda _et: afcBambuAMS._kept_link_contradicted(self, slot, sid, uid, why))
             else:
                 afcBambuAMS._kept_link_contradicted(self, slot, sid, uid, why)
 
@@ -5083,7 +4628,8 @@ class afcBambuAMS(afcUnit):
         :return str: what Spoolman records, for the line; None when nothing shows
             another spool
         """
-        if not tray and check(spool_id, uid):
+        if (not tray
+            and check(spool_id, uid)):
             return f"Spoolman records other tags for spool {spool_id}"
         rfid, client, spool = afcBambuAMS._linked_spool(self, spool_id)
         if spool is None:
@@ -5099,10 +4645,10 @@ class afcBambuAMS(afcUnit):
             return None
         found, by_tray, _dupe = match(client, uid, tray)
         fid = (found or {}).get("id")
-        if fid in (None, "") or str(fid) == str(spool_id):
+        if (fid in (None, "")
+            or str(fid) == str(spool_id)):
             return None
-        return (f"Spoolman records this {'reel' if by_tray else 'tag'} on "
-                f"spool {fid}")
+        return f"Spoolman records this {'reel' if by_tray else 'tag'} on spool {fid}"
 
     def _answer_binding_check(self, sp: Any, lane: Any, info: dict) -> None:
         """
@@ -5134,12 +4680,12 @@ class afcBambuAMS(afcUnit):
                 or slot is None
                 or not info.get("present")
                 or not isinstance(memo, dict)
-                or (getattr(sp, "_bound_uid", None) or {}).get(slot)
-                is not None):
+                or (getattr(sp, "_bound_uid", None) or {}).get(slot) is not None):
                 return
             key = (str(sid), str(uid))
             tray = afcBambuAMS._norm_tray(info.get("tray_uid") or "")
-            if not tray or key in memo:
+            if (not tray
+                or key in memo):
                 return
             rfid, _client, spool = afcBambuAMS._linked_spool(self, sid)
             if spool is None:
@@ -5174,8 +4720,7 @@ class afcBambuAMS(afcUnit):
             return
         (getattr(self, "_restored_bays", None) or set()).discard(slot)
         afcBambuAMS._drop_held_record(
-            self, lane, info,
-            why=why or f"Spoolman records other tags for spool {spool_id}")
+            self, lane, info, why=why or f"Spoolman records other tags for spool {spool_id}")
         (getattr(self, "_spoolman_latched", None) or set()).discard(slot)
         self._surface_slot_info(lane, info)
         self._save_lane_vars()
@@ -5209,37 +4754,32 @@ class afcBambuAMS(afcUnit):
         slots = getattr(self, "_slots", None) or []
         kept: List[str] = []
         stock: List[str] = []
-        order = sorted((getattr(self, "_slot_map", None) or {}).items(),
-                       key=lambda kv: kv[1])
+        order = sorted((getattr(self, "_slot_map", None) or {}).items(), key=lambda kv: kv[1])
         for name, slot in order:
             rec = held.get(name) or {}
             lane = (getattr(self, "lanes", None) or {}).get(name)
             if (lane is None
                 or not (0 <= slot < len(slots))
-                or (rec.get("spool_id") in (None, "", 0)
-                    and rec.get("material") in (None, ""))):
+                or (rec.get("spool_id") in (None, "", 0) and rec.get("material") in (None, ""))):
                 continue
             info = slots[slot] or {}
             if not info.get("present"):
                 continue
             if (getattr(lane, "spool_id", None) in (None, "", 0)
                 and getattr(lane, "material", None) in (None, "")):
-                continue              # cleared since the claim
+                continue
             tag = info.get("material")
             if (tag
                 and str(tag).lower() != "unknown"
                 and not info.get("reread_pending")):
                 verdict = afcBambuAMS._held_verdict(self, lane, info)
                 if verdict != "keep":
-                    afcBambuAMS._drop_held_record(
-                        self, lane, info, defaults=verdict == "defaults")
+                    afcBambuAMS._drop_held_record(self, lane, info, defaults=verdict == "defaults")
                     self._surface_slot_info(lane, info)
                     continue
                 afcBambuAMS._keep_held_record(self, lane, info)
-                self.logger.debug(
-                    f"AFC bambu {self.name}: {lane.name} keeps its saved "
-                    f"record: the tag in bay {slot + 1} ({tag}) is the same "
-                    f"spool")
+                self.logger.debug(f"AFC bambu {self.name}: {lane.name} keeps its saved "
+                                  f"record: the tag in bay {slot + 1} ({tag}) is the same spool")
                 continue
             if afcBambuAMS._lane_on_defaults(self, lane):
                 dfl = getattr(self, "_defaulted_bays", None)
@@ -5258,9 +4798,8 @@ class afcBambuAMS(afcUnit):
         parts = []
         if kept:
             one = len(kept) == 1
-            parts.append(
-                f"restored the saved record{'' if one else 's'} of the "
-                f"untagged spool{'' if one else 's'} on {', '.join(kept)}")
+            parts.append(f"restored the saved record{'' if one else 's'} of the "
+                         f"untagged spool{'' if one else 's'} on {', '.join(kept)}")
         if stock:
             one = len(stock) == 1
             parts.append(
@@ -5289,10 +4828,12 @@ class afcBambuAMS(afcUnit):
         """
         rb = getattr(self, "_restored_bays", None)
         slot = info.get("index")
-        if not rb or slot not in rb:
+        if (not rb
+            or slot not in rb):
             return
         tag = info.get("material")
-        if not tag or str(tag).lower() == "unknown":
+        if (not tag
+            or str(tag).lower() == "unknown"):
             return
         rb.discard(slot)
         if afcBambuAMS._held_verdict(self, lane, info) != "keep":
@@ -5320,18 +4861,21 @@ class afcBambuAMS(afcUnit):
                    | (getattr(self, "_defaulted_bays", None) or set()))
         for name, slot in (getattr(self, "_slot_map", None) or {}).items():
             lane = self.lanes.get(name)
-            if lane is None or not (0 <= slot < len(slots)):
+            if (lane is None
+                or not (0 <= slot < len(slots))):
                 continue
             info = slots[slot]
-            if not info or not info.get("present") or slot in waiting:
+            if (not info
+                or not info.get("present")
+                or slot in waiting):
                 continue
             if (getattr(lane, "material", "")
                 or getattr(lane, "spool_id", None)):
-                self._afc_owned.add(slot)         # lane has data -> defer
-            elif info.get("material") or info.get("rfid_uid"):
-                self._surface_slot_info(lane, info)   # blank lane -> the tag
-            # A present bay with no tag is left to _restore_untagged_defaults,
-            # which runs on every claim, not only the first.
+                self._afc_owned.add(slot)
+            elif (info.get("material")
+                  or info.get("rfid_uid")):
+                self._surface_slot_info(lane, info)
+            # A present bay with no tag goes to _restore_untagged_defaults, run on every claim.
 
     def _print_claimed_prep(self) -> None:
         """
@@ -5348,23 +4892,21 @@ class afcBambuAMS(afcUnit):
             latest = self._bridge.latest_status() if self._bridge else None
             online = self._unit_online(latest)
             ok = self._bridge is not None
-            order = sorted((getattr(self, "_slot_map", None) or {}).items(),
-                           key=lambda kv: kv[1])
+            order = sorted((getattr(self, "_slot_map", None) or {}).items(), key=lambda kv: kv[1])
             for name, slot in order:
                 lane = self.lanes.get(name)
                 if lane is None:
                     continue
                 info = slots[slot] if 0 <= slot < len(slots) else {}
-                _p, _s, _l, msg = prep_lane_state(
-                    info or {}, getattr(lane, "tool_loaded", False), online,
-                    fallback_material=getattr(lane, "material", None))
+                _p, _s, _l, msg = prep_lane_state(info or {},
+                                                  getattr(lane, "tool_loaded", False), online,
+                                                  fallback_material=getattr(lane, "material", None))
                 _map_txt = (lane.map_to_string()
                             if hasattr(lane, "map_to_string") else lane.map)
                 self.logger.info(f"{lane.name} tool cmd: {_map_txt} {msg}")
             self.logger.raw(self.logo if ok else self.logo_error)
         except Exception as e:
-            self.logger.debug(
-                f"AFC bambu {self.name}: claimed-unit PREP printout failed: {e}")
+            self.logger.debug(f"AFC bambu {self.name}: claimed-unit PREP printout failed: {e}")
 
     def _handle_ready(self) -> None:
         """
@@ -5382,31 +4924,25 @@ class afcBambuAMS(afcUnit):
             except ValueError as e:
                 error_str = f"AFC_BambuAMS {self.name}: {e}"
                 raise error(error_str)
-        # Seed virtual-hub occupancy: pinless lanes default _load_state=True
-        # and would read loaded until the first status frame.
+        # Pinless lanes default _load_state=True and would read loaded until the first frame.
         for lane in self.lanes.values():
             if self._is_virtual_hub(lane):
                 lane._load_state = False
         if not self.serial_port:
-            self.logger.info(
-                f"AFC bambu {self.name}: no serial_port configured -- unit "
-                f"stays offline. (A section with no serial_port is usually a "
-                f"leftover in AFC_auto_vars.cfg for a renamed or removed "
-                f"unit; it is safe to delete that section.)")
+            self.logger.info(f"AFC bambu {self.name}: no serial_port configured -- unit "
+                             f"stays offline. (A section with no serial_port is usually a "
+                             f"leftover in AFC_auto_vars.cfg for a renamed or removed "
+                             f"unit; it is safe to delete that section.)")
             return
-        # Reuse an existing bridge for this serial port (shared across the
-        # daisy-chained units), or create + start it for the first unit.
+        # One bridge per serial port, shared by the chained units.
         bridge = _bridge_mod._BRIDGES.get(self.serial_port)
         fresh = bridge is None
         if fresh:
-            bridge = BambuBridge(self._open_serial, self.afc.reactor,
-                                 self.logger)
+            bridge = BambuBridge(self._open_serial, self.afc.reactor, self.logger)
             if self._tcp_key_store:
                 bridge.store_key = self.tcp_key
             _bridge_mod.attach_wifi(self.serial_port, bridge)
-            # The narration goes to its own rotating file, one per master
-            # (boxed units on different buses both narrate as 0x0700); the
-            # first keeps the plain name.
+            # One narration file per master: boxed units on different buses all narrate as 0x0700.
             try:
                 import os
                 log_file = self.printer.start_args.get("log_file", None)
@@ -5414,93 +4950,74 @@ class afcBambuAMS(afcUnit):
                     bridge.set_narration_log(os.path.dirname(log_file),
                                              _bridge_log_tag(self.serial_port))
             except Exception as e:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: no narration log ({e})")
+                self.logger.warning(f"AFC bambu {self.name}: no narration log ({e})")
             _bridge_mod._BRIDGES[self.serial_port] = bridge
         self._bridge = bridge
         bridge.add_listener(self._on_status)
         bridge.add_reconnect_listener(self._on_bridge_reconnect)
         if self.pool:
-            # Idle pool unit: own the bridge if first, but no announce, index
-            # or timers; _on_status ignores it until claim() runs the online.
+            # Idle pool unit: no announce, index or timers until claim() runs.
             if fresh:
                 try:
                     bridge.start(defer_open=self._bridge_may_be_late())
                     if self.variant != "auto":
                         bridge.send({"cmd": "variant", "set": self.variant})
                     bridge.send({"cmd": "status"})
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: brought the bridge up as the "
-                        f"pool owner on {self.serial_port} (variant="
-                        f"{self.variant}); units claim onto it live.")
+                    self.logger.debug(f"AFC bambu {self.name}: brought the bridge up as the "
+                                      f"pool owner on {self.serial_port} (variant="
+                                      f"{self.variant}); units claim onto it live.")
                 except Exception as e:
-                    self.logger.warning(
-                        f"AFC bambu {self.name}: pool-owner bridge init "
-                        f"failed: {e}")
+                    self.logger.warning(f"AFC bambu {self.name}: pool-owner bridge init "
+                                        f"failed: {e}")
             return
-        # After AFC restores lanes, re-assert "loaded" for a tool-loaded lane
-        # with the mode-07 signal: a blind feed at idle stall-retracts.
+        # A tool-loaded lane needs the mode-07 signal, or a blind feed at idle stall-retracts.
         try:
-            self.afc.reactor.register_callback(
-                lambda et: self._startup_restore_loaded(),
-                self.afc.reactor.monotonic() + 5.0)
+            self.afc.reactor.register_callback(lambda et: self._startup_restore_loaded(),
+                                               self.afc.reactor.monotonic() + 5.0)
         except Exception:
             pass
-        # Once initial presence is in, prime the scan baseline so only real
-        # inserts scan, and give defaults to present bays with no tag.
+        # So only real inserts scan, and present bays with no tag get defaults.
         try:
-            self.afc.reactor.register_callback(
-                self._prime_scan_baseline, self.afc.reactor.monotonic() + 8.0)
+            self.afc.reactor.register_callback(self._prime_scan_baseline,
+                                               self.afc.reactor.monotonic() + 8.0)
         except Exception:
-            self._scan_primed = True        # no reactor (tests): scan immediately
-        # Demand-gated follower re-engage timer (watches the extruder; re-selects
-        # only on real extrusion). One timer per unit; harmless if idle.
+            self._scan_primed = True
+        # Re-selects only on real extrusion.
         try:
             if self._follow_timer is None:
                 self._follow_timer = self.afc.reactor.register_timer(
-                    self._follow_tick,
-                    self.afc.reactor.monotonic() + self.follow_poll_interval)
+                    self._follow_tick, self.afc.reactor.monotonic() + self.follow_poll_interval)
         except Exception:
             pass
-        # Chain self-heal watchdog: re-verify the UID -> chain-index pin every
-        # 30 s, since a unit that power-cycles can re-enroll elsewhere. The map
-        # comes from the Pico's RAM, so it costs no bus traffic.
+        # A power-cycled unit can re-enroll elsewhere; the map is in the Pico's RAM, so no bus cost.
         try:
-            if self.unit_uid and self._uid_watch_timer is None:
+            if (self.unit_uid
+                and self._uid_watch_timer is None):
                 self._uid_watch_timer = self.afc.reactor.register_timer(
-                    self._uid_watch_tick,
-                    self.afc.reactor.monotonic() + 30.0)
+                    self._uid_watch_tick, self.afc.reactor.monotonic() + 30.0)
         except Exception:
             pass
-        # UID-pin before announcing or seeding: chain indices shuffle across
-        # power cycles and everything per-unit is keyed by ams_index, so
-        # resolve it here before PREP and the announces below.
+        # Chain indices shuffle across power cycles and everything per-unit is keyed by ams_index.
         if not fresh:
             if self.unit_uid:
                 self._resolve_uid_blocking()
             self._announce_unit()
-            # Restates a configured wiring detail, so AFC.log only.
-            self.logger.debug(
-                f"AFC bambu {self.name}: sharing bridge on {self.serial_port} "
-                f"(ams_index={self.ams_index})")
+            self.logger.debug(f"AFC bambu {self.name}: sharing bridge on {self.serial_port} "
+                              f"(ams_index={self.ams_index})")
             return
         try:
             bridge.start(defer_open=self._bridge_may_be_late())
-            # Pin the device variant if configured; 'auto' lets the firmware
-            # detect AMS vs lite by probing both bus addresses.
+            # 'auto' lets the firmware probe both bus addresses.
             if self.variant != "auto":
                 bridge.send({"cmd": "variant", "set": self.variant})
             if self.unit_uid:
                 self._resolve_uid_blocking()
             self._announce_unit()
-            # Prime state: ask the bridge for an immediate status frame so the
-            # lanes reflect real slot presence before the first periodic poll.
+            # So the lanes show real presence before the first periodic poll.
             bridge.send({"cmd": "status"})
-            self.logger.debug(
-                f"AFC bambu {self.name}: bridge connected on {self.serial_port} "
-                f"(variant={self.variant}, ams_index={self.ams_index})")
-            # Warn (once, on the bridge-owning unit) if the configured AMS types
-            # exceed Bambu's bus limits (<=4 four-slot AMS, <=8 HT, <=12 total).
+            self.logger.debug(f"AFC bambu {self.name}: bridge connected on {self.serial_port} "
+                              f"(variant={self.variant}, ams_index={self.ams_index})")
+            # Bambu's bus limits: up to 4 four-slot AMS, 8 HT, 12 total.
             try:
                 models = []
                 for _, u in self.printer.lookup_objects("AFC_BambuAMS"):
@@ -5509,14 +5026,12 @@ class afcBambuAMS(afcUnit):
                         models.append(m)
                 warn = check_ams_limits(models)
                 if warn:
-                    self.logger.warning(
-                        f"AFC bambu: AMS bus over Bambu limits -- {warn}. Extra "
-                        f"units past the limit may not enroll.")
+                    self.logger.warning(f"AFC bambu: AMS bus over Bambu limits -- {warn}. Extra "
+                                        f"units past the limit may not enroll.")
             except Exception:
                 pass
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: bridge connect failed: {e}")
+            self.logger.warning(f"AFC bambu {self.name}: bridge connect failed: {e}")
 
     def set_master(self, master: Any) -> None:
         """
@@ -5554,8 +5069,7 @@ class afcBambuAMS(afcUnit):
         self._load_odom_start = self._load_odom_at_sensor = None
         self._path_wait_load = True
 
-    def hold_lanes(self,
-                   records: Optional[Dict[str, Dict[str, Any]]]) -> None:
+    def hold_lanes(self, records: Optional[Dict[str, Dict[str, Any]]]) -> None:
         """
         Take the lane records the master holds for this claim.
 
@@ -5591,24 +5105,18 @@ class afcBambuAMS(afcUnit):
             return False
         self.unit_uid = (uid or "").strip().upper() or None
         self.ams_model = model
-        # Reassert heater capability from the claimed model: a spare can change
-        # model between claims. An unknown model falls back to the unheated
-        # ams1 spec, since a phantom heater would send heat commands to
-        # hardware without one.
+        # A spare can change model between claims. Unknown falls back to the unheated ams1 spec, so
+        # no heat commands go to hardware without a heater.
         _spec = _AMS_MODELS.get(model)
         if _spec is None:
-            self.logger.warning(
-                f"AFC bambu {self.name}: claimed unknown model {model!r}; "
-                f"assuming NO heater. Known: {', '.join(sorted(_AMS_MODELS))}")
+            self.logger.warning(f"AFC bambu {self.name}: claimed unknown model {model!r}; "
+                                f"assuming NO heater. Known: {', '.join(sorted(_AMS_MODELS))}")
         self.has_heater = (_spec or _AMS_MODELS["ams1"])[0]
-        # The bridge and listener were wired at boot; wire them here only if
-        # that did not happen, never adding the listener twice.
         if getattr(self, "_bridge", None) is None:
             bridge = _bridge_mod._BRIDGES.get(self.serial_port)
             if bridge is None:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: claim found no live bridge on "
-                    f"{self.serial_port}; unit stays offline until restart.")
+                self.logger.warning(f"AFC bambu {self.name}: claim found no live bridge on "
+                                    f"{self.serial_port}; unit stays offline until restart.")
                 return False
             self._bridge = bridge
             bridge.add_listener(self._on_status)
@@ -5616,23 +5124,17 @@ class afcBambuAMS(afcUnit):
                 bridge.add_reconnect_listener(self._on_bridge_reconnect)
             except Exception:
                 pass
-        # With unit_uid set and _id_resolved False, _on_status defers every
-        # frame, so clearing pool now cannot route a frame to index 0 before
-        # resolution.
+        # With unit_uid set and _id_resolved False, _on_status defers every frame, so no frame
+        # reaches index 0 before resolution.
         self._id_resolved = False
-        # A claim is this unit's connection starting: whatever its bays were
-        # stamped with before now is baselined, not applied (see
-        # _baseline_meas_stamp). _scan_primed survives a reclaim; this must not.
+        # Bay stamps from before the claim are baselined, not applied; _scan_primed survives.
         self._stamp_looked = set()
-        # The rest of the per-connection state too: a spare's bay numbers are
-        # shared bus addresses, and old latches belong to whoever held them.
+        # A spare's bay numbers are shared bus addresses, so old latches are another unit's.
         self._spoolman_latched = set()
         self._scanned_bays = set()
         afcBambuAMS._reset_connection_state(self)
         afcBambuAMS._reset_lookup_state(self)
-        # A priming wait left from an earlier claim is not this one's (this
-        # claim schedules its own, below), and the bays _prev_present
-        # remembers may be another unit's.
+        # The bays _prev_present remembers may be another unit's.
         self._prime_waiting = False
         self._seed_present_seen = False
         try:
@@ -5646,17 +5148,14 @@ class afcBambuAMS(afcUnit):
             self._slot_map = build_slot_map(self.lanes, self.SLOTS_PER_UNIT)
         except Exception as e:
             self.logger.warning(f"AFC bambu {self.name}: claim slot map: {e}")
-        # The lanes take the records held for this claim (hold_lanes) before
-        # anything saves, as PREP does at boot; scan priming settles them.
+        # As PREP does at boot; scan priming settles them.
         self._afc_owned = set()
         try:
             afcBambuAMS._apply_held_lanes(self)
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: claim could not restore the saved "
-                f"lane records: {e}")
-        # Pin index by UID: this re-seeds the lanes from a fresh status frame
-        # and, once resolved, replays _announce_unit at the real index.
+            self.logger.warning(f"AFC bambu {self.name}: claim could not restore the saved "
+                                f"lane records: {e}")
+        # Once resolved, this re-seeds the lanes and replays _announce_unit at the real index.
         try:
             self._resolve_uid_index(0)
         except Exception as e:
@@ -5665,41 +5164,35 @@ class afcBambuAMS(afcUnit):
             self._announce_unit()
         except Exception:
             pass
-        # Defer scan priming as at boot, so bays present at the claim form the
-        # baseline instead of all re-reading and measuring as fresh inserts.
+        # So bays present at the claim form the baseline instead of re-reading as fresh inserts.
         try:
-            self.afc.reactor.register_callback(
-                self._prime_scan_baseline, self.afc.reactor.monotonic() + 8.0)
+            self.afc.reactor.register_callback(self._prime_scan_baseline,
+                                               self.afc.reactor.monotonic() + 8.0)
         except Exception:
-            self._scan_primed = True      # no reactor (tests): scan immediately
+            self._scan_primed = True
         try:
-            if self.unit_uid and getattr(self, "_uid_watch_timer", None) is None:
+            if (self.unit_uid
+                and getattr(self, "_uid_watch_timer", None) is None):
                 self._uid_watch_timer = self.afc.reactor.register_timer(
                     self._uid_watch_tick, self.afc.reactor.monotonic() + 30.0)
         except Exception:
             pass
-        # Restore the follower for the lane AFC records as tool-loaded, once
-        # and deferred until the index resolves and PREP has run (one toolhead
-        # per chain, so one engage). Also link-loss and stall detection,
-        # without the auto-arm.
+        # One toolhead per chain, so one engage, after the index resolves and PREP has run.
         try:
             if getattr(self, "_detector_timer", None) is None:
                 self._detector_timer = self.afc.reactor.register_timer(
-                    self._detector_tick,
-                    self.afc.reactor.monotonic() + self.follow_poll_interval)
+                    self._detector_tick, self.afc.reactor.monotonic() + self.follow_poll_interval)
         except Exception:
             pass
         try:
             self._loaded_restore_done = False
             self._loaded_restore_tries = 0
-            self.afc.reactor.register_callback(
-                lambda et: self._restore_loaded_follower(),
-                self.afc.reactor.monotonic() + 8.0)
+            self.afc.reactor.register_callback(lambda et: self._restore_loaded_follower(),
+                                               self.afc.reactor.monotonic() + 8.0)
         except Exception:
             pass
-        self.logger.debug(
-            f"AFC bambu {self.name}: claimed UID {self.unit_uid} as {model} "
-            f"and brought online live (ams_index={self.ams_index}).")
+        self.logger.debug(f"AFC bambu {self.name}: claimed UID {self.unit_uid} as {model} "
+                          f"and brought online live (ams_index={self.ams_index}).")
         return True
 
     def release(self) -> None:
@@ -5720,19 +5213,16 @@ class afcBambuAMS(afcUnit):
         self._bridge = None
         self.unit_uid = None
         self._id_resolved = False
-        # The master holds the lanes' own records from here (see
-        # AFC_BridgeBox._bay_records); the next claim is handed its own.
+        # The master holds the lanes' records from here (AFC_BridgeBox._bay_records).
         self._held_lanes = {}
-        # Clear the prior claim's slot data so a get_status/PREP read cannot
-        # briefly surface the old unit's spools on the freshly re-mapped lanes
-        # before _adopt_index re-seeds them ~0.6s into the next claim.
+        # Or a get_status/PREP read shows the old unit's spools before _adopt_index re-seeds them.
         self._slots = [{} for _ in range(self.SLOTS_PER_UNIT)]
-        # Likewise drop measurements and bound tags: the next claim may be another unit.
-        # Stamp memos stay so a same-UID reclaim does not re-adopt old measurements.
+        # The next claim may be another unit. Stamp memos stay, so a same-UID reclaim does not
+        # re-adopt old measurements.
         try:
             for _o in afcBambuAMS._built_measure_objs(self):
-                for _d in ("_measured_remain", "_pending_summary",
-                           "_bound_uid", "_bind_owed", "_convert_owed"):
+                for _d in ("_measured_remain", "_pending_summary", "_bound_uid", "_bind_owed",
+                           "_convert_owed"):
                     _memo = getattr(_o, _d, None)
                     if isinstance(_memo, dict):
                         _memo.clear()
@@ -5752,18 +5242,16 @@ class afcBambuAMS(afcUnit):
 
         :param tries: retry counter
         """
-        if self._bridge is None or not self.unit_uid:
+        if (self._bridge is None
+            or not self.unit_uid):
             return
-        self._bridge.send({"cmd": "chain"})            # request the enrollment map
-        # The reply arrives asynchronously on the bridge's read thread, so
-        # chain_uids() read on this tick would see the previous (or empty) map.
-        # Match after a short delay, as AFC_BAMBU_UIDS does.
+        self._bridge.send({"cmd": "chain"})
+        # The reply lands on the read thread, so chain_uids() on this tick sees the old map.
         try:
-            self.afc.reactor.register_callback(
-                lambda et: self._match_uid_index(tries),
-                self.afc.reactor.monotonic() + 0.6)
+            self.afc.reactor.register_callback(lambda et: self._match_uid_index(tries),
+                                               self.afc.reactor.monotonic() + 0.6)
         except Exception:
-            self._match_uid_index(tries)               # no reactor (tests)
+            self._match_uid_index(tries)
 
     def _match_uid_index(self, tries: int) -> None:
         """
@@ -5776,27 +5264,25 @@ class afcBambuAMS(afcUnit):
 
         :param tries: retry counter
         """
-        if self._bridge is None or not self.unit_uid:
+        if (self._bridge is None
+            or not self.unit_uid):
             return
         uids = self._bridge.chain_uids()
         idx = uids.index(self.unit_uid) if self.unit_uid in uids else -1
         if idx >= 0:
             self._adopt_index(idx)
             return
-        # Retry for ~1 min: enrollment after a Pico reboot can take tens of
-        # seconds with a full chain, and a late adopt still re-seeds the lanes.
-        if tries < 40:                                 # chain not ready yet -> retry
+        # Enrollment after a Pico reboot can take tens of seconds with a full chain.
+        if tries < 40:
             try:
-                self.afc.reactor.register_callback(
-                    lambda et: self._resolve_uid_index(tries + 1),
-                    self.afc.reactor.monotonic() + 1.5)
+                self.afc.reactor.register_callback(lambda et: self._resolve_uid_index(tries + 1),
+                                                   self.afc.reactor.monotonic() + 1.5)
             except Exception:
                 pass
         else:
-            self.logger.warning(
-                f"AFC bambu {self.name}: unit_uid {self.unit_uid} never appeared "
-                f"on the chain ({uids}); check the unit_uid value against "
-                f"AFC_BAMBU_UIDS. Holding chain index {self.ams_index}.")
+            self.logger.warning(f"AFC bambu {self.name}: unit_uid {self.unit_uid} never appeared "
+                                f"on the chain ({uids}); check the unit_uid value against "
+                                f"AFC_BAMBU_UIDS. Holding chain index {self.ams_index}.")
 
     def _adopt_index(self, idx: int) -> None:
         """
@@ -5810,31 +5296,28 @@ class afcBambuAMS(afcUnit):
         """
         old = self.ams_index
         was_resolved = self._id_resolved
-        self._id_resolved = True          # a real chain index, not the default
-        # Anything cached under an unverified index is another unit's (every
-        # unit starts at index 0), so the first confirmation clears it even
-        # unchanged.
-        if idx == old and not was_resolved:
+        self._id_resolved = True
+        # Every unit starts at index 0, so the first confirmation clears the cache even unchanged.
+        if (idx == old
+            and not was_resolved):
             self._slots = [{} for _ in range(self.SLOTS_PER_UNIT)]
-            self._presence_ok = False     # and nothing known about them yet
+            self._presence_ok = False
             self._presence_wait_said = False
             try:
-                self._bridge.send({"cmd": "status"})   # re-seed, verified now
+                self._bridge.send({"cmd": "status"})
             except Exception:
                 pass
         if idx == old:
-            # Re-confirmations happen at every resolve/reconnect, so log at
-            # debug; only a changed pin (below) is logged at info.
+            # Re-confirmed on every resolve and reconnect; only a changed pin logs at info.
             try:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: UID {self.unit_uid} confirmed at "
-                    f"ams_index {idx}")
+                self.logger.debug(f"AFC bambu {self.name}: UID {self.unit_uid} confirmed at "
+                                  f"ams_index {idx}")
             except Exception:
                 pass
-            self._send_ht_flag(self._bridge)     # re-assert (Pico may have rebooted)
-            afcBambuAMS._send_unit_model(self, self._bridge)  # which machine
+            self._send_ht_flag(self._bridge)  # the Pico may have rebooted
+            afcBambuAMS._send_unit_model(self, self._bridge)
             self._send_mc_addr(self._bridge)
-            if self._announce_deferred:      # held at connect; send it now
+            if self._announce_deferred:
                 self._announce_deferred = False
                 self._announce_defer_t0 = 0.0
                 self._announce_defer_warned = False
@@ -5844,24 +5327,22 @@ class afcBambuAMS(afcUnit):
         if self._dry_id_follows_index:
             self.dry_ams_id = mc_id_for_index(idx)
         self._slots = [{} for _ in range(self.SLOTS_PER_UNIT)]
-        self._presence_ok = False         # the new index has not answered
+        self._presence_ok = False
         self._presence_wait_said = False
         try:
             self._bridge.send({"cmd": "units", "n": idx + 1})
-            # Move the HT flag from the old index to the resolved one so the
-            # firmware arms the insert-edge scan on the right unit.
+            # So the firmware arms the insert-edge scan on the right unit.
             if self._is_ht():
                 self._bridge.send({"cmd": "htunit", "unit": old, "on": 0})
             self._send_ht_flag(self._bridge)
             afcBambuAMS._send_unit_model(self, self._bridge)
             self._send_mc_addr(self._bridge)
-            self._bridge.send({"cmd": "status"})    # re-seed from the right unit
+            self._bridge.send({"cmd": "status"})
         except Exception:
             pass
-        self.logger.debug(
-            f"AFC bambu {self.name}: pinned to UID {self.unit_uid} at "
-            f"chain index {idx} (was ams_index {old})")
-        if self._announce_deferred:          # held at connect; send it now
+        self.logger.debug(f"AFC bambu {self.name}: pinned to UID {self.unit_uid} at "
+                          f"chain index {idx} (was ams_index {old})")
+        if self._announce_deferred:
             self._announce_deferred = False
             self._announce_defer_t0 = 0.0
             self._announce_defer_warned = False
@@ -5880,7 +5361,8 @@ class afcBambuAMS(afcUnit):
         :param timeout: Max seconds to wait for the chain map
         :return bool: True if the UID was resolved
         """
-        if self._bridge is None or not self.unit_uid:
+        if (self._bridge is None
+            or not self.unit_uid):
             return False
         try:
             reactor = self.afc.reactor
@@ -5888,7 +5370,7 @@ class afcBambuAMS(afcUnit):
             last_req = -10.0
             while reactor.monotonic() < end:
                 now = reactor.monotonic()
-                if now - last_req >= 1.0:      # (re-)request the enrollment map
+                if now - last_req >= 1.0:
                     last_req = now
                     try:
                         self._bridge.send({"cmd": "chain"})
@@ -5905,20 +5387,17 @@ class afcBambuAMS(afcUnit):
             seen = self._bridge.chain_uids()
         except Exception:
             seen = []
-        # Debug, not warning: a slow chain at startup is expected and the
-        # retries re-pin when the UID appears. The 40-retry give-up warns.
+        # A slow chain at startup is expected; the 40-retry give-up warns.
         try:
-            self.logger.debug(
-                f"AFC bambu {self.name}: unit_uid {self.unit_uid} not on the "
-                f"chain after {timeout:.0f}s (chain so far: {seen or 'empty'}); "
-                f"holding chain index {self.ams_index} until it appears "
-                f"(background retry)")
+            self.logger.debug(f"AFC bambu {self.name}: unit_uid {self.unit_uid} not on the "
+                              f"chain after {timeout:.0f}s (chain so far: {seen or 'empty'}); "
+                              f"holding chain index {self.ams_index} until it appears "
+                              f"(background retry)")
         except Exception:
             pass
         try:
-            self.afc.reactor.register_callback(
-                lambda et: self._resolve_uid_index(0),
-                self.afc.reactor.monotonic() + 2.0)
+            self.afc.reactor.register_callback(lambda et: self._resolve_uid_index(0),
+                                               self.afc.reactor.monotonic() + 2.0)
         except Exception:
             pass
         return False
@@ -5934,16 +5413,13 @@ class afcBambuAMS(afcUnit):
         """
         if self._bridge is None:
             return
-        # Never register at a guessed index: until unit_uid resolves (or a pool
-        # spare is claimed), every registration would land on whichever unit
-        # holds index 0. Defer; _adopt_index replays this once the index is
-        # known.
+        # Until unit_uid resolves or a spare is claimed, any registration lands on index 0;
+        # _adopt_index replays this.
         if ((self.unit_uid or getattr(self, "pool", False))
             and not self._id_resolved):
             self._announce_deferred = True
-            # Debug level: waiting for the chain map at boot is normal. It is
-            # only a problem if it never resolves, so record when the wait
-            # started and let _check_chain_resolve escalate.
+            # Waiting for the chain map at boot is normal; _check_chain_resolve escalates if it
+            # never resolves.
             if not getattr(self, "_announce_defer_t0", 0.0):
                 try:
                     self._announce_defer_t0 = self.afc.reactor.monotonic()
@@ -5951,14 +5427,10 @@ class afcBambuAMS(afcUnit):
                     self._announce_defer_t0 = 0.0
             why = (f"UID {self.unit_uid}" if self.unit_uid
                    else "unclaimed pool slot, no UID yet")
-            self.logger.debug(
-                f"AFC bambu {self.name}: chain index not resolved yet ({why}); "
-                f"holding this unit's registrations until the chain map "
-                f"arrives")
+            self.logger.debug(f"AFC bambu {self.name}: chain index not resolved yet ({why}); "
+                              f"holding this unit's registrations until the chain map arrives")
             return
-        # One try per send, so a failure cannot skip _send_mc_addr: without it
-        # the log drain never asks an HT, and every HT move and measurement is
-        # lost while the bus looks healthy.
+        # One try per send: without _send_mc_addr the log drain never asks an HT for its moves.
         sends: Tuple[Tuple[str, Callable[[], Any]], ...] = (
             ("units", lambda: self._bridge.send(
                 {"cmd": "units", "n": self.ams_index + 1})),
@@ -5968,8 +5440,7 @@ class afcBambuAMS(afcUnit):
             ("arm cadence", lambda: self._bridge.send(
                 {"cmd": "armms", "ms": int(FOLLOW_ARM_MS)})))
         if self._is_lite():
-            # The AMS Lite has no HT flag, model, MC poll or arm cadence: only
-            # its bus variant, which a rebooted bridge forgets, and one unit.
+            # The AMS Lite only needs its bus variant, which a rebooted bridge forgets.
             sends = (
                 ("variant", lambda: self._bridge.send(
                     {"cmd": "variant", "set": "lite"})),
@@ -5978,11 +5449,9 @@ class afcBambuAMS(afcUnit):
             try:
                 fn()
             except Exception as e:
-                # Name the failed send: a silent failure looks like a unit
-                # that is online and polling but never narrates.
-                self.logger.warning(
-                    f"AFC bambu {self.name}: could not announce {what} to the "
-                    f"bridge ({e}); narration or addressing may be wrong")
+                # A silent failure looks like a unit that polls but never narrates.
+                self.logger.warning(f"AFC bambu {self.name}: could not announce {what} to the "
+                                    f"bridge ({e}); narration or addressing may be wrong")
 
     def _on_bridge_reconnect(self) -> None:
         """
@@ -5992,36 +5461,25 @@ class afcBambuAMS(afcUnit):
 
         Re-announce this unit's config and re-resolve the UID pin.
         """
-        # A new connection: the next frame is a first look at every measurement
-        # stamp, so one taken while the link was down is baselined, not
-        # applied.
+        # A measurement taken while the link was down is baselined, not applied.
         self._stamp_looked = set()
-        # Reset presence history too: a rebooted Pico reports bays empty before
-        # its first poll. The lookup state and its latch are kept.
+        # A rebooted Pico reports bays empty before its first poll. The lookup state is kept.
         afcBambuAMS._reset_connection_state(self)
-        # A bay occupied before the reconnect that the first real answer calls
-        # empty was emptied; _on_status seeds _present_seen from it.
+        # A bay occupied before that the first real answer calls empty was emptied.
         self._seed_present_seen = True
-        # A scan open across the gap is checked on that same answer
-        # (_close_scans_the_bridge_lost).
         self._scans_to_check = True
-        # The info reply (chip, fw, variant) is only sent on request. This
-        # early ask may be lost to link-key auth; _announce_after_settle asks
-        # again.
+        # Info is only sent on request, and this early ask may be lost to link-key auth.
         try:
             self._bridge.request_info()
         except Exception:
             pass
-        # The Pico is not rebooted on reconnect (a watchdog reboot can take a
-        # USB-CAN adapter down). Announce after a settle, on the reactor.
+        # No Pico reboot on reconnect: a watchdog reboot can take a USB-CAN adapter down.
         try:
             reactor = self.afc.reactor
-            reactor.register_callback(
-                lambda et: self._announce_after_settle(),
-                reactor.monotonic() + ANNOUNCE_SETTLE_S)
+            reactor.register_callback(lambda et: self._announce_after_settle(),
+                                      reactor.monotonic() + ANNOUNCE_SETTLE_S)
             return
         except Exception:
-            # No usable reactor (early boot, or a test shim): announce now.
             pass
         self._announce_after_settle()
 
@@ -6033,8 +5491,7 @@ class afcBambuAMS(afcUnit):
         Split out so it can be deferred onto the reactor instead of sleeping on
         the reader thread.
         """
-        # Ask info again after the settle: the first ask can precede link-key
-        # auth. chip() and the reboot-vs-hiccup detection need the reply.
+        # The first ask can precede link-key auth; chip() and reboot detection need the reply.
         try:
             self._bridge.request_info()
         except Exception:
@@ -6046,12 +5503,10 @@ class afcBambuAMS(afcUnit):
             self._bridge.send({"cmd": "status"})
         except Exception:
             pass
-        # Re-assert the loaded lane: the Pico rebooted, so the AMS forgot which
-        # tray is threaded. Same gate as klippy:ready, after a short settle.
+        # The rebooted Pico forgot which tray is threaded.
         try:
-            self.afc.reactor.register_callback(
-                lambda et: self._startup_restore_loaded(),
-                self.afc.reactor.monotonic() + 1.0)
+            self.afc.reactor.register_callback(lambda et: self._startup_restore_loaded(),
+                                               self.afc.reactor.monotonic() + 1.0)
         except Exception:
             pass
         self._relink_after_reboot()
@@ -6078,37 +5533,32 @@ class afcBambuAMS(afcUnit):
         if bridge is None:
             return
         try:
-            if not bridge.consume_reboot():     # one-shot, chain-wide
+            if not bridge.consume_reboot():
                 return
         except AttributeError:
-            return                              # bridge predates the counter
+            return
         try:
             if self.afc.function.in_print():
-                self.logger.info(
-                    f"AFC bambu {self.name}: bridge rebooted, but a print is "
-                    f"running -- not relinking. Units may show a fault until "
-                    f"the print ends; AFC_BAMBU_RELINK UNIT={self.name} clears "
-                    f"it by hand.")
+                self.logger.info(f"AFC bambu {self.name}: bridge rebooted, but a print is "
+                                 f"running -- not relinking. Units may show a fault until "
+                                 f"the print ends; AFC_BAMBU_RELINK UNIT={self.name} clears "
+                                 f"it by hand.")
                 return
         except Exception:
-            return                              # cannot tell: do nothing
-        self.logger.debug(
-            f"AFC bambu {self.name}: bridge rebooted -- relinking the chain so "
-            f"the units drop their park (they lost their master mid-frame)")
+            return
+        self.logger.debug(f"AFC bambu {self.name}: bridge rebooted -- relinking the chain so "
+                          f"the units drop their park (they lost their master mid-frame)")
         try:
             bridge.send({"cmd": "relink"})
         except Exception:
             self.logger.debug(f"AFC bambu {self.name}: post-reboot relink failed",
                               traceback=traceback.format_exc())
             return
-        # The relink deregisters every unit, so replay all reconnect listeners.
-        # consume_reboot() already fired, so this cannot loop into another
-        # relink.
+        # The relink deregisters every unit; consume_reboot() already fired, so this cannot loop.
         try:
             reactor = self.afc.reactor
-            reactor.register_callback(
-                lambda et: bridge.replay_reconnect_listeners(),
-                reactor.monotonic() + RELINK_SETTLE_S)
+            reactor.register_callback(lambda et: bridge.replay_reconnect_listeners(),
+                                      reactor.monotonic() + RELINK_SETTLE_S)
         except Exception:
             try:
                 bridge.replay_reconnect_listeners()
@@ -6124,11 +5574,11 @@ class afcBambuAMS(afcUnit):
         :return float: next wake time (30s cadence)
         """
         try:
-            if self._bridge is not None and self.unit_uid:
+            if (self._bridge is not None
+                and self.unit_uid):
                 self._bridge.send({"cmd": "chain"})
-                self.afc.reactor.register_callback(
-                    lambda et: self._uid_watch_check(),
-                    self.afc.reactor.monotonic() + 0.8)
+                self.afc.reactor.register_callback(lambda et: self._uid_watch_check(),
+                                                   self.afc.reactor.monotonic() + 0.8)
         except Exception:
             pass
         return eventtime + 30.0
@@ -6143,15 +5593,12 @@ class afcBambuAMS(afcUnit):
             if self.unit_uid in uids:
                 idx = uids.index(self.unit_uid)
                 if idx != self.ams_index:
-                    self.logger.warning(
-                        f"AFC bambu {self.name}: chain moved mid-session -- UID "
-                        f"{self.unit_uid} now at index {idx} (was "
-                        f"{self.ams_index}); re-pinning")
+                    self.logger.warning(f"AFC bambu {self.name}: chain moved mid-session -- UID "
+                                        f"{self.unit_uid} now at index {idx} (was "
+                                        f"{self.ams_index}); re-pinning")
                     self._adopt_index(idx)
                 elif not self._id_resolved:
-                    # Same number, but only as the config default: adopt so
-                    # held-back registrations are released instead of deferring
-                    # forever.
+                    # Only the config default: adopt so held registrations go out.
                     self._adopt_index(idx)
         except Exception:
             pass
@@ -6172,20 +5619,17 @@ class afcBambuAMS(afcUnit):
             return
         for lane in getattr(self, "lanes", {}).values():
             if getattr(lane, "tool_loaded", False):
-                # Routine on every restart with a lane loaded, hence debug.
+                # Routine on every restart with a lane loaded.
                 if not self._ready_to_follow(lane):
-                    # Steppers come up de-energised, so engaging now would
-                    # pulse the AMS with nothing gripping; the follow poll arms
-                    # it once the motors come on.
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: {lane.name} loaded at "
-                        f"startup on an unhomed machine with a de-energised "
-                        f"extruder; leaving the follower for the poll loop to "
-                        f"arm once either changes")
+                    # Steppers come up de-energized, so engaging now would pulse the AMS with
+                    # nothing gripping.
+                    self.logger.debug(f"AFC bambu {self.name}: {lane.name} loaded at "
+                                      f"startup on an unhomed machine with a de-energised "
+                                      f"extruder; leaving the follower for the poll loop to "
+                                      f"arm once either changes")
                     continue
-                self.logger.debug(
-                    f"AFC bambu {self.name}: {lane.name} loaded at startup, "
-                    f"re-asserting AMS loaded state + follower")
+                self.logger.debug(f"AFC bambu {self.name}: {lane.name} loaded at startup, "
+                                  f"re-asserting AMS loaded state + follower")
                 self._engage_follower(lane)
 
     def _restore_loaded_follower(self, _et: Optional[float] = None) -> bool:
@@ -6219,30 +5663,27 @@ class afcBambuAMS(afcUnit):
         """
         if getattr(self, "_loaded_restore_done", False):
             return False
-        # Not addressable yet (index unresolved / bridge down): retry a bounded
-        # number of times rather than latch and miss the restore.
-        if self._bridge is None or not getattr(self, "_id_resolved", False):
+        # Not addressable yet: retry a bounded number of times rather than miss the restore.
+        if (self._bridge is None
+            or not getattr(self, "_id_resolved", False)):
             tries = getattr(self, "_loaded_restore_tries", 0)
             if tries < 6:
                 self._loaded_restore_tries = tries + 1
                 try:
-                    self.afc.reactor.register_callback(
-                        lambda et: self._restore_loaded_follower(),
-                        self.afc.reactor.monotonic() + 3.0)
+                    self.afc.reactor.register_callback(lambda et: self._restore_loaded_follower(),
+                                                       self.afc.reactor.monotonic() + 3.0)
                 except Exception:
                     pass
             else:
-                self._loaded_restore_done = True    # out of retries: none due
+                self._loaded_restore_done = True
             return False
         afc = self.afc
         loaded = {ln for ln in
                   (getattr(e, "lane_loaded", None)
                    for e in getattr(afc, "tools", {}).values()) if ln}
-        # A lane the master gave this unit in place of another carries that
-        # unit's filament in AFC's record (see loaded_lane_moved), unless this
-        # claim's own record says so (_toolhead_record_is_mine).
-        moved = getattr(getattr(self, "_master", None), "loaded_lane_moved",
-                        None)
+        # A lane the master gave this unit in place of another carries that unit's filament,
+        # unless this claim's own record says so.
+        moved = getattr(getattr(self, "_master", None), "loaded_lane_moved", None)
         mine = [lane for lane in getattr(self, "lanes", {}).values()
                 if lane.name in loaded
                 and not (moved is not None and moved(lane.name))
@@ -6254,20 +5695,18 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
         if not mine:
-            return False                # the loaded lane belongs to another unit
+            return False
         for lane in mine:
             if not getattr(lane, "tool_loaded", False):
-                lane.tool_loaded = True         # repair from AFC's authoritative record
+                lane.tool_loaded = True  # repair from AFC's record
         try:
-            self._startup_restore_loaded()      # engages the tray (mode:4), once
+            self._startup_restore_loaded()  # engages the tray (mode:4) once
         except Exception as ex:
-            self.logger.warning(
-                f"AFC bambu {self.name}: loaded-follower restore failed: {ex}")
+            self.logger.warning(f"AFC bambu {self.name}: loaded-follower restore failed: {ex}")
             return False
-        self.logger.debug(
-            f"AFC bambu {self.name}: restored the follower for "
-            f"{', '.join(lane.name for lane in mine)} (AFC records it loaded to "
-            f"the toolhead) -- mode:4, one-shot.")
+        self.logger.debug(f"AFC bambu {self.name}: restored the follower for "
+                          f"{', '.join(lane.name for lane in mine)} (AFC records it loaded to "
+                          f"the toolhead) -- mode:4, one-shot.")
         return True
 
     def restore_follower_on_return(self, since: float) -> bool:
@@ -6296,12 +5735,14 @@ class afcBambuAMS(afcUnit):
             does not own the loaded lane, stands aside, or left the restore to
             retry until its index resolves
         """
-        if self.pool or self._bridge is None:
+        if (self.pool
+            or self._bridge is None):
             return False
         if not getattr(self, "_loaded_restore_done", True):
             return False
         at = getattr(self, "_loaded_restore_at", None)
-        if at is not None and at >= since:
+        if (at is not None
+            and at >= since):
             return False
         if (getattr(self, "_load_in_progress", False)
             or getattr(self, "_unload_in_progress", False)
@@ -6326,8 +5767,8 @@ class afcBambuAMS(afcUnit):
 
         :param lane: A lane whose filament is threaded to the toolhead
         """
-        self.bridge_finish(lane)     # commit loaded (mode-07)
-        self.select_lane(lane)       # mode-09 -> mode:4 (last mode change)
+        self.bridge_finish(lane)  # mode-07
+        self.select_lane(lane)  # mode-09 -> mode:4
         self.set_feed_assist(lane, True)  # hold mode:4 via AP2 sync
 
     def _bridge_may_be_late(self) -> bool:
@@ -6356,25 +5797,19 @@ class afcBambuAMS(afcUnit):
         spec = str(self.serial_port or "")
         if spec.strip().lower().startswith("tcp://"):
             host, port = TcpPort.parse(spec)
-            # Logged before the connect, since a refusal raises out of here.
-            # Info once, then debug: the reader calls this on every backoff
-            # pass.
+            # Logged before the connect, which can raise; info once, as each backoff calls this.
             _say = self.logger.info if not getattr(self, "_tcp_said", False) \
                 else self.logger.debug
             self._tcp_said = True
             _say(f"AFC bambu {self.name}: bridge over TCP at tcp://{host}:{port}"
                  f" (opt-in transport -- USB-CDC is the supported one)")
-            # Same timeouts as the serial path below, and for the same reason:
-            # every send() is made from a reactor timer, so a far end that
-            # stops reading must time out rather than block the reactor.
-            return TcpPort(host, port, timeout=0.1, write_timeout=0.5,
-                           key=self.tcp_key)
+            # Every send() runs on a reactor timer, so a far end that stops reading must time out.
+            return TcpPort(host, port, timeout=0.1, write_timeout=0.5, key=self.tcp_key)
         import serial
-        # write_timeout is required: every send() runs on the reactor, and a
-        # Pico busy on the AMS bus stops draining its CDC. A blocked write
-        # would stall the reactor long enough to shut the MCUs down.
-        return serial.Serial(_bridge_mod.usb_port(self.serial_port), self.baud,
-                             timeout=0.1, write_timeout=0.5)
+        # A Pico busy on the AMS bus stops draining its CDC; a blocked write would stall the reactor
+        # long enough to shut the MCUs down.
+        return serial.Serial(_bridge_mod.usb_port(self.serial_port), self.baud, timeout=0.1,
+                             write_timeout=0.5)
 
     def _make_logo(self, error: bool) -> str:
         """
@@ -6384,12 +5819,10 @@ class afcBambuAMS(afcUnit):
         :return str: the logo text PREP prints after testing the unit's lanes
         """
         builder = _ams_box_logo_error if error else _ams_box_logo
-        # unit_slots, not SLOTS_PER_UNIT: a 1-slot AMS HT draws one bay, not four.
-        return builder("BambuAMS",
-                       getattr(self, "unit_slots", self.SLOTS_PER_UNIT),
-                       self.name)
+        # A 1-slot AMS HT draws one bay, not four.
+        return builder("BambuAMS", getattr(self, "unit_slots", self.SLOTS_PER_UNIT), self.name)
 
-    # ── PREP interface ──
+    # PREP interface
 
     def system_Test(self, cur_lane: Any, delay: float, assignTcmd: bool,
                     enable_movement: bool) -> bool:
@@ -6424,42 +5857,34 @@ class afcBambuAMS(afcUnit):
             slot = self._slot_of(cur_lane)
             info = self._slots[slot] if slot is not None else {}
             prep, staged, live, msg = prep_lane_state(
-                info, getattr(cur_lane, 'tool_loaded', False),
-                self._unit_online(latest),
+                info, getattr(cur_lane, 'tool_loaded', False), self._unit_online(latest),
                 fallback_material=getattr(cur_lane, 'material', None))
             cur_lane.prep_state = prep
             cur_lane.loaded_to_hub = staged
-            # Virtual hub occupancy is the bay's hub sensor.
             if self._is_virtual_hub(cur_lane):
-                cur_lane._load_state = bool(
-                    afcBambuAMS._hub_reads_filament(self, info))
+                cur_lane._load_state = bool(afcBambuAMS._hub_reads_filament(self, info))
             elif self._is_lite():
-                # An AMS Lite lane has no load switch: its bay is its load.
+                # An AMS Lite lane has no load switch.
                 cur_lane._load_state = bool(prep)
             if not prep:
-                # Empty bay: LED off, lane idle.
                 self.lane_not_ready(cur_lane)
                 cur_lane.status = AFCLaneState.NONE
             else:
-                # A present spool in an AMS bay is staged and ready (no
-                # separate load sensor), so mark it LOADED, as AFC_ACE does.
+                # A present spool is staged (no separate load sensor), as AFC_ACE does.
                 self.lane_loaded(cur_lane)
                 cur_lane.status = AFCLaneState.LOADED
                 self.lane_illuminate_spool(cur_lane)
-                # AFC's var file owns filament data at boot; sub_type is saved
-                # by get_status but not restored by AFC_prep, so read it back
-                # here.
+                # AFC_prep does not restore sub_type.
                 self._restore_sub_type(cur_lane)
                 if (getattr(cur_lane, "material", "")
                     or getattr(cur_lane, "spool_id", None)):
                     self._afc_owned.add(slot)
                 else:
                     self._surface_slot_info(cur_lane, info)
-        self._prep_seen = True               # the status path may write now
+        self._prep_seen = True
         if assignTcmd:
             try:
-                # A unit claimed from the pool before PREP already has its T#
-                # registered; the pool helper skips the second registration.
+                # A unit claimed before PREP already has its T#.
                 from extras.AFC_BridgeBox import assign_pool_tcmd
                 assign_pool_tcmd(cur_lane, self.afc)
             except Exception as e:
@@ -6471,7 +5896,7 @@ class afcBambuAMS(afcUnit):
         try:
             cur_lane.do_enable(False)
         except Exception:
-            pass                             # no drive stepper on these lanes
+            pass
         _map_txt = (cur_lane.map_to_string()
                     if hasattr(cur_lane, "map_to_string") else cur_lane.map)
         self.logger.info(f"{cur_lane.name} tool cmd: {_map_txt} {msg}")
@@ -6481,7 +5906,7 @@ class afcBambuAMS(afcUnit):
             self.logger.warning(f"AFC bambu: set_afc_prep_done failed: {e}")
         return succeeded
 
-    # ── status mirroring ──
+    # Status mirroring
 
     def _on_status(self, obj: dict) -> None:
         """
@@ -6494,62 +5919,49 @@ class afcBambuAMS(afcUnit):
         :param obj: A decoded bridge status event
         """
         try:
-            # A pooled or released unit ignores the bus; it may still hold a
-            # listener a bridge could not drop.
+            # A pooled or released unit may still hold a listener a bridge could not drop.
             if getattr(self, "pool", False):
                 return
-            # Identity before data: until the UID resolves, ams_index is the
-            # default and every unit would match unit 0. Frames keep coming, so
-            # waiting is free.
+            # Until the UID resolves every unit would match unit 0.
             if (getattr(self, "unit_uid", None)
                 and not getattr(self, "_id_resolved", True)):
                 return
-            # Names this unit on the bridge's console sentences.
             namer = getattr(self._bridge, "name_unit", None)
             if callable(namer):
                 namer(self.ams_index, self.name)
-            # Latch the unit's give-up (byte[19] == 0x07) on every frame, since
-            # only some frames carry it. Cleared when a fault is armed; own
-            # try.
+            # Only some frames carry the give-up byte (byte[19] == 0x07).
             try:
                 if self._unit_state(obj) == self.AMS_STATE_STALLED:
                     self._declared_since_fault = True
                 self._track_odom(obj)
             except Exception:
                 pass
-            # Verify identity on every frame: the firmware re-enrolls on a bus
-            # hiccup in discovery order. chain_uids() is cached, no bus
-            # traffic.
+            # The firmware re-enrolls on a bus hiccup in discovery order; chain_uids() is cached.
             if getattr(self, "unit_uid", ""):
                 try:
                     uids = self._bridge.chain_uids()
-                    if uids and self.unit_uid in uids:
+                    if (uids
+                        and self.unit_uid in uids):
                         live = uids.index(self.unit_uid)
                         if live != self.ams_index:
-                            self.logger.warning(
-                                f"AFC bambu {self.name}: chain re-enrolled -- "
-                                f"UID {self.unit_uid} moved from index "
-                                f"{self.ams_index} to {live}; re-adopting")
+                            self.logger.warning(f"AFC bambu {self.name}: chain re-enrolled -- "
+                                                f"UID {self.unit_uid} moved from index "
+                                                f"{self.ams_index} to {live}; re-adopting")
                             self._adopt_index(live)
-                            return      # this frame was keyed to the old index
+                            return
                 except Exception:
                     pass
-            # A just-booted Pico reports every bay empty until its first
-            # presence poll. Those frames are not folded, or loaded spools
-            # would unbind and scans start; the lanes keep their restored
-            # state.
+            # A just-booted Pico reports every bay empty until its first presence poll; folding
+            # those would unbind loaded spools and start scans.
             if not afcBambuAMS._presence_known(self, obj):
                 self._booted_under_us = True
                 if not getattr(self, "_presence_wait_said", False):
                     self._presence_wait_said = True
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: the bridge has not polled "
-                        f"this unit's bays yet; keeping the lanes as they are")
+                    self.logger.debug(f"AFC bambu {self.name}: the bridge has not polled "
+                                      f"this unit's bays yet; keeping the lanes as they are")
                 return
             self._presence_ok = True
-            # Whether this frame's occupancy is the unit's own answer (the
-            # firmware publishes preslen): a bay such a frame calls empty is
-            # empty, not a just-booted bridge's default.
+            # With preslen published, a bay this frame calls empty really is empty.
             try:
                 _pe = afcBambuAMS._unit_entry(self, obj)
                 self._presence_answered = bool(
@@ -6561,7 +5973,8 @@ class afcBambuAMS(afcUnit):
             if getattr(self, "_seed_present_seen", False):
                 self._seed_present_seen = False
                 ent = afcBambuAMS._unit_entry(self, obj)
-                if ent is not None and ent.get("preslen") is not None:
+                if (ent is not None
+                    and ent.get("preslen") is not None):
                     seen = getattr(self, "_present_seen", None)
                     if seen is None:
                         seen = self._present_seen = set()
@@ -6572,9 +5985,10 @@ class afcBambuAMS(afcUnit):
                     continue
                 info = bridge_slot_to_info(entry)
                 idx = info.get("index")
-                if isinstance(idx, int) and 0 <= idx < self.SLOTS_PER_UNIT:
+                if (isinstance(idx, int)
+                    and 0 <= idx < self.SLOTS_PER_UNIT):
                     self._slots[idx] = info
-            # A scan the bridge was running when it restarted died with it.
+            # A scan running when the bridge restarted died with it.
             if (getattr(self, "_booted_under_us", False)
                 or getattr(self, "_scans_to_check", False)):
                 rebooted = getattr(self, "_booted_under_us", False)
@@ -6582,8 +5996,6 @@ class afcBambuAMS(afcUnit):
                 self._scans_to_check = False
                 afcBambuAMS._close_scans_the_bridge_lost(self, rebooted)
             self._sync_lanes()
-            # Priming that came due before the bridge had polled runs now,
-            # after the fold above.
             if getattr(self, "_prime_waiting", False):
                 afcBambuAMS._prime_scan_baseline(self)
         except Exception as e:
@@ -6635,18 +6047,17 @@ class afcBambuAMS(afcUnit):
             base.pop(slot, None)
             (getattr(self, "_cycle_end_seen", None) or {}).pop(slot, None)
             mt = getattr(self, "_scan_motion_t0", None)
-            if mt is not None and 0 <= slot < len(mt):
+            if (mt is not None
+                and 0 <= slot < len(mt)):
                 mt[slot] = None
             lane = self._lane_for_slot(slot)
             name = getattr(lane, "name", None) or f"bay {slot + 1}"
-            self.logger.info(
-                f"AFC bambu {self.name}: the bridge restarted during the tag "
-                f"scan of {name}, which ended the scan; {name} is left as it "
-                f"is. Run AFC_BAMBU_SCAN LANE={name} to scan it again")
+            self.logger.info(f"AFC bambu {self.name}: the bridge restarted during the tag "
+                             f"scan of {name}, which ended the scan; {name} is left as it "
+                             f"is. Run AFC_BAMBU_SCAN LANE={name} to scan it again")
 
-    #: How long scan priming waits on the firmware's own re-read of the bays
-    #: it found occupied at boot. The firmware settles one in a few
-    #: seconds; this only catches a re-read that never settles.
+    #: How long scan priming waits on the firmware's re-read of bays occupied at boot;
+    #: it normally settles in a few seconds.
     PRIME_REREAD_WAIT_S = 30.0
 
     def _rereads_owed(self) -> bool:
@@ -6682,7 +6093,8 @@ class afcBambuAMS(afcUnit):
         :return dict: the entry, or None if the frame lists no such unit
         """
         for u in obj.get("units") or []:
-            if isinstance(u, dict) and u.get("n") == self.ams_index:
+            if (isinstance(u, dict)
+                and u.get("n") == self.ams_index):
                 return u
         return None
 
@@ -6702,12 +6114,12 @@ class afcBambuAMS(afcUnit):
             had a presence reply from this unit
         """
         units = obj.get("units")
-        if not isinstance(units, list) or not units:
+        if (not isinstance(units, list)
+            or not units):
             return True
         mine = afcBambuAMS._unit_entry(self, obj)
         if mine is None:
-            # Units listed, this one not: the bridge is not polling it yet (a
-            # rebooted Pico polls only the units it has been told of).
+            # A rebooted Pico polls only the units it has been told of.
             return not any(isinstance(u, dict) and "preslen" in u
                            for u in units)
         if mine.get("preslen") is None:
@@ -6724,9 +6136,7 @@ class afcBambuAMS(afcUnit):
         :param latest: A bridge status dict (or None)
         :return bool: True if this ams_index's unit reports online
         """
-        # An idle pool bay has no unit on the wire and keeps the default
-        # ams_index 0, so matching by ams_index would read another unit's
-        # online flag. It is offline until claimed (claim() clears self.pool).
+        # An idle pool bay keeps the default ams_index 0 and would read another unit's online flag.
         if getattr(self, "pool", False):
             return False
         if not latest:
@@ -6734,27 +6144,20 @@ class afcBambuAMS(afcUnit):
         u = afcBambuAMS._unit_entry(self, latest)
         if u is not None:
             return bool(u.get("online"))
-        return bool(latest.get("online"))     # single-unit fallback
+        return bool(latest.get("online"))
 
-    #: The unit's own state, from op-04 reply byte[19]. 0x07 is STALLED, the
-    #: "state:7" the HT and AMS 2 print in words and the AMS 1's only fault
-    #: signal. Firmware debounces it; 255 = not heard from.
+    #: op-04 reply byte[19]. 0x07 is STALLED ("state:7"), the AMS 1's only fault signal.
+    #: Debounced by the firmware; 255 = not heard from.
     AMS_STATE_STALLED = 0x07
-    #: Unit states meaning "parked on a fault" (the narration's `state:[67]`).
-    #: CLEARFAULT checks all of them, so 0x06 is not reported as cleared.
+    #: The narration's `state:[67]`; CLEARFAULT checks both.
     AMS_STATES_FAULTED = (0x06, 0x07)
 
-    #: How long ustate must read STALLED before a load stops feeding and hands
-    #: over to the recovery. A retrying unit reads 2; a latched one holds 7.
+    #: How long STALLED must hold before a load hands over to recovery. A retrying unit reads 2.
     STALL_LATCH_S = 10.0
 
-    #: After a raised stall, how long the detectors stay quiet. One stall
-    #: arrives as several reports (the narration, state 7, a later "state:6"),
-    #: and each would raise again once the hold lifts outside a print.
+    #: One stall arrives as several reports, and each would raise again once the hold lifts.
     FAULT_QUIET_S = 5.0
-    #: How long the AMS stays parked after an assist timeout before it
-    #: recovers by itself. Seen at 55-60 s on an AMS 2, ending with a
-    #: "state:6" report of the same episode.
+    #: An AMS 2 recovers by itself after 55-60 s, ending with a "state:6" report.
     ASSIST_TIMEOUT_LATCH_S = 90.0
 
     def _unit_state(self, latest: Optional[dict]) -> Optional[int]:
@@ -6764,7 +6167,6 @@ class afcBambuAMS(afcUnit):
         :param latest: A bridge status dict (or None)
         :return int: the state byte, or None if this unit has not reported one
         """
-        # As in _unit_online: an idle pool bay has no state of its own.
         if getattr(self, "pool", False):
             return None
         if not latest:
@@ -6773,12 +6175,9 @@ class afcBambuAMS(afcUnit):
         if u is None:
             return None
         st = u.get("ustate")
-        # 255 is the firmware saying "not heard from yet", which is not a state
-        # and must never be read as one.
         return None if st is None or st == 0xFF else int(st)
 
-    #: Filament movement (mm) during a recovery attempt that counts as moving:
-    #: a working AMS swings nearly the whole tube, a stuck one sits near zero.
+    #: A working AMS swings nearly the whole tube; a stuck one sits near zero.
     ODOM_MOVED_MM = 200.0
 
     def _track_odom(self, obj: dict) -> None:
@@ -6799,11 +6198,13 @@ class afcBambuAMS(afcUnit):
         """
         fault = self._follow_fault_hold
         load = getattr(self, "_load_in_progress", False)
-        if not fault and not load:
-            return                          # nothing is asking the question
+        if (not fault
+            and not load):
+            return
         u = afcBambuAMS._unit_entry(self, obj)
         v = u.get("odom") if u is not None else None
-        if v is None or int(v) == -1:       # firmware's unknown sentinel
+        if (v is None
+            or int(v) == -1):  # firmware's unknown sentinel
             return
         mm = float(v)
         if fault:
@@ -6821,7 +6222,8 @@ class afcBambuAMS(afcUnit):
 
         :return float: the span, or None if we never got two readings
         """
-        if self._odom_lo is None or self._odom_hi is None:
+        if (self._odom_lo is None
+            or self._odom_hi is None):
             return None
         return self._odom_hi - self._odom_lo
 
@@ -6835,7 +6237,8 @@ class afcBambuAMS(afcUnit):
 
         :return float: the span, or None if we never got two readings
         """
-        if self._load_odom_lo is None or self._load_odom_hi is None:
+        if (self._load_odom_lo is None
+            or self._load_odom_hi is None):
             return None
         return self._load_odom_hi - self._load_odom_lo
 
@@ -6864,8 +6267,7 @@ class afcBambuAMS(afcUnit):
         if span >= self.ODOM_MOVED_MM:
             return (f"The AMS moved filament {span:.0f}mm during the attempt "
                     f"and it still did not reach the toolhead, so the blockage "
-                    f"is DOWNSTREAM OF THE AMS -- the bowden or the toolhead, "
-                    f"not the spool.")
+                    f"is DOWNSTREAM OF THE AMS -- the bowden or the toolhead, not the spool.")
         return (f"The AMS moved filament only {span:.0f}mm during the attempt, "
                 f"so the blockage is AT THE AMS -- check the spool for a "
                 f"tangle and the bay for a snag.")
@@ -6887,7 +6289,8 @@ class afcBambuAMS(afcUnit):
         :param lane: The lane currently followed
         :return bool: True if a fault was raised
         """
-        if not getattr(self, "fault_detect", False) or self._bridge is None:
+        if (not getattr(self, "fault_detect", False)
+            or self._bridge is None):
             return False
         if (getattr(self, "_unload_in_progress", False)
             or getattr(self, "_drying", False)):
@@ -6897,12 +6300,12 @@ class afcBambuAMS(afcUnit):
             self._stalled_seen = False
             return False
         if getattr(self, "_stalled_seen", False):
-            return False            # already reported this stall; one per event
+            return False
         self._stalled_seen = True
         if self._fault_quiet():
-            return False            # the tail of a stall already raised
+            return False
         if self._overfeed_active():
-            return False            # still parked from an assist timeout
+            return False
         if self._take_overfeed(lane):
             return False
         msg = (f"AFC bambu {self.name}: the AMS reports it has STALLED "
@@ -6947,11 +6350,9 @@ class afcBambuAMS(afcUnit):
             return None
         return hub
 
-    # Lane states we must never overwrite from a passive status poll: a load,
-    # unload, eject, or error is mid-flight and owns the lane's status.
+    # A load, unload, eject, or error owns the lane's status.
     _ACTIVE_STATES = (AFCLaneState.TOOL_LOADED, AFCLaneState.TOOL_LOADING,
-                      AFCLaneState.TOOL_UNLOADING, AFCLaneState.EJECTING,
-                      AFCLaneState.ERROR)
+                      AFCLaneState.TOOL_UNLOADING, AFCLaneState.EJECTING, AFCLaneState.ERROR)
 
     def _sync_lanes(self) -> None:
         """
@@ -6981,30 +6382,27 @@ class afcBambuAMS(afcUnit):
                 continue
             present = info.get("present", False)
             lane.prep_state = present
-            # Before any gate, so the first look at a bay's stamp happens on
-            # the first frame that carries it; and before the insert edge, so a
-            # window it opens on this frame cannot exempt the stamp.
+            # Before any gate and the insert edge, so a window opened here cannot exempt the stamp.
             afcBambuAMS._baseline_meas_stamp(self, slot, info)
-            # A stamp kept for the spool that left (see the adopt block) is
-            # dropped once the bay's sequence runs below it: the counter
-            # started again, so an equal pair from here is a new measurement.
+            # Once the bay's sequence runs below the departed stamp, the counter restarted.
             _dep = getattr(self, "_meas_departed", None)
-            if _dep and slot in _dep and info.get("meas_seq") is not None:
+            if (_dep
+                and slot in _dep
+                and info.get("meas_seq") is not None):
                 try:
                     if int(info["meas_seq"]) < int(_dep[slot][0]):
                         _dep.pop(slot, None)
                 except Exception:
                     _dep.pop(slot, None)
-            # Kick a tag scan on a freshly inserted spool (presence 0->1).
             self._maybe_auto_scan(slot, present, info)
             afcBambuAMS._check_runout_drain(self, slot, info)
             status = getattr(lane, "status", None)
             active = status in self._ACTIVE_STATES
             if present:
-                # Staged and ready: latch staged-at-hub and show LOADED so it is
-                # never rendered as "detected but not loaded".
+                # Never rendered as "detected but not loaded".
                 lane.loaded_to_hub = True
-                if not active and status != AFCLaneState.LOADED:
+                if (not active
+                    and status != AFCLaneState.LOADED):
                     try:
                         self.lane_loaded(lane)
                         self.lane_illuminate_spool(lane)
@@ -7012,85 +6410,68 @@ class afcBambuAMS(afcUnit):
                         pass
                     lane.status = AFCLaneState.LOADED
             else:
-                # Empty bay can't be staged; clear the latch so a re-inserted
-                # spool re-runs the full load path.
+                # So a re-inserted spool re-runs the full load path.
                 lane.loaded_to_hub = False
-                # The spool AFC's data described is gone, so there is nothing
-                # left to defer to.
                 self._afc_owned.discard(slot)
-                if not active and status != AFCLaneState.NONE:
+                if (not active
+                    and status != AFCLaneState.NONE):
                     try:
                         self.lane_not_ready(lane)
                     except Exception:
                         pass
                     lane.status = AFCLaneState.NONE
             if self._is_virtual_hub(lane):
-                lane._load_state = bool(
-                    afcBambuAMS._hub_reads_filament(self, info))
+                lane._load_state = bool(afcBambuAMS._hub_reads_filament(self, info))
             elif self._is_lite():
-                # No load switch on an AMS Lite lane, and the pinless default
-                # reads loaded: filament in its bay is the lane's load.
+                # No load switch on an AMS Lite lane, and the pinless default reads loaded.
                 lane._load_state = bool(present)
-            # Before PREP restores the var file a blank lane says nothing, so
-            # hold off. Gated on afc.prep_done: a spare claimed after PREP is
-            # never prepped.
+            # A blank lane says nothing before PREP restores the var file. A spare claimed after
+            # PREP is never prepped.
             if not (getattr(self, "_prep_seen", False)
                     or getattr(getattr(self, "afc", None),
                                "prep_done", False)):
                 continue
-            # Until the unit answers a scan the bay still shows the previous
-            # spool's record, so the unit decides: working, read a tag, or
-            # none.
+            # Until the unit answers, the bay still shows the previous spool's record.
             verdict = self._scan_verdict(slot)
-            # Debug trace: one line per verdict change per slot, with the
-            # firmware's seq/res and the record's headline fields.
             try:
                 tr = getattr(self, "_trace_verdict", None)
                 if tr is None:
                     tr = self._trace_verdict = {}
                 if tr.get(slot) != verdict:
                     tr[slot] = verdict
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: slot {slot} scan verdict -> "
-                        f"{verdict} (fw seq={info.get('scan_seq')} "
-                        f"res={info.get('scan_res')} | record: "
-                        f"mat={info.get('material') or '-'} "
-                        f"uid={info.get('rfid_uid') or '-'} "
-                        f"present={info.get('present')})")
+                    self.logger.debug(f"AFC bambu {self.name}: slot {slot} scan verdict -> "
+                                      f"{verdict} (fw seq={info.get('scan_seq')} "
+                                      f"res={info.get('scan_res')} | record: "
+                                      f"mat={info.get('material') or '-'} "
+                                      f"uid={info.get('rfid_uid') or '-'} "
+                                      f"present={info.get('present')})")
             except Exception:
                 pass
             if verdict in ("read", "notag"):
-                # The unit has answered for this bay. That outranks whatever
-                # AFC restored at boot, so stop deferring to it.
+                # The unit's answer outranks what AFC restored at boot.
                 self._afc_owned.discard(slot)
             if verdict == "waiting":
-                continue                         # it has not answered yet
+                continue
             if verdict == "notag":
-                # Finished with no read: defaults once, and the hold stays so
-                # the old profile is not restored. A late tag (material and
-                # uid) still wins.
-                if info.get("material") and info.get("rfid_uid"):
-                    # Say why nothing changed, or a scan that visibly ran reads
-                    # as a fault. A same-tag read never settles a scan
-                    # mid-cycle: a bind written then aborts the measurement.
+                # Defaults once; the hold keeps the old profile off. A late tag still wins.
+                if (info.get("material")
+                    and info.get("rfid_uid")):
+                    # A scan that visibly ran would otherwise read as a fault. A same-tag read never
+                    # settles a scan mid-cycle: a bind then aborts the measurement.
                     fi = getattr(self, "_fresh_insert", None) or {}
-                    # "info same as last read" is not a veto: the unit measures
-                    # anyway, so the hold ends on the unit's answer or the
-                    # scan's time cap.
+                    # The unit measures anyway, so the hold ends on its answer or the time cap.
                     ended = True
                     try:
                         started = (getattr(self, "_scan_t0", None)
                                    or [None] * 8)[slot]
                         bridge = getattr(self, "_bridge", None)
-                        if bridge is not None and started is not None:
+                        if (bridge is not None
+                            and started is not None):
                             ended = bridge.rfid_cycle_ended_since(
-                                started,
-                                addr=getattr(self, "dry_dev_addr", None))
+                                started, addr=getattr(self, "dry_dev_addr", None))
                     except Exception:
                         ended = True
-                    # This hold and the scan backstop wait on the same silence,
-                    # so bound it by the scan's own clock (the larger, not the
-                    # sum).
+                    # Bounded by the scan's own clock, since the backstop waits on the same silence.
                     _t0 = (getattr(self, "_scan_t0", None)
                            or [None] * 8)[slot]
                     _now = None
@@ -7098,52 +6479,39 @@ class afcBambuAMS(afcUnit):
                         _now = self.afc.reactor.monotonic()
                     except Exception:
                         _now = None
-                    # getattr with a default: tests drive this path with
-                    # a plain stand-in object.
                     _cap_s = getattr(self, "SCAN_FALLBACK_CAP", 45.0)
                     _capped = (_t0 is not None
                                and _now is not None
                                and (_now - _t0) > _cap_s)
-                    if not ended and not _capped:
+                    if (not ended
+                        and not _capped):
                         if fi.get(slot) == 1:
                             fi[slot] = 2
-                            self.logger.debug(
-                                f"AFC bambu {self.name}: {lane.name} -- "
-                                f"fresh insert re-read its own tag; the "
-                                f"measurement is still coming, holding "
-                                f"the lane for the unit's answer")
+                            self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- "
+                                              f"fresh insert re-read its own tag; the "
+                                              f"measurement is still coming, holding "
+                                              f"the lane for the unit's answer")
                         continue
-                    # Log a timeout explicitly, so it is not mistaken for the
-                    # unit's verdict and a late result can be told from an
-                    # absent one.
-                    if _capped and not ended:
-                        self.logger.warning(
-                            f"AFC bambu {self.name}: {lane.name} -- "
-                            f"gave up waiting after {_cap_s:.0f}s "
-                            f"(SCAN_FALLBACK_CAP); the unit had NOT "
-                            f"ended its cycle, so anything below is our "
-                            f"timer's verdict and not the unit's. A "
-                            f"measurement arriving after this is late, "
-                            f"not absent.")
-                    fi.pop(slot, None)   # settled: by the unit, or by the cap above
-                    # The measurement memo lives on the Spoolman
-                    # delegate; _held_measurements finds it there.
+                    # So a late result can be told from an absent one.
+                    if (_capped
+                        and not ended):
+                        self.logger.warning(f"AFC bambu {self.name}: {lane.name} -- "
+                                            f"gave up waiting after {_cap_s:.0f}s "
+                                            f"(SCAN_FALLBACK_CAP); the unit had NOT "
+                                            f"ended its cycle, so anything below is our "
+                                            f"timer's verdict and not the unit's. A "
+                                            f"measurement arriving after this is late, not absent.")
+                    fi.pop(slot, None)
                     held = afcBambuAMS._held_measurements(self).get(slot)
                     if held:
-                        # A measurement from this session is already on
-                        # the record: say so rather than "not measured".
-                        self.logger.debug(
-                            f"AFC bambu {self.name}: {lane.name} -- "
-                            f"cycle ended with no new read; already "
-                            f"measured this session ({held}% held), "
-                            f"spool unchanged")
+                        self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- "
+                                          f"cycle ended with no new read; already "
+                                          f"measured this session ({held}% held), spool unchanged")
                         self._release_scan_hold(slot)
                         self._scan_notag[slot] = False
                         self._surface_slot_info(lane, info)
                         continue
-                    # The bound-tag memo lives on the Spoolman delegate. The
-                    # record has a UID here (this branch needs one), so a bay
-                    # never bound cannot match.
+                    # The record has a UID here, so a bay never bound cannot match.
                     _bound = None
                     for _o in afcBambuAMS._built_measure_objs(self):
                         _bound = (getattr(_o, "_bound_uid", None)
@@ -7151,94 +6519,77 @@ class afcBambuAMS(afcUnit):
                         if _bound is not None:
                             break
                     same = (info.get("rfid_uid") == _bound)
-                    # The bay's tag still goes on the lane (a late tag wins
-                    # over defaults); _surface_slot_info logs it when that
-                    # changes the lane.
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: {lane.name} -- the unit ran "
-                        f"its scan and measure and reported no NEW read"
-                        f"{' (same spool as last time)' if same else ''}; "
-                        f"keeping the tag already on this bay "
-                        f"({info.get('material')}"
-                        f"{' ' + str(info.get('rfid_uid')).upper()}) "
-                        f"for the lane rather than giving it defaults")
+                    # A late tag wins over defaults.
+                    self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- the unit ran "
+                                      f"its scan and measure and reported no NEW read"
+                                      f"{' (same spool as last time)' if same else ''}; "
+                                      f"keeping the tag already on this bay ({info.get('material')}"
+                                      f"{' ' + str(info.get('rfid_uid')).upper()}) "
+                                      f"for the lane rather than giving it defaults")
                     self._release_scan_hold(slot)
                     self._scan_notag[slot] = False
                     self._surface_slot_info(lane, info)
                     continue
-                # Do not call a bay empty while the firmware says it owes a
-                # read: a boxed unit reads through calibration with none of the
-                # auth phrases.
+                # A boxed unit reads through calibration with none of the auth phrases.
                 if info.get("reread_pending"):
                     continue
                 if not self._scan_notag[slot]:
                     self._scan_notag[slot] = True
                     self._finalize_scan(slot)
-                # The hold keeps _surface_slot_info off this bay, but the bind
-                # that _finalize_scan sent can still attach a spool owed a
-                # measurement.
+                # The bind _finalize_scan sent can still attach a spool owed a measurement.
                 afcBambuAMS._apply_remain_weight(self, lane, info)
                 continue
             if verdict == "read":
-                # Some models abort a measurement on bus traffic, so hold the
-                # readout, apply and Spoolman round-trip until it finishes.
+                # Some models abort a measurement on bus traffic.
                 if not self._measure_settled(slot, info):
                     continue
-                self._release_scan_hold(slot)    # the record is this spool's
+                self._release_scan_hold(slot)
                 self._scan_notag[slot] = False
                 afcBambuAMS._log_tag_readout(self, lane, info, force=True)
-            # Measurement adopt, on every verdict: a repeat measure of an
-            # unchanged spool is verdict "none" but still new, so dedupe on the
-            # stamp. The firmware attributes the percent to its bay; the
-            # narration path cannot.
+            # A repeat measure of an unchanged spool is verdict "none" but new: dedupe on the stamp.
             try:
                 mseq = info.get("meas_seq")
                 mpct = info.get("meas_pct")
-                if mseq and mpct is not None:
+                if (mseq
+                    and mpct is not None):
                     seen = getattr(self, "_meas_seen", None)
                     if seen is None:
                         seen = self._meas_seen = {}
-                    # The percent is the test, not the sequence: an AMS 2
-                    # advances meas_seq on a stale meas_pct, so only the HT
-                    # adopts here. _prev is None only for a stamp this
-                    # connection watched appear.
+                    # An AMS 2 advances meas_seq on a stale meas_pct, so only the HT adopts here.
+                    # _prev is None only for a stamp this connection watched appear.
                     _prev = seen.get(slot)
-                    # A presence flap hands back the departed spool's stamp:
-                    # recorded as seen, not applied. A stamp taken from here is
-                    # adopted as usual.
+                    # A presence flap hands back the departed spool's stamp: seen, not applied.
                     _gone = (getattr(self, "_meas_departed", None)
                              or {}).get(slot)
-                    if _prev is None and _gone == (mseq, mpct):
+                    if (_prev is None
+                        and _gone == (mseq, mpct)):
                         seen[slot] = (mseq, mpct)
                         _blg = getattr(self, "_meas_baselined", None)
                         if _blg is None:
                             _blg = self._meas_baselined = set()
                         _blg.add(slot)
-                        self.logger.debug(
-                            f"AFC bambu {self.name}: slot {slot} carries "
-                            f"measurement {mpct}% (seq {mseq}) from before its "
-                            f"spool came out; recorded, not applied")
+                        self.logger.debug(f"AFC bambu {self.name}: slot {slot} carries "
+                                          f"measurement {mpct}% (seq {mseq}) from before its "
+                                          f"spool came out; recorded, not applied")
                         _prev = seen[slot]
-                    # Exception: a baselined figure was never applied, so a
-                    # same-percent seq can be real (a CAPSCAN after a restart).
-                    # Adopt it only while our capacity window is open for this
-                    # bay.
+                    # A baselined figure was never applied, so a same-percent seq can be real
+                    # (a CAPSCAN after a restart); adopted only while this bay's window is open.
                     _bl = getattr(self, "_meas_baselined", None) or set()
                     _ours = (_prev is not None
                              and slot in _bl
                              and mseq != _prev[0]
                              and slot in afcBambuAMS._cap_live_pending(self))
-                    if _prev is None or _prev[1] != mpct or _ours:
+                    if (_prev is None
+                        or _prev[1] != mpct
+                        or _ours):
                         _bl.discard(slot)
                         seen[slot] = (mseq, mpct)
-                        _took = self._adopt_measured_remain(
-                            slot, int(mpct), "physical AMS measurement",
-                            seq=mseq)
-                        # An answer to a waiting bay outside the narration:
-                        # marked, not closed, since get_status records it and
-                        # hands the bus back.
+                        _took = self._adopt_measured_remain(slot, int(mpct),
+                                                            "physical AMS measurement", seq=mseq)
+                        # Marked, not closed: get_status records it and hands the bus back.
                         _waiting = getattr(self, "_cap_pending", None) or {}
-                        if _took and slot in _waiting:
+                        if (_took
+                            and slot in _waiting):
                             _ans = getattr(self, "_cap_answered", None)
                             if _ans is None:
                                 self._cap_answered: set = set()
@@ -7246,17 +6597,15 @@ class afcBambuAMS(afcUnit):
                             _ans.add(slot)
             except Exception:
                 pass
-            if verdict == "none" and slot in self._afc_owned:
-                # AFC ownership protects data, not an empty lane: the verdict
-                # is "none" for anything the host did not command, so a blank
-                # owned lane would never fill from the bay. Re-check here, as
-                # _finalize_scan does.
+            if (verdict == "none"
+                and slot in self._afc_owned):
+                # The verdict is "none" for anything the host did not command, so a blank owned lane
+                # would never fill from the bay.
                 if (getattr(lane, "material", "")
                     or getattr(lane, "spool_id", None)):
                     self._fill_missing_variant(lane, info)
-                    # This branch skips the only automatic Spoolman lookup, the
-                    # settle of a measurement owed to a bind and the summary
-                    # drain, so run all three here.
+                    # This branch skips the automatic Spoolman lookup, the bind's measurement settle
+                    # and the summary drain, so all three run here.
                     _lookup = getattr(self, "_lookup_unbound", None)
                     if _lookup is not None:
                         _lookup(lane, info)
@@ -7265,10 +6614,9 @@ class afcBambuAMS(afcUnit):
                                for _o in afcBambuAMS._built_measure_objs(self)):
                             self._drain_spool_summary(slot)
                     continue
-                self._afc_owned.discard(slot)   # nothing left to defer to
+                self._afc_owned.discard(slot)
             self._surface_slot_info(lane, info)
-            # A measurement finishes before its record catches up, so drain
-            # held summaries now. _built_measure_objs builds nothing new.
+            # A measurement finishes before its record catches up; this builds no new objects.
             if any(getattr(_o, "_pending_summary", None)
                    for _o in afcBambuAMS._built_measure_objs(self)):
                 self._drain_spool_summary(slot)
@@ -7310,15 +6658,13 @@ class afcBambuAMS(afcUnit):
         :param info: the bay's normalized slot info
         """
         looked = getattr(self, "_stamp_looked", None)
-        # Fail safe: an object without the set (a stand-in that skipped
-        # __init__) starts a look rather than adopting on first sight.
+        # A stand-in that skipped __init__ starts a look rather than adopting on first sight.
         if looked is None:
             looked = self._stamp_looked = set()
         if slot in looked:
             return
         mseq = info.get("meas_seq")
-        # Firmware that publishes no stamp has nothing to baseline yet; keep
-        # looking, so a record that gains one is still caught on first sight.
+        # So a record that later gains a stamp is still caught on first sight.
         if mseq is None:
             return
         looked.add(slot)
@@ -7339,11 +6685,11 @@ class afcBambuAMS(afcUnit):
         if bl is None:
             bl = self._meas_baselined = set()
         bl.add(slot)
-        if prev is None or prev[1] != mpct:
-            self.logger.debug(
-                f"AFC bambu {self.name}: slot {slot} carries measurement "
-                f"{mpct}% (seq {mseq}) from before this connection; recorded, "
-                f"not applied -- the lane keeps what it had")
+        if (prev is None
+            or prev[1] != mpct):
+            self.logger.debug(f"AFC bambu {self.name}: slot {slot} carries measurement "
+                              f"{mpct}% (seq {mseq}) from before this connection; recorded, "
+                              f"not applied -- the lane keeps what it had")
 
     def _measure_settled(self, slot: int, info: dict) -> bool:
         """
@@ -7370,26 +6716,25 @@ class afcBambuAMS(afcUnit):
                 return True
         except Exception:
             return True
-        # measure_on_insert=False: no measurement was asked for, so the
-        # "measurement landed" exit would never fire.
+        # No measurement was asked for, so the "measurement landed" exit would never fire.
         if not getattr(self, "measure_on_insert", False):
             return True
         mseq = info.get("meas_seq")
         base = (getattr(self, "_meas_seq0", None) or {}).get(slot)
-        if mseq and mseq != base:
-            return True                      # it measured
+        if (mseq
+            and mseq != base):
+            return True
         started = (getattr(self, "_scan_t0", None) or [None] * 8)[slot] \
             if 0 <= slot < len(getattr(self, "_scan_t0", None) or []) else None
         bridge = getattr(self, "_bridge", None)
-        if bridge is not None and started is not None:
+        if (bridge is not None
+            and started is not None):
             try:
-                if bridge.rfid_cycle_ended_since(
-                        started, addr=getattr(self, "dry_dev_addr", None)):
-                    return True              # finished, with nothing to show
+                if bridge.rfid_cycle_ended_since(started, addr=getattr(self, "dry_dev_addr", None)):
+                    return True
             except Exception:
-                return True                  # never block on a broken helper
-        # Say it once per slot, so the wait after a visible read is not
-        # mistaken for a fault.
+                return True
+        # So the wait after a visible read is not mistaken for a fault.
         held = getattr(self, "_measure_wait_said", None)
         if held is None:
             held = self._measure_wait_said = set()
@@ -7397,13 +6742,10 @@ class afcBambuAMS(afcUnit):
             held.add(slot)
             name = next((n for n, s in (getattr(self, "_slot_map", None)
                                         or {}).items() if s == slot), None)
-            self.logger.debug(
-                f"AFC bambu {self.name}: {name or f'slot {slot}'} read its "
-                f"tag; holding the lane until the unit finishes measuring "
-                f"the spool -- this model stops calibrating if we write "
-                f"mid-cycle")
+            self.logger.debug(f"AFC bambu {self.name}: {name or f'slot {slot}'} read its "
+                              f"tag; holding the lane until the unit finishes measuring "
+                              f"the spool -- this model stops calibrating if we write mid-cycle")
         return False
-
 
     def _fill_missing_variant(self, lane: Any, info: dict) -> None:
         """
@@ -7427,38 +6769,33 @@ class afcBambuAMS(afcUnit):
         :param lane: The AFC lane object
         :param info: Normalized slot info from bridge_slot_to_info
         """
-        # Check all of sub_type, vendor, filament_name and colour: prep may
-        # restore sub_type from vars, and a bay's colour lands a beat after
-        # its material, so a lane can be complete except for one field.
+        # Prep may restore sub_type, and a bay's color lands a beat after its material.
         if (getattr(lane, "sub_type", "")
             and getattr(lane, "spool_vendor", "")
             and getattr(lane, "filament_name", "")
             and getattr(lane, "color", "")):
             return
         tag_material = info.get("material")
-        if not tag_material or tag_material.lower() == "unknown":
+        if (not tag_material
+            or tag_material.lower() == "unknown"):
             return
-        # A UID two units both claim is not evidence of anything: one unit's
-        # bay cannot hold another's spool, so a duplicated UID means the record
-        # is a copy, not a reading. Refuse it.
+        # One bay cannot hold another unit's spool, so a duplicated UID means the record is a copy.
         if self._uid_claimed_elsewhere(info.get("rfid_uid")):
             return
         material, sub_type = _split_bambu_material(tag_material)
         if (getattr(lane, "material", "") or "").strip().lower() != \
                 material.strip().lower():
             return
-        # A lane with no spool fills only from a record matching its colour: a
-        # bay keeps a departed reel's record, and material alone would dress
-        # the lane as it. A bound lane keeps the colour fill; a black tag's
-        # variant stands in.
+        # A bay keeps a departed reel's record, so a lane with no spool fills only from a matching
+        # color. A bound lane keeps the color fill; a black tag's variant stands in.
         if (getattr(lane, "spool_id", None) in (None, "", 0)
             and not _lane_colour_is_records(lane, info)):
             return
         filled = []
-        # Colour first, outside the sub_type gate below: a tag whose material
-        # carries no variant ("PLA" alone) still has a colour to fill.
+        # A tag with no variant ("PLA" alone) still has a color.
         tag_color = info.get("color")
-        if tag_color and not getattr(lane, "color", ""):
+        if (tag_color
+            and not getattr(lane, "color", "")):
             lane.color = tag_color if tag_color.startswith("#") \
                 else "#" + tag_color
             filled.append("color " + lane.color)
@@ -7470,16 +6807,12 @@ class afcBambuAMS(afcUnit):
                 lane.spool_vendor = BAMBU_BRAND
                 filled.append("vendor")
             if not getattr(lane, "filament_name", ""):
-                lane.filament_name = build_filament_name(
-                    BAMBU_BRAND, material, sub_type)
+                lane.filament_name = build_filament_name(BAMBU_BRAND, material, sub_type)
                 filled.append("name")
-        # Nothing below runs for a lane that was already complete.
         if not filled:
             return
-        # Say what was filled; sub_type and colour come from the bay's record.
-        self.logger.debug(
-            f"AFC bambu {self.name}: {lane.name} -- filling in "
-            f"{' and '.join(filled)} from the bay's record ({tag_material})")
+        self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- filling in "
+                          f"{' and '.join(filled)} from the bay's record ({tag_material})")
         try:
             lane.send_lane_data()
         except Exception:
@@ -7508,7 +6841,7 @@ class afcBambuAMS(afcUnit):
             saved = (units.get(self.name) or {}).get(lane.name) or {}
             sub = (saved.get("sub_type") or "").strip()
         except Exception:
-            return                      # no file, bad JSON: nothing to restore
+            return
         if sub:
             lane.sub_type = sub
 
@@ -7536,7 +6869,7 @@ class afcBambuAMS(afcUnit):
                 units = json.load(fh)
             return (units.get(self.name) or {}).get(lane_name) or {}
         except Exception:
-            return {}                   # no file, bad JSON: nothing to go on
+            return {}
 
     def _save_lane_vars(self) -> None:
         """
@@ -7580,39 +6913,33 @@ class afcBambuAMS(afcUnit):
         :param claimed_live: True when this unit was claimed from the pool after PREP
                              ran, so its bays may be re-armed for a scan
         """
-        # The lane's saved record decides, read synchronously
-        # (_persisted_lane); defaults only where nothing holds a record.
-        for slot in range(min(len(self._slots),
-                              getattr(self, "unit_slots", len(self._slots)))):
+        # The lane's saved record decides; defaults only where nothing holds a record.
+        for slot in range(min(len(self._slots), getattr(self, "unit_slots", len(self._slots)))):
             info = self._slots[slot]
-            if not info or not info.get("present") or info.get("material"):
+            if (not info
+                or not info.get("present")
+                or info.get("material")):
                 continue
             lane = self._lane_for_slot(slot)
             if lane is not None:
                 if getattr(lane, "spool_id", None) not in (None, "", 0):
-                    continue                 # Spoolman-linked -> the user's
+                    continue
                 if getattr(lane, "material", None) not in (None, ""):
-                    continue                 # restored from vars -> the user's
-                # The same question asked of the lane's saved record, which
-                # answers it correctly this early.
+                    continue
+                # The saved record answers this correctly this early.
                 saved = self._persisted_lane(getattr(lane, "name", ""))
                 if (saved.get("spool_id") not in (None, "", 0)
                     or saved.get("material") not in (None, "")):
-                    continue   # has a record: PREP or the claim restores it
-            # Spool present and nothing knows anything about it: give it AFC's
-            # defaults. On a claimed pool unit, its master held no record for
-            # the bay.
+                    continue
+            # Nothing knows anything about this spool, so it gets AFC's defaults.
             self._finalize_scan(slot, scanned=False, no_record=True)
-            # The defaults are ours, not the user's: a tag the unit hands
-            # back after this (an HT's cache, a boxed unit's re-read) is
-            # written over them, not held off as restored.
+            # The defaults are ours, so a tag the unit hands back later is written over them.
             dfl = getattr(self, "_defaulted_bays", None)
             if dfl is None:
                 dfl = self._defaulted_bays = set()
             dfl.add(slot)
-            # A unit claimed live hands the bay to the insert path once per bay per
-            # connection. Not at startup: the Spoolman fetch may be in flight, and an
-            # unreadable tag would clear the lane and its Spoolman link.
+            # Not at startup: the Spoolman fetch may be in flight, and an unreadable tag would clear
+            # the lane and its Spoolman link.
             if not claimed_live:
                 continue
             ra = getattr(self, "_untagged_rearmed", None)
@@ -7623,9 +6950,8 @@ class afcBambuAMS(afcUnit):
                 ra[slot] = True
                 self._prev_present[slot] = False
                 self._auto_scanned[slot] = False
-                self.logger.debug(
-                    f"AFC bambu {self.name}: slot {slot} came up with a spool "
-                    f"and no record of it -- scanning it as a fresh insert")
+                self.logger.debug(f"AFC bambu {self.name}: slot {slot} came up with a spool "
+                                  f"and no record of it -- scanning it as a fresh insert")
 
     def _release_scan_hold(self, slot: int) -> None:
         """
@@ -7634,7 +6960,8 @@ class afcBambuAMS(afcUnit):
         :param slot: 0-based AMS slot index on this unit
         """
         arr = getattr(self, "_scan_t0", None)
-        if arr is not None and 0 <= slot < len(arr):
+        if (arr is not None
+            and 0 <= slot < len(arr)):
             arr[slot] = None
 
     def _open_scan(self, slot: int) -> None:
@@ -7651,18 +6978,14 @@ class afcBambuAMS(afcUnit):
 
         :param slot: 0-based AMS slot index on this unit
         """
-        self._scan_notag[slot] = False   # asking again; the old answer is void
-        # The scan's read replaces a held record still waiting for its tag.
+        self._scan_notag[slot] = False
         (getattr(self, "_restored_bays", None) or set()).discard(slot)
-        # From here the bay has been looked at, so the next report is real;
-        # this releases the boot hold for this bay only.
+        # This releases the boot hold for this bay only.
         try:
             self._scanned_bays.add(slot)
         except AttributeError:
             self._scanned_bays = {slot}
-        # A scan gets a fresh Spoolman lookup: re-arm the one-shot and forget
-        # any recorded miss, retry or refusal, since the answer may have
-        # changed.
+        # The answer may have changed since the last lookup.
         try:
             (getattr(self, "_spoolman_latched", None) or set()).discard(slot)
             (getattr(self, "_match_only_bays", None) or set()).discard(slot)
@@ -7681,27 +7004,23 @@ class afcBambuAMS(afcUnit):
                             _miss.discard(_m)
         except Exception:
             pass
-        # A new scan gets a new "holding for the measurement" line if it waits.
         try:
             (getattr(self, "_measure_wait_said", None) or set()).discard(slot)
         except Exception:
             pass
         if self._is_lite():
-            # Nothing to wait out: the bridge reads every loaded AMS Lite bay
-            # each round and drops a bay's record when its spool leaves or
-            # arrives, so the record is the bay's own (verdict "none").
+            # The bridge reads every loaded AMS Lite bay each round, so the record is the bay's own.
             return
         t0 = getattr(self, "_scan_t0", None)
-        if t0 is None or not (0 <= slot < len(t0)):
+        if (t0 is None
+            or not (0 <= slot < len(t0))):
             return
         try:
             t0[slot] = self.afc.reactor.monotonic()
         except Exception:
             t0[slot] = None
             return
-        # Baseline the firmware's per-bay verdict counter. This scan's verdict
-        # is "the seq advanced past this value", which still fires when the
-        # same spool is re-inserted and the record comes back identical.
+        # The verdict is "seq advanced past this", which still fires on an identical re-insert.
         try:
             seq0 = getattr(self, "_scan_seq0", None)
             if seq0 is None:
@@ -7712,14 +7031,12 @@ class afcBambuAMS(afcUnit):
             seq0[slot] = info.get("scan_seq")
         except Exception:
             pass
-        # The cycle-end arm (see _scan_verdict) is per scan: a leftover armed
-        # flag would let this scan's first cycle-end conclude immediately.
+        # A leftover cycle-end arm would let this scan's first cycle-end conclude at once.
         try:
             (getattr(self, "_cycle_end_seen", None) or {}).pop(slot, None)
         except Exception:
             pass
-        # A new scan invalidates the bay's old measurement, including one owed
-        # to a bind or material. If this scan measures, the fresh value lands.
+        # A new scan invalidates the bay's old measurement.
         try:
             for _o in afcBambuAMS._built_measure_objs(self):
                 (getattr(_o, "_measured_remain", None) or {}).pop(slot, None)
@@ -7728,8 +7045,7 @@ class afcBambuAMS(afcUnit):
                 (getattr(_o, "_convert_owed", None) or {}).pop(slot, None)
         except Exception:
             pass
-        # Baseline the measurement counter the same way, for the models that
-        # wait for it before touching the lane (see quiet_while_measuring).
+        # For the models that wait for it (quiet_while_measuring).
         try:
             mseq0 = getattr(self, "_meas_seq0", None)
             if mseq0 is None:
@@ -7740,13 +7056,10 @@ class afcBambuAMS(afcUnit):
             mseq0[slot] = info.get("meas_seq")
         except Exception:
             pass
-        # One backstop, for a bridge that stops talking. On a working bus the
-        # scan resolves in _sync_lanes as soon as the firmware publishes its
-        # verdict (the firmware closes its window on the unit's cycle-end).
+        # For a bridge that stops talking; otherwise the firmware's verdict settles it.
         try:
-            self.afc.reactor.register_callback(
-                lambda et, s=slot: self._scan_timeout(s),
-                t0[slot] + self.SCAN_VERDICT_CAP + 1.0)
+            self.afc.reactor.register_callback(lambda et, s=slot: self._scan_timeout(s),
+                                               t0[slot] + self.SCAN_VERDICT_CAP + 1.0)
         except Exception:
             pass
 
@@ -7762,7 +7075,8 @@ class afcBambuAMS(afcUnit):
         verdict = self._scan_verdict(slot)
         if verdict == "read":
             self._release_scan_hold(slot)
-        elif verdict == "notag" and not self._scan_notag[slot]:
+        elif (verdict == "notag"
+              and not self._scan_notag[slot]):
             self._scan_notag[slot] = True
             self._finalize_scan(slot)
 
@@ -7795,14 +7109,13 @@ class afcBambuAMS(afcUnit):
         if slot is None:
             return "none"
         t0arr = getattr(self, "_scan_t0", None)
-        if not t0arr or not (0 <= slot < len(t0arr)):
+        if (not t0arr
+            or not (0 <= slot < len(t0arr))):
             return "none"
         started = t0arr[slot]
         if started is None:
             return "none"
-        # The firmware's per-bay verdict wins: narration stamps are per address
-        # class, so a sibling could answer for this bay. Older firmware falls
-        # through to the stamps.
+        # Narration stamps are per address class, so a sibling could answer for this bay.
         try:
             info = (self._slots[slot]
                     if 0 <= slot < len(getattr(self, "_slots", []) or [])
@@ -7811,12 +7124,10 @@ class afcBambuAMS(afcUnit):
             if seq is not None:
                 base = (getattr(self, "_scan_seq0", None) or {}).get(slot)
                 if seq != base:
-                    # 1 = read; 2 (foreign) and 3 (no tag) both finalize to
-                    # defaults, and _finalize_scan's message tells them apart.
+                    # 1 = read; 2 (foreign) and 3 (no tag) both get defaults.
                     if info.get("scan_res") == 1:
                         return "read"
-                    # Arm, then confirm on a later frame: an AMS 2 can report
-                    # res=3 and carry the tag seconds later.
+                    # An AMS 2 can report res=3 and carry the tag seconds later.
                     pend = getattr(self, "_cycle_end_seen", None)
                     if pend is None:
                         pend = self._cycle_end_seen = {}
@@ -7824,9 +7135,7 @@ class afcBambuAMS(afcUnit):
                         pend[slot] = True
                         return "waiting"
                     return "notag"
-                # Unresolved: wait for the firmware, which always resolves.
-                # Only a dead bridge strands the seq, and SCAN_VERDICT_CAP
-                # covers that.
+                # The firmware always resolves; SCAN_VERDICT_CAP covers a dead bridge.
                 try:
                     if (self.afc.reactor.monotonic() - started
                             >= self.SCAN_VERDICT_CAP):
@@ -7838,28 +7147,25 @@ class afcBambuAMS(afcUnit):
             pass
         bridge = getattr(self, "_bridge", None)
         if bridge is None:
-            return "notag"           # nothing can answer; do not wait for it
+            return "notag"
         dev = getattr(self, "dry_dev_addr", 0) or None
         try:
             if bridge.rfid_read_succeeded_since(started, addr=dev):
                 return "read"
             if bridge.rfid_cycle_ended_since(started, addr=dev):
-                # A cycle end is not a verdict alone: on a boxed AMS the record
-                # surfaces after calibration. The first sighting arms, a later
-                # frame confirms, so a read landing between wins.
+                # On a boxed AMS the record surfaces after calibration, so a later frame confirms
+                # the cycle end.
                 pend = getattr(self, "_cycle_end_seen", None)
                 if pend is None:
                     pend = self._cycle_end_seen = {}
                 if not pend.get(slot):
                     pend[slot] = True
                     return "waiting"
-                # Confirmed: no read narration in that frame. A material in the
-                # record may be the previous spool's; _sync_lanes decides what
-                # to do with a tag.
+                # A material in the record may be the previous spool's.
                 return "notag"
         except Exception:
             return "notag"
-        # Backstop only (see SCAN_FALLBACK_CAP): the unit said nothing at all.
+        # The unit said nothing at all.
         try:
             if self.afc.reactor.monotonic() - started >= self.SCAN_FALLBACK_CAP:
                 return "notag"
@@ -7867,9 +7173,7 @@ class afcBambuAMS(afcUnit):
             pass
         return "waiting"
 
-    # How long a bay must stay empty mid-print before its lane is run out.
-    # Longer than a stray presence frame, and short, since every second of
-    # it prints more of the leftover filament.
+    # Longer than a stray presence frame; short, since every second prints more leftover.
     RUNOUT_CONFIRM_S = 1.5
 
     def _bay_ran_out(self, lane: Any) -> bool:
@@ -7891,7 +7195,8 @@ class afcBambuAMS(afcUnit):
                 return False
             slot = afcBambuAMS._slot_of(self, lane)
             slots = getattr(self, "_slots", None) or []
-            if slot is None or not (0 <= slot < len(slots)):
+            if (slot is None
+                or not (0 <= slot < len(slots))):
                 return False
             if not getattr(self, "_presence_ok", False):
                 return False
@@ -7916,8 +7221,7 @@ class afcBambuAMS(afcUnit):
         :return float: reactor time of that narration, or None
         """
         try:
-            getter = getattr(getattr(self, "_bridge", None),
-                             "tray_switches", None)
+            getter = getattr(getattr(self, "_bridge", None), "tray_switches", None)
             if not callable(getter):
                 return None
             got = getter(getattr(self, "dry_dev_addr", None),
@@ -7928,7 +7232,8 @@ class afcBambuAMS(afcUnit):
             if sw & 1:
                 return None
             inserted = (getattr(self, "_inserted_at", None) or {}).get(slot)
-            if inserted is not None and t <= inserted:
+            if (inserted is not None
+                and t <= inserted):
                 return None
             return t
         except Exception:
@@ -7944,7 +7249,6 @@ class afcBambuAMS(afcUnit):
     HUB_EMPTY_MAX = 0xD0
     HUB_EMPTY_MAX_BY_MODEL = {"ams1": 0xCA, "ams2": 0xE0, "ht": 0xCA}
     HUB_CLEAR_S = 2.0
-    # How long an unload waits for its bay's hub to read clear.
     HUB_UNLOAD_WAIT_S = 5.0
 
     def _hub_empty_max(self) -> int:
@@ -7954,8 +7258,8 @@ class afcBambuAMS(afcUnit):
 
         :return int: the raw threshold
         """
-        return afcBambuAMS.HUB_EMPTY_MAX_BY_MODEL.get(
-            getattr(self, "ams_model", None), afcBambuAMS.HUB_EMPTY_MAX)
+        return afcBambuAMS.HUB_EMPTY_MAX_BY_MODEL.get(getattr(self, "ams_model", None),
+                                                      afcBambuAMS.HUB_EMPTY_MAX)
 
     def _hub_reads_filament(self, info: Optional[dict]) -> Optional[bool]:
         """
@@ -7991,11 +7295,12 @@ class afcBambuAMS(afcUnit):
         try:
             slot = afcBambuAMS._slot_of(self, lane)
             slots = getattr(self, "_slots", None) or []
-            if slot is None or not (0 <= slot < len(slots)):
+            if (slot is None
+                or not (0 <= slot < len(slots))):
                 return True
             reactor = self.afc.reactor
-            end = reactor.monotonic() + getattr(
-                self, "HUB_UNLOAD_WAIT_S", afcBambuAMS.HUB_UNLOAD_WAIT_S)
+            end = reactor.monotonic() + getattr(self, "HUB_UNLOAD_WAIT_S",
+                                                afcBambuAMS.HUB_UNLOAD_WAIT_S)
             while True:
                 seen = afcBambuAMS._hub_reads_filament(self, slots[slot])
                 if not seen:
@@ -8006,10 +7311,9 @@ class afcBambuAMS(afcUnit):
             if quiet:
                 return False
             raw = slots[slot].get("hub_raw")
-            self.logger.warning(
-                f"AFC bambu {self.name}: {lane.name} unloaded but bay "
-                f"{slot + 1}'s hub sensor still reads filament (0x{raw:02X}); "
-                f"the hub shows occupied until it clears")
+            self.logger.warning(f"AFC bambu {self.name}: {lane.name} unloaded but bay "
+                                f"{slot + 1}'s hub sensor still reads filament (0x{raw:02X}); "
+                                f"the hub shows occupied until it clears")
             return False
         except Exception:
             return True
@@ -8050,37 +7354,36 @@ class afcBambuAMS(afcUnit):
                 if lane is None:
                     return
             raw = (info or {}).get("hub_raw")
-            if raw is None or raw > afcBambuAMS._hub_empty_max(self):
+            if (raw is None
+                or raw > afcBambuAMS._hub_empty_max(self)):
                 self._runout_hub_clear_t = None
                 if (raw is not None
                     and getattr(self, "_runout_cleared", None) is lane):
-                    self._runout_cleared = None     # filament in the hub
+                    self._runout_cleared = None
                 return
-            if not drain and getattr(self, "_runout_cleared", None) is lane:
+            if (not drain
+                and getattr(self, "_runout_cleared", None) is lane):
                 return
             now = _mono(getattr(self, "afc", None))
             t0 = getattr(self, "_runout_hub_clear_t", None)
             if t0 is None:
                 self._runout_hub_clear_t = now
                 return
-            if now - t0 < getattr(self, "HUB_CLEAR_S",
-                                  afcBambuAMS.HUB_CLEAR_S):
+            if now - t0 < getattr(self, "HUB_CLEAR_S", afcBambuAMS.HUB_CLEAR_S):
                 return
             self._runout_hub_clear_t = None
             if drain:
-                afcBambuAMS._end_runout_drain(
-                    self, f"the hub sensor reads it gone (0x{raw:02X})")
+                afcBambuAMS._end_runout_drain(self, f"the hub sensor reads it gone (0x{raw:02X})")
                 return
             self._runout_cleared = lane
             try:
                 self.set_feed_assist(lane, False)
             except Exception:
                 pass
-            self.logger.info(
-                f"AFC bambu {self.name}: {lane.name} ran out and its hub "
-                f"sensor reads clear (0x{raw:02X}): stopped the follower. "
-                f"AFC still records {lane.name} at the toolhead: unload it, "
-                f"or run UNSET_LANE_LOADED if the toolhead is empty too.")
+            self.logger.info(f"AFC bambu {self.name}: {lane.name} ran out and its hub "
+                             f"sensor reads clear (0x{raw:02X}): stopped the follower. "
+                             f"AFC still records {lane.name} at the toolhead: unload it, "
+                             f"or run UNSET_LANE_LOADED if the toolhead is empty too.")
         except Exception:
             pass
 
@@ -8119,9 +7422,8 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
         try:
-            self.logger.info(
-                f"AFC bambu {self.name}: stopped pushing {lane.name}'s "
-                f"leftover: {why}")
+            self.logger.info(f"AFC bambu {self.name}: stopped pushing {lane.name}'s "
+                             f"leftover: {why}")
         except Exception:
             pass
 
@@ -8147,7 +7449,8 @@ class afcBambuAMS(afcUnit):
         if not getattr(lane, "tool_loaded", False):
             return False
         ext = getattr(lane, "extruder_obj", None)
-        if ext is not None and getattr(ext, "lane_loaded", None) != lane.name:
+        if (ext is not None
+            and getattr(ext, "lane_loaded", None) != lane.name):
             return False
         return True
 
@@ -8178,13 +7481,11 @@ class afcBambuAMS(afcUnit):
             target = (getattr(self.afc, "lanes", None) or {}).get(target_name)
         if (target is not None
             and getattr(target, "extruder_obj", None) is not None
-            and target.extruder_obj
-            is not getattr(lane, "extruder_obj", None)):
+            and target.extruder_obj is not getattr(lane, "extruder_obj", None)):
             self._runout_empty.add(lane.name)
-            self.logger.info(
-                f"AFC bambu {self.name}: {lane.name} ran out, switching to "
-                f"its runout lane {target_name} on another extruder (the AMS "
-                f"retract is skipped)")
+            self.logger.info(f"AFC bambu {self.name}: {lane.name} ran out, switching to "
+                             f"its runout lane {target_name} on another extruder (the AMS "
+                             f"retract is skipped)")
             return False
         if not target_name:
             why = f"{lane.name} has no runout lane set."
@@ -8194,20 +7495,17 @@ class afcBambuAMS(afcUnit):
             why = (f"its runout lane {target_name} feeds the same extruder, "
                    f"and the leftover filament is in the way.")
         lane.status = AFCLaneState.NONE
-        # Its unload skips the AMS retract and keeps the follower pushing.
         self._runout_empty.add(lane.name)
         try:
             self.lane_not_ready(lane)
         except Exception:
-            pass                            # an LED, never worth the pause
-        self.afc.error.AFC_error(
-            f"Runout on {lane.name} ({where}): the spool ran out, and the "
-            f"leftover filament is past the AMS feeder, so it cannot be "
-            f"pulled back. Paused without unloading, since {why}\n"
-            f"The follower keeps pushing, so the leftover is not held in the "
-            f"feeder: unload {lane.name} and pull the leftover out, load the "
-            f"next spool, then resume.",
-            pause=True)
+            pass
+        self.afc.error.AFC_error(f"Runout on {lane.name} ({where}): the spool ran out, and the "
+                                 f"leftover filament is past the AMS feeder, so it cannot be "
+                                 f"pulled back. Paused without unloading, since {why}\n"
+                                 f"The follower keeps pushing, so the leftover is not held in the "
+                                 f"feeder: unload {lane.name} and pull the leftover out, load the "
+                                 f"next spool, then resume.", pause=True)
         return True
 
     def _arm_presence_runout(self, slot: int, inlet: bool = False) -> None:
@@ -8224,10 +7522,11 @@ class afcBambuAMS(afcUnit):
         """
         try:
             lane = afcBambuAMS._lane_for_slot(self, slot)
-            if lane is None or not afcBambuAMS.check_runout(self, lane):
+            if (lane is None
+                or not afcBambuAMS.check_runout(self, lane)):
                 return
         except Exception:
-            return                          # the removal edge must never raise
+            return
         pend = getattr(self, "_runout_pending", None)
         if pend is None:
             pend = self._runout_pending = {}
@@ -8238,10 +7537,8 @@ class afcBambuAMS(afcUnit):
         wait = getattr(self, "RUNOUT_CONFIRM_S", afcBambuAMS.RUNOUT_CONFIRM_S)
         what = ("the AMS says its inlet switch cleared" if inlet
                 else "went empty")
-        self.logger.debug(
-            f"AFC bambu {self.name}: AMS bay {slot + 1} {what} under "
-            f"{lane.name} while printing; runout if it stays empty for "
-            f"{wait:.1f}s")
+        self.logger.debug(f"AFC bambu {self.name}: AMS bay {slot + 1} {what} under "
+                          f"{lane.name} while printing; runout if it stays empty for {wait:.1f}s")
         reactor = getattr(getattr(self, "afc", None), "reactor", None)
         register = getattr(reactor, "register_callback", None)
         if not callable(register):
@@ -8290,17 +7587,16 @@ class afcBambuAMS(afcUnit):
         if (bridge is None
             or not afcBambuAMS._unit_online(self, latest)
             or not afcBambuAMS._presence_known(self, latest or {})):
-            self.logger.warning(
-                f"AFC bambu {self.name}: AMS bay {slot + 1} read empty "
-                f"mid-print, but the bridge cannot vouch for presence right "
-                f"now; not treating it as a runout")
+            self.logger.warning(f"AFC bambu {self.name}: AMS bay {slot + 1} read empty "
+                                f"mid-print, but the bridge cannot vouch for presence right "
+                                f"now; not treating it as a runout")
             return
         lane = afcBambuAMS._lane_for_slot(self, slot)
-        if lane is None or not afcBambuAMS.check_runout(self, lane):
+        if (lane is None
+            or not afcBambuAMS.check_runout(self, lane)):
             return
-        self.logger.info(
-            f"AFC bambu {self.name}: RUNOUT on {lane.name}: AMS bay "
-            f"{slot + 1} stayed empty while printing")
+        self.logger.info(f"AFC bambu {self.name}: RUNOUT on {lane.name}: AMS bay "
+                         f"{slot + 1} stayed empty while printing")
         afc = self.afc
         try:
             if not afcBambuAMS.handle_runout(self, lane):
@@ -8309,13 +7605,10 @@ class afcBambuAMS(afcUnit):
                 else:
                     lane._perform_pause_runout()
         except Exception as e:
-            self.logger.error(
-                f"AFC bambu {self.name}: runout handling for {lane.name} "
-                f"failed: {e}")
+            self.logger.error(f"AFC bambu {self.name}: runout handling for {lane.name} failed: {e}")
             try:
-                afc.error.AFC_error(
-                    f"Runout on {lane.name} (AMS bay {slot + 1}) could not be "
-                    f"handled: {e}", pause=True)
+                afc.error.AFC_error(f"Runout on {lane.name} (AMS bay {slot + 1}) could not be "
+                                    f"handled: {e}", pause=True)
             except Exception:
                 pass
         finally:
@@ -8336,16 +7629,14 @@ class afcBambuAMS(afcUnit):
         return next((lanes.get(n) for n, sl in smap.items()
                      if sl == slot and n in lanes), None)
 
-    # One profile per model; every model decision lives here (AMS 1 measures 12
-    # s after "finish", AMS 2 reads silently through calibration, the HT reads
-    # from its flash cache). Add a model by adding a row.
+    # One profile per model; add a model by adding a row.
     _PROFILES = {
         "ams1": {
             "fw_model": 0,
-            "commands_scan": True,   # the module asks; the unit answers
-            "pre_read_safe": True,   # a plain 0x211 is this bay's own record
-            "measure_route": "narration",   # narrates "odom C:..,P:NN%"
-            "quiet_while_measuring": False,  # measures with us talking
+            "commands_scan": True,
+            "pre_read_safe": True,  # a plain 0x211 is this bay's own record
+            "measure_route": "narration",  # narrates "odom C:..,P:NN%"
+            "quiet_while_measuring": False,
             "slots": 4,
         },
         "ams2": {
@@ -8353,8 +7644,7 @@ class afcBambuAMS(afcUnit):
             "commands_scan": True,
             "pre_read_safe": True,
             "measure_route": "narration",
-            # Do not touch an AMS 2 between read and measurement: applying the
-            # tag at "read success,valid" aborts its calibration.
+            # Applying the tag at "read success,valid" aborts an AMS 2's calibration.
             "quiet_while_measuring": True,
             "slots": 4,
         },
@@ -8363,16 +7653,15 @@ class afcBambuAMS(afcUnit):
             "commands_scan": False,  # firmware-armed on the insert edge
             "pre_read_safe": False,  # a plain read serves the flash cache
             "measure_route": "narration",
-            # The HT (like AMS 1) measures fine with the apply going out
-            # mid-cycle, so it does not wait.
+            # The HT measures fine with the apply going out mid-cycle.
             "quiet_while_measuring": False,
             "slots": 1,
         },
         "lite": {
-            "fw_model": None,        # the firmware runs it as its own variant
-            "commands_scan": False,  # the bridge reads its tags round and round
+            "fw_model": None,
+            "commands_scan": False,
             "pre_read_safe": True,
-            "measure_route": None,   # it never measures a spool
+            "measure_route": None,
             "quiet_while_measuring": False,
             "slots": 4,
         },
@@ -8385,8 +7674,7 @@ class afcBambuAMS(afcUnit):
 
         :return dict: the profile for this unit's ams_model (ams2 when unknown)
         """
-        return self._PROFILES.get(getattr(self, "ams_model", "ams2"),
-                                  self._PROFILES["ams2"])
+        return self._PROFILES.get(getattr(self, "ams_model", "ams2"), self._PROFILES["ams2"])
 
     def _send_unit_model(self, bridge: Any) -> None:
         """
@@ -8400,14 +7688,11 @@ class afcBambuAMS(afcUnit):
         """
         if bridge is None:
             return
-        # Everything getattr'd: tests use duck-typed stand-ins, and this send
-        # must never break a connect.
+        # This send must never break a connect.
         try:
-            prof = afcBambuAMS._PROFILES.get(
-                getattr(self, "ams_model", "") or "ams2",
-                afcBambuAMS._PROFILES["ams2"])
-            bridge.send({"cmd": "model",
-                         "unit": int(getattr(self, "ams_index", 0) or 0),
+            prof = afcBambuAMS._PROFILES.get(getattr(self, "ams_model", "") or "ams2",
+                                             afcBambuAMS._PROFILES["ams2"])
+            bridge.send({"cmd": "model", "unit": int(getattr(self, "ams_index", 0) or 0),
                          "m": int(prof["fw_model"])})
         except Exception:
             pass
@@ -8421,11 +7706,8 @@ class afcBambuAMS(afcUnit):
 
         :return bool: True for an AMS HT
         """
-        # Answered from the model profile, the single source of truth for the
-        # model. getattr, because test stand-ins carry only ams_model.
-        prof = afcBambuAMS._PROFILES.get(
-            getattr(self, "ams_model", "") or "",
-            None)
+        # Test stand-ins carry only ams_model.
+        prof = afcBambuAMS._PROFILES.get(getattr(self, "ams_model", "") or "", None)
         if prof is not None:
             return prof["fw_model"] == 2
         return (bool(getattr(self, "has_heater", False))
@@ -8487,9 +7769,8 @@ class afcBambuAMS(afcUnit):
                 and m
                 and sec != me
                 and (_opt(sec, "serial_port") or "") == port):
-                problems.append(
-                    f"[{sec}] is on the same bridge ({port}). An AMS Lite is "
-                    f"the only device on its bus; give it a bridge of its own.")
+                problems.append(f"[{sec}] is on the same bridge ({port}). An AMS Lite is "
+                                f"the only device on its bus; give it a bridge of its own.")
         snapmaker = hasattr(self.printer, "get_snapmaker_config_dir")
         hubs: Dict[str, str] = {}
         exts: Dict[str, str] = {}
@@ -8503,39 +7784,35 @@ class afcBambuAMS(afcUnit):
             if hub:
                 hubs[lane] = hub
             else:
-                problems.append(
-                    f"{lane}: an AMS Lite has no hub. Set hub: direct on the "
-                    f"lane, or name an [AFC_hub] with a switch_pin.")
+                problems.append(f"{lane}: an AMS Lite has no hub. Set hub: direct on the "
+                                f"lane, or name an [AFC_hub] with a switch_pin.")
             ext = _opt(sec, "extruder") or self.extruder
             if ext is None:
-                continue                  # AFC_lane reports a missing extruder
+                continue
             exts[lane] = ext
             ext_sec = f"AFC_extruder {ext}"
             start = (_opt(ext_sec, "pin_tool_start") or "").lower()
             if start in ("virtual", "unknown"):
-                problems.append(
-                    f"{lane}: [{ext_sec}] has pin_tool_start: {start}. An AMS "
-                    f"Lite needs a real toolhead sensor or none: set "
-                    f"pin_tool_start to the pin of a filament switch before "
-                    f"the extruder gears, or remove it and the AMS Lite's "
-                    f"odometer ends the load.")
+                problems.append(f"{lane}: [{ext_sec}] has pin_tool_start: {start}. An AMS "
+                                f"Lite needs a real toolhead sensor or none: set "
+                                f"pin_tool_start to the pin of a filament switch before "
+                                f"the extruder gears, or remove it and the AMS Lite's "
+                                f"odometer ends the load.")
             elif start == "buffer":
                 if not (_opt(sec, "buffer")
                         or _opt(ext_sec, "buffer")
                         or self.buffer_name):
-                    problems.append(
-                        f"{lane}: [{ext_sec}] has pin_tool_start: buffer, but "
-                        f"no buffer is set for this lane (buffer: on the "
-                        f"lane, the extruder or [{me}]). Without one an AMS "
-                        f"Lite has nothing to stop its feed.")
+                    problems.append(f"{lane}: [{ext_sec}] has pin_tool_start: buffer, but "
+                                    f"no buffer is set for this lane (buffer: on the "
+                                    f"lane, the extruder or [{me}]). Without one an AMS "
+                                    f"Lite has nothing to stop its feed.")
             elif (not start
                   and _opt(ext_sec, "u1_filament_sensor_name")
                   and not snapmaker):
-                problems.append(
-                    f"{lane}: [{ext_sec}] uses u1_filament_sensor_name, the "
-                    f"Snapmaker U1's own sensor, which counts only on a U1. "
-                    f"Set pin_tool_start to a filament switch instead, or "
-                    f"remove both and the AMS Lite's odometer ends the load.")
+                problems.append(f"{lane}: [{ext_sec}] uses u1_filament_sensor_name, the "
+                                f"Snapmaker U1's own sensor, which counts only on a U1. "
+                                f"Set pin_tool_start to a filament switch instead, or "
+                                f"remove both and the AMS Lite's odometer ends the load.")
         for what, named, fix in (
                 ("extruder", exts, "Put every lane on the same extruder."),
                 ("hub", hubs, "Give every lane the same hub: direct, or the "
@@ -8543,10 +7820,9 @@ class afcBambuAMS(afcUnit):
             if len(set(named.values())) > 1:
                 pairs = ", ".join(f"{lane}: {name}"
                                   for lane, name in named.items())
-                problems.append(
-                    f"mode: combined runs the trays through one splitter "
-                    f"into one toolhead, but the lanes name more than one "
-                    f"{what} ({pairs}). {fix}")
+                problems.append(f"mode: combined runs the trays through one splitter "
+                                f"into one toolhead, but the lanes name more than one "
+                                f"{what} ({pairs}). {fix}")
         if problems:
             error_str = (f"[{me}] ams_model: lite cannot run this setup:\n"
                          + "\n".join(problems))
@@ -8575,27 +7851,22 @@ class afcBambuAMS(afcUnit):
             is_ht = False
         uid = str(getattr(self, "unit_uid", None) or "").strip().upper()
         capen = 1 if getattr(self, "measure_on_insert", False) else 0
-        # Each part is sent on its own, so one that fails (a write timing
-        # out) does not cost the unit the rest of its announce.
+        # One at a time, so a write timeout does not cost the rest of the announce.
         steps: List[Tuple[str, Callable[[], None]]] = [
             ("htunit", lambda: bridge.send({"cmd": "htunit",
                                             "unit": self.ams_index,
                                             "on": 1 if is_ht else 0}))]
-        if is_ht and getattr(self, "ht_0f_hold", True):
-            steps.append(("ht0fhold",
-                          lambda: bridge.send({"cmd": "ht0fhold", "on": 1})))
-        # measure_on_insert lives in the firmware, which opens the
-        # measurement window for every unit type. Re-sent at connect, like
-        # the HT flag.
+        if (is_ht
+            and getattr(self, "ht_0f_hold", True)):
+            steps.append(("ht0fhold", lambda: bridge.send({"cmd": "ht0fhold", "on": 1})))
+        # The firmware holds measure_on_insert, so it is re-sent at connect.
         steps.append(("capen", lambda: bridge.send(
             {"cmd": "capen", "unit": self.ams_index, "on": capen})))
-        # Class registry hint. The firmware places HTs at 0x80-0x87 and
-        # boxed units at 0x00-0x03, probing unclassified units itself; a
-        # known HT's UID from printer.cfg only saves that probe cycle after
-        # a cold start.
-        if is_ht and len(uid) == 24:
-            steps.append(("htuid", lambda: bridge.send(
-                {"cmd": "htuid", "uid": uid})))
+        # The firmware places HTs at 0x80-0x87 and boxed units at 0x00-0x03; a known HT's UID only
+        # saves the probe cycle after a cold start.
+        if (is_ht
+            and len(uid) == 24):
+            steps.append(("htuid", lambda: bridge.send({"cmd": "htuid", "uid": uid})))
         if self.bus_serial:
             steps.append(("serial", lambda: bridge.send(
                 {"cmd": "serial", "s": self.bus_serial[:15]})))
@@ -8609,9 +7880,8 @@ class afcBambuAMS(afcUnit):
             except Exception as e:
                 failed.append(f"{what} ({e!r})")
         if failed:
-            self.logger.debug(
-                f"AFC bambu {self.name}: connect announce could not send "
-                f"{', '.join(failed)}")
+            self.logger.debug(f"AFC bambu {self.name}: connect announce could not send "
+                              f"{', '.join(failed)}")
 
     def _may_save_ids(self) -> bool:
         """
@@ -8668,7 +7938,7 @@ class afcBambuAMS(afcUnit):
             for name, unit in self.printer.lookup_objects("AFC_BambuAMS"):
                 uid = (getattr(unit, "unit_uid", "") or "").strip().upper()
                 if len(uid) != 24:
-                    continue                  # nothing to pin it by
+                    continue
                 try:
                     is_ht = bool(unit._is_ht())
                 except Exception:
@@ -8676,27 +7946,20 @@ class afcBambuAMS(afcUnit):
                 try:
                     model = int(unit.profile["fw_model"])
                 except Exception:
-                    model = 1             # AMS 2: the module's own default
+                    model = 1
                 rank = int(getattr(unit, "_bind_rank", 0))
                 units.append((is_ht, rank, name, uid, model))
             if not units:
                 return
-            # Plain sequential order, boxed first, then HTs, numbered 0..N-1.
-            # The firmware does class placement when class addressing is on;
-            # the host owns only the order.
-            units.sort()          # boxed first, then configured ams_index
-                                  # (frozen at init), name as the tiebreak
+            # The firmware does class placement; the host owns only the order.
+            units.sort()  # boxed first, then ams_index (frozen at init), then name
             only = (only_uid or "").strip().upper()
             for i, (_, _, _, uid, model) in enumerate(units):
-                if i < 12 and (not only or uid == only):
-                    # The model rides with the binding, so the firmware
-                    # restores it from flash at the first enrollment instead of
-                    # judging every unit as an AMS 1 until Klipper connects.
-                    bridge.send({"cmd": "bind", "uid": uid, "idx": i,
-                                 "m": model})
-            # Persist, so the next power-up does not need telling. The
-            # firmware compares before writing, so a matching record touches
-            # no flash; it writes only on a fresh Pico or a config change.
+                if (i < 12
+                    and (not only or uid == only)):
+                    # So the firmware restores the model from flash, not judging all as AMS 1.
+                    bridge.send({"cmd": "bind", "uid": uid, "idx": i, "m": model})
+            # The firmware compares before writing, so a matching record touches no flash.
             if persist:
                 bridge.send({"cmd": "idsave"})
         except Exception:
@@ -8721,12 +7984,11 @@ class afcBambuAMS(afcUnit):
         try:
             boxed = getattr(self, "rollcall_span_boxed", None)
             ht = getattr(self, "rollcall_span_ht", None)
-            # Opt-in only: with neither option set nothing is sent, and the
-            # firmware keeps its default of all twelve ids.
-            if boxed is None and ht is None:
+            # Opt-in: the firmware defaults to all twelve ids.
+            if (boxed is None
+                and ht is None):
                 return
-            bridge.send({"cmd": "rcspan",
-                         "boxed": int(boxed or 0), "ht": int(ht or 0)})
+            bridge.send({"cmd": "rcspan", "boxed": int(boxed or 0), "ht": int(ht or 0)})
         except Exception:
             pass
 
@@ -8745,19 +8007,14 @@ class afcBambuAMS(afcUnit):
         """
         if bridge is None:
             return
-        # The unit's bus address, derived the way the firmware derives it
-        # (see mc_id_for_index). mc_id_base is an additive override and 0 for
-        # every shipped model.
+        # As the firmware derives it (mc_id_for_index); mc_id_base is 0 for every shipped model.
         pay = (self.mc_ams_id if self.mc_ams_id >= 0
                else (self.mc_id_base | mc_id_for_index(self.ams_index)))
         try:
-            bridge.send({"cmd": "mcaddr", "unit": self.ams_index,
-                         "addr": int(self.mc_dev_addr), "pay": int(pay)})
+            bridge.send({"cmd": "mcaddr", "unit": self.ams_index, "addr": int(self.mc_dev_addr),
+                         "pay": int(pay)})
         except Exception:
             pass
-
-
-
 
     def _reconcile_empty_bays(self) -> None:
         """
@@ -8777,37 +8034,32 @@ class afcBambuAMS(afcUnit):
         """
         cleared = False
         try:
-            for slot in range(min(getattr(self, "unit_slots", 0),
-                                  len(self._prev_present))):
+            for slot in range(min(getattr(self, "unit_slots", 0), len(self._prev_present))):
                 info = (self._slots or [None] * self.SLOTS_PER_UNIT)[slot]
-                if info and info.get("present"):
+                if (info
+                    and info.get("present")):
                     continue
                 lane = self._lane_for_slot(slot)
                 if lane is None:
                     continue
                 if (getattr(lane, "material", None)
                     or getattr(lane, "spool_id", None) not in (None, "", 0)):
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: bay {slot + 1} is empty but "
-                        f"{lane.name} still held filament data -- clearing it")
+                    self.logger.debug(f"AFC bambu {self.name}: bay {slot + 1} is empty but "
+                                      f"{lane.name} still held filament data -- clearing it")
                     sid = getattr(lane, "spool_id", None)
                     self._clear_lane_filament(lane)
                     self._unbind_spool(lane)
                     afcBambuAMS._forget_lane_extras(lane)
-                    afcBambuAMS._note_dropped_link(self, lane, sid,
-                                                   tagged=False)
+                    afcBambuAMS._note_dropped_link(self, lane, sid, tagged=False)
                     try:
                         lane.send_lane_data()
                     except Exception:
                         pass
                     cleared = True
-                # Forget this slot's Spoolman miss: a different spool (or the
-                # same one after being added to Spoolman) must get a fresh
-                # lookup rather than inheriting "we already asked".
+                # A different spool, or one since added to Spoolman, gets a fresh lookup.
                 self._forget_spoolman_miss(slot)
         except Exception as e:
-            self.logger.debug(
-                f"AFC bambu {self.name}: empty-bay reconcile skipped: {e}")
+            self.logger.debug(f"AFC bambu {self.name}: empty-bay reconcile skipped: {e}")
         if cleared:
             self._save_lane_vars()
 
@@ -8823,27 +8075,25 @@ class afcBambuAMS(afcUnit):
         :param slot: 0-based AMS slot index
         :return bool: True while this slot's scan is still within its window
         """
-        # Not _scan_t0, which clears on the read, before the unit retracts off
-        # the bay switch. The motion guard ends on cycle-end or expiry.
+        # Not _scan_t0, which clears on the read before the unit retracts off the bay switch.
         t0s = getattr(self, "_scan_motion_t0", None)
-        if not t0s or not (0 <= slot < len(t0s)):
+        if (not t0s
+            or not (0 <= slot < len(t0s))):
             return False
         started = t0s[slot]
         if not started:
             return False
-        # Every model announces its cycle end ("Calibration rst:0",
-        # "STEP7:finish,cali tray", "STEP7:cali end"), so wait for that rather
-        # than a timer.
+        # Every model announces its cycle end, so wait for that rather than a timer.
         try:
             getend = getattr(self._bridge, "last_scan_end", None)
             ended = getend() if callable(getend) else None
-            if ended is not None and ended >= started:
-                t0s[slot] = None        # the unit finished; stop guarding
+            if (ended is not None
+                and ended >= started):
+                t0s[slot] = None
                 return False
         except Exception:
             pass
-        # Backstop for a unit that never announces an end, so a scan that dies
-        # mid-cycle cannot gate this bay forever.
+        # So a scan that dies mid-cycle cannot gate this bay forever.
         try:
             now = self.afc.reactor.monotonic()
         except Exception:
@@ -8853,10 +8103,8 @@ class afcBambuAMS(afcUnit):
             return False
         return True
 
-    # Motion states any AFC lane can be in while filament is actually moving.
-    # A scan must not start against any of these (see _afc_motion_busy).
-    _AFC_BUSY_STATES = ("Tool Loading", "Tool Unloading", "HUB Loading",
-                        "Ejecting", "Calibrating", "Infinite Runout")
+    _AFC_BUSY_STATES = ("Tool Loading", "Tool Unloading", "HUB Loading", "Ejecting", "Calibrating",
+                        "Infinite Runout")
 
     def _afc_motion_busy(self) -> bool:
         """
@@ -8879,23 +8127,19 @@ class afcBambuAMS(afcUnit):
         """
         afc = getattr(self, "afc", None)
         if afc is None:
-            return False                      # no AFC at all: nothing to hit
+            return False
         try:
-            # Core AFC leaves in_toolchange set after a load fails outside a
-            # print (only a later good load or AFC_RESUME clears it), which
-            # held every scan until a restart. A real toolchange is a running
-            # G-code command, so the flag only counts while one holds the mutex.
+            # Core AFC leaves in_toolchange set after a failed load outside a print; a real
+            # toolchange holds the mutex.
             if (getattr(afc, "in_toolchange", False)
-                    and afcBambuAMS._gcode_running(self)):
+                and afcBambuAMS._gcode_running(self)):
                 return True
             for ln in (getattr(afc, "lanes", None) or {}).values():
-                # Compared as is: AFC stores the AFCLaneState member, a str
-                # enum equal to its text, while str() of it would read
-                # "AFCLaneState.TOOL_LOADING" and never match.
+                # AFC stores the str enum, equal to its text; str() would never match.
                 if getattr(ln, "status", "") in self._AFC_BUSY_STATES:
                     return True
         except Exception:
-            return True                       # cannot tell -> do not move
+            return True
         return False
 
     def _gcode_running(self) -> bool:
@@ -8907,7 +8151,7 @@ class afcBambuAMS(afcUnit):
         try:
             return bool(self.gcode.get_mutex().test())
         except Exception:
-            return True                       # cannot tell -> treat as busy
+            return True
 
     def _maybe_auto_scan(self, slot: int, present: bool, info: dict) -> None:
         """
@@ -8924,60 +8168,48 @@ class afcBambuAMS(afcUnit):
         """
         if not (0 <= slot < len(self._prev_present)):
             return
-        # A 1-slot HT can report garbage bits for bays it lacks; ignore them.
+        # A 1-slot HT can report garbage bits for bays it lacks.
         if slot >= getattr(self, "unit_slots", len(self._prev_present)):
             return
-        # Which bays this connection has seen occupied: only a removal of one
-        # of those is a removal this connection watched (see _present_seen).
         seen_in = getattr(self, "_present_seen", None)
         if seen_in is None:
             seen_in = self._present_seen = set()
         if present:
             seen_in.add(slot)
-            # A bay that fills again was not a runout: a pending one dies here,
-            # before the gates below, which track presence silently. An AMS 2
-            # still reads present with its inlet clear, so that one stays.
+            # A bay that fills again was not a runout. An AMS 2 still reads present with its inlet
+            # clear, so that one stays.
             if afcBambuAMS._inlet_ran_out_at(self, slot) is None:
                 (getattr(self, "_runout_pending", None) or {}).pop(slot, None)
         else:
-            # An emptied AMS Lite tray holds no fresh spool, even when the
-            # edge itself is tracked silently below.
             (getattr(self, "_lite_fresh", None) or set()).discard(slot)
-        # A scan moves filament past the bay switch; treated as a removal it
-        # would loop forever. Track presence silently while a scan is in
-        # flight.
+        # A scan moves filament past the bay switch; treated as a removal it would loop forever.
         inflight = getattr(self, "_scan_in_flight", None)
-        if callable(inflight) and inflight(slot):
+        if (callable(inflight)
+            and inflight(slot)):
             self._prev_present[slot] = present
             return
-        # Nor while the unit is moving filament for us: the presence line
-        # flickers during an unload, and a scan started mid-retract stalls
-        # the reactor. Presence is tracked silently, as above.
+        # The presence line flickers during an unload, and a scan mid-retract stalls Klipper.
         if (getattr(self, "_unload_in_progress", False)
             or getattr(self, "_load_in_progress", False)):
             self._prev_present[slot] = present
             return
         was_present = self._prev_present[slot]
         self._prev_present[slot] = present
-        # Spools present at boot are not fresh inserts: until primed, only
-        # record presence, so a reboot never re-reads what AFC restored at
-        # prep.
+        # So a reboot never re-reads what AFC restored at prep.
         if not getattr(self, "_scan_primed", True):
             if not present:
                 self._auto_scanned[slot] = False
             return
-        # Log every bay transition (all slots) so inserts/removals are visible.
-        if present and not was_present:
-            self.logger.debug(
-                f"AFC bambu {self.name}: spool INSERTED in slot {slot} "
-                f"(AMS bay {slot + 1})")
+        if (present
+            and not was_present):
+            self.logger.debug(f"AFC bambu {self.name}: spool INSERTED in slot {slot} "
+                              f"(AMS bay {slot + 1})")
             # Switch narration from before this spool is about the last one.
             ins = getattr(self, "_inserted_at", None)
             if ins is None:
                 ins = self._inserted_at = {}
             ins[slot] = _mono(getattr(self, "afc", None))
-            # An AMS Lite pulls a new spool's tip in to its outlet, so its
-            # first load travels the whole path (see _unit_load_lane).
+            # An AMS Lite pulls a new spool's tip to its outlet, so its first load runs the path.
             if afcBambuAMS._is_lite(self):
                 fresh = getattr(self, "_lite_fresh", None)
                 if fresh is None:
@@ -8985,46 +8217,39 @@ class afcBambuAMS(afcUnit):
                 fresh.add(slot)
             # A follower left pushing this bay would feed the new spool on.
             _dr = getattr(self, "_runout_drain", None)
-            if _dr is not None and afcBambuAMS._slot_of(self, _dr) == slot:
+            if (_dr is not None
+                and afcBambuAMS._slot_of(self, _dr) == slot):
                 afcBambuAMS._end_runout_drain(self, "a spool went into its bay")
-            # A physical insert means a measurement is coming, even on a
-            # same-tag reinsert. This flag only selects the one-time "fresh
-            # insert" INFO line.
+            # Only selects the one-time "fresh insert" INFO line; a measurement comes either way.
             fi = getattr(self, "_fresh_insert", None)
             if fi is None:
                 fi = self._fresh_insert = {}
             fi[slot] = 1
-            # A fresh insert deserves a fresh attempt: clear the once-per-
-            # insert measure latch on the presence 0->1 edge, or a measurement
-            # lost mid-way (a false fault, say) silently skips the next spool.
+            # Or a measurement lost mid-way silently skips the next spool.
             if getattr(self, "_auto_cali_slot", None) == slot:
                 self._auto_cali_slot = None
-        elif was_present and not present:
-            self.logger.debug(
-                f"AFC bambu {self.name}: spool REMOVED from slot {slot} "
-                f"(AMS bay {slot + 1})")
-            # Mid-print, the lane at the toolhead losing its bay is a runout:
-            # the spool's tail has passed the feeder's sensor.
+        elif (was_present
+              and not present):
+            self.logger.debug(f"AFC bambu {self.name}: spool REMOVED from slot {slot} "
+                              f"(AMS bay {slot + 1})")
+            # The spool's tail has passed the feeder's sensor.
             afcBambuAMS._arm_presence_runout(self, slot)
-        elif present and was_present:
-            # The AMS 2 still reads the bay present, but said its inlet
-            # cleared: once per such narration.
+        elif (present
+              and was_present):
+            # The AMS 2 still reads the bay present but said its inlet cleared; once per narration.
             t_in = afcBambuAMS._inlet_ran_out_at(self, slot)
             done = getattr(self, "_inlet_runout_armed", None)
             if done is None:
                 done = self._inlet_runout_armed = {}
-            if t_in is not None and done.get(slot) != t_in:
+            if (t_in is not None
+                and done.get(slot) != t_in):
                 afcBambuAMS._arm_presence_runout(self, slot, inlet=True)
                 if slot in (getattr(self, "_runout_pending", None) or {}):
                     done[slot] = t_in
         if not present:
-            # Removal edge: clear the slot's cached profile so it does not
-            # linger and the next insert reads fresh (the HT never re-reads on
-            # its own). Spoolman-linked lanes stay authoritative.
+            # Removal: the HT never re-reads by itself, so the cached profile goes. Spoolman stays.
             if was_present:
-                # The held measurement leaves with the spool, on every holder.
-                # A removal this connection saw is recorded first, with its
-                # stamp, for a flap to hand back.
+                # A removal seen here is recorded first, with its stamp, for a flap to return.
                 if slot in seen_in:
                     try:
                         rb = getattr(self, "_removed_bays", None)
@@ -9035,14 +8260,11 @@ class afcBambuAMS(afcUnit):
                         if cb is None:
                             cb = self._cleared_bays = set()
                         cb.add(slot)
-                        # Prefer this frame's stamp, the one a flap hands back;
-                        # fall back to the last pair seen if the firmware
-                        # already cleared the percent.
+                        # This frame's stamp, or the last pair seen if the percent is already gone.
                         stamp = None
                         if (info.get("meas_seq")
                             and info.get("meas_pct") is not None):
-                            stamp = (info.get("meas_seq"),
-                                     info.get("meas_pct"))
+                            stamp = (info.get("meas_seq"), info.get("meas_pct"))
                         if stamp is None:
                             stamp = (getattr(self, "_meas_seen", None)
                                      or {}).get(slot)
@@ -9055,17 +8277,13 @@ class afcBambuAMS(afcUnit):
                             dep.pop(slot, None)
                     except Exception:
                         pass
-                # A lookup Spoolman did not answer, or a match refused, was
-                # about the spool that left, and lane defaults waiting on the
-                # insert were for a spool that did not stay.
-                for _d in ("_lookup_retry", "_lookup_refused",
-                           "_defaults_due"):
+                # Lookups, refusals and insert defaults waiting here were for the spool that left.
+                for _d in ("_lookup_retry", "_lookup_refused", "_defaults_due"):
                     (getattr(self, _d, None) or {}).pop(slot, None)
                 (getattr(self, "_defaults_quiet", None) or set()).discard(slot)
                 try:
                     for _o in afcBambuAMS._built_measure_objs(self):
-                        for _d in ("_measured_remain", "_meas_seq_seen",
-                                   "_meas_seen", "_bind_owed",
+                        for _d in ("_measured_remain", "_meas_seq_seen", "_meas_seen", "_bind_owed",
                                    "_convert_owed"):
                             (getattr(_o, _d, None) or {}).pop(slot, None)
                         (getattr(_o, "_meas_baselined", None)
@@ -9074,92 +8292,83 @@ class afcBambuAMS(afcUnit):
                     pass
                 lane = self._lane_for_slot(slot)
                 if lane is not None:
-                    # Clear regardless of a Spoolman binding: a binding to an empty bay is
-                    # stale by definition and would block the next real tag from
-                    # applying. A re-insert re-binds from the tag.
+                    # Even if Spoolman-bound: a binding to an empty bay blocks the next real tag.
                     self._clear_lane_filament(lane)
                     self._unbind_spool(lane)
-                # A held record waiting for its tag left with the spool.
                 (getattr(self, "_restored_bays", None) or set()).discard(slot)
-                # Drop any summary waiting on the departed spool and the tag
-                # this bay was bound from, on every holder.
                 for _o in afcBambuAMS._built_measure_objs(self):
                     for _d in ("_pending_summary", "_bound_uid"):
                         _memo = getattr(_o, _d, None)
                         if isinstance(_memo, dict):
                             _memo.pop(slot, None)
-                # And the Spoolman-miss memo, so a spool added later can bind
-                # without a restart. Unbound call: tests use duck-typed
-                # stand-ins.
+                # So a spool added later can bind without a restart.
                 afcBambuAMS._forget_spoolman_miss(self, slot)
-                # Re-arm the one-shot: the next spool in this bay gets its
-                # own single lookup (OpenAMS re-arms the same way), a read's.
+                # The next spool in this bay gets its own single lookup, as OpenAMS does.
                 try:
                     self._spoolman_latched.discard(slot)
                     (getattr(self, "_match_only_bays", None)
                      or set()).discard(slot)
                 except Exception:
                     pass
-                # Persist the removal, or a restart before the next save would
-                # restore the departed spool's record from the var file.
-                # Best-effort: this edge must never raise.
+                # Or a restart before the next save restores the departed spool. Must never raise.
                 try:
                     self._save_lane_vars()
                 except Exception:
                     pass
-            self._auto_scanned[slot] = False        # reinsertion re-scans
+            self._auto_scanned[slot] = False
             ra = getattr(self, "_untagged_rearmed", None)
-            if ra is not None and 0 <= slot < len(ra):
-                ra[slot] = False                    # and a new spool is a new question
-            self._scan_notag[slot] = False          # a new spool is a new answer
+            if (ra is not None
+                and 0 <= slot < len(ra)):
+                ra[slot] = False
+            self._scan_notag[slot] = False
             defer = getattr(self, "_scan_defer", None)
-            if defer is not None and 0 <= slot < len(defer):
-                defer[slot] = False                 # nothing left to replay
+            if (defer is not None
+                and 0 <= slot < len(defer)):
+                defer[slot] = False
             self._release_scan_hold(slot)
             return
-        # Lane defaults for an insert that could not be scanned, once the bay
-        # has stayed occupied past a flap; a read landed meanwhile wins. Ahead
-        # of the held-scan replay, which returns every frame.
+        # Defaults for an insert that could not be scanned, once past a flap; a read meanwhile wins.
+        # Ahead of the held-scan replay, which returns every frame.
         due = (getattr(self, "_defaults_due", None) or {}).get(slot)
-        if due is not None and _mono(getattr(self, "afc", None)) >= due:
+        if (due is not None
+            and _mono(getattr(self, "afc", None)) >= due):
             self._defaults_due.pop(slot, None)
             quiet = getattr(self, "_defaults_quiet", None) or set()
             held = slot in quiet
             quiet.discard(slot)
-            # The held insert already told the operator how to have it read.
-            afcBambuAMS._defaults_until_read(self, slot, info, say=not held,
-                                             blank_ok=True)
+            afcBambuAMS._defaults_until_read(self, slot, info, say=not held, blank_ok=True)
             if held:
                 try:
                     self._save_lane_vars()
                 except Exception:
                     pass
-        # A scan held back (a loaded lane on this unit, or AFC busy), replayed
-        # once that clears.
+        # A scan held for a loaded lane on this unit, or AFC busy.
         defer = getattr(self, "_scan_defer", None)
-        if defer is not None and 0 <= slot < len(defer) and defer[slot]:
+        if (defer is not None
+            and 0 <= slot < len(defer)
+            and defer[slot]):
             if _unit_tool_loaded(self):
                 return
-            # Re-check the same conditions as the hold, or the deferred scan
-            # would fire into the next load.
+            # Or the deferred scan would fire into the next load.
             if afcBambuAMS._afc_motion_busy(self):
                 return
             afc_d = getattr(self, "afc", None)
             try:
-                if afc_d is not None and afc_d.function.in_print():
+                if (afc_d is not None
+                    and afc_d.function.in_print()):
                     return
             except Exception:
                 pass
             defer[slot] = False
-            self.logger.debug(
-                f"AFC bambu {self.name}: unit is free -- scanning the spool in "
-                f"slot {slot} that was held back")
+            self.logger.debug(f"AFC bambu {self.name}: unit is free -- scanning the spool in "
+                              f"slot {slot} that was held back")
             afcBambuAMS._start_tag_scan(self, slot, info)
             return
         if was_present:
             return
         scanned_once = getattr(self, "_auto_scanned", None) or []
-        if 0 <= slot < len(scanned_once) and scanned_once[slot]:
+        if (0 <= slot < len(scanned_once)
+            and scanned_once[slot]):
             return
         afc = getattr(self, "afc", None)
         try:
@@ -9167,65 +8376,58 @@ class afcBambuAMS(afcUnit):
         except Exception:
             printing = False
         if printing:
-            # Never move filament mid-print. The lane waits on AFC's defaults,
-            # but only after DEFAULTS_SETTLE_S, since one stray frame can
-            # report a bay occupied.
+            # Never move filament mid-print. Defaults wait DEFAULTS_SETTLE_S, since one stray frame
+            # can report a bay occupied.
             due = getattr(self, "_defaults_due", None)
             if due is None:
                 due = self._defaults_due = {}
-            due[slot] = _mono(afc) + getattr(
-                self, "DEFAULTS_SETTLE_S", afcBambuAMS.DEFAULTS_SETTLE_S)
+            due[slot] = _mono(afc) + getattr(self, "DEFAULTS_SETTLE_S",
+                                             afcBambuAMS.DEFAULTS_SETTLE_S)
             return
-        if not self.auto_scan or self._bridge is None:
+        if (not self.auto_scan
+            or self._bridge is None):
             return
-        # A lane on this unit is at the toolhead: hold the scan (a tag read
-        # pulses the whole unit's follower); _scan_defer replays it. The HT is
-        # exempt.
+        # A tag read pulses the unit's follower, so a loaded lane holds the scan; the HT is exempt.
         if (not self._is_ht()
             and not self._is_lite()
             and _unit_tool_loaded(self)):
             self._auto_scanned[slot] = True
             defer = getattr(self, "_scan_defer", None)
-            if defer is not None and 0 <= slot < len(defer):
+            if (defer is not None
+                and 0 <= slot < len(defer)):
                 defer[slot] = True
-            # The insert still counts: the lane goes on defaults once the bay
-            # settles, and the deferred scan overwrites them. _finalize_scan
-            # without a scan only closes the hold.
+            # The lane goes on defaults once the bay settles; the deferred scan overwrites them.
             self._finalize_scan(slot, scanned=False)
             due = getattr(self, "_defaults_due", None)
             if due is None:
                 due = self._defaults_due = {}
-            due[slot] = _mono(afc) + getattr(
-                self, "DEFAULTS_SETTLE_S", afcBambuAMS.DEFAULTS_SETTLE_S)
+            due[slot] = _mono(afc) + getattr(self, "DEFAULTS_SETTLE_S",
+                                             afcBambuAMS.DEFAULTS_SETTLE_S)
             quiet = getattr(self, "_defaults_quiet", None)
             if quiet is None:
                 quiet = self._defaults_quiet = set()
             quiet.add(slot)
             _ln = self._lane_for_slot(slot)
             _ln = getattr(_ln, "name", None) or "<lane>"
-            self.logger.info(
-                f"AFC bambu {self.name}: spool in slot {slot} -- {_ln} goes on "
-                f"lane defaults until it is read, and the SCAN is held: a lane "
-                f"on this unit is loaded to the toolhead and a scan would move "
-                f"filament on it. It scans itself when that lane comes out, or "
-                f"run AFC_BAMBU_SCAN LANE={_ln} whenever you like")
-            # Still pull the new spool in (motion only, no scan) the way a
-            # real printer does: drop the follower, prime the bay up to the
+            self.logger.info(f"AFC bambu {self.name}: spool in slot {slot} -- {_ln} goes on "
+                             f"lane defaults until it is read, and the SCAN is held: a lane "
+                             f"on this unit is loaded to the toolhead and a scan would move "
+                             f"filament on it. It scans itself when that lane comes out, or "
+                             f"run AFC_BAMBU_SCAN LANE={_ln} whenever you like")
+            # Pull the new spool in the way a real printer does: drop the follower, prime to the
             # hub, re-engage. Never during a print.
             self._maybe_insert_pullin(slot)
             return
-        # Nor while anything is moving filament (_afc_motion_busy), HT
-        # included: arming its scan takes the bus. Deferred, replayed above
-        # once idle.
+        # Arming even an HT's scan takes the bus.
         if afcBambuAMS._afc_motion_busy(self):
             self._auto_scanned[slot] = True
             defer = getattr(self, "_scan_defer", None)
-            if defer is not None and 0 <= slot < len(defer):
+            if (defer is not None
+                and 0 <= slot < len(defer)):
                 defer[slot] = True
-            self.logger.debug(
-                f"AFC bambu {self.name}: spool in slot {slot} will be scanned "
-                f"when AFC is idle -- a lane is loading or unloading and a "
-                f"scan now would take the bus out from under it")
+            self.logger.debug(f"AFC bambu {self.name}: spool in slot {slot} will be scanned "
+                              f"when AFC is idle -- a lane is loading or unloading and a "
+                              f"scan now would take the bus out from under it")
             return
         afcBambuAMS._start_tag_scan(self, slot, info)
 
@@ -9245,25 +8447,24 @@ class afcBambuAMS(afcUnit):
 
         :param slot: 0-based AMS slot index that was just inserted
         """
-        if not getattr(self, "insert_pullin", True) or self._bridge is None:
+        if (not getattr(self, "insert_pullin", True)
+            or self._bridge is None):
             return
-        if self._is_ht():          # single lane: situation cannot arise
+        if self._is_ht():
             return
-        # Never during a print: the loaded lane must keep its follower.
+        # The loaded lane must keep its follower.
         afc = getattr(self, "afc", None)
         try:
-            if afc is not None and afc.function.in_print():
+            if (afc is not None
+                and afc.function.in_print()):
                 return
         except Exception:
             pass
-        # Don't cut in on a load/unload/scan already moving filament on the bus.
         try:
             if afcBambuAMS._afc_motion_busy(self):
                 return
         except Exception:
             pass
-        # The lanes holding this unit's follower, to drop now and restore
-        # after.
         loaded = [ln for ln in self.lanes.values()
                   if bool(getattr(ln, "tool_loaded", False))]
         if not loaded:
@@ -9271,19 +8472,17 @@ class afcBambuAMS(afcUnit):
         r = self.afc.reactor
         now = r.monotonic()
         # One sequence at a time, so a re-engage cannot land in the next prime.
-        # Edges arriving mid-sequence are absorbed.
         if now < getattr(self, "_pullin_until", 0.0):
             return
-        self._pullin_until = now + 6.8      # reserve the drop->prime->re-engage window
-        # 1) drop the follower so the unit leaves state:4 (preload_disable clears)
+        self._pullin_until = now + 6.8
+        # 1) drop the follower so the unit leaves state:4
         for ln in loaded:
             try:
                 self.set_feed_assist(ln, False)
             except Exception:
                 pass
 
-        # 2) prime the new bay up to the hub, at +1.5 s (after the unit leaves
-        #    state:4, where a prime does nothing) and again at +3.5 s. No scan.
+        # 2) prime the new bay to the hub at +1.5 s (a prime does nothing in state:4) and +3.5 s
         def _prime(_et: float) -> None:
             """
             Reactor callback: send the prime command for the slot.
@@ -9291,15 +8490,13 @@ class afcBambuAMS(afcUnit):
             :param _et: reactor event time
             """
             try:
-                self._bridge.send({"cmd": "prime", "unit": self.ams_index,
-                                   "slot": slot})
+                self._bridge.send({"cmd": "prime", "unit": self.ams_index, "slot": slot})
             except Exception:
                 pass
         r.register_callback(_prime, now + 1.5)
         r.register_callback(_prime, now + 3.5)
 
-        # 3) re-engage the loaded lane's follower once the prime has settled, and
-        #    release the in-flight guard.
+        # 3) re-engage once the prime has settled
         def _reengage(_et: float) -> None:
             """
             Reactor callback: re-engage the follower on every loaded lane.
@@ -9314,10 +8511,9 @@ class afcBambuAMS(afcUnit):
             self._pullin_until = 0.0
         r.register_callback(_reengage, now + 6.0)
 
-        self.logger.info(
-            f"AFC bambu {self.name}: slot {slot} inserted while a lane is loaded "
-            f"and idle -- dropping the follower, priming the bay in (motion only, "
-            f"no scan/measure), then re-engaging the loaded lane. Scan deferred.")
+        self.logger.info(f"AFC bambu {self.name}: slot {slot} inserted while a lane is loaded "
+                         f"and idle -- dropping the follower, priming the bay in (motion only, "
+                         f"no scan/measure), then re-engaging the loaded lane. Scan deferred.")
 
     def _start_tag_scan(self, slot: int, info: dict) -> None:
         """
@@ -9330,50 +8526,37 @@ class afcBambuAMS(afcUnit):
         :param slot: 0-based AMS slot index on this unit
         :param info: Normalized slot info as of the insert
         """
-        # A genuine insert edge reads the tag, even over existing material.
-        # Blank the old profile first so the UI does not show it meanwhile (a
-        # Spoolman-bound lane is kept).
+        # A genuine insert reads the tag even over existing material; the old profile is blanked.
         lane = self._lane_for_slot(slot)
-        if lane is not None and getattr(lane, "spool_id", None) in (None, "", 0):
+        if (lane is not None
+            and getattr(lane, "spool_id", None) in (None, "", 0)):
             self._clear_lane_filament(lane)
         self._auto_scanned[slot] = True
         self._open_scan(slot)
-        # The motion guard's clock (see _scan_in_flight), set unconditionally.
         mt = getattr(self, "_scan_motion_t0", None)
-        if mt is not None and 0 <= slot < len(mt):
+        if (mt is not None
+            and 0 <= slot < len(mt)):
             try:
                 mt[slot] = self.afc.reactor.monotonic()
             except Exception:
                 mt[slot] = None
-        # The HT scans its own tag on its preload switch and the firmware arms
-        # the poll, so no scan is sent (it would read stale flash). A boxed AMS
-        # scans by feeding past its reader, via scan().
+        # The HT scans its own tag on its preload switch; a sent scan would read stale flash.
         if self._is_ht():
-            # The firmware arms the HT's scan and capacity window, but mark the
-            # slot pending: an unmarked measurement is discarded.
+            # An unmarked measurement is discarded.
             afcBambuAMS._cap_open_pending(self, slot)
-            self.logger.debug(
-                f"AFC bambu {self.name}: new spool in slot {slot}; HT scans and "
-                f"measures it on insert (firmware-driven at 0x1800)")
+            self.logger.debug(f"AFC bambu {self.name}: new spool in slot {slot}; HT scans and "
+                              f"measures it on insert (firmware-driven at 0x1800)")
         else:
-            self.logger.debug(
-                f"AFC bambu {self.name}: new spool detected in slot {slot}, "
-                f"scanning tag")
-            # The measurement rides on the insert's autonomous preload, gated
-            # in the firmware by measure_on_insert. calibrate_on_insert is
-            # opt-in.
+            self.logger.debug(f"AFC bambu {self.name}: new spool detected in slot {slot}, "
+                              f"scanning tag")
+            # The measurement rides the insert's preload, gated by measure_on_insert.
             _cal = bool(getattr(self, "calibrate_on_insert", False))
             if afcBambuAMS._start_capscan(self, slot, cali=_cal, insert=True):
                 getattr(self, "_scan_claim_tries", {}).pop(slot, None)
             else:
-                # The bus claim was refused (two units scanning at once can
-                # take Klipper down): re-run this insert once the bus frees.
-                # Each retry re-opens the hold.
-                if not afcBambuAMS._defer_scan_retry(self, slot, info,
-                                                     "bus busy"):
-                    # No reactor to defer on, or the queue has outlived any
-                    # plausible sibling scan: fall back to the burst rather
-                    # than never scanning at all.
+                # Two units scanning at once can take Klipper down; a refused claim re-runs later.
+                if not afcBambuAMS._defer_scan_retry(self, slot, info, "bus busy"):
+                    # Fall back to the burst rather than never scanning.
                     getattr(self, "_scan_claim_tries", {}).pop(slot, None)
                     self.scan(slot)
 
@@ -9395,16 +8578,15 @@ class afcBambuAMS(afcUnit):
             tries = self._scan_claim_tries = {}
         n = tries.get(slot, 0) + 1
         tries[slot] = n
-        if n > 24:                           # ~2 minutes of polite retry
+        if n > 24:  # ~2 minutes of retry
             return False
         try:
             self.afc.reactor.register_callback(
                 lambda et, s=slot, i=dict(info):
                     afcBambuAMS._retry_claimed_scan(self, s, i),
                 self.afc.reactor.monotonic() + 5.0)
-            self.logger.debug(
-                f"AFC bambu {self.name}: {why}, deferring slot {slot} "
-                f"tag scan (try {n})")
+            self.logger.debug(f"AFC bambu {self.name}: {why}, deferring slot {slot} "
+                              f"tag scan (try {n})")
             return True
         except Exception:
             return False
@@ -9426,11 +8608,10 @@ class afcBambuAMS(afcUnit):
                    else None) or {}
             if not cur.get("present"):
                 getattr(self, "_scan_claim_tries", {}).pop(slot, None)
-                return                           # spool gone; nothing to scan
+                return
             afcBambuAMS._start_tag_scan(self, slot, info)
         except Exception as e:
-            self.logger.debug(
-                f"AFC bambu {self.name}: deferred scan retry failed: {e}")
+            self.logger.debug(f"AFC bambu {self.name}: deferred scan retry failed: {e}")
 
     def _clear_lane_filament(self, lane: Any) -> None:
         """
@@ -9446,20 +8627,18 @@ class afcBambuAMS(afcUnit):
 
         :param lane: The AFC lane object
         """
-        for attr, val in (("material", ""), ("color", ""), ("weight", 0),
-                          ("filament_name", ""), ("sub_type", ""),
-                          ("spool_vendor", "")):
+        for attr, val in (("material", ""), ("color", ""), ("weight", 0), ("filament_name", ""),
+                          ("sub_type", ""), ("spool_vendor", "")):
             try:
                 setattr(lane, attr, val)
             except Exception:
                 pass
-        # The tare came from the departed spool too (see _restore_config_tare).
+        # The tare came from the departed spool too.
         restore = getattr(self, "_restore_config_tare", None)
         if restore is not None:
             restore(lane)
 
-    def _finalize_scan(self, slot: int, scanned: bool = True,
-                       no_record: bool = False) -> None:
+    def _finalize_scan(self, slot: int, scanned: bool = True, no_record: bool = False) -> None:
         """
         The no-tag outcome: give the lane its AFC defaults.
 
@@ -9484,30 +8663,24 @@ class afcBambuAMS(afcUnit):
         if not (0 <= slot < len(self._slots)):
             return
         info = self._slots[slot]
-        if not info or not info.get("present"):
+        if (not info
+            or not info.get("present")):
             self._release_scan_hold(slot)
-            return                                   # spool gone
-        # Two outcomes: a tag read applies the record, no tag applies defaults.
-        # A link or material on the lane describes the previous spool, so no
-        # early return.
+            return
+        # A link or material on the lane describes the previous spool.
         lane = self._lane_for_slot(slot)
         if lane is None:
             self._release_scan_hold(slot)
             return
-        # No scan: leave the lane alone, as a caller that has not looked cannot
-        # tell an empty lane from a pending Spoolman fetch. The exception is
-        # no_record=True (_restore_untagged_defaults): lane, saved record and
-        # tag are all empty, so defaults beat a blank lane.
-        if not scanned and not no_record:
+        # Without a scan a caller cannot tell an empty lane from a pending Spoolman fetch, except
+        # with no_record=True, where lane, saved record and tag are all empty.
+        if (not scanned
+            and not no_record):
             self._release_scan_hold(slot)
             return
-        # Blanked here, since the status loop may have re-armed it. The
-        # Spoolman link goes with the filament, but only when a scan actually
-        # ran.
+        # The status loop may have re-armed it. The Spoolman link goes only after a real scan.
         if scanned:
-            # A failed read says nothing about the reel's filament, so a
-            # measured weight (_measured_remain) is kept; material, colour and
-            # name are not.
+            # A failed read says nothing about the filament, so a measured weight is kept.
             _held = None
             try:
                 for _o in afcBambuAMS._built_measure_objs(self):
@@ -9521,19 +8694,15 @@ class afcBambuAMS(afcUnit):
             if _keep_w:
                 try:
                     lane.weight = _keep_w
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: {lane.name} -- kept the "
-                        f"measured {_keep_w} g through a no-tag scan "
-                        f"({_held}% held, no removal since)")
+                    self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- kept the "
+                                      f"measured {_keep_w} g through a no-tag scan "
+                                      f"({_held}% held, no removal since)")
                 except Exception:
                     pass
-            self._unbind_spool(
-                lane, "the scan read no tag, so this link is the previous spool's")
+            self._unbind_spool(lane, "the scan read no tag, so this link is the previous spool's")
         try:
             afcBambuAMS._apply_lane_defaults(self, lane, info)
-            # Surface the UID even here. "No readable tag" means the profile
-            # did not decode; the chip UID is usually right there, and it is
-            # what a third-party spool gets bound by.
+            # The chip UID usually reads when the profile does not; third-party spools bind by it.
             _uid = None
             try:
                 for _sl in (self._slots or []):
@@ -9542,27 +8711,24 @@ class afcBambuAMS(afcUnit):
                         break
             except Exception:
                 _uid = None
-            # Tell a third-party tag from none. For a chip it cannot
-            # authenticate the unit narrates:
+            # For a chip it cannot authenticate the unit narrates:
             #     STEP:stop goto auth / STEP:auth fail:-4
             #     STEP7:info_valid 0 or bbl:-1        (bbl = Bambu Lab)
             _foreign = False
             try:
                 t0 = getattr(self, "_scan_t0", None)
-                if self._bridge is not None and t0 is not None:
+                if (self._bridge is not None
+                    and t0 is not None):
                     _foreign = self._bridge.rfid_foreign_tag_since(
-                        t0[slot],
-                        addr=getattr(self, "dry_dev_addr", 0) or None)
+                        t0[slot], addr=getattr(self, "dry_dev_addr", 0) or None)
             except Exception:
                 _foreign = False
             if _uid:
                 _why = (f" -- the tag's UID is {str(_uid).upper()}, bind it to "
                         f"a spool in Spoolman to track this reel")
-                # A read-less scan can still leave the chip UID; look it up in
-                # Spoolman through the delegate, which no-ops without Spoolman.
+                # The delegate no-ops without Spoolman.
                 try:
-                    self._bind_by_uid_bg(lane, slot, str(_uid),
-                                         " on a read-less scan")
+                    self._bind_by_uid_bg(lane, slot, str(_uid), " on a read-less scan")
                 except Exception:
                     pass
             elif _foreign:
@@ -9571,31 +8737,24 @@ class afcBambuAMS(afcUnit):
                         "(auth failed). A third-party spool: set the material "
                         "on the lane, or bind it in Spoolman by hand")
             elif scanned:
-                # A UID is reported only for a tag the unit can authenticate,
-                # so a third-party chip can look like no tag; name both
-                # possibilities.
+                # A UID is reported only for a tag the unit can authenticate.
                 _why = (" -- the unit read no tag here. That is an empty bay, "
                         "or a chip whose keys are not Bambu's: an AMS reports a "
-                        "UID only for tags it can authenticate, so no UID does "
-                        "not mean no chip")
+                        "UID only for tags it can authenticate, so no UID does not mean no chip")
             else:
                 _why = (" -- nothing has read this bay yet. No scan was "
                         "attempted, so this says nothing about the reader or "
-                        "the spool; reseat it, or run "
-                        f"AFC_BAMBU_SCAN LANE={lane.name}")
+                        f"the spool; reseat it, or run AFC_BAMBU_SCAN LANE={lane.name}")
             self.logger.info(
                 f"AFC bambu {self.name}: "
                 + (f"no readable tag profile in slot {slot}" if scanned
                    else f"no tag on record for slot {slot}")
                 + f"; applied lane defaults to {lane.name}" + _why)
-            # Persist only after a real scan: saved on the boot path, defaults
-            # would permanently replace a record still in flight.
+            # Saved on the boot path, defaults would replace a record still in flight.
             if scanned:
                 self._save_lane_vars()
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: default apply for slot {slot} "
-                f"failed: {e}")
+            self.logger.warning(f"AFC bambu {self.name}: default apply for slot {slot} failed: {e}")
 
     def _apply_lane_defaults(self, lane: Any, info: dict) -> None:
         """
@@ -9625,14 +8784,7 @@ class afcBambuAMS(afcUnit):
                 "default_color": getattr(afc, "default_color", None),
             })
 
-
-
-
-
-
-
-    def calibrate_bowden(self, cur_lane: Any, dis: float,
-                         tol: float) -> "Tuple[bool, str, int]":
+    def calibrate_bowden(self, cur_lane: Any, dis: float, tol: float) -> "Tuple[bool, str, int]":
         """
         Bowden calibration is not necessary on a Bambu AMS.
 
@@ -9647,19 +8799,15 @@ class afcBambuAMS(afcUnit):
         :param tol: tolerance the caller would have applied; unused
         :return tuple: (True, message, 0)
         """
-        # Two paths, because CALIBRATE_AFC has two: the lane loop shows
-        # calibration_lane_message(), the BOWDEN path ignores it, so
-        # respond_info.
+        # CALIBRATE_AFC's BOWDEN path ignores calibration_lane_message().
         try:
-            self.gcode.respond_info(
-                "Bambu AMS measures its own lane automatically -- bowden "
-                "calibration is not necessary.")
+            self.gcode.respond_info("Bambu AMS measures its own lane automatically -- bowden "
+                                    "calibration is not necessary.")
         except Exception:
             pass
         return (True, "calibration_lane", 0)
 
-    def calibrate_lane(self, cur_lane: Any,
-                       tol: float) -> "Tuple[bool, str, int]":
+    def calibrate_lane(self, cur_lane: Any, tol: float) -> "Tuple[bool, str, int]":
         """
         Lane calibration is automatic on a Bambu AMS, as with bowden.
 
@@ -9669,8 +8817,7 @@ class afcBambuAMS(afcUnit):
         """
         return (True, "calibration_lane", 0)
 
-    def calibrate_hub(self, cur_lane: Any,
-                      tol: float) -> "Tuple[bool, str, int]":
+    def calibrate_hub(self, cur_lane: Any, tol: float) -> "Tuple[bool, str, int]":
         """
         Hub calibration is not needed on a Bambu AMS.
 
@@ -9703,10 +8850,7 @@ class afcBambuAMS(afcUnit):
         return ("\nBambu AMS measures its own lane automatically -- bowden/lane "
                 "calibration is not necessary for: {lanes}\n")
 
-
-
-    def _log_tag_readout(self, lane: Any, info: dict,
-                         force: bool = False) -> None:
+    def _log_tag_readout(self, lane: Any, info: dict, force: bool = False) -> None:
         """
         Print what the tag actually said, on the read.
 
@@ -9727,15 +8871,14 @@ class afcBambuAMS(afcUnit):
             mat = info.get("material")
             if not mat:
                 return
-            # Once per distinct answer: an operator scan and the background
-            # fill both get the line, a repeated status frame does not.
-            # force=True always answers.
+            # Once per distinct answer; force=True always answers.
             slot_i = info.get("index")
             key = (info.get("rfid_uid"), mat, info.get("meas_seq"))
             seen = getattr(self, "_readout_last", None)
             if seen is None:
                 seen = self._readout_last = {}
-            if not force and seen.get(slot_i) == key:
+            if (not force
+                and seen.get(slot_i) == key):
                 return
             seen[slot_i] = key
             colour = info.get("color") or ""
@@ -9745,8 +8888,7 @@ class afcBambuAMS(afcUnit):
                 nominal = int(info.get("weight") or 1000)
             except (TypeError, ValueError):
                 nominal = 1000
-            # A stamp found at connect is not this session's measurement; only
-            # a figure on the lane, or about to be adopted, is called measured.
+            # A stamp found at connect is not this session's measurement.
             stale = False
             if meas:
                 try:
@@ -9763,10 +8905,7 @@ class afcBambuAMS(afcUnit):
             if stale:
                 rtxt = f"{meas}% stamped before this connection, not applied"
             elif meas:
-                # Quote the same grams the lane gets: same floor
-                # (_remain_floor_pct) and same _grams_for. The fallback caps
-                # the percent at 100 (a full reel reads over). Each delegate
-                # call has its own try.
+                # Same grams the lane gets. The fallback caps at 100 % (a full reel reads over).
                 def _linear() -> int:
                     """
                     Remaining grams by plain proportion of the nominal weight.
@@ -9775,19 +8914,15 @@ class afcBambuAMS(afcUnit):
                     """
                     return max(1, (int(nominal) * min(int(eff), 100)) // 100)
                 eff = int(meas)
-                # _measure_of, not _spool: the lane's grams come from the
-                # measurement delegate with or without Spoolman, and so does
-                # this line's figure.
+                # The lane's grams come from the measurement delegate with or without Spoolman.
                 try:
-                    _fl = getattr(afcBambuAMS._measure_of(self),
-                                  "_remain_floor_pct", None)
+                    _fl = getattr(afcBambuAMS._measure_of(self), "_remain_floor_pct", None)
                     if _fl is not None:
                         eff = int(_fl(info.get("rfid_uid") or "", int(meas)))
                 except Exception:
                     eff = int(meas)
                 try:
-                    _gf = getattr(afcBambuAMS._measure_of(self),
-                                  "_grams_for", None)
+                    _gf = getattr(afcBambuAMS._measure_of(self), "_grams_for", None)
                     grams_est = (_gf(slot_i, lane, eff, nominal)
                                  if _gf is not None else _linear())
                 except Exception:
@@ -9796,16 +8931,12 @@ class afcBambuAMS(afcUnit):
                 if eff != int(meas):
                     rtxt += f", held at {eff}%"
                 rtxt += f" (~{grams_est} g"
-                rtxt += (" -- a full reel reads proud of the reference "
-                         "radius)" if eff > 100 else ")")
+                rtxt += (
+                    " -- a full reel reads proud of the reference radius)" if eff > 100 else ")")
             else:
-                # The tag's own remain field is never shown: it is not a
-                # quantity (a sealed 1 kg spool ships with 0.8 in it). Only a
-                # real measurement produces a remaining figure.
+                # The tag's remain field is no quantity: a sealed 1 kg spool ships with 0.8 in it.
                 rtxt = "no measurement yet"
-            # DEBUG, not INFO: _say_spool_summary is the operator's line for
-            # a scan. This one keeps the diagnostic extras (SKU, nominal,
-            # nozzle range) in AFC.log.
+            # _say_spool_summary is the operator's line; this keeps the extras in AFC.log.
             self.logger.debug(
                 f"AFC bambu {self.name}: {lane.name} tag -- {mat}"
                 f"{(' ' + str(info.get('sku'))) if info.get('sku') else ''}"
@@ -9815,9 +8946,7 @@ class afcBambuAMS(afcUnit):
                 f" | nominal {nominal} g"
                 f" | nozzle {info.get('temp_min') or '?'}"
                 f"-{info.get('temp_max') or '?'}C"
-                # Tagged with where it came from, because almost every Bambu
-                # tag leaves this blank and the number below it is then the
-                # material table's, not the spool's.
+                # Most Bambu tags leave it blank, and the figure is then the material table's.
                 f" | bed {info.get('bed_temp') or '?'}C"
                 f" ({info.get('bed_temp_source') or 'unknown'})")
         except Exception:
@@ -9845,13 +8974,10 @@ class afcBambuAMS(afcUnit):
             slot = info.get("index")
             if slot in (getattr(self, "_scanned_bays", None) or set()):
                 return False
-            # A bay whose removal edge cleared the lane in this process: what
-            # is on it now (lane defaults for an insert nothing has read) is
-            # not something AFC restored, whatever the bridge link did since.
+            # A bay whose removal cleared the lane in this process holds nothing AFC restored.
             if slot in (getattr(self, "_cleared_bays", None) or set()):
                 return False
-            # Nor are defaults this connection applied, or a held record that
-            # is only defaults: a tag reported after either is a read.
+            # Nor do defaults this connection applied: a tag after them is a read.
             if slot in (getattr(self, "_defaulted_bays", None) or set()):
                 return False
             return (getattr(lane, "spool_id", None) not in (None, "", 0)
@@ -9901,36 +9027,39 @@ class afcBambuAMS(afcUnit):
           "no": nothing to ask for this bay
         """
         try:
-            if getattr(self, "pool", False) or lane is None or not info:
+            if (getattr(self, "pool", False)
+                or lane is None
+                or not info):
                 return "no"
             slot = info.get("index")
             uid = info.get("rfid_uid")
-            if not info.get("present") or not uid or slot is None:
+            if (not info.get("present")
+                or not uid
+                or slot is None):
                 return "no"
             if getattr(lane, "spool_id", None) not in (None, "", 0):
                 return "no"
             if slot in (getattr(self, "_spoolman_latched", None) or ()):
                 return "no"
             lane_mat = str(getattr(lane, "material", "") or "").strip().lower()
-            # Neither a colour nor a variant: a lane on defaults, which no
-            # record can be tested against.
+            # A lane on defaults has nothing to test a record against.
             if (not lane_mat
-                or not (_colour_key(getattr(lane, "color", ""))
-                        or getattr(lane, "sub_type", ""))):
+                or not (_colour_key(getattr(lane, "color", "")) or getattr(lane, "sub_type", ""))):
                 return "no"
             claimed = getattr(self, "_uid_claimed_elsewhere", None)
-            if callable(claimed) and claimed(uid):
+            if (callable(claimed)
+                and claimed(uid)):
                 return "stale"
             busy = bool(info.get("reread_pending"))
             t0 = getattr(self, "_scan_t0", None) or []
-            if 0 <= slot < len(t0) and t0[slot] is not None:
+            if (0 <= slot < len(t0)
+                and t0[slot] is not None):
                 busy = True
             moving = getattr(self, "_scan_in_flight", None)
-            if callable(moving) and moving(slot):
+            if (callable(moving)
+                and moving(slot)):
                 busy = True
-            # A capacity window is waited out until its measurement is in:
-            # closed by the narration path, or marked _cap_answered by the
-            # adopt block (which leaves it open for the narration).
+            # Closed by the narration, or marked _cap_answered by the adopt block.
             try:
                 live = slot in afcBambuAMS._cap_live_pending(self)
             except Exception:
@@ -9939,9 +9068,8 @@ class afcBambuAMS(afcUnit):
                 and slot not in (getattr(self, "_cap_answered", None) or ())):
                 busy = True
             tag = info.get("material")
-            if not tag or str(tag).lower() == "unknown":
-                # The profile comes back once the window is done with it,
-                # answered or not.
+            if (not tag
+                or str(tag).lower() == "unknown"):
                 return "wait" if (busy or live) else "no"
             material, _sub = _split_bambu_material(tag)
             if (material.strip().lower() != lane_mat
@@ -9950,7 +9078,8 @@ class afcBambuAMS(afcUnit):
             if busy:
                 return "wait"
             due = (getattr(self, "_lookup_retry", None) or {}).get(slot)
-            if due is not None and _mono(getattr(self, "afc", None)) < due:
+            if (due is not None
+                and _mono(getattr(self, "afc", None)) < due):
                 return "wait"
             return "due"
         except Exception:
@@ -9985,7 +9114,7 @@ class afcBambuAMS(afcUnit):
         try:
             if afcBambuAMS._unbound_lookup_state(self, lane, info) != "due":
                 return
-            # Asked only now, after the conditions: this builds the delegate.
+            # This builds the delegate.
             if getattr(self, "_spool", None) is None:
                 return
             slot = info.get("index")
@@ -9994,17 +9123,15 @@ class afcBambuAMS(afcUnit):
                 latch = self._spoolman_latched = set()
             latch.add(slot)
             (getattr(self, "_lookup_retry", None) or {}).pop(slot, None)
-            self.logger.debug(
-                f"AFC bambu {self.name}: {lane.name} has no Spoolman spool and "
-                f"its bay's tag {str(info.get('rfid_uid')).upper()} "
-                f"({info.get('material')}) matches the lane -- looking the "
-                f"tag up in Spoolman; the lane is left as AFC restored it")
+            self.logger.debug(f"AFC bambu {self.name}: {lane.name} has no Spoolman spool and "
+                              f"its bay's tag {str(info.get('rfid_uid')).upper()} "
+                              f"({info.get('material')}) matches the lane -- looking the "
+                              f"tag up in Spoolman; the lane is left as AFC restored it")
             self._spoolman_sync(lane, info, restored=True)
         except Exception:
             try:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: lookup for an unbound lane "
-                    f"failed", traceback=traceback.format_exc())
+                self.logger.debug(f"AFC bambu {self.name}: lookup for an unbound lane failed",
+                                  traceback=traceback.format_exc())
             except Exception:
                 pass
 
@@ -10025,19 +9152,19 @@ class afcBambuAMS(afcUnit):
         :return bool: True while a lookup for this bay is still to be sent
         """
         try:
-            if slot is None or not info:
+            if (slot is None
+                or not info):
                 return False
             afc = getattr(self, "afc", None)
-            if afc is None or getattr(afc, "spoolman", None) is None:
+            if (afc is None
+                or getattr(afc, "spoolman", None) is None):
                 return False
             lane = afcBambuAMS._lane_for_slot(self, slot)
-            return afcBambuAMS._unbound_lookup_state(
-                self, lane, info) in ("due", "wait")
+            return afcBambuAMS._unbound_lookup_state(self, lane, info) in ("due", "wait")
         except Exception:
             return False
 
-    def _defaults_until_read(self, slot: int, info: dict,
-                             say: bool = True,
+    def _defaults_until_read(self, slot: int, info: dict, say: bool = True,
                              blank_ok: bool = False) -> None:
         """
         A spool put into a bay during a print: lane defaults until it is read.
@@ -10090,34 +9217,32 @@ class afcBambuAMS(afcUnit):
                     or getattr(_bl, "spool_id", None) not in (None, "", 0)):
                     return
             named = info.get("rfid_uid") or info.get("material")
-            if named and not info.get("reread_pending"):
+            if (named
+                and not info.get("reread_pending")):
                 return
             lane = self._lane_for_slot(slot)
             if lane is None:
                 return
             if getattr(lane, "spool_id", None) not in (None, "", 0):
                 self._clear_lane_filament(lane)
-                self._unbind_spool(
-                    lane, "nothing has read the spool in the bay, so this "
-                          "link is the previous spool's")
+                self._unbind_spool(lane, "nothing has read the spool in the bay, so this "
+                                   "link is the previous spool's")
             afcBambuAMS._apply_lane_defaults(self, lane, info)
             if not say:
                 return
-            self.logger.info(
-                f"AFC bambu {self.name}: spool INSERTED in slot {slot} during "
-                f"a print, and nothing has read it -- {lane.name} is on lane "
-                f"defaults and linked to no spool until it is read. The unit "
-                f"may read it on its own; to read it yourself, run "
-                f"AFC_BAMBU_SCAN LANE={lane.name} once the print is done")
+            self.logger.info(f"AFC bambu {self.name}: spool INSERTED in slot {slot} during "
+                             f"a print, and nothing has read it -- {lane.name} is on lane "
+                             f"defaults and linked to no spool until it is read. The unit "
+                             f"may read it on its own; to read it yourself, run "
+                             f"AFC_BAMBU_SCAN LANE={lane.name} once the print is done")
             try:
                 self._save_lane_vars()
             except Exception:
                 pass
         except Exception:
             try:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: lane defaults for the slot {slot} "
-                    f"insert failed", traceback=traceback.format_exc())
+                self.logger.debug(f"AFC bambu {self.name}: lane defaults for the slot {slot} "
+                                  f"insert failed", traceback=traceback.format_exc())
             except Exception:
                 pass
 
@@ -10134,45 +9259,38 @@ class afcBambuAMS(afcUnit):
         :param info: Normalized slot info from bridge_slot_to_info
         """
         tag_material = info.get("material")
-        if tag_material and tag_material.lower() == "unknown":
+        if (tag_material
+            and tag_material.lower() == "unknown"):
             tag_material = None
 
-        # Not a record of the spool in the bay: an empty bay's record is the
-        # departed spool's, and one the firmware still owes a re-read is not
-        # current yet. Wait for the read. A record with no "present" key (a
-        # test stand-in) is not held.
+        # An empty bay's record is the departed spool's, and a re-read owed is not current yet.
+        # A test stand-in with no "present" key is not held.
         if (("present" in info and not info.get("present"))
             or info.get("reread_pending")):
             _arw = getattr(self, "_apply_remain_weight", None)
-            if info.get("present") and callable(_arw):
+            if (info.get("present")
+                and callable(_arw)):
                 _arw(lane, info)
             return
 
-        # At startup the lane is whatever AFC restored. The AMS re-reports its
-        # cached record every frame, so until this bay is scanned on this
-        # connection it may only fill a blank lane. A held record with no tag
-        # read is settled against the first tag (_settle_restored_bay).
+        # The AMS re-reports its cached record every frame, so until a bay is scanned on this
+        # connection it may only fill a blank lane.
         _settle = getattr(self, "_settle_restored_bay", None)
         if _settle is not None:
             _settle(lane, info)
         _hold = getattr(self, "_boot_hold", None)
-        if _hold is not None and _hold(lane, info):
-            # The hold keeps the record off the lane, not the lane off
-            # Spoolman: a restored lane with no spool still has its tag looked
-            # up.
+        if (_hold is not None
+            and _hold(lane, info)):
+            # A restored lane with no spool still has its tag looked up.
             _lookup = getattr(self, "_lookup_unbound", None)
             if _lookup is not None:
                 _lookup(lane, info)
                 self._apply_remain_weight(lane, info)
             return
 
-        # No "already bound?" gate: the tag is the bay, so it is applied like
-        # any other reader does (read -> lane -> Spoolman). Spoolman stays
-        # authoritative for the spool_id and the remaining weight only.
+        # The tag is the bay. Spoolman is authoritative only for spool_id and remaining weight.
         if tag_material:
-            # The AMS tag is the source of truth: apply it directly,
-            # overwriting any AFC default, which the "only if empty" helper
-            # would not.
+            # The tag overwrites any AFC default.
             color = info.get("color")
             color_hex = (color if color.startswith("#") else "#" + color) \
                 if color else None
@@ -10182,15 +9300,11 @@ class afcBambuAMS(afcUnit):
                        or getattr(lane, "sub_type", None) != sub_type
                        or (color_hex and getattr(lane, "color", None) != color_hex))
             lane.material = material
-            # Variant, vendor and display name, implied by the tag, so every
-            # surface that shows a spool (dryer panel, Spoolman, RFID
-            # notifications) has them.
+            # So every surface that shows a spool has them.
             lane.sub_type = sub_type
             lane.spool_vendor = BAMBU_BRAND
-            # Same builder the ACE 2 RFID path uses, so both vendors render
-            # a spool identically ("Bambu PLA Matte").
-            lane.filament_name = build_filament_name(
-                BAMBU_BRAND, material, sub_type)
+            # Same builder as ACE 2, so both render "Bambu PLA Matte".
+            lane.filament_name = build_filament_name(BAMBU_BRAND, material, sub_type)
             if color_hex:
                 lane.color = color_hex
             if tmin is not None:
@@ -10198,9 +9312,7 @@ class afcBambuAMS(afcUnit):
                     lane.extruder_temp = float(tmin)
                 except (TypeError, ValueError):
                     pass
-            # Bed temp: most tags leave it blank, so it is derived from the
-            # material. A tag figure overwrites; a derived one only fills a
-            # blank.
+            # Most tags leave bed temp blank; a tag figure overwrites, a derived one fills a blank.
             bed = info.get("bed_temp")
             if (bed is not None
                 and (info.get("bed_temp_source") == "tag"
@@ -10209,38 +9321,30 @@ class afcBambuAMS(afcUnit):
                     lane.bed_temp = float(bed)
                 except (TypeError, ValueError):
                     pass
-            # A 0 g spool renders as empty in the UI, so seed the tag's nominal
-            # weight when the lane's weight is unset or still exactly nominal
-            # (AFC only decrements from here). remain 0 means "not measured".
+            # A 0 g spool renders as empty, so seed the nominal weight when unset or still nominal.
+            # remain 0 means "not measured".
             tag_w = info.get("weight")
             try:
                 nominal = int(tag_w) if tag_w else 1000
             except (TypeError, ValueError):
                 nominal = 1000
-            # The tag's stored remain never sets the weight (it is not a
-            # measurement). Seed the nominal only; a measurement arrives
-            # through _adopt_measured_remain.
+            # The tag's remain is not a measurement; one arrives through _adopt_measured_remain.
             w = nominal
-            # Seed only a default or unset weight: a measurement applies once,
-            # when taken, and extrusion and restores own the weight otherwise.
+            # Extrusion and restores own the weight once it is set.
             cur_w = getattr(lane, "weight", 0)
-            if not cur_w or int(cur_w) == nominal:
+            if (not cur_w
+                or int(cur_w) == nominal):
                 lane.weight = w
             if changed:
                 self.logger.info(
                     f"AFC bambu {self.name}: applied tag to {lane.name}: "
                     f"{getattr(lane, 'filament_name', '') or tag_material} "
                     f"{color_hex or ''}".rstrip())
-                # Change-only, so this is not a write per status frame.
-                # Persisted so the lane does not depend on the AMS still
-                # holding the record at the next boot.
+                # Change-only. Saved so the lane does not depend on the AMS at the next boot.
                 self._save_lane_vars()
-                # The fill delivers tags with no scan window open (verdict
-                # "none"), e.g. a re-insert into a fresh bay; log the tag that
-                # changed the lane.
+                # A fill with no scan window (verdict "none") logs the tag that changed the lane.
                 afcBambuAMS._log_tag_readout(self, lane, info)
-            # Bind or create in Spoolman keyed on the UID; match-only for a bay
-            # whose held record had a link (see _note_dropped_link).
+            # Match-only for a bay whose held record had a link (_note_dropped_link).
             slot_i = info.get("index")
             latch = getattr(self, "_spoolman_latched", None)
             if latch is None:
@@ -10251,12 +9355,9 @@ class afcBambuAMS(afcUnit):
                     self._spoolman_sync(lane, info, restored=True)
                 else:
                     self._spoolman_sync(lane, info)
-        # No readable tag yet (staged, not fed past the reader): do not apply a
-        # default, which would show the wrong material and lock out the tag.
+        # No readable tag yet: a default would show the wrong material and lock out the tag.
         elif info.get("rfid_uid"):
-            # UID-only: match Spoolman on the UID alone. Reached only once the
-            # unit has answered, since a bay's UID outlives its cleared
-            # profile.
+            # Only once the unit has answered, since a bay's UID outlives its cleared profile.
             slot_i = info.get("index")
             latch = getattr(self, "_spoolman_latched", None)
             if latch is None:
@@ -10265,8 +9366,7 @@ class afcBambuAMS(afcUnit):
                 latch.add(slot_i)
                 self._spoolman_sync(lane, info)
 
-        # Hand over a measurement owed to the spool a bind attaches, and finish
-        # one owed to the material now named; nothing else touches the weight.
+        # Nothing else touches the weight.
         self._apply_remain_weight(lane, info)
 
     def _record_fresh(self, rec: dict) -> bool:
@@ -10293,9 +9393,8 @@ class afcBambuAMS(afcUnit):
         :return dict: {"temp", "target", "state", "seen"} for this unit, or
             None when it has not narrated chamber telemetry.
         """
-        # A unit not on the bus owns no chamber: an unclaimed spare sits at
-        # index 0 and would adopt the first real unit's. Gated on `pool`, not
-        # online, so a reconnect gap cannot hide a real unit's chamber.
+        # An unclaimed spare at index 0 would adopt the first real unit's. Gated on `pool`, not
+        # online, so a reconnect gap cannot hide a real chamber.
         if getattr(self, "pool", False):
             return None
         by_unit = getattr(self._bridge, "_chmb_by_unit", None)
@@ -10343,14 +9442,12 @@ class afcBambuAMS(afcUnit):
             or (_mono(self) - started) <= DRY_SILENT_GRACE):
             return
         self._drying = False
-        self._dry_host_refusal = (
-            f"{self.name} never started the cycle -- the dry command drew no "
-            f"reply and no chamber telemetry followed. An AMS HT that is "
-            f"mid-task (scanning or feeding) ignores the command silently; "
-            f"let it finish and start again.")
-        self.logger.info(
-            f"AFC bambu {self.name}: not drying -- the unit never answered "
-            f"the dry command (silent for {int(DRY_SILENT_GRACE)}s)")
+        self._dry_host_refusal = (f"{self.name} never started the cycle -- the dry command drew no "
+                                  f"reply and no chamber telemetry followed. An AMS HT that is "
+                                  f"mid-task (scanning or feeding) ignores the command silently; "
+                                  f"let it finish and start again.")
+        self.logger.info(f"AFC bambu {self.name}: not drying -- the unit never answered "
+                         f"the dry command (silent for {int(DRY_SILENT_GRACE)}s)")
 
     def _finish_timed_dry(self, started: Any, minutes: int, live: bool) -> None:
         """
@@ -10383,13 +9480,13 @@ class afcBambuAMS(afcUnit):
         self._dryrem_at_stop = None
         try:
             u = afcBambuAMS._unit_entry(self, self._bridge.latest_status() or {})
-            if u is not None and u.get("dryrem") is not None:
+            if (u is not None
+                and u.get("dryrem") is not None):
                 self._dryrem_at_stop = int(u["dryrem"])
         except Exception:
             pass
-        self.logger.info(
-            f"AFC bambu {self.name}: drying finished (the {minutes} min cycle "
-            f"ran out)")
+        self.logger.info(f"AFC bambu {self.name}: drying finished (the {minutes} min cycle "
+                         f"ran out)")
 
     def _follow_arm_acked(self, latest: Any) -> Any:
         """
@@ -10444,35 +9541,29 @@ class afcBambuAMS(afcUnit):
         if _mono(self) < getattr(self, "_dry_adopt_after", 0.0):
             return False
         stamped = getattr(self, "_dryrem_at_stop", None)
-        if stamped is not None and int(dr) == int(stamped):
+        if (stamped is not None
+            and int(dr) == int(stamped)):
             return False
-        # From cold, adopt a dry only once the countdown ticks, falling by no
-        # more than the elapsed time plus DRYREM_TICK_SLACK_S; a frozen
-        # register or an HT's jump must not latch _drying. A change from the
-        # stop stamp shows at once.
+        # From cold, adopt a dry only once the countdown ticks, falling by at most elapsed plus
+        # DRYREM_TICK_SLACK_S; a frozen register or an HT's jump must not latch _drying.
         now = _mono(self)
         ticked = False
         if prev is not None:
             fell = int(prev[0]) - int(dr)
             elapsed = max(0.0, now - float(prev[1]))
             ticked = 0 < fell <= elapsed + DRYREM_TICK_SLACK_S
-        # The stop stamp keeps its own rule: any number different from the one
-        # a stop stamped is evidence the stop did not take, and reaches the
-        # panel on the first such frame.
+        # Any number different from the stop's stamp means the stop did not take.
         unstopped = stamped is not None and int(stamped) != int(dr)
         if not (ticked or unstopped):
             return False
         was = int(prev[0]) if prev is not None else int(stamped)
         self._drying = True
         self._dryrem_at_stop = None
-        # Log the adoption, so a load refused for drying can be traced to the
-        # countdown. Guarded: bare test objects may lack a logger, and that
-        # must not decide whether a unit is drying.
+        # So a load refused for drying can be traced. Bare test objects may lack a logger.
         try:
-            self.logger.info(
-                f"AFC bambu {self.name}: adopting the unit's own dry cycle -- "
-                f"its countdown moved {was}s -> {int(dr)}s, so a cycle this "
-                f"host did not start is running ({int(dr)}s left)")
+            self.logger.info(f"AFC bambu {self.name}: adopting the unit's own dry cycle -- "
+                             f"its countdown moved {was}s -> {int(dr)}s, so a cycle this "
+                             f"host did not start is running ({int(dr)}s left)")
         except Exception:
             pass
         return True
@@ -10510,13 +9601,12 @@ class afcBambuAMS(afcUnit):
         """
         status = super().get_status(eventtime)
         latest = self._bridge.latest_status() if self._bridge else None
-        # An unclaimed pool bay may not read the roster: at the default index 0
-        # it would publish the first real unit's dry state as its own.
-        if latest and getattr(self, "pool", False):
+        # At index 0 an unclaimed bay would publish the first real unit's dry state.
+        if (latest
+            and getattr(self, "pool", False)):
             latest = {k: v for k, v in latest.items() if k != "units"}
         status["bridge_online"] = self._unit_online(latest)
-        # The transport itself: whether a port is open, and for how long it has
-        # not been (bridge_online goes stale, not false).
+        # bridge_online goes stale, not false.
         try:
             status["bridge_connected"] = (self._bridge.is_connected()
                                           if self._bridge else False)
@@ -10527,82 +9617,65 @@ class afcBambuAMS(afcUnit):
             status["bridge_connected"] = False
             status["bridge_down_for"] = None
         status["ams_index"] = self.ams_index
-        # byte[19] of the op-04 reply, published: 04 healthy, 07 stalled, None
-        # when the unit has not reported one. Every generation sends it, unlike
-        # fault narration (the AMS 1 has none).
+        # op-04 byte[19]: 04 healthy, 07 stalled, None unreported. Unlike fault narration, every
+        # generation sends it.
         status["unit_state"] = self._unit_state(latest)
         humidity, temperature = unit_env(latest, self.ams_index)
-        status["humidity"] = humidity          # %RH, or None if unknown
-        # Chamber temperature, streamed only while drying; stale after 120 s
-        # and keyed by chain index (see _chamber_record).
+        status["humidity"] = humidity  # %RH, or None
+        # Streamed only while drying; stale after 120 s.
         rec = self._chamber_record() if self._bridge is not None else None
-        # Resolve the chamber telemetry once, here, so every derived field
-        # (temperature, drying, target, state) reads the same record and they
-        # agree.
+        # Resolved once so every derived field reads the same record.
         live, attributable, seen_t = self._chamber_live()
-        # Only telemetry after the last start or stop, plus a grace, speaks for
-        # the current cycle, or a stop would be undone by the next poll.
+        # Or a stop would be undone by the next poll.
         fresh_for_this_cycle = (live
                                 and seen_t > getattr(self, "_dry_adopt_after", 0.0))
-        if temperature is None and fresh_for_this_cycle and rec is not None:
+        if (temperature is None
+            and fresh_for_this_cycle
+            and rec is not None):
             temperature = rec.get("temp")
-        status["temperature"] = temperature    # °C, or None when not drying
-        # An HT has one bay. The arrays stay SLOTS_PER_UNIT wide so a stray
-        # frame naming slot 3 cannot fault; only the published shape is trimmed
-        # to unit_slots.
+        status["temperature"] = temperature  # °C, or None when not drying
+        # The arrays stay SLOTS_PER_UNIT wide so a stray slot 3 cannot fault; output is trimmed.
         status["slots"] = self._published_slots()
-        # Apply a narrated capacity measurement to the slot that asked.
         self._status_apply_measurements(status)
-        # Follower and buffer telemetry, like an FPS buffer (buff 0..100, 100 =
-        # compressed). The fields are bridge-wide, so attributed to the
-        # following unit, else the one with a loaded lane, else None.
+        # Like an FPS buffer (buff 0..100, 100 = compressed). Bridge-wide fields, so attributed to
+        # the following unit, else the one with a loaded lane, else None.
         mine = (self._following_lane is not None) or _unit_tool_loaded(self)
         latest_own = latest if mine else None
         buff = latest_own.get("buff") if latest_own else None
-        # Odometer from the 0x03 motion reply, per unit and live at the poll
-        # rate. Negative is a reading (the resting state sits slightly below
-        # zero); only the firmware's -1 mm unknown sentinel is excluded.
+        # From the 0x03 motion reply. The resting state sits slightly below zero; only the
+        # firmware's -1 mm sentinel is excluded.
         odom = None
         try:
             u = afcBambuAMS._unit_entry(self, latest)
             v = u.get("odom") if u is not None else None
-            if v is not None and int(v) != -1:
-                odom = int(v) / 1000.0         # mm -> metres
+            if (v is not None
+                and int(v) != -1):
+                odom = int(v) / 1000.0  # mm -> meters
         except Exception:
             odom = None
         status["odom_m"] = odom
-        status["follow_buff"] = buff              # 0..100 fullness
-        status["buffer"] = buff                   # alias (FPS-style value)
+        status["follow_buff"] = buff
+        status["buffer"] = buff  # FPS-style alias
         status["buffer_state"] = _buffer_state(buff)
-        # How many times the firmware decoded the buffer; 0 means follow_buff
-        # is still its seed value, which reads as a satisfied buffer.
+        # 0 means follow_buff is still its seed, which reads as a satisfied buffer.
         status["follow_buff_reads"] = latest_own.get("buffn") if latest_own else None
-        # Last motion reply length and the raw buffer field. A length <= 26
-        # carries no buffer; BUFF_POS_FULL / BUFF_POS_EMPTY are calibrated on
-        # the raw value.
+        # A length <= 26 carries no buffer; BUFF_POS_FULL/BUFF_POS_EMPTY use the raw value.
         status["follow_buff_replylen"] = latest_own.get("bufflen") if latest_own else None
-        # follow_buff above is the firmware's mapped value, whose calibration
-        # is wrong on an AMS HT; follow_buff_raw is the field itself (signed
-        # LE) and is the one to trust.
+        # follow_buff's mapping is wrong on an AMS HT; trust follow_buff_raw (signed LE).
         status["follow_buff_raw"] = latest_own.get("buffraw") if latest_own else None
         status["follow_state"] = latest_own.get("fstate") if latest_own else None
-        # 0 means the AMS has never reported a follower state, so follow_state is
-        # the firmware's seed (4) rather than a confirmation that it is following.
+        # 0 means follow_state is the firmware's seed (4), not a confirmation.
         status["follow_state_reads"] = latest_own.get("fstaten") if latest_own else None
-        # Whether the follower arm was acknowledged. False while following
-        # means the arm is not landing; while idle, not armed.
+        # False while following means the arm is not landing.
         status["follow_arm_acked"] = self._follow_arm_acked(latest)
-        # The AMS's own reference id, from its "[AMS_COMMON]...ref:N" narration.
-        # An AMS HT only acts on a SELECT addressed to this id, so a mismatch
-        # here means tray selects are ignored and the unit reports tray:255.
+        # From "[AMS_COMMON]...ref:N". An AMS HT acts only on a SELECT to this id; a mismatch
+        # means tray selects are ignored and the unit reports tray:255.
         status["ams_ref"] = latest.get("amsref") if latest else None
-        # decode_presence instrumentation: presdrop climbing with presok flat
-        # means replies are discarded by the guard. nexp is the polled unit
-        # count; htmask the HT-flagged indices.
+        # presdrop climbing with presok flat means the guard discards replies. nexp = polled unit
+        # count; htmask = HT-flagged indices.
         status["poll_nexp"] = latest.get("nexp") if latest else None
         status["ht_mask"] = latest.get("htmask") if latest else None
-        # Per unit: the reply length accepted and the raw byte[9] read as the
-        # slot bitmap, splitting "empty" from "wrong offset".
+        # The accepted reply length and raw byte[9], splitting "empty" from "wrong offset".
         _u = afcBambuAMS._unit_entry(self, latest) if latest else None
         status["pres_len"] = _u.get("preslen") if _u else None
         status["pres_byte"] = _u.get("presbyte") if _u else None
@@ -10610,71 +9683,54 @@ class afcBambuAMS(afcUnit):
         status["pres_drop"] = latest.get("presdrop") if latest else None
         status["pres_addr"] = latest.get("presaddr") if latest else None
         status["pres_want"] = latest.get("preswant") if latest else None
-        # The phase of the firmware's op-04 state channel (~148 ms), the
-        # fastest way to see whether a transition happened.
+        # The op-04 state channel phase (~148 ms), the fastest way to see a transition.
         _ph = latest.get("phase") if latest else None
         status["ams_phase"] = _ph
-        # Keep this in step with the bridge firmware's phase numbering.
+        # Keep in step with the bridge firmware's phase numbering.
         status["ams_phase_name"] = {
             0: "idle 01/00", 1: "select 01/FF", 2: "drive 03/00",
             3: "arrived 03/00 tail 02", 4: "enter 09/7F", 5: "pre 07/00",
             6: "hold 07/7F", 7: "release 07/00", 8: "done 09/3F",
             9: "error 0F/00",
         }.get(_ph)
-        # Why the follower may be standing down (e.g. a manual-off latch).
-        status["follow_manual_off"] = bool(
-            getattr(self, "_follow_manual_off", False))
-        status["follow_when_loaded"] = bool(
-            getattr(self, "follow_when_loaded", False))
+        status["follow_manual_off"] = bool(getattr(self, "_follow_manual_off", False))
+        status["follow_when_loaded"] = bool(getattr(self, "follow_when_loaded", False))
         status.update(self._bridge_identity())
-        # The AMS's last self-reported stall, and the motor current it came
-        # with. Surfaced so a fault is inspectable after the fact, not only at
-        # the moment it paused.
+        # Surfaced so a fault is inspectable after the pause.
         if self._bridge is not None:
-            # Scoped to this unit: both boxed units share 0x0700, so the index
-            # separates a chain-mate's stall from this lane's.
-            _seq, ftext, famps = self._bridge.last_fault(
-                unit=getattr(self, "ams_index", None))
+            # Both boxed units share 0x0700, so the index separates a chain-mate's stall.
+            _seq, ftext, famps = self._bridge.last_fault(unit=getattr(self, "ams_index", None))
             status["ams_fault"] = ftext or None
             status["ams_motor_amps"] = famps or None
-        # True while a stall has the follower held off, waiting for a resume.
         status["follow_fault_hold"] = self._follow_fault_hold
-        # Narration accounting: empty log replies are ordinary, so polls
-        # climbing with frames flat means no answer to the drain; frames
-        # climbing with texts flat means nothing queued.
+        # polls climbing with frames flat = no answer to the drain; frames climbing with texts flat
+        # = nothing queued.
         status["ams_narration_polls"] = latest.get("dbgpolls") if latest else None
         status["ams_narration_frames"] = latest.get("dbgframes") if latest else None
         status["ams_narration_texts"] = latest.get("dbgtexts") if latest else None
-        # Narration lines the firmware cut. While 0, "the unit never said X" is
-        # a claim about the unit; if it climbs, such claims are suspect.
+        # While 0, "the unit never said X" is a claim about the unit; if it climbs, it is suspect.
         status["ams_narration_cut"] = latest.get("dbgtrunc") if latest else None
-        # Raw MC_ONLINE result: snap_empty climbing with snap_replies flat
-        # means no answer within REPLY_TIMEOUT_US; the reverse means replies
-        # are discarded.
+        # snap_empty climbing with snap_replies flat = no answer within REPLY_TIMEOUT_US; the
+        # reverse = replies discarded.
         status["ams_snap_replies"] = latest.get("snapn") if latest else None
         status["ams_snap_replies_p1"] = latest.get("snapn1") if latest else None
         status["ams_snap_empty"] = latest.get("snapempty") if latest else None
         status["following"] = (self._following_lane.name
                                if self._following_lane is not None else None)
-        # Live chamber telemetry streams only while a cycle runs, so trust it
-        # over the host flag and adopt a cycle this host did not start.
+        # Chamber telemetry streams only while a cycle runs, so it outranks the host flag.
         if fresh_for_this_cycle:
             self._dry_seen_live = True
-            self._drying = True   # adopt it, so a STOP from the panel is armed
+            self._drying = True  # adopt it, so a panel STOP is armed
         elif (self._drying
               and attributable
               and getattr(self, "_dry_seen_live", False)
               and not live):
-            # The unit reported for this cycle and has now gone silent past the
-            # staleness window: the cycle is over (finished its timer or was
-            # stopped at the unit).
+            # Silent past the staleness window: the cycle finished or was stopped at the unit.
             self._drying = False
             self._dry_seen_live = False
-            self.logger.info(
-                f"AFC bambu {self.name}: drying finished (the unit stopped "
-                f"reporting chamber telemetry)")
-        # A refused cycle is not a cycle: an "[AMS_CHMB]err" for this attempt
-        # clears the optimistic _drying, unless the unit already reported live.
+            self.logger.info(f"AFC bambu {self.name}: drying finished (the unit stopped "
+                             f"reporting chamber telemetry)")
+        # An "[AMS_CHMB]err" for this attempt clears _drying unless the unit already reported live.
         started = getattr(self, "_dry_started_at", None)
         minutes = getattr(self, "_dry_minutes", 0) or 0
 
@@ -10686,13 +9742,11 @@ class afcBambuAMS(afcUnit):
             and settled
             and not getattr(self, "_dry_seen_live", False)):
             self._drying = False
-            # The cycle stamps are kept: a late start re-adopts, and dry_rotate
-            # needs the commanded value (the unit echoes rotate:0).
+            # Kept: a late start re-adopts, and dry_rotate needs the command (echo says rotate:0).
             if not getattr(self, "_dry_refusal_logged", False):
                 self._dry_refusal_logged = True
-                self.logger.info(
-                    f"AFC bambu {self.name}: not drying -- the unit refused: "
-                    f"{refused_now}")
+                self.logger.info(f"AFC bambu {self.name}: not drying -- the unit refused: "
+                                 f"{refused_now}")
         elif not refused_now:
             self._dry_refusal_logged = False
         self._drop_silent_dry(refused_now, started)
@@ -10700,32 +9754,29 @@ class afcBambuAMS(afcUnit):
         started = getattr(self, "_dry_started_at", None)
         minutes = getattr(self, "_dry_minutes", 0) or 0
         status["drying"] = bool(self._drying)
-        # Whether live telemetry confirmed the cycle, so a panel can show
-        # "starting" during the self-check.
+        # So a panel can show "starting" during the self-check.
         status["dry_confirmed"] = bool(getattr(self, "_dry_seen_live", False))
-        # Seconds left in the commanded cycle, or None: an adopted cycle has no
-        # known duration, and 0 would render as "finishing now".
+        # None for an adopted cycle: 0 would render as "finishing now".
         remaining = None
-        if self._drying and started is not None and minutes:
+        if (self._drying
+            and started is not None
+            and minutes):
             remaining = max(0, int(minutes * 60 - (_mono(self) - started)))
         status["dry_remaining"] = remaining
         status["dry_minutes"] = minutes or None
-        # Whether the running cycle is spinning the spool. The unit's own
-        # [AMS_CHMB] echo wins (it survives a restart and covers cycles this
-        # host did not start); fall back to the recorded command otherwise.
+        # The unit's [AMS_CHMB] echo survives a restart and covers cycles this host did not start.
         cfg = None
         try:
             cfg = self._bridge_call_arg("last_dry_cfg", self.ams_index)
         except Exception:
             cfg = None
-        if cfg and cfg.get("dur"):
+        if (cfg
+            and cfg.get("dur")):
             status["dry_minutes"] = int(cfg["dur"])
-            if not remaining and started is not None:
-                status["dry_remaining"] = max(
-                    0, int(cfg["dur"] * 60 - (_mono(self) - started)))
-        # The AMS's own countdown (0x3C "dryrem") outranks everything above and
-        # survives restarts, but freezes when 0x3C stops decoding, so it
-        # re-arms a stopped cycle only while ticking (see _dryrem_says_drying).
+            if (not remaining
+                and started is not None):
+                status["dry_remaining"] = max(0, int(cfg["dur"] * 60 - (_mono(self) - started)))
+        # The 0x3C "dryrem" countdown survives restarts but freezes when 0x3C stops decoding.
         try:
             u = afcBambuAMS._unit_entry(self, latest)
             dr = u.get("dryrem") if u is not None else None
@@ -10736,16 +9787,14 @@ class afcBambuAMS(afcUnit):
                 status["drying"] = True
         except Exception:
             pass
-        # Chamber temp and humidity from the 0x3C decode, preferred over
-        # narration. A first-gen AMS never answers 0x3C, so its temperature
-        # stays None; its humidity comes from the 0x04 reply.
+        # A first-gen AMS never answers 0x3C, so its humidity comes from the 0x04 reply.
         try:
             u = afcBambuAMS._unit_entry(self, latest) or {}
             et, eh = u.get("envt"), u.get("envh")
-            if et is not None and int(et) > 0:
+            if (et is not None
+                and int(et) > 0):
                 status["temperature"] = float(int(et))
-            # Fill-in only: the 0x04-reply humidity is preferred, and these
-            # are likely different sensors, so one does not replace the other.
+            # Likely different sensors, so fill-in only.
             if (status.get("humidity") is None
                 and eh is not None
                 and 0 <= int(eh) <= 100):
@@ -10753,59 +9802,51 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
 
-        # ROTATE is the one field where the command outranks the echo: the unit
-        # echoes rotate:0,0 even for ROTATE=1. The echo is used only for a
-        # cycle this host did not start.
-        if self._drying and started is not None:
+        # The unit echoes rotate:0,0 even for ROTATE=1, so the command wins for our own cycles.
+        if (self._drying
+            and started is not None):
             status["dry_rotate"] = 1 if getattr(self, "_dry_rotate", 0) else 0
         elif cfg:
             status["dry_rotate"] = 1 if cfg.get("rotate") else 0
         else:
             status["dry_rotate"] = None
-        # What the heater is doing, from [AMS_CHMB] telemetry, with the same
-        # 120 s staleness rule as the chamber temperature.
+        # Same 120 s staleness rule as the chamber temperature.
         status["has_heater"] = self.has_heater
         status["ams_model"] = self.ams_model
         status["dry_max_temp"] = self.dry_max_temp
         dry_target = None
         dry_state = None
-        if fresh_for_this_cycle and rec is not None:
+        if (fresh_for_this_cycle
+            and rec is not None):
             dry_target = rec.get("target")
             dry_state = rec.get("state")
-        if dry_target is None and status.get("drying"):
-            # No live telemetry during a cycle: a boxed dry deafens the
-            # bridge's receiver, so use the settings the unit echoed before
-            # heating, else the commanded temperature.
-            if cfg and cfg.get("tmpr"):
+        if (dry_target is None
+            and status.get("drying")):
+            # A boxed dry deafens the bridge's receiver: use the echoed settings, else the command.
+            if (cfg
+                and cfg.get("tmpr")):
                 dry_target = cfg.get("tmpr")
             elif getattr(self, "_dry_temp", None):
                 dry_target = self._dry_temp
-        status["dry_target"] = dry_target      # C the AMS is driving to
-        status["dry_state"] = dry_state        # AMS's own chamber state code
-        # The unit's external 24 V jack (~24 with the adapter, ~0.5 without),
-        # only while the chamber streams; published for a heater interlock.
+        status["dry_target"] = dry_target  # °C the AMS is driving to
+        status["dry_state"] = dry_state
+        # The external 24 V jack (~24 with adapter, ~0.5 without), only while the chamber streams.
         _ad = (rec or {}).get("ad_v") if isinstance(rec, dict) else None
         status["ext_supply_v"] = _ad
         status["ext_supply_seen"] = (rec or {}).get("seen") \
             if isinstance(rec, dict) else None
-        # Why a Dry button should be greyed right now, or None. The same string
-        # AFC_BAMBU_HEATER_START would answer with, published so the refusal
-        # can be shown before the press.
+        # The same string AFC_BAMBU_HEATER_START would answer with, so a Dry button can grey out.
         try:
             status["dry_blocked"] = (self._bus_supply_conflict()
                                      if not self._drying else "") or None
         except Exception:
             status["dry_blocked"] = None
-        # Why the unit last declined to dry, in its own words. Not gated on
-        # self._drying, which is host intent set whether or not the AMS
-        # accepted; the unit clears it when it reports heating or a self-check.
+        # Not gated on self._drying (host intent); the unit clears it when it reports heating.
         status["dry_error"] = (self._bridge_call_arg("last_dry_error",
                                                      self.ams_index)
                                or getattr(self, "_dry_host_refusal", "")
                                or None)
-        # ...unless the unit is demonstrably drying: the HT narrates warnings
-        # on the same err channel, so with a cycle running the text goes to
-        # dry_note.
+        # The HT narrates warnings on the same err channel, so mid-cycle it goes to dry_note.
         status["dry_note"] = ""
         if (status.get("dry_error")
             and status.get("drying")
@@ -10814,8 +9855,7 @@ class afcBambuAMS(afcUnit):
             status["dry_error"] = ""
         return status
 
-    # ── transport primitives ──
-
+    # Transport primitives
 
     def _status_apply_measurements(self, status: dict) -> None:
         """
@@ -10827,17 +9867,12 @@ class afcBambuAMS(afcUnit):
 
         :param status: the status dict get_status is building
         """
-        # Apply a narrated capacity measurement to the slot that asked for it:
-        # a boxed unit narrates the percent but does not persist it to the
-        # slot.
+        # A boxed unit narrates the percent but does not persist it to the slot.
         try:
-            # Expire lapsed waits on every pass; the calls below need a
-            # reading, so a bay that measured nothing would otherwise wait
-            # forever.
+            # A bay that measured nothing would otherwise wait forever.
             afcBambuAMS._cap_live_pending(self)
             pend = getattr(self, "_cap_pending_slot", None)
-            # Log a reading nobody adopted, once, only when no bay is waiting,
-            # and never on a pool spare (spares share bus addresses).
+            # Once, only with no bay waiting, never on a pool spare (spares share bus addresses).
             try:
                 _m = self._bridge.last_cap_measure(
                     getattr(self, "dry_dev_addr", 0)) if self._bridge else None
@@ -10848,26 +9883,24 @@ class afcBambuAMS(afcUnit):
                     and _m.get("t") != getattr(self, "_cap_adopted_t", None)
                     and _m.get("t") != getattr(self, "_cap_orphan_t", None)):
                     self._cap_orphan_t = _m.get("t")
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: unclaimed {_m.get('pct_raw')}% "
-                        f"reading (t={_m.get('t')}, restored={_m.get('restored')}"
-                        f", pend={pend}, t0={getattr(self, '_cap_pending_t0', 0.0)}"
-                        f", adopted_t={getattr(self, '_cap_adopted_t', None)})")
+                    self.logger.debug(f"AFC bambu {self.name}: unclaimed {_m.get('pct_raw')}% "
+                                      f"reading (t={_m.get('t')}, restored={_m.get('restored')}"
+                                      f", pend={pend}, t0={getattr(self, '_cap_pending_t0', 0.0)}"
+                                      f", adopted_t={getattr(self, '_cap_adopted_t', None)})")
             except Exception:
                 pass
-            # A calibration's end is a verdict code ("Calibration rst:0" =
-            # done). On an HT the percent lands on the tag, so the verdict
-            # shows it finished.
-            if pend is not None and self._bridge is not None:
+            # "Calibration rst:0" = done. On an HT the percent lands on the tag.
+            if (pend is not None
+                and self._bridge is not None):
                 getc = getattr(self._bridge, "last_ht_cali", None)
                 cali = (getc(self.ams_index) if callable(getc) else None)
-                if cali and cali.get("t", 0) > getattr(self, "_cap_pending_t0", 0.0):
+                if (cali
+                    and cali.get("t", 0) > getattr(self, "_cap_pending_t0", 0.0)):
                     if cali.get("t", 0) != getattr(self, "_cap_cali_seen_t", None):
                         self._cap_cali_seen_t = cali.get("t", 0)
                         rst = cali.get("rst")
-                        # Re-read the slot: the measurement lands after the tag
-                        # read. rst:0 only ends the cycle (a cached reinsert
-                        # measures nothing), so the narrated percent decides.
+                        # The measurement lands after the tag read. rst:0 only ends the cycle, so
+                        # the percent decides.
                         measured = None
                         try:
                             measured = self._bridge.last_cap_measure(
@@ -10878,19 +9911,18 @@ class afcBambuAMS(afcUnit):
                             measured
                             and measured.get("t", 0)
                                > getattr(self, "_cap_pending_t0", 0.0))
-                        if rst == 0 and did_measure:
+                        if (rst == 0
+                            and did_measure):
                             try:
-                                self._bridge.send({"cmd": "reread",
-                                                   "unit": self.ams_index,
+                                self._bridge.send({"cmd": "reread", "unit": self.ams_index,
                                                    "slot": pend})
                             except Exception:
                                 pass
-                        if rst == 0 and not did_measure:
+                        if (rst == 0
+                            and not did_measure):
                             lane = self._lane_for_slot(pend)
-                            # One-edge retry: a native insert measure can see
-                            # only the tag's first pass (rst:0, no percent).
-                            # Retry once through _run_calibrate, latched by
-                            # _auto_cali_slot until the next insert.
+                            # An insert measure may see only the tag's first pass (rst:0, no %):
+                            # retry once, latched by _auto_cali_slot until the next insert.
                             retried = False
                             said = False
                             if (getattr(self, "measure_on_insert", False)
@@ -10904,35 +9936,28 @@ class afcBambuAMS(afcUnit):
                                     != getattr(self, "_cap_pending_t0",
                                                0.0)):
                                 self._auto_cali_slot = pend
-                                why = afcBambuAMS._run_calibrate(
-                                    self, lane, pend)
+                                why = afcBambuAMS._run_calibrate(self, lane, pend)
                                 if why is None:
                                     retried = True
-                                    self.logger.debug(
-                                        f"AFC bambu {self.name}: slot {pend} "
-                                        f"one-edged its insert measurement "
-                                        f"(rst:0, no percent narrated) -- "
-                                        f"measure_on_insert is retrying it "
-                                        f"once")
+                                    self.logger.debug(f"AFC bambu {self.name}: slot {pend} "
+                                                      f"one-edged its insert measurement "
+                                                      f"(rst:0, no percent narrated) -- "
+                                                      f"measure_on_insert is retrying it once")
                                 else:
                                     said = True
-                                    self.logger.debug(
-                                        f"AFC bambu {self.name}: slot {pend} "
-                                        f"one-edged its insert measurement "
-                                        f"and the retry could not start "
-                                        f"({why}) -- AFC_BAMBU_CAPSCAN "
-                                        f"UNIT={self.name} LANE={lane.name} "
-                                        f"runs it by hand")
+                                    self.logger.debug(f"AFC bambu {self.name}: slot {pend} "
+                                                      f"one-edged its insert measurement "
+                                                      f"and the retry could not start "
+                                                      f"({why}) -- AFC_BAMBU_CAPSCAN "
+                                                      f"UNIT={self.name} LANE={lane.name} "
+                                                      f"runs it by hand")
                             if retried:
                                 said = True
-                            elif not said and (
-                                    getattr(self, "measure_on_insert", False)
-                                    and str(getattr(self, "ams_model", "")
-                                            ).lower() in _HT_MODELS
-                                    and getattr(self, "_auto_cali_slot",
-                                                None) == pend):
-                                # The retry one-edged too (the latch is from
-                                # this insert): say so and stop.
+                            elif (not said
+                                  and getattr(self, "measure_on_insert", False)
+                                  and (str(getattr(self, "ams_model", "")).lower()
+                                       in _HT_MODELS)
+                                  and getattr(self, "_auto_cali_slot", None) == pend):
                                 said = True
                                 self.logger.info(
                                     f"AFC bambu {self.name}: slot {pend} "
@@ -10943,18 +9968,16 @@ class afcBambuAMS(afcUnit):
                                        if lane is not None else "")
                                     + " runs it by hand")
                             if not said:
-                                self.logger.debug(
-                                    f"AFC bambu {self.name}: slot {pend} "
-                                    f"finished its cycle but "
-                                    f"never narrated a percent (rst:0) -- it "
-                                    f"took only ONE pull, so there was no "
-                                    f"second edge to measure from. That is "
-                                    f"geometric and it follows the SPOOL, not "
-                                    f"the bay: the second edge needs a full "
-                                    f"revolution of filament past the reader, "
-                                    f"so a large or full reel can come up "
-                                    f"short. Running it again often lands "
-                                    f"it.")
+                                self.logger.debug(f"AFC bambu {self.name}: slot {pend} "
+                                                  f"finished its cycle but "
+                                                  f"never narrated a percent (rst:0) -- it "
+                                                  f"took only ONE pull, so there was no "
+                                                  f"second edge to measure from. That is "
+                                                  f"geometric and it follows the SPOOL, not "
+                                                  f"the bay: the second edge needs a full "
+                                                  f"revolution of filament past the reader, "
+                                                  f"so a large or full reel can come up "
+                                                  f"short. Running it again often lands it.")
                         else:
                             self.logger.debug(
                                 f"AFC bambu {self.name}: slot {pend} calibration "
@@ -10965,114 +9988,90 @@ class afcBambuAMS(afcUnit):
                                     4: "aborted (rst:4) -- stalled during "
                                        "calibration"
                                     }.get(rst, f"returned rst:{rst}")))
-            if pend is not None and self._bridge is not None:
+            if (pend is not None
+                and self._bridge is not None):
                 meas = None
                 try:
-                    meas = self._bridge.last_cap_measure(
-                        getattr(self, "dry_dev_addr", 0))
+                    meas = self._bridge.last_cap_measure(getattr(self, "dry_dev_addr", 0))
                 except Exception:
                     meas = None
-                # Log why a measurement was not taken up (pend unset, reading
-                # older than its bay's window, or a flash restore), once per
-                # reading. The owner is found first, since each bay's window
-                # opens at a different time.
+                # Why a measurement was not taken up, once per reading; each bay's window opens at a
+                # different time.
                 owner = (afcBambuAMS._cap_owner_of(self, meas)
                          if meas else None)
                 own_t0 = getattr(self, "_cap_pending_t0", 0.0)
                 if owner is not None:
-                    own_t0 = afcBambuAMS._cap_live_pending(self).get(
-                        owner, own_t0)
-                # Not for a reading this unit already adopted: the bridge keeps
-                # the last one per address. Named by its own tray, so one bay's
-                # figure is not reported as another's.
+                    own_t0 = afcBambuAMS._cap_live_pending(self).get(owner, own_t0)
+                # The bridge keeps the last reading per address. Named by its own tray.
                 if (meas
                     and not (meas.get("t", 0) > own_t0)
-                    and meas.get("t") != getattr(self, "_cap_adopted_t",
-                                                 None)):
+                    and meas.get("t") != getattr(self, "_cap_adopted_t", None)):
                     if getattr(self, "_cap_stale_t", None) != meas.get("t"):
                         self._cap_stale_t = meas.get("t")
                         _pct = meas.get("pct_raw")
                         _tray = meas.get("save_tray")
                         if _tray is None:
                             _tray = meas.get("tray")
-                        if owner is not None and _tray in (None, owner):
-                            _what = (f"slot {owner} has a {_pct}% reading "
-                                     f"but it is")
+                        if (owner is not None
+                            and _tray in (None, owner)):
+                            _what = f"slot {owner} has a {_pct}% reading but it is"
                         elif _tray is not None:
                             _what = f"tray {_tray}'s {_pct}% reading is"
                         else:
-                            _what = (f"the last {_pct}% reading (no tray "
-                                     f"named) is")
-                        self.logger.debug(
-                            f"AFC bambu {self.name}: {_what} not newer than "
-                            f"this capscan (meas t={meas.get('t')}, "
-                            f"window t0={own_t0}) -- not adopted")
-                if meas and meas.get("t", 0) > own_t0:
-                    # Prefer the unclamped reading (fresh spools measure over
-                    # 100%). A flash restore is the previous spool's, so `pend`
-                    # stays set for the live one.
+                            _what = f"the last {_pct}% reading (no tray named) is"
+                        self.logger.debug(f"AFC bambu {self.name}: {_what} not newer than "
+                                          f"this capscan (meas t={meas.get('t')}, "
+                                          f"window t0={own_t0}) -- not adopted")
+                if (meas
+                    and meas.get("t", 0) > own_t0):
+                    # Fresh spools measure over 100 %. A flash restore is the previous spool's, so
+                    # `pend` stays.
                     if meas.get("restored"):
-                        # Say it once per restore, not once per status frame.
                         if getattr(self, "_cap_restore_t", None) != meas.get("t"):
                             self._cap_restore_t = meas.get("t")
-                            self.logger.debug(
-                                f"AFC bambu {self.name}: slot {pend} reported a "
-                                f"flash-restored {meas.get('pct_raw')}% -- that "
-                                f"is the previous spool's figure for this bay, "
-                                f"not this spool's; waiting for the live "
-                                f"measurement")
+                            self.logger.debug(f"AFC bambu {self.name}: slot {pend} reported a "
+                                              f"flash-restored {meas.get('pct_raw')}% -- that "
+                                              f"is the previous spool's figure for this bay, "
+                                              f"not this spool's; waiting for the live measurement")
                     elif owner is None:
-                        # Not attributable by narration (the named bay is not
-                        # waiting, or several are and none is named). The
-                        # firmware's per-bay stamp still attributes it. Logged
-                        # once per reading.
+                        # Not attributable by narration; the firmware's per-bay stamp still
+                        # attributes it.
                         if getattr(self, "_cap_unattr_t", None) != meas.get("t"):
                             self._cap_unattr_t = meas.get("t")
                             _p = sorted(afcBambuAMS._cap_live_pending(self))
-                            self.logger.debug(
-                                f"AFC bambu {self.name}: a "
-                                f"{meas.get('pct_raw')}% reading names tray "
-                                f"{meas.get('save_tray')} and the bays waiting "
-                                f"are {_p} -- not attributing it by narration; "
-                                f"the firmware's per-bay stamp decides")
+                            self.logger.debug(f"AFC bambu {self.name}: a "
+                                              f"{meas.get('pct_raw')}% reading names tray "
+                                              f"{meas.get('save_tray')} and the bays waiting "
+                                              f"are {_p} -- not attributing it by narration; "
+                                              f"the firmware's per-bay stamp decides")
                     else:
                         pct = int(meas.get("pct_raw") or meas.get("pct") or 0)
-                        # meas["t"] is the sequence identity, or _adopt_measured_remain never adopts
-                        # twice. It is only compared for equality, so mixing with int seqs is safe.
-                        self._adopt_measured_remain(owner, pct, "capscan",
-                                                    seq=meas.get("t"))
+                        # meas["t"] is the sequence identity, compared only for equality.
+                        self._adopt_measured_remain(owner, pct, "capscan", seq=meas.get("t"))
                         afcBambuAMS._cap_close_pending(self, owner)
                         self._cap_adopted_t = meas.get("t")
-                        # Measurement in: hand the bus back. The claim also
-                        # lapses on the unit's cycle-end, so a failed
-                        # measurement cannot wedge the bus.
+                        # The claim also lapses on cycle-end: a failed measure cannot wedge the bus.
                         rel = getattr(self._bridge, "release_bus", None)
                         if callable(rel):
                             rel(self.name)
-            # Nothing pending: reset the one-shot insert-retry latch.
             if pend is None:
                 self._auto_cali_slot = None
-            # The published percent is worked back from the lane's grams (see
-            # _lane_remain_pct), since the grams stay current and survive a
-            # restart. A bay the lane cannot answer for falls back to a held
-            # measurement, else its record; a lane at 0 g answers 0.
+            # Worked back from the lane's grams, which stay current and survive a restart. A lane at
+            # 0 g answers 0.
             held_pct = afcBambuAMS._held_measurements(self)
-            # Repair the stored slots and the copies get_status already took.
             targets = list(self._slots or []) + list(status.get("slots") or [])
             for sl in targets:
                 idx = sl.get("index")
-                if idx is None or not sl.get("present"):
+                if (idx is None
+                    or not sl.get("present")):
                     continue
                 pct = afcBambuAMS._lane_remain_pct(self, idx, sl)
                 if pct is not None:
                     sl["remain_pct"] = pct
                 elif idx in held_pct:
-                    # The floored figure, capped at 100 (see _shown_remain_pct).
-                    sl["remain_pct"] = afcBambuAMS._shown_remain_pct(
-                        self, idx, held_pct[idx])
+                    sl["remain_pct"] = afcBambuAMS._shown_remain_pct(self, idx, held_pct[idx])
         except Exception as e:
-            self.logger.debug(
-                f"AFC bambu {self.name}: capscan/calibrate/follower status: {e}")
+            self.logger.debug(f"AFC bambu {self.name}: capscan/calibrate/follower status: {e}")
     def _slot_of(self, lane: Any) -> Optional[int]:
         """
         Return the 0-based AMS slot for a lane, or None if unmapped.
@@ -11120,12 +10119,10 @@ class afcBambuAMS(afcUnit):
         b = latest.get("buff")
         if b is None:
             return None
-        # The firmware seeds its buffer field at 100 (fully compressed);
-        # `buffn` counts real writes, so 0 means the seed. An absent key keeps
-        # the reading.
+        # The firmware seeds the field at 100; `buffn` counts real writes, so 0 means the seed.
         if latest.get("buffn") == 0:
             return None
-        v = b / 100.0                      # compressed(buff 100)->1.0, empty(0)->0.0
+        v = b / 100.0  # compressed (100) -> 1.0, empty (0) -> 0.0
         return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
 
     def _tool_loaded_lane(self) -> Optional[Any]:
@@ -11147,13 +10144,10 @@ class afcBambuAMS(afcUnit):
 
         :return Optional[Any]: a tool-loaded, slot-mapped, active lane, or None
         """
-        # AFC's own answer first: the lane AFC believes is threaded to the
-        # toolhead right now, which survives a G28 and a Klipper restart
-        # (current_lane does not). If it is on this unit, follow it.
+        # AFC's threaded lane survives a G28 and a Klipper restart; current_lane does not.
         try:
-            # afc.current, not afc.current_load: the status dict publishes
-            # afc.current under the key "current_load" (AFC.py get_status), and
-            # "current_lane" is afc.current_loading.
+            # get_status publishes afc.current as "current_load"; "current_lane" is
+            # afc.current_loading.
             named = getattr(self.afc, "current", None)
             if (named
                 and named in self.lanes
@@ -11172,14 +10166,14 @@ class afcBambuAMS(afcUnit):
             if self._slot_of(lane) is None:
                 continue
             ext = getattr(lane, "extruder_obj", None)
-            if ext is not None and current:
+            if (ext is not None
+                and current):
                 name = (getattr(ext, "th_extruder_name", None)
                         or getattr(ext, "name", None))
-                if name and name != current:
-                    continue            # another extruder is the active one
-            # No on_shuttle() check: a docked toolhead answers False (e.g.
-            # after a G28). Only positive knowledge of a different active
-            # extruder (above) skips a loaded lane.
+                if (name
+                    and name != current):
+                    continue
+            # No on_shuttle() check: a docked toolhead answers False after a G28.
             return lane
         return None
 
@@ -11225,18 +10219,16 @@ class afcBambuAMS(afcUnit):
         :return tuple: (ok, slot), ok False when the lane isn't mapped
         """
         slot = self._slot_of(lane)
-        if slot is None or self._bridge is None:
+        if (slot is None
+            or self._bridge is None):
             return (False, -1)
-        self._bridge.send(
-            {"cmd": "select", "unit": self.ams_index, "slot": slot})
+        self._bridge.send({"cmd": "select", "unit": self.ams_index, "slot": slot})
         return (True, slot)
 
-    # `mm` is not a distance: the bus carries none, and a feed is one frame
-    # repeated until stop. The firmware turns `mm`/`mmps` into a runaway
-    # deadline:
+    # `mm` is not a distance: a feed is one frame repeated until stop. The firmware turns it
+    # into a runaway deadline:
     #     ms = (mm / mmps) * 2000 + 5000      2x nominal + 5s slack
-    # A bare AFC_BAMBU_FEED runs to that deadline, far past `mm`, so it is a
-    # developer tool.
+    # So a bare AFC_BAMBU_FEED runs far past `mm`; it is a developer tool.
     def feed(self, lane: Any, mm: float, mmps: Optional[float] = None) -> bool:
         """
         Feed filament from a lane's slot toward the toolhead.
@@ -11246,8 +10238,7 @@ class afcBambuAMS(afcUnit):
         :param mmps: Speed in mm/s, or None for the configured default
         :return bool: True if the command was issued
         """
-        return self._move("feed", lane, mm,
-                          mmps if mmps is not None else NOMINAL_MMPS)
+        return self._move("feed", lane, mm, mmps if mmps is not None else NOMINAL_MMPS)
 
     def retract(self, lane: Any, mm: float, mmps: Optional[float] = None) -> bool:
         """
@@ -11258,8 +10249,7 @@ class afcBambuAMS(afcUnit):
         :param mmps: Speed in mm/s, or None for the configured default
         :return bool: True if the command was issued
         """
-        return self._move("retract", lane, mm,
-                          mmps if mmps is not None else NOMINAL_MMPS)
+        return self._move("retract", lane, mm, mmps if mmps is not None else NOMINAL_MMPS)
 
     def _move(self, cmd: str, lane: Any, mm: float, mmps: float) -> bool:
         """
@@ -11272,10 +10262,10 @@ class afcBambuAMS(afcUnit):
         :return bool: True if the command was issued
         """
         slot = self._slot_of(lane)
-        if slot is None or self._bridge is None:
+        if (slot is None
+            or self._bridge is None):
             return False
-        self._bridge.send({"cmd": cmd, "unit": self.ams_index, "slot": slot,
-                           "mm": round(mm, 2),
+        self._bridge.send({"cmd": cmd, "unit": self.ams_index, "slot": slot, "mm": round(mm, 2),
                            "mmps": round(clamp_speed(mmps, MAX_MMPS), 2)})
         return True
 
@@ -11297,13 +10287,11 @@ class afcBambuAMS(afcUnit):
         :return bool: True if the command was issued
         """
         slot = self._slot_of(lane)
-        if slot is None or self._bridge is None:
+        if (slot is None
+            or self._bridge is None):
             return False
-        self._bridge.send({"cmd": "assist", "unit": self.ams_index,
-                           "slot": slot, "on": bool(on)})
-        # Track which lane the demand-gated re-engage timer should watch. Reset
-        # the extruder baseline so the first sample after a (re)engage or a
-        # tool change doesn't read as a huge jump and fire a spurious feed.
+        self._bridge.send({"cmd": "assist", "unit": self.ams_index, "slot": slot, "on": bool(on)})
+        # A fresh extruder baseline, so the first sample after an engage is not a jump.
         if on:
             self._following_lane = lane
             self._follow_last_e = None
@@ -11325,17 +10313,17 @@ class afcBambuAMS(afcUnit):
         bridge with nothing loaded here is a problem to report, not a reason to
         stop the machine.
         """
-        if not self.link_loss_pause_s or self._bridge is None:
+        if (not self.link_loss_pause_s
+            or self._bridge is None):
             return
         quiet = self._bridge.silent_for()
-        if quiet is None or quiet < self.link_loss_pause_s:
-            # Heard from: re-arm for the next outage. The latch is cleared here
-            # rather than on resume, so a link that drops, recovers and drops
-            # again pauses both times.
+        if (quiet is None
+            or quiet < self.link_loss_pause_s):
+            # Cleared here, not on resume, so a link that drops twice pauses twice.
             self._link_loss_paused = False
             return
         if self._link_loss_paused:
-            return                      # already reported this outage
+            return
         lane = self._tool_loaded_lane()
         if lane is None:
             return
@@ -11345,12 +10333,10 @@ class afcBambuAMS(afcUnit):
         except Exception:
             return
         self._link_loss_paused = True
-        self._raise_ams_fault(
-            lane,
-            f"AFC bambu {self.name}: the bridge has sent nothing for "
-            f"{quiet:.0f}s while printing. Pausing: the extruder would go on "
-            f"pulling against an AMS that is no longer being driven. The link "
-            f"reconnects by itself -- resume once it is back.")
+        self._raise_ams_fault(lane, f"AFC bambu {self.name}: the bridge has sent nothing for "
+                              f"{quiet:.0f}s while printing. Pausing: the extruder would go on "
+                              f"pulling against an AMS that is no longer being driven. The link "
+                              f"reconnects by itself -- resume once it is back.")
 
     def _fault_quiet(self) -> bool:
         """
@@ -11422,11 +10408,10 @@ class afcBambuAMS(afcUnit):
         self._fault_quiet_until = now + self.FAULT_QUIET_S
         self._overfeed_lane = lane
         self._overfeed_until = now + self.ASSIST_TIMEOUT_LATCH_S
-        self.logger.debug(
-            f"AFC bambu {self.name}: {lane.name}: the AMS's assist timed out "
-            f"before the buffer filled (buffer {start:.2f} -> {end:.2f}). Not "
-            f"a jam; the follower re-arms once the AMS recovers and the "
-            f"extruder pulls.")
+        self.logger.debug(f"AFC bambu {self.name}: {lane.name}: the AMS's assist timed out "
+                          f"before the buffer filled (buffer {start:.2f} -> {end:.2f}). Not "
+                          f"a jam; the follower re-arms once the AMS recovers and the "
+                          f"extruder pulls.")
 
     def _raise_ams_fault(self, lane: Any, msg: str) -> None:
         """
@@ -11446,24 +10431,19 @@ class afcBambuAMS(afcUnit):
             return
         self._follow_fault_hold = True
         self._follow_fault_saw_pause = False
-        # Kept so the reload on resume is aimed at the slot that stalled, not
-        # whatever is loaded by the time the print resumes.
+        # So the reload on resume targets the slot that stalled.
         self._fault_lane = lane
-        # Arm the declaration latch against this fault, so "declared" never
-        # means a leftover from the last one.
+        # So "declared" never means a leftover from the last fault.
         self._declared_since_fault = False
-        # Same for the odometer range, which locates the jam.
+        # The odometer range locates the jam.
         self._odom_lo = None
         self._odom_hi = None
         try:
             self.set_feed_assist(lane, False)
         except Exception as e:
-            # A fault report must never be able to break the follower tick.
-            self.logger.debug(
-                f"AFC bambu {self.name}: could not drop assist on stall: {e}")
-        # PAUSE moves Z, which raises outside a print or unhomed, and an
-        # escaped exception in the follower timer shuts Klipper down. Pause
-        # only while printing, and never let the pause path throw.
+            self.logger.debug(f"AFC bambu {self.name}: could not drop assist on stall: {e}")
+        # PAUSE moves Z, which raises outside a print or unhomed, and an escape from the follower
+        # timer shuts Klipper down.
         try:
             printing = bool(self.afc.function.in_print())
         except Exception:
@@ -11471,12 +10451,9 @@ class afcBambuAMS(afcUnit):
         try:
             self.afc.error.AFC_error(msg, pause=printing)
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: stall fault reported but the pause "
-                f"could not run ({e}); left the follower held. Original: {msg}")
-        # A Bambu fault paused this print, so RESUME alone would print air.
-        # Flagged here so reload-on-resume works with auto_error_recovery off
-        # too.
+            self.logger.warning(f"AFC bambu {self.name}: stall fault reported but the pause "
+                                f"could not run ({e}); left the follower held. Original: {msg}")
+        # RESUME alone would print air. Set here so reload-on-resume works without auto recovery.
         if printing:
             self._resume_needs_reload = True
             self._maybe_auto_recover(lane)
@@ -11515,21 +10492,19 @@ class afcBambuAMS(afcUnit):
         if not getattr(self, "auto_error_recovery", False):
             return
         if getattr(self, "_auto_recover_armed", False):
-            return                          # one attempt per fault
+            return
         self._auto_recover_armed = True
         self._in_auto_recover = True
         name = getattr(lane, "name", None)
         if not name:
-            # _run is never scheduled, so _done never clears these; clear
-            # them here so a later fault can arm.
+            # _run is never scheduled, so _done never clears these.
             self._in_auto_recover = False
             self._auto_recover_armed = False
             return
-        self.logger.info(
-            f"AFC bambu {self.name}: auto error recovery for {name} -- "
-            f"unloading (cut, retract, unload) and reloading the same spool, "
-            f"then resuming the print if the reload takes. "
-            f"Disable with auto_error_recovery: False.")
+        self.logger.info(f"AFC bambu {self.name}: auto error recovery for {name} -- "
+                         f"unloading (cut, retract, unload) and reloading the same spool, "
+                         f"then resuming the print if the reload takes. "
+                         f"Disable with auto_error_recovery: False.")
 
         def _declared() -> bool:
             """
@@ -11554,8 +10529,7 @@ class afcBambuAMS(afcUnit):
                 return bool(self.afc.function.is_paused())
             except Exception:
                 try:
-                    return bool(self.printer.lookup_object(
-                        "pause_resume").is_paused)
+                    return bool(self.printer.lookup_object("pause_resume").is_paused)
                 except Exception:
                     return False
 
@@ -11580,35 +10554,27 @@ class afcBambuAMS(afcUnit):
             :param _n: the lane name, captured at arm time
             :return float: reactor.NEVER on every exit
             """
-            # Queue only. AFC's own macros own the cutter and the toolhead.
+            # AFC's own macros own the cutter and the toolhead.
             try:
-                # TOOL_UNLOAD, not UNSET_LANE_LOADED, which moves nothing and
-                # would leave the severed strand in the path. TOOL_UNLOAD cuts,
-                # retracts and unloads.
-                self.gcode.run_script(
-                    f"TOOL_UNLOAD LANE={_n}\nCHANGE_TOOL LANE={_n}")
+                # UNSET_LANE_LOADED moves nothing and would leave the cut strand in the path.
+                self.gcode.run_script(f"TOOL_UNLOAD LANE={_n}\nCHANGE_TOOL LANE={_n}")
             except Exception as e:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: auto error recovery for {_n} "
-                    f"could not run ({e}); the lane is still paused and held. "
-                    f"Recover it by hand.")
+                self.logger.warning(f"AFC bambu {self.name}: auto error recovery for {_n} "
+                                    f"could not run ({e}); the lane is still paused and held. "
+                                    f"Recover it by hand.")
                 return _done(self.afc.reactor.NEVER)
-            # One attempt only: the AMS retries by itself, and the reload inside
-            # unit_load_lane already retries over two recovery rounds.
+            # The AMS retries by itself, and unit_load_lane's reload already retries twice.
             if _declared():
                 self.logger.warning(
                     f"AFC bambu {self.name}: {_n} -- the unit has given up "
                     f"(state 7). Parked; the print stays PAUSED. Clear the jam "
                     f"and resume. {self._jam_location()}".rstrip())
                 return _done(self.afc.reactor.NEVER)
-            # Resume only if the reload actually filled the toolhead; the
-            # RESUME wrap reloads an empty lane first and refuses to continue
-            # into an empty toolhead.
+            # The RESUME wrap refuses to continue into an empty toolhead.
             ln = self.lanes.get(_n)
             loaded = bool(getattr(ln, "tool_loaded", False)) if ln else False
             if not loaded:
-                # The unit already retried on its own and is held in error,
-                # waiting to be told to load. Report it; do not retry.
+                # The unit already retried and is held in error.
                 self.logger.warning(
                     f"AFC bambu {self.name}: {_n} did NOT reload -- the AMS is "
                     f"HELD IN ERROR and will not try again on its own. Clear "
@@ -11618,56 +10584,45 @@ class afcBambuAMS(afcUnit):
                        " NOTE: the print is no longer paused and the toolhead "
                        "is empty."))
                 return _done(self.afc.reactor.NEVER)
-            # The reload took, so drop the reload the resume wrap would
-            # otherwise owe and re-arm: this fault is dealt with, and a later
-            # one during the same print deserves its own attempt.
+            # This fault is dealt with; a later one in the same print gets its own attempt.
             self._resume_needs_reload = False
             self._auto_recover_armed = False
             if not _paused():
-                self.logger.info(
-                    f"AFC bambu {self.name}: {_n} is reloaded and ready; the "
-                    f"print was not paused, so there is nothing to resume.")
+                self.logger.info(f"AFC bambu {self.name}: {_n} is reloaded and ready; the "
+                                 f"print was not paused, so there is nothing to resume.")
                 return _done(self.afc.reactor.NEVER)
             limit = getattr(self, "auto_error_recovery_limit", 0)
             resumed = getattr(self, "_auto_resume_count", 0)
             if resumed >= limit:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: {_n} is reloaded and ready, but "
-                    f"this print has already been resumed automatically "
-                    f"{resumed} time(s) "
-                    f"(auto_error_recovery_limit: {limit}). THE PRINT IS STILL "
-                    f"PAUSED -- a jam that keeps coming back needs a person. "
-                    f"Press resume when you are ready; that also clears the "
-                    f"count.")
+                self.logger.warning(f"AFC bambu {self.name}: {_n} is reloaded and ready, but "
+                                    f"this print has already been resumed automatically "
+                                    f"{resumed} time(s) "
+                                    f"(auto_error_recovery_limit: {limit}). THE PRINT IS STILL "
+                                    f"PAUSED -- a jam that keeps coming back needs a person. "
+                                    f"Press resume when you are ready; that also clears the count.")
                 return _done(self.afc.reactor.NEVER)
             self._auto_resume_count = resumed + 1
             try:
-                # RESUME re-enters _reload_before_resume, which returns at once
-                # because the lane is fed again. Queued like the unload above:
-                # never run inline from the follower's timer.
+                # Queued, never inline from the follower's timer; the fed lane makes it return.
                 self.gcode.run_script("RESUME")
             except Exception as e:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: {_n} is reloaded but the resume "
-                    f"failed ({e}); the print stays PAUSED. Press resume when "
-                    f"you are ready.")
+                self.logger.warning(f"AFC bambu {self.name}: {_n} is reloaded but the resume "
+                                    f"failed ({e}); the print stays PAUSED. Press resume when "
+                                    f"you are ready.")
                 return _done(self.afc.reactor.NEVER)
-            self.logger.info(
-                f"AFC bambu {self.name}: {_n} is reloaded and the print has "
-                f"been RESUMED automatically "
-                f"({self._auto_resume_count} of {limit} this print). Disable "
-                f"with auto_error_recovery_limit: 0.")
+            self.logger.info(f"AFC bambu {self.name}: {_n} is reloaded and the print has "
+                             f"been RESUMED automatically "
+                             f"({self._auto_resume_count} of {limit} this print). Disable "
+                             f"with auto_error_recovery_limit: 0.")
             return _done(self.afc.reactor.NEVER)
 
         try:
-            self.afc.reactor.register_callback(
-                _run, self.afc.reactor.monotonic() + 1.0)
+            self.afc.reactor.register_callback(_run, self.afc.reactor.monotonic() + 1.0)
         except Exception:
             self._auto_recover_armed = False
             self._in_auto_recover = False
 
-    #: Seconds a UID may stay unresolved before warning that the unit is not
-    #: on the bus. A healthy chain resolves in well under a second.
+    #: Seconds a UID may stay unresolved before warning; a healthy chain resolves in under a second.
     CHAIN_RESOLVE_WARN_S = 30.0
 
     def _check_chain_resolve(self, eventtime: float) -> None:
@@ -11682,22 +10637,22 @@ class afcBambuAMS(afcUnit):
 
         :param eventtime: Reactor event time
         """
-        if not self._announce_deferred or self._id_resolved:
+        if (not self._announce_deferred
+            or self._id_resolved):
             return
         t0 = getattr(self, "_announce_defer_t0", 0.0)
-        if not t0 or eventtime - t0 < self.CHAIN_RESOLVE_WARN_S:
+        if (not t0
+            or eventtime - t0 < self.CHAIN_RESOLVE_WARN_S):
             return
         if getattr(self, "_announce_defer_warned", False):
             return
         self._announce_defer_warned = True
-        self.logger.warning(
-            f"AFC bambu {self.name}: UID {self.unit_uid} still has no chain "
-            f"index after {self.CHAIN_RESOLVE_WARN_S:.0f}s -- this unit is not "
-            f"answering the bus, so its registrations have not been sent. "
-            f"Check it is powered and chained; AFC_BAMBU_UIDS shows the map.")
+        self.logger.warning(f"AFC bambu {self.name}: UID {self.unit_uid} still has no chain "
+                            f"index after {self.CHAIN_RESOLVE_WARN_S:.0f}s -- this unit is not "
+                            f"answering the bus, so its registrations have not been sent. "
+                            f"Check it is powered and chained; AFC_BAMBU_UIDS shows the map.")
 
-    # A hold clears the way it was raised: the unit leaving its fault, or a
-    # human resuming. Not by the buffer, which lifts during the cut.
+    # Cleared by the unit leaving its fault or a resume, not the buffer, which lifts during the cut.
 
     def _fault_hold_active(self) -> bool:
         """
@@ -11721,19 +10676,16 @@ class afcBambuAMS(afcUnit):
             self._follow_fault_saw_pause = True
             return True
         if not self._follow_fault_saw_pause:
-            # No pause seen yet. During a print, keep waiting for it; outside a
-            # print there will never be one, so release rather than latching
-            # the follower off indefinitely.
+            # Outside a print no pause will come, so release rather than hold the follower off.
             try:
                 printing = bool(self.afc.function.in_print())
             except Exception:
-                printing = True     # unknown: keep the safer, held behaviour
+                printing = True  # unknown: stay held
             if printing:
                 return True
         was_printing = self._follow_fault_saw_pause
         self._follow_fault_hold = False
-        # Re-arm auto recovery (one attempt per fault, not per print), but not
-        # from inside the recovery's own attempt (see _in_auto_recover).
+        # One attempt per fault, not per print; not from inside the recovery's own attempt.
         if not getattr(self, "_in_auto_recover", False):
             self._auto_recover_armed = False
         self._follow_fault_saw_pause = False
@@ -11760,9 +10712,9 @@ class afcBambuAMS(afcUnit):
 
         :param lane: The lane currently followed
         """
-        # Defensive throughout: this runs inside the follower's reactor timer,
-        # and a fault reporter must never be able to stop the follower itself.
-        if not getattr(self, "fault_detect", False) or self._bridge is None:
+        # This runs inside the follower's timer, which a fault reporter must never stop.
+        if (not getattr(self, "fault_detect", False)
+            or self._bridge is None):
             return
         if getattr(self, "_unload_in_progress", False):
             return
@@ -11771,9 +10723,7 @@ class afcBambuAMS(afcUnit):
         getf = getattr(self._bridge, "last_fault", None)
         if not callable(getf):
             return
-        # Scoped to this unit: boxed units share 0x0700, and every claimed
-        # unit on a chain runs this check, so a bridge-wide read would report
-        # a chain-mate's stall against this unit's lane.
+        # Boxed units share 0x0700, so a bridge-wide read would report a chain-mate's stall.
         seq, text, amps = getf(unit=getattr(self, "ams_index", None))
         if seq == getattr(self, "_fault_seen", 0):
             return
@@ -11788,25 +10738,19 @@ class afcBambuAMS(afcUnit):
             return
         low = text.lower()
         if (self._overfeed_active()
-                and not _STALL_WORDS_RE.search(low)):
-            # "state:6" or a link drop with no stall in it: the unit is still
-            # parked from the assist timeout, not reporting a new jam.
-            self.logger.debug(
-                f"AFC bambu {self.name}: {lane.name}: still parked from the "
-                f"assist timeout, not a new stall: {_fault_reason(text)}")
+            and not _STALL_WORDS_RE.search(low)):
+            # The unit is still parked from the assist timeout, not reporting a new jam.
+            self.logger.debug(f"AFC bambu {self.name}: {lane.name}: still parked from the "
+                              f"assist timeout, not a new stall: {_fault_reason(text)}")
             return
-        # "stall exit" is the scan path finishing its pull-in, not a failure.
+        # The scan's pull-in finishing, not a failure.
         if "stall exit" in low:
             return
-        # A stall "during calib" is the AMS's capacity calibration pulling the
-        # spool to a hard stop to measure its radius ("check stall during
-        # calib" / "Calibration rst"), a normal step, not a jam.
+        # Capacity calibration pulls the spool to a hard stop to measure it, a normal step.
         if "calib" in low:
             return
         current = f", motor {amps:.2f}A" if amps else ""
-        # The unit's own error code, when it has stated one ("err_code: 0 -> 23"
-        # on HT, "err_code:0x00->0x80" on AMS 2); it changes when the jam is
-        # actually cleared.
+        # "err_code: 0 -> 23" on HT, "err_code:0x00->0x80" on AMS 2; it changes when the jam clears.
         code = None
         try:
             getec = getattr(self._bridge, "last_err_code", None)
@@ -11817,11 +10761,8 @@ class afcBambuAMS(afcUnit):
         err = f", err_code {code}" if code else ""
         msg = (f"AFC bambu {self.name}: AMS reported a stall on {lane.name}"
                f"{current}{err} -- the spool is likely tangled or the path "
-               f"jammed. Clear the snag, then resume.\n"
-               f"AMS said: {_fault_reason(text)}")
-        # The resume is not blocked: the unit accepts a clear immediately but
-        # cannot leave its error state until the filament moves, so resuming
-        # into an uncleared jam simply stalls and fires this again.
+               f"jammed. Clear the snag, then resume.\nAMS said: {_fault_reason(text)}")
+        # The unit cannot leave its error until the filament moves; resuming into a jam fires again.
         try:
             if self.afc.function.in_print():
                 msg += "\nOnce cleared, click resume to continue printing"
@@ -11829,9 +10770,8 @@ class afcBambuAMS(afcUnit):
             pass
         self._raise_ams_fault(lane, msg)
 
-    # No buffer-starvation detector: it fires on healthy prints and the buffer
-    # is shared. byte[19] == 0x07 reports the stall directly on every unit
-    # type.
+    # No buffer-starvation detector: it fires on healthy prints and the buffer is shared.
+    # byte[19] == 0x07 reports the stall on every unit type.
 
     def _run_stall_checks(self, lane: Any) -> None:
         """
@@ -11850,13 +10790,11 @@ class afcBambuAMS(afcUnit):
         """
         if getattr(self, "_load_in_progress", False):
             return
-        # A lane whose bay ran out: the unit stalls once the leftover leaves
-        # its feeder, with nothing to push. Raising it would drop the assist,
-        # and a stopped follower grips the leftover so it cannot come out.
+        # The unit stalls once a run-out leftover leaves its feeder; raising it would drop the
+        # assist, and a stopped follower grips the leftover.
         if afcBambuAMS._bay_ran_out(self, lane):
             try:
-                seq, _t, _a = self._bridge.last_fault(
-                    unit=getattr(self, "ams_index", None))
+                seq, _t, _a = self._bridge.last_fault(unit=getattr(self, "ams_index", None))
                 self._fault_seen = seq
                 if (self._unit_state(self._bridge.latest_status())
                         == self.AMS_STATE_STALLED):
@@ -11866,8 +10804,7 @@ class afcBambuAMS(afcUnit):
             return
         if getattr(self, "_follow_fault_hold", False):
             try:
-                seq, _t, _a = self._bridge.last_fault(
-                    unit=getattr(self, "ams_index", None))
+                seq, _t, _a = self._bridge.last_fault(unit=getattr(self, "ams_index", None))
                 self._fault_seen = seq
                 if (self._unit_state(self._bridge.latest_status())
                         == self.AMS_STATE_STALLED):
@@ -11913,7 +10850,7 @@ class afcBambuAMS(afcUnit):
                 e = float(self.afc.toolhead.get_position()[3])
                 pos = self._feed_odom_mm(lane)
         except Exception:
-            pos = None               # cannot tell: start over next tick
+            pos = None
         base = getattr(self, "_clog_base", None)
         if (pos is None
             or base is None
@@ -11929,8 +10866,7 @@ class afcBambuAMS(afcUnit):
         msg = (f"AFC bambu {self.name}: {lane.name} has stopped moving: the "
                f"extruder pushed {pushed:.0f}mm, but the AMS Lite's odometer "
                f"saw no filament leave the tray. The nozzle may be clogged, "
-               f"the extruder gears slipping, or the spool snagged. Clear it, "
-               f"then resume.")
+               f"the extruder gears slipping, or the spool snagged. Clear it, then resume.")
         self._raise_ams_fault(lane, msg)
         return True
 
@@ -11971,7 +10907,7 @@ class afcBambuAMS(afcUnit):
                 odom = self._odom_now_mm()
                 e = float(self.afc.toolhead.get_position()[3])
         except Exception:
-            fps = None               # cannot tell: start over next tick
+            fps = None
         base = getattr(self, "_feed_stop_base", None)
         if (fps is None
             or e is None
@@ -11986,8 +10922,7 @@ class afcBambuAMS(afcUnit):
         _lane, e0, lo, hi, odom0 = base
         lo, hi = min(lo, fps), max(hi, fps)
         if (hi - lo >= FEED_STOP_SWING
-            or (odom is not None and odom0 is not None
-                and abs(odom - odom0) >= LITE_ODOM_STEP_MM)):
+            or (odom is not None and odom0 is not None and abs(odom - odom0) >= LITE_ODOM_STEP_MM)):
             self._feed_stop_base = (lane, e, fps, fps, odom)
             return False
         self._feed_stop_base = (lane, e0, lo, hi, odom0)
@@ -11999,8 +10934,7 @@ class afcBambuAMS(afcUnit):
                f"extruder pushed {pushed:.0f}mm, but the AMS buffer never "
                f"moved (a printing extruder drains it every ~20mm). The "
                f"filament may not have reached the extruder gears, the gears "
-               f"may be slipping, or the nozzle may be clogged. Clear it, "
-               f"then resume.")
+               f"may be slipping, or the nozzle may be clogged. Clear it, then resume.")
         self._raise_ams_fault(lane, msg)
         return True
 
@@ -12018,12 +10952,9 @@ class afcBambuAMS(afcUnit):
         :param lane: The lane currently followed, or None
         :return Any: the lane followed after this tick, or None
         """
-        # Evaluated every tick and never short-circuited into the test below:
-        # this call is also what releases the hold once the print resumes.
+        # Never short-circuited: this call also releases the hold once the print resumes.
         fault_hold = self._fault_hold_active()
-        # Auto-arm: keep the follower engaged while a lane on this unit is
-        # threaded, independent of the buffer readback and extruder wiring.
-        # Held off after a stall, since re-arming into a jam grinds.
+        # Engaged while a lane on this unit is threaded; held off after a stall, as re-arming grinds
         if (self.follow_when_loaded
             and not fault_hold
             and not getattr(self, '_follow_manual_off', False)
@@ -12031,26 +10962,21 @@ class afcBambuAMS(afcUnit):
             loaded = self._tool_loaded_lane()
             if (loaded is not None
                 and getattr(loaded, "status", "") == AFCLaneState.ERROR):
-                # A lane in ERROR is left to the operator: a re-armed assist
-                # would push half-retracted filament forward again. None here
-                # takes the stand-down branch below.
+                # A re-armed assist would push half-retracted filament forward again.
                 loaded = None
             cleared = getattr(self, "_runout_cleared", None)
             if cleared is not None:
                 if not afcBambuAMS._bay_ran_out(self, cleared):
                     self._runout_cleared = None
                 elif loaded is cleared:
-                    # Ran out and its hub reads clear: nothing left for the
-                    # AMS to push (_check_runout_drain).
+                    # Ran out and its hub reads clear: nothing left to push.
                     loaded = None
             if loaded is not None:
                 if lane is not loaded:
-                    # Never engaged, or the loaded lane changed -> (re)engage mode:4.
-                    self._engage_follower(loaded)   # sets _following_lane
+                    self._engage_follower(loaded)  # (re)engage mode:4; sets _following_lane
                     lane = self._following_lane
                 else:
-                    # Already following: re-assert mode:4 if the AMS dropped to
-                    # 0, rate-limited and only when the extruder asked for
+                    # Re-assert mode:4 if the AMS dropped to 0, only when the extruder asked for
                     # filament within follow_rearm_window.
                     try:
                         e_now = self.afc.toolhead.get_position()[3]
@@ -12060,21 +10986,21 @@ class afcBambuAMS(afcUnit):
                             self._follow_last_demand = eventtime
                             self._follow_last_e = e_now
                         elif e_now < self._follow_last_e:
-                            self._follow_last_e = e_now     # retract/reset
+                            self._follow_last_e = e_now  # retract or reset
                     except Exception:
-                        # No toolhead to read: treat as demand rather than
-                        # never re-arming.
+                        # No toolhead to read: treat as demand.
                         self._follow_last_demand = eventtime
                     st = self._bridge.latest_status()
                     fstate = st.get("fstate") if st is not None else None
                     wants = (eventtime - self._follow_last_demand
                              <= self.follow_rearm_window)
                     overfed = getattr(self, "_overfeed_lane", None) is loaded
-                    if overfed and self._overfeed_active():
-                        pass        # parked; it ignores commands until then
-                    elif overfed and wants:
-                        # Recovered from an assist timeout, whatever its mode
-                        # reads: the full engage (finish, select, assist).
+                    if (overfed
+                        and self._overfeed_active()):
+                        pass  # parked; ignores commands until then
+                    elif (overfed
+                          and wants):
+                        # Recovered from an assist timeout: the full engage, whatever its mode says.
                         self._overfeed_lane = None
                         self._follow_reassert_last = eventtime
                         self._fault_quiet_until = (time.monotonic()
@@ -12082,16 +11008,14 @@ class afcBambuAMS(afcUnit):
                         self._engage_follower(loaded)
                     elif (fstate == AMS_MODE_IDLE
                           and wants
-                          and eventtime - getattr(
-                              self, "_follow_reassert_last", 0.0) >= 2.0):
+                          and eventtime - getattr(self, "_follow_reassert_last", 0.0) >= 2.0):
                         self._follow_reassert_last = eventtime
                         self.set_feed_assist(loaded, True)
             elif (lane is not None
                   and lane is getattr(self, "_runout_drain", None)):
-                pass        # pushing a leftover out (_start_runout_drain)
+                pass  # pushing a leftover out
             elif lane is not None:
-                # Nothing loaded from this unit: stand down. Logged at most
-                # every 5 s, as a flickering _tool_loaded_lane() cycles here.
+                # Logged at most every 5 s, as a flickering _tool_loaded_lane() cycles here.
                 if (eventtime - getattr(self, "_follow_standdown_log", 0.0)
                         >= 5.0):
                     self._follow_standdown_log = eventtime
@@ -12099,15 +11023,14 @@ class afcBambuAMS(afcUnit):
                         cur_ext = self.afc.function.get_current_extruder()
                     except Exception:
                         cur_ext = "?"
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: standing the follower down "
-                        f"for {getattr(lane, 'name', '?')} -- no tool-loaded "
-                        f"lane on this unit (afc.current="
-                        f"{getattr(self.afc, 'current', None)}, active "
-                        f"extruder={cur_ext}). If this repeats at a lane that "
-                        f"IS loaded, the active-extruder gate is the flap.")
+                    self.logger.debug(f"AFC bambu {self.name}: standing the follower down "
+                                      f"for {getattr(lane, 'name', '?')} -- no tool-loaded "
+                                      f"lane on this unit (afc.current="
+                                      f"{getattr(self.afc, 'current', None)}, active "
+                                      f"extruder={cur_ext}). If this repeats at a lane that "
+                                      f"IS loaded, the active-extruder gate is the flap.")
                 self.set_feed_assist(lane, False)
-                lane = self._following_lane        # now None
+                lane = self._following_lane
         return lane
 
     def _detector_tick(self, eventtime: float) -> float:
@@ -12124,33 +11047,32 @@ class afcBambuAMS(afcUnit):
         :param eventtime: Reactor event time
         :return float: next fire time
         """
-        if self._bridge is None or self.pool:
+        if (self._bridge is None
+            or self.pool):
             return eventtime + self.follow_poll_interval
         try:
             self._check_link_loss()
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: link-loss check raised {e!r}; "
-                f"detector tick continuing.")
-        # Called every tick: it is also what releases the hold on resume.
+            self.logger.warning(f"AFC bambu {self.name}: link-loss check raised {e!r}; "
+                                f"detector tick continuing.")
+        # It also releases the hold on resume.
         try:
             if (getattr(self, "_loaded_restore_done", False)
-                    and getattr(self, "_id_resolved", True)):
+                and getattr(self, "_id_resolved", True)):
                 self._auto_arm(eventtime, self._following_lane)
             else:
                 self._fault_hold_active()
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: follower auto-arm raised {e!r}; "
-                f"detector tick continuing.")
+            self.logger.warning(f"AFC bambu {self.name}: follower auto-arm raised {e!r}; "
+                                f"detector tick continuing.")
         try:
             watch = self._tool_loaded_lane()
-            if watch is not None and self._bridge is not None:
+            if (watch is not None
+                and self._bridge is not None):
                 self._run_stall_checks(watch)
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: fault check raised {e!r}; "
-                f"detector tick continuing.")
+            self.logger.warning(f"AFC bambu {self.name}: fault check raised {e!r}; "
+                                f"detector tick continuing.")
         return eventtime + self.follow_poll_interval
 
     def _follow_tick(self, eventtime: float) -> float:
@@ -12167,58 +11089,44 @@ class afcBambuAMS(afcUnit):
         """
         if self._bridge is None:
             return eventtime + self.follow_poll_interval
-        # Drying does not idle this tick: a load starting during a dry has
-        # nothing tool_loaded yet and needs the follower, and the firmware does
-        # not hold the follower off while drying.
+        # A load starting during a dry needs the follower, and the firmware does not hold it off.
         lane = self._following_lane
-        # Contained like every detector here: this is a reactor timer, and an
-        # escaped exception takes all of Klipper down with it.
+        # An escaped exception in a reactor timer takes Klipper down.
         try:
             chk = getattr(self, "_check_chain_resolve", None)
             if callable(chk):
                 chk(eventtime)
-            # No buffer-based auto-reset of the fault hold (see the note above
-            # _fault_hold_active).
         except Exception as e:
             log = getattr(self, "logger", None)
             if log:
-                log.warning(
-                    f"AFC bambu {self.name}: fault auto-reset raised {e!r}; "
-                    f"follower tick continuing.")
-        # Bridge link lost mid-print: when frames stop, the extruder keeps
-        # pulling against an AMS nobody is driving and the filament grinds
-        # long before the transport reconnects. Contained (reactor timer).
+                log.warning(f"AFC bambu {self.name}: fault auto-reset raised {e!r}; "
+                            f"follower tick continuing.")
+        # With frames stopped, the extruder pulls against an undriven AMS and grinds the filament.
         try:
             self._check_link_loss()
         except Exception as e:
             log = getattr(self, "logger", None)
             if log:
-                log.warning(
-                    f"AFC bambu {self.name}: link-loss check raised {e!r}; "
-                    f"follower tick continuing.")
+                log.warning(f"AFC bambu {self.name}: link-loss check raised {e!r}; "
+                            f"follower tick continuing.")
         lane = self._auto_arm(eventtime, lane)
-        # Fault detection follows the loaded lane, not the followed one:
-        # AFC_BAMBU_FOLLOWER ENABLE=0 clears _following_lane, and running
-        # without assist is when the buffer is most likely to starve.
+        # ENABLE=0 clears _following_lane, and running without assist is when the buffer starves.
         watch = lane
         if watch is None:
             try:
                 watch = self._tool_loaded_lane()
             except Exception:
                 watch = None
-        if watch is not None and self._bridge is not None:
-            # Contained: an exception escaping into reactor.run() shuts down
-            # all of Klipper.
+        if (watch is not None
+            and self._bridge is not None):
             try:
                 self._run_stall_checks(watch)
             except Exception as e:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: fault check raised {e!r}; "
-                    f"follower tick continuing.")
-        if lane is not None and self._bridge is not None:
-            # Telemetry: buffer position + follower state, for tuning (off by
-            # default). Rate-limited and emitted only when buff/fstate/online
-            # change.
+                self.logger.warning(f"AFC bambu {self.name}: fault check raised {e!r}; "
+                                    f"follower tick continuing.")
+        if (lane is not None
+            and self._bridge is not None):
+            # Off by default; emitted only when buff/fstate/online change.
             dbg = getattr(self, "follow_debug_interval", 0.0)
             if (dbg > 0.0
                 and eventtime - getattr(self, "_follow_last_log", 0.0) >= dbg):
@@ -12229,12 +11137,9 @@ class afcBambuAMS(afcUnit):
                     if vals != getattr(self, "_follow_last_dbg", None):
                         self._follow_last_log = eventtime
                         self._follow_last_dbg = vals
-                        self.logger.debug(
-                            f"AFC bambu {self.name}: follow {lane.name} "
-                            f"buff={vals[0]} fstate={vals[1]} online={vals[2]}")
-            # No per-tick keep-alive is sent: the op-04 hold that keeps the
-            # follower engaged is sustained by the assist arm (set_feed_assist;
-            # follower armed), which stays set until an explicit assist-off.
+                        self.logger.debug(f"AFC bambu {self.name}: follow {lane.name} "
+                                          f"buff={vals[0]} fstate={vals[1]} online={vals[2]}")
+            # No keep-alive: the assist arm sustains the op-04 hold until an explicit assist-off.
         return eventtime + self.follow_poll_interval
 
     def stop(self) -> bool:
@@ -12267,9 +11172,8 @@ class afcBambuAMS(afcUnit):
         self._bridge.send({"cmd": "relink"})
         try:
             reactor = self.afc.reactor
-            reactor.register_callback(
-                lambda et: self._bridge.replay_reconnect_listeners(),
-                reactor.monotonic() + RELINK_SETTLE_S)
+            reactor.register_callback(lambda et: self._bridge.replay_reconnect_listeners(),
+                                      reactor.monotonic() + RELINK_SETTLE_S)
         except Exception:
             try:
                 self._bridge.replay_reconnect_listeners()
@@ -12316,9 +11220,7 @@ class afcBambuAMS(afcUnit):
         """
         if self._bridge is None:
             return False
-        # For the AMS HT the filament-info read must target its 0x1800 device
-        # (dry_dev_addr); a 0x0700 read returns nothing. Harmless for AMS2 Pro /
-        # boxed AMS where dry_dev_addr is 0x0700 (the firmware's default).
+        # The AMS HT's filament-info read must target 0x1800; a 0x0700 read returns nothing.
         cmd: Dict[str, Any] = {"cmd": "scan", "unit": self.ams_index,
                                "addr": getattr(self, "dry_dev_addr", 0)}
         slot: Optional[int]
@@ -12333,13 +11235,12 @@ class afcBambuAMS(afcUnit):
         self._bridge.send(cmd)
         return True
 
-    # Mode 09->07 "STEP7:finish" frames (CRC included). Mode 07 is the AMS's
-    # load-complete signal; without it the feed stage retract-retries forever.
-    # Sent when the toolhead sensor triggers.
+    # Mode 09->07 "STEP7:finish" frames, CRC included. Without mode 07 the feed stage
+    # retract-retries forever.
     _FINISH_FRAMES = (
-        "3DC50CC803000900A502800C",   # mode 09 feeder->hub handoff
-        "3DC50CC8030007000002514C",   # mode 07 gate
-        "3DC50CC8030007007F023654",   # mode 07 finish (STEP7:finish)
+        "3DC50CC803000900A502800C",  # mode 09 feeder->hub handoff
+        "3DC50CC8030007000002514C",  # mode 07 gate
+        "3DC50CC8030007007F023654",  # mode 07 finish
     )
 
     def bridge_finish(self, lane: Any = None) -> bool:
@@ -12358,8 +11259,7 @@ class afcBambuAMS(afcUnit):
         if self._bridge is None:
             return False
         if self._is_lite():
-            # Boxed frames. The AMS Lite's own finish is the hold the stop at
-            # the sensor already left it in.
+            # The AMS Lite's finish is the hold the sensor stop already left it in.
             return True
         for hexf in self._FINISH_FRAMES:
             self._bridge.send({"cmd": "raw", "hex": hexf})
@@ -12374,18 +11274,16 @@ class afcBambuAMS(afcUnit):
         :return bool: True if the command was issued
         """
         slot = self._slot_of(lane)
-        if slot is None or self._bridge is None:
+        if (slot is None
+            or self._bridge is None):
             return False
-        self._bridge.send({"cmd": "select", "unit": self.ams_index,
-                           "slot": slot})
-        self._bridge.send({"cmd": "unload", "unit": self.ams_index,
-                           "slot": slot})
+        self._bridge.send({"cmd": "select", "unit": self.ams_index, "slot": slot})
+        self._bridge.send({"cmd": "unload", "unit": self.ams_index, "slot": slot})
         return True
 
-    # ── stepperless drive (AFC_lane.move_to hook) ──
+    # Stepperless drive (AFC_lane.move_to)
 
-    def lane_move(self, lane: Any, distance: float,
-                  speed_mode: Any = None) -> bool:
+    def lane_move(self, lane: Any, distance: float, speed_mode: Any = None) -> bool:
         """
         Firmware-driven lane move for a stepperless lane.
 
@@ -12402,9 +11300,7 @@ class afcBambuAMS(afcUnit):
             return self.feed(lane, distance)
         return self.retract(lane, abs(distance))
 
-    def _wait_move(self, mm: float,
-                   mmps: Optional[float] = None,
-                   fault_mark: Optional[int] = None,
+    def _wait_move(self, mm: float, mmps: Optional[float] = None, fault_mark: Optional[int] = None,
                    accept_switch_finish: bool = False,
                    accept_tray_release: Optional[int] = None) -> bool:
         """
@@ -12436,8 +11332,7 @@ class afcBambuAMS(afcUnit):
         :return bool: True if the AMS reported a successful completion; False
           if it reported a stall or nothing arrived before the timeout
         """
-        # The deadline uses DEADLINE_MMPS: it sizes a watchdog. nm is resolved
-        # once, since tests use shims with no .name.
+        # nm is resolved once, since test shims have no .name.
         nm = getattr(self, "name", "?")
 
         def _say(msg: str) -> None:
@@ -12453,85 +11348,75 @@ class afcBambuAMS(afcUnit):
 
         speed = DEADLINE_MMPS if mmps is None else clamp_speed(mmps, MAX_MMPS)
         duration = (abs(mm) / speed) if speed > 0 else 0.0
-        # Generous ceiling: the estimate is a lower bound on how long the AMS
-        # may legitimately take, not an upper one.
+        # The estimate is a lower bound on how long the AMS may take.
         deadline_s = min(duration * 2.0 + 5.0, MOVE_DEADLINE_MAX_S)
         bridge = self._bridge
         start_seq = bridge.last_finish()[0] if bridge is not None else 0
-        # Sample the retract's completion now, so a previous load's switch
-        # cannot end this wait (see _STATE_SWITCH_DONE_RE).
+        # So a previous load's switch cannot end this wait.
         start_switch = 0
-        if accept_switch_finish and bridge is not None:
+        if (accept_switch_finish
+            and bridge is not None):
             try:
                 start_switch = bridge.last_switch_finish()[0]
             except (AttributeError, TypeError):
-                accept_switch_finish = False    # older bridge; deadline stands
-        # The tray-release edge, marked the same way; with the tray-index
-        # check, an operator handling spools cannot end an unload.
+                accept_switch_finish = False  # older bridge
+        # With the tray-index check, an operator handling spools cannot end an unload.
         start_tray = 0
-        if accept_tray_release is not None and bridge is not None:
+        if (accept_tray_release is not None
+            and bridge is not None):
             try:
-                start_tray = bridge.last_tray_release(
-                    unit=getattr(self, "ams_index", None))[0]
+                start_tray = bridge.last_tray_release(unit=getattr(self, "ams_index", None))[0]
             except (AttributeError, TypeError):
-                accept_tray_release = None      # older bridge; deadline stands
+                accept_tray_release = None  # older bridge
         reactor = self.afc.reactor
-        # Narration ends the wait (it alone reports success), then a fault. Not
-        # fstate, which is bus-wide, nor a still odometer, since retries pause.
+        # Narration alone reports success. Not fstate, which is bus-wide, nor a still odometer,
+        # since retries pause.
         try:
             end = reactor.monotonic() + deadline_s
             while reactor.monotonic() < end:
                 if bridge is not None:
                     seq, ok, _text = bridge.last_finish()
                     if seq != start_seq:
-                        # Each exit logs which signal ended the wait; they
-                        # fire under different conditions per model.
-                        _say(
-                            f"AFC bambu {nm}: move ended on NARRATION "
-                            f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
-                            f"(ok={ok}): {str(_text)[:70]}")
+                        # Which signal ended the wait; they differ per model.
+                        _say(f"AFC bambu {nm}: move ended on NARRATION "
+                             f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
+                             f"(ok={ok}): {str(_text)[:70]}")
                         return ok
-                    # The unit has given up. A latched unit reports no
-                    # completion, so this ends the wait instead of sitting out
-                    # the deadline.
+                    # A latched unit reports no completion, so this ends the wait.
                     if (fault_mark is not None
-                        and self._ams_fault_since(fault_mark,
-                                                  consume=False)):
-                        _say(
-                            f"AFC bambu {nm}: move ended on a FAULT "
-                            f"after {reactor.monotonic() - (end - deadline_s):.1f}s")
+                        and self._ams_fault_since(fault_mark, consume=False)):
+                        _say(f"AFC bambu {nm}: move ended on a FAULT "
+                             f"after {reactor.monotonic() - (end - deadline_s):.1f}s")
                         return False
-                if accept_switch_finish and bridge is not None:
+                if (accept_switch_finish
+                    and bridge is not None):
                     try:
                         sw_seq, sw_text = bridge.last_switch_finish()
                     except (AttributeError, TypeError):
                         sw_seq, sw_text = start_switch, ""
                     if sw_seq > start_switch:
-                        _say(
-                            f"AFC bambu {nm}: move ended on the STATE SWITCH "
-                            f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
-                            f"-- {sw_text.strip()[:80]}")
+                        _say(f"AFC bambu {nm}: move ended on the STATE SWITCH "
+                             f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
+                             f"-- {sw_text.strip()[:80]}")
                         return True
-                if accept_tray_release is not None and bridge is not None:
+                if (accept_tray_release is not None
+                    and bridge is not None):
                     try:
                         tr_seq, tr_from = bridge.last_tray_release(
                             unit=getattr(self, "ams_index", None))
                     except (AttributeError, TypeError):
                         tr_seq, tr_from = start_tray, None
-                    # Both conditions: a release of another tray is the
-                    # operator, not this reel, and is ignored.
-                    if tr_seq > start_tray and tr_from == accept_tray_release:
-                        _say(
-                            f"AFC bambu {nm}: move ended on the TRAY RELEASE "
-                            f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
-                            f"-- tray {tr_from} -> none")
+                    # A release of another tray is the operator, not this reel.
+                    if (tr_seq > start_tray
+                        and tr_from == accept_tray_release):
+                        _say(f"AFC bambu {nm}: move ended on the TRAY RELEASE "
+                             f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
+                             f"-- tray {tr_from} -> none")
                         return True
                 reactor.pause(reactor.monotonic() + 0.1)
         except Exception:
             pass
-        _say(
-            f"AFC bambu {nm}: move ended on the DEADLINE "
-            f"({deadline_s:.0f}s) -- no signal arrived")
+        _say(f"AFC bambu {nm}: move ended on the DEADLINE ({deadline_s:.0f}s) -- no signal arrived")
         return False
 
     def _toolhead_sensor_triggered(self, cur_lane: Any) -> bool:
@@ -12564,7 +11449,8 @@ class afcBambuAMS(afcUnit):
         try:
             ext = getattr(cur_lane, "extruder_obj", None)
             sw = getattr(ext, "fila_tool_start", None)
-            if sw is not None and hasattr(sw, "runout_buttun_state"):
+            if (sw is not None
+                and hasattr(sw, "runout_buttun_state")):
                 return bool(sw.runout_buttun_state)
             helper = getattr(sw, "runout_helper", None)
             if helper is not None:
@@ -12593,14 +11479,13 @@ class afcBambuAMS(afcUnit):
             if getattr(cur_lane.extruder_obj, "tool_start", None) != "buffer":
                 return None
             buf = cur_lane.buffer_obj
-            reading = {"fps": float(buf.fps_value),
-                       "smoothed": float(buf.smoothed_fps),
+            reading = {"fps": float(buf.fps_value), "smoothed": float(buf.smoothed_fps),
                        "need": float(buf._homing_high_point)}
             if hasattr(buf, "_odom_still_for"):
                 reading["still"] = float(buf._odom_still_for())
             return reading
         except Exception:
-            return None            # a log line must never break a load
+            return None  # a log line must never break a load
 
     @staticmethod
     def _describe_gate(reading: dict, peak: Optional[float] = None) -> str:
@@ -12614,8 +11499,7 @@ class afcBambuAMS(afcUnit):
         """
         peak_s = f", peak {peak:.2f}" if peak is not None else ""
         text = (f"buffer fps {reading['fps']:.2f} (smoothed "
-                f"{reading['smoothed']:.2f}{peak_s}, needs "
-                f"{reading['need']:.2f})")
+                f"{reading['smoothed']:.2f}{peak_s}, needs {reading['need']:.2f})")
         if "still" in reading:
             text += f", odometer still {reading['still']:.1f}s"
         return text
@@ -12698,7 +11582,7 @@ class afcBambuAMS(afcUnit):
             if self._unit_state(latest) == afcBambuAMS.AMS_STATE_STALLED:
                 return (0, 0)
         except Exception:
-            pass                  # a torn frame is not a fault
+            pass  # a torn frame is not a fault
         return None
 
     @staticmethod
@@ -12714,9 +11598,8 @@ class afcBambuAMS(afcUnit):
             return what
         return f"{what} (error {err[0]:02X} {err[1]:02X})"
 
-    def _lite_stall_cause(self, cur_lane: Any, err: Tuple[int, int],
-                          fed: Optional[float], expect_mm: Optional[float],
-                          sensor: bool) -> str:
+    def _lite_stall_cause(self, cur_lane: Any, err: Tuple[int, int], fed: Optional[float],
+                          expect_mm: Optional[float], sensor: bool) -> str:
         """
         The failure text for an AMS Lite load the unit stopped itself.
 
@@ -12746,8 +11629,7 @@ class afcBambuAMS(afcUnit):
                 "the toolhead sensor sits before the extruder gears and is "
                 "reading." if near else stuck)
         return (f"The AMS Lite stopped feeding {cur_lane.name}{where} before "
-                f"the toolhead sensor saw it: {words}{tray}.\n{hint} "
-                f"{_RETRY_HINT}.")
+                f"the toolhead sensor saw it: {words}{tray}.\n{hint} {_RETRY_HINT}.")
 
     def _lite_grip_check(self, cur_lane: Any, cur_extruder: Any,
                          before: Optional[float]) -> Optional[str]:
@@ -12773,7 +11655,7 @@ class afcBambuAMS(afcUnit):
         try:
             self.afc.toolhead.wait_moves()
         except Exception:
-            pass                  # judged on the odometer alone
+            pass
         deadline = reactor.monotonic() + LITE_GRIP_WAIT_S
         moved: Optional[float] = None
         while True:
@@ -12787,9 +11669,8 @@ class afcBambuAMS(afcUnit):
                 break
             reactor.pause(now + 0.05)
         if moved is None:
-            self.logger.debug(
-                f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
-                f"the AMS Lite's odometer stopped reporting")
+            self.logger.debug(f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
+                              f"the AMS Lite's odometer stopped reporting")
             return None
         return (f"The extruder did not take {cur_lane.name}: it pulled "
                 f"{stn:.0f}mm, but the AMS Lite's odometer saw only "
@@ -12806,8 +11687,7 @@ class afcBambuAMS(afcUnit):
         return (self.fps_buffer_value(), self._bridge_call("buff_refill_seq"))
 
     def _boxed_grip_check(self, cur_lane: Any, cur_extruder: Any,
-                          mark: Tuple[Optional[float], Optional[int]]
-                          ) -> Optional[str]:
+                          mark: Tuple[Optional[float], Optional[int]]) -> Optional[str]:
         """
         Whether the extruder has hold of a boxed unit's filament.
 
@@ -12840,25 +11720,24 @@ class afcBambuAMS(afcUnit):
         drop = 0.0
         while True:
             seq = self._bridge_call("buff_refill_seq")
-            if seq0 is not None and seq is not None and seq != seq0:
+            if (seq0 is not None
+                and seq is not None
+                and seq != seq0):
                 refill = self._bridge_call("last_buff_refill") or ()
                 det = refill[2] if len(refill) > 2 else None
-                self.logger.debug(
-                    f"AFC bambu {self.name}: the extruder took "
-                    f"{cur_lane.name}: the AMS refilled its buffer"
-                    f"{'' if det is None else f' ({det:.0f}mm)'} "
-                    f"{reactor.monotonic() - t0:.1f}s into the push")
+                self.logger.debug(f"AFC bambu {self.name}: the extruder took "
+                                  f"{cur_lane.name}: the AMS refilled its buffer"
+                                  f"{'' if det is None else f' ({det:.0f}mm)'} "
+                                  f"{reactor.monotonic() - t0:.1f}s into the push")
                 return None
             fps = self.fps_buffer_value()
             if fps is not None:
                 peak = fps if peak is None else max(peak, fps)
                 drop = max(drop, peak - fps)
                 if drop >= GRIP_DROP:
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: the extruder took "
-                        f"{cur_lane.name}: the buffer dropped {drop:.2f} from "
-                        f"{peak:.2f} {reactor.monotonic() - t0:.1f}s into "
-                        f"the push")
+                    self.logger.debug(f"AFC bambu {self.name}: the extruder took "
+                                      f"{cur_lane.name}: the buffer dropped {drop:.2f} from "
+                                      f"{peak:.2f} {reactor.monotonic() - t0:.1f}s into the push")
                     return None
             now = reactor.monotonic()
             if now >= deadline:
@@ -12869,14 +11748,12 @@ class afcBambuAMS(afcUnit):
         except Exception:
             linked = False
         if not linked:
-            self.logger.debug(
-                f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
-                f"the link to the bridge is down")
+            self.logger.debug(f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
+                              f"the link to the bridge is down")
             return None
         return (f"The extruder did not take {cur_lane.name}: it pushed "
                 f"{stn:.0f}mm, but the AMS buffer never dropped (it stayed "
-                f"near {peak:.2f}), so the filament is not in the extruder "
-                f"gears.")
+                f"near {peak:.2f}), so the filament is not in the extruder gears.")
 
     def _grip_back_off(self, cur_lane: Any, cur_extruder: Any) -> None:
         """
@@ -12898,30 +11775,27 @@ class afcBambuAMS(afcUnit):
         self.stop()
         self._clear_latched_error(cur_lane, "the grip retry")
         start = self._feed_odom_mm(cur_lane)
-        # Queued first so the two overlap, as the unload's concurrent retract.
+        # Queued first so the two overlap.
         speed = float(getattr(cur_extruder, "tool_unload_speed", 0) or 0)
-        afc.move_e_pos(-GRIP_BACK_MM, speed or NOMINAL_MMPS, "grip back off",
-                       wait_tool=False)
-        self.select_lane(cur_lane)           # as the eject does
+        afc.move_e_pos(-GRIP_BACK_MM, speed or NOMINAL_MMPS, "grip back off", wait_tool=False)
+        self.select_lane(cur_lane)
         self.retract(cur_lane, GRIP_BACK_MM)
         deadline = reactor.monotonic() + 2 * GRIP_BACK_MM / NOMINAL_MMPS
         while True:
             now = reactor.monotonic()
             pos = self._feed_odom_mm(cur_lane)
             if (now >= deadline
-                or (start is not None and pos is not None
-                    and abs(pos - start) >= GRIP_BACK_MM)):
+                or (start is not None and pos is not None and abs(pos - start) >= GRIP_BACK_MM)):
                 break
             reactor.pause(min(now + 0.05, deadline))
         self.stop()
         try:
             afc.toolhead.wait_moves()
         except Exception:
-            pass                  # the extruder's retract is not judged
+            pass
 
-    def _grip_refeed(self, cur_lane: Any, cur_extruder: Any,
-                     feed_dist: float, timeout: float
-                     ) -> Optional[Tuple[Optional[float], Optional[int]]]:
+    def _grip_refeed(self, cur_lane: Any, cur_extruder: Any, feed_dist: float,
+                     timeout: float) -> Optional[Tuple[Optional[float], Optional[int]]]:
         """
         Back a lane off the gears and hand it to the extruder again.
 
@@ -12933,7 +11807,7 @@ class afcBambuAMS(afcUnit):
           when the feed never reached the toolhead sensor
         """
         self._grip_back_off(cur_lane, cur_extruder)
-        self._load_full_path = False         # restarts partway along
+        self._load_full_path = False
         self.feed(cur_lane, feed_dist)
         if not self._feed_until_sensor(cur_lane, timeout):
             self.stop()
@@ -12943,8 +11817,7 @@ class afcBambuAMS(afcUnit):
         self._advance_into_extruder(cur_lane, cur_extruder)
         return mark
 
-    # The feed ends on stop() when the sensor trips, then bridge_finish(). The
-    # printer's op-03 motion byte here faults the unit (TIMEOUT 2/3).
+    # The printer's op-03 motion byte here faults the unit (TIMEOUT 2/3).
 
     def _ams_fault_seq(self) -> int:
         """
@@ -13000,8 +11873,7 @@ class afcBambuAMS(afcUnit):
         slot = self._slot_of(lane)
         return slot is not None and int(seq or 0) > mark and tray == slot
 
-    def _ams_fault_since(self, mark: int,
-                         consume: bool = True) -> Optional[str]:
+    def _ams_fault_since(self, mark: int, consume: bool = True) -> Optional[str]:
         """
         The AMS's own words for a real fault raised since ``mark``.
 
@@ -13026,10 +11898,13 @@ class afcBambuAMS(afcUnit):
             seq, text, _amps = getf(unit=getattr(self, "ams_index", None))
         except Exception:
             return None
-        if not seq or seq == mark or not text:
+        if (not seq
+            or seq == mark
+            or not text):
             return None
         low = text.lower()
-        if "stall exit" in low or "calib" in low:
+        if ("stall exit" in low
+            or "calib" in low):
             return None
         if consume:
             self._fault_seen = seq
@@ -13051,8 +11926,7 @@ class afcBambuAMS(afcUnit):
         self._declared_fault_text = text
         return True
 
-    def _feed_until_sensor(self, cur_lane: Any,
-                           timeout: Optional[float] = None,
+    def _feed_until_sensor(self, cur_lane: Any, timeout: Optional[float] = None,
                            limit_mm: Optional[float] = None,
                            expect_mm: Optional[float] = None) -> bool:
         """
@@ -13088,21 +11962,21 @@ class afcBambuAMS(afcUnit):
         sensor = not lite or self._has_toolhead_sensor(cur_lane)
         self._lite_fault_err = None
         self._lite_stall_mm = None
-        if sensor and self._toolhead_sensor_triggered(cur_lane):
+        if (sensor
+            and self._toolhead_sensor_triggered(cur_lane)):
             self.stop()
             return True
         attempt_t0 = self.afc.reactor.monotonic()
         deadline = attempt_t0 + timeout
         last_kick = -1.0
         kicks = 0
-        latched_since = None                  # when ustate first read STALLED
-        # An AMS Lite's odometer: its last reading and when it last moved, and
-        # whether this attempt has seen the unit without a fault.
+        latched_since = None  # when ustate first read STALLED
+        # An AMS Lite's odometer, when it last moved, and whether this attempt saw it fault-free.
         odom_pos: Optional[float] = None
         odom_t = attempt_t0
         odom_moved = False
         lite_clear = False
-        gate_peak: Optional[float] = None     # highest smoothed buffer fps
+        gate_peak: Optional[float] = None
 
         def _at_gears(pos: Optional[float], fed: Optional[float]) -> bool:
             """
@@ -13115,47 +11989,39 @@ class afcBambuAMS(afcUnit):
             self.stop()
             self._load_odom_at_sensor = pos
             self._lite_stall_mm = fed
-            self.logger.debug(
-                f"AFC bambu {self.name}: {cur_lane.name} stopped "
-                f"{fed or 0.0:.0f}mm in by the AMS Lite's odometer; taking it "
-                f"as at the extruder gears")
+            self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} stopped "
+                              f"{fed or 0.0:.0f}mm in by the AMS Lite's odometer; taking it "
+                              f"as at the extruder gears")
             return True
-        self._fault_said_this_load = False    # say it once per load, not per kick
+        self._fault_said_this_load = False  # once per load, not per kick
         while self.afc.reactor.monotonic() < deadline:
             now = self.afc.reactor.monotonic()
-            # A shut-down printer has no toolhead to feed and the sensor can no
-            # longer change; the bridge is a separate MCU so nothing here fails
-            # on its own. Exit as a timeout instead of riding it out.
+            # A shut-down printer has no toolhead to feed and the bridge MCU won't notice: time out.
             try:
                 _down = self.printer.is_shutdown()
             except Exception:
-                _down = False      # never let a state read stop a live load
+                _down = False
             if _down:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: {cur_lane.name} -- the printer "
-                    f"has shut down, so this load stops feeding. Nothing can "
-                    f"reach the toolhead until Klipper is restarted.")
+                self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the printer "
+                                    f"has shut down, so this load stops feeding. Nothing can "
+                                    f"reach the toolhead until Klipper is restarted.")
                 break
-            # Same for a link that is down: every kick is dropped by send() and
-            # no narration can end the wait. Only a link down past
-            # LINK_DOWN_GRACE_S gives up; a brief reconnect does not.
+            # A down link drops every kick; only one down past LINK_DOWN_GRACE_S gives up.
             try:
                 _link_down_t = (self._bridge.down_since()
                                 if self._bridge is not None else None)
             except Exception:
-                _link_down_t = None    # never let a state read stop a live load
+                _link_down_t = None
             if _link_down_t is not None:
                 _for = time.monotonic() - _link_down_t
                 if _for > LINK_DOWN_GRACE_S:
-                    self.logger.warning(
-                        f"AFC bambu {self.name}: {cur_lane.name} -- the link "
-                        f"to the bridge has been down {_for:.0f}s, so every "
-                        f"command this load sends is being dropped. Stopping "
-                        f"rather than feeding a bus we cannot reach. "
-                        f"{_RETRY_HINT}.")
+                    self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the link "
+                                        f"to the bridge has been down {_for:.0f}s, so every "
+                                        f"command this load sends is being dropped. Stopping "
+                                        f"rather than feeding a bus we cannot reach. "
+                                        f"{_RETRY_HINT}.")
                     break
-            # A kick to an AMS Lite showing a fault would clear it and feed
-            # again: a retry its user never asked for.
+            # A kick would clear its fault and feed again, a retry its user never asked for.
             lf = self._lite_fault() if lite else None
             gate = self._buffer_gate_reading(cur_lane)
             if gate is not None:
@@ -13166,80 +12032,63 @@ class afcBambuAMS(afcUnit):
                 last_kick = now
                 gate_s = (f"; {self._describe_gate(gate, gate_peak)}"
                           if gate is not None else "")
-                self.logger.debug(
-                    f"AFC bambu {self.name}: feeding {cur_lane.name} to sensor "
-                    f"(kick {kicks}); letting the AMS run its own retry"
-                    f"{gate_s}")
+                self.logger.debug(f"AFC bambu {self.name}: feeding {cur_lane.name} to sensor "
+                                  f"(kick {kicks}); letting the AMS run its own retry{gate_s}")
                 self.feed(cur_lane, self.load_retry_pulse)
-            # A fault is not a reason to stop asking: the AMS recovers under a
-            # continued request. Except "state_switch finish, fail, retry:5",
-            # its spent budget (AMS 2 and HT).
+            # The AMS recovers under a continued request, except "state_switch finish, fail,
+            # retry:5" (AMS 2 and HT).
             try:
-                # Scoped to this attempt, not the whole load: the caller's
-                # re-home between attempts can unlatch a stuck unit, so a
-                # give-up in an earlier attempt must not abort the next one.
+                # Per attempt: the re-home between attempts can unlatch a stuck unit.
                 _gave_up = (self._bridge is not None
                             and self._bridge.gave_up_since(
                                 attempt_t0, addr=getattr(self, "dry_dev_addr", None)))
             except Exception:
-                _gave_up = False       # never let a helper stop a live load
+                _gave_up = False
             if _gave_up:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: {cur_lane.name} -- the AMS says "
-                    f"it has STOPPED retrying, so this load stops asking. "
-                    f"Clear the path at the unit. {_RETRY_HINT}.")
+                self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS says "
+                                    f"it has STOPPED retrying, so this load stops asking. "
+                                    f"Clear the path at the unit. {_RETRY_HINT}.")
                 break
-            # The same give-up as a byte for the AMS 1: ustate latched at 7
-            # past STALL_LATCH_S (a retrying unit reads 2). The caller then
-            # re-homes; a status read that raises must not end the load.
+            # The AMS 1's give-up: ustate latched at 7 past STALL_LATCH_S (a retrying unit reads 2).
             try:
-                _ustate = self._unit_state(
-                    self._bridge.latest_status() if self._bridge else None)
+                _ustate = self._unit_state(self._bridge.latest_status() if self._bridge else None)
             except Exception:
                 _ustate = None
             _hold = afcBambuAMS.STALL_LATCH_S
             if lite:
-                pass                          # its own report, below
+                pass
             elif _ustate == afcBambuAMS.AMS_STATE_STALLED:
                 if latched_since is None:
                     latched_since = now
                 elif now - latched_since >= _hold:
-                    self.logger.warning(
-                        f"AFC bambu {self.name}: {cur_lane.name} -- the unit "
-                        f"has reported STALLED for {_hold:.0f}s without "
-                        f"clearing, so this attempt stops feeding and hands "
-                        f"over to the recovery re-home.")
+                    self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the unit "
+                                        f"has reported STALLED for {_hold:.0f}s without "
+                                        f"clearing, so this attempt stops feeding and hands "
+                                        f"over to the recovery re-home.")
                     break
             else:
-                latched_since = None          # working again; re-arm the hold
+                latched_since = None  # working again
             if (self._ams_declared_fault()
                 and not getattr(self, "_fault_said_this_load", False)):
                 self._fault_said_this_load = True
-                # Info, not warning: the unit recovers itself and the load
-                # carries on. The failure case has its own messages.
-                self.logger.debug(
-                    f"AFC bambu {self.name}: {cur_lane.name} -- the AMS "
-                    f"reported a fault during the load; still feeding, the "
-                    f"unit runs its own recovery while the request continues")
+                # The unit recovers itself and the load carries on.
+                self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS "
+                                  f"reported a fault during the load; still feeding, the "
+                                  f"unit runs its own recovery while the request continues")
             if (sensor
                 and self._toolhead_sensor_triggered(cur_lane)):
-                self.stop()          # halt instantly so the AMS can't retract it
-                # Read the odometer now: it keeps climbing once the extruder
-                # takes over (tool_stn plus the purge), so any later reading
-                # would include what the toolhead consumed.
+                self.stop()  # so the AMS can't retract it
+                # It keeps climbing once the extruder takes over.
                 self._load_odom_at_sensor = self._feed_odom_mm(cur_lane)
                 gate_s = (f" ({self._describe_gate(gate)})"
                           if gate is not None else "")
-                # A clean load is already narrated by AFC's load path; log at
-                # info only when this loop had to re-kick the AMS.
+                # AFC's load path narrates a clean load.
                 if kicks:
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: {cur_lane.name} reached the "
-                        f"toolhead sensor after {kicks} feed kick(s){gate_s}")
+                    self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} reached the "
+                                      f"toolhead sensor after {kicks} feed kick(s){gate_s}")
                 else:
-                    self.logger.debug(
-                        f"AFC bambu {self.name}: sensor triggered for "
-                        f"{cur_lane.name}, AMS stopped{gate_s}")
+                    self.logger.debug(f"AFC bambu {self.name}: sensor triggered for "
+                                      f"{cur_lane.name}, AMS stopped{gate_s}")
                 return True
             if limit_mm is not None:
                 fed = self._load_fed_mm(cur_lane)
@@ -13265,9 +12114,8 @@ class afcBambuAMS(afcUnit):
                     lite_clear = True
                 elif (lite_clear
                       or now - attempt_t0 >= LITE_FAULT_GRACE_S):
-                    # Its own word that it has stopped (an earlier fault can
-                    # show until the bridge's clear takes). No re-home and no
-                    # re-kick: the A1 leaves the retry to its user.
+                    # An earlier fault can show until the bridge's clear takes. No re-kick: the A1
+                    # leaves the retry to its user.
                     self._lite_fault_err = lf
                     if (sensor
                         or short):
@@ -13278,9 +12126,7 @@ class afcBambuAMS(afcUnit):
                     and not sensor
                     and not short):
                     return _at_gears(pos, fed)
-            # No fallback to the AMS's own arrival report: with a toolhead
-            # sensor, the unit reaching the end of its tube differs from the
-            # filament reaching the toolhead when the path binds.
+            # With a sensor, the end of the tube is not the toolhead when the path binds.
             try:
                 self.afc.reactor.pause(now + 0.05)
             except Exception:
@@ -13288,10 +12134,9 @@ class afcBambuAMS(afcUnit):
         self.stop()
         gate = self._buffer_gate_reading(cur_lane)
         if gate is not None:
-            self.logger.debug(
-                f"AFC bambu {self.name}: {cur_lane.name} feed ended without "
-                f"the buffer calling the load; "
-                f"{self._describe_gate(gate, gate_peak)}")
+            self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} feed ended without "
+                              f"the buffer calling the load; "
+                              f"{self._describe_gate(gate, gate_peak)}")
         return False
 
     def _log_delta(self, msg: str, debug: bool = True) -> None:
@@ -13335,8 +12180,7 @@ class afcBambuAMS(afcUnit):
         if b is None:
             return None
         try:
-            return (b.last_finish()[0], b.last_switch_finish()[0],
-                    b.last_assist_done())
+            return (b.last_finish()[0], b.last_switch_finish()[0], b.last_assist_done())
         except Exception:
             return None
 
@@ -13379,10 +12223,10 @@ class afcBambuAMS(afcUnit):
                 return 0.0
             if now >= deadline:
                 return now - t0
-            # No baseline means no bridge to ask: wait out the cap.
             if base is not None:
                 cur = self._settle_seqs()
-                if cur is not None and cur != base:
+                if (cur is not None
+                    and cur != base):
                     return now - t0
             try:
                 reactor.pause(min(now + 0.05, deadline))
@@ -13424,8 +12268,7 @@ class afcBambuAMS(afcUnit):
         self.set_feed_assist(cur_lane, True)  # hold mode:4 via AP2 sync
         if tool_stn > bite:
             afc.move_e_pos(tool_stn - bite, speed, "tool stn")
-            self._log_delta(f"Bambu: tool_stn queued "
-                            f"({tool_stn - bite:.0f}mm @ {speed:.0f}mm/s)")
+            self._log_delta(f"Bambu: tool_stn queued ({tool_stn - bite:.0f}mm @ {speed:.0f}mm/s)")
 
     def unit_load_lane(self, cur_lane: Any, cur_extruder: Any = None) -> bool:
         """
@@ -13444,13 +12287,11 @@ class afcBambuAMS(afcUnit):
         :return bool: True on a verified load, False on failure
         """
         self._load_in_progress = True
-        # A fresh load puts filament back on the AMS side, so its next unload
-        # reels again.
+        # A fresh load puts filament back on the AMS side.
         if getattr(self, "_reeled_home_lane", None) == getattr(cur_lane, "name", None):
             self._reeled_home_lane = None
         if getattr(self, "_runout_drain", None) is not None:
-            afcBambuAMS._end_runout_drain(
-                self, f"{getattr(cur_lane, 'name', 'a lane')} is loading")
+            afcBambuAMS._end_runout_drain(self, f"{getattr(cur_lane, 'name', 'a lane')} is loading")
         try:
             return self._unit_load_lane(cur_lane, cur_extruder)
         finally:
@@ -13469,87 +12310,66 @@ class afcBambuAMS(afcUnit):
         :return bool: True on a verified load, False on failure
         """
         afc = self.afc
-        # A real load supersedes any manual follower override, so a forgotten
-        # AFC_BAMBU_FOLLOWER ENABLE=0 cannot leave the next print without assist.
+        # So a forgotten ENABLE=0 cannot leave the next print without assist.
         self._follow_manual_off = False
         self._follow_fault_hold = False
-        # Per-load state: a previous failure's words must not describe this one.
         self._declared_fault_text = None
         self._lite_fault_err = None
         self._lite_stall_mm = None
-        # Same for the odometer range, which locates a failure upstream or
-        # downstream of the AMS.
+        # The odometer range places a failure upstream or downstream of the AMS.
         self._load_odom_lo = None
         self._load_odom_hi = None
-        # Re-arm auto recovery (one attempt per fault), but not from inside the
-        # recovery's own attempt: that attempt runs CHANGE_TOOL, which lands
-        # here, and clearing the guard would let it retrigger itself.
+        # Not from inside the recovery: its CHANGE_TOOL lands here and would retrigger itself.
         if not getattr(self, "_in_auto_recover", False):
             self._auto_recover_armed = False
         self._follow_fault_saw_pause = False
         if cur_extruder is None:
             cur_extruder = getattr(cur_lane, "extruder_obj", None)
         if self._bridge is None:
-            self.logger.warning(
-                f"AFC bambu {self.name}: bridge not connected, cannot load "
-                f"{cur_lane.name}")
+            self.logger.warning(f"AFC bambu {self.name}: bridge not connected, cannot load "
+                                f"{cur_lane.name}")
             return False
-        # Loading while drying is allowed on all unit types; a stalled load
-        # then retries without the 0F/0E re-home (see the recovery loop).
 
-        # Claim narration for this unit while it loads: tube_len is narrated
-        # by whichever unit is feeding, and the device address cannot tell two
-        # boxed units apart.
+        # tube_len is narrated by the feeding unit; the address cannot tell two boxed units apart.
         try:
             self._bridge.set_active_unit(self.ams_index)
         except Exception:
             pass
         ok, _slot = self.select_lane(cur_lane)
         if not ok:
-            self.logger.warning(
-                f"AFC bambu {self.name}: lane {cur_lane.name} is not mapped to "
-                f"an AMS slot")
+            self.logger.warning(f"AFC bambu {self.name}: lane {cur_lane.name} is not mapped to "
+                                f"an AMS slot")
             return False
 
-        # Take the unit's own path measurement if it has one, and save it.
-        # Before one exists, DEFAULT_BOWDEN_MM is used; it is long enough for
-        # that first load to finish so the AMS can measure.
+        # DEFAULT_BOWDEN_MM is long enough for the first load to finish so the AMS can measure.
         self._adopt_measured_path()
-        # Full path from the bay when not yet staged; hub->toolhead when staged.
         if getattr(cur_lane, "loaded_to_hub", False):
             feed_dist = self.afc_bowden_length
         else:
             feed_dist = self.afc_bowden_length + DIST_HUB_MM
-        # Only a load that runs the whole path from the bay, with no re-home,
-        # may change a path length already adopted (see _adopt_measured_path).
+        # Only a full-path load with no re-home may change an adopted path length.
         self._load_full_path = not getattr(cur_lane, "loaded_to_hub", False)
 
         lite = self._is_lite()
         sensor = not lite or self._has_toolhead_sensor(cur_lane)
-        # Pre-feed guard: never push into an already-occupied toolhead.
+        # Never push into an occupied toolhead.
         if (sensor
             and self._toolhead_sensor_triggered(cur_lane)):
             afc.error.handle_lane_failure(
-                cur_lane,
-                f"Toolhead sensor already detects filament before loading "
+                cur_lane, f"Toolhead sensor already detects filament before loading "
                 f"{cur_lane.name}.\nClear the toolhead before loading (manually "
-                f"retract or run AFC_RESET for {cur_lane.name}).",
-                pause=afc.function.in_print())
+                f"retract or run AFC_RESET for {cur_lane.name}).", pause=afc.function.in_print())
             return False
 
-        # Kick the continuous feed and tight-poll the toolhead sensor. The
-        # deadline uses DEADLINE_MMPS over the whole retry cycle, not
-        # MOVE_DEADLINE_MAX_S; an AMS Lite feeds at LITE_MMPS.
+        # The deadline covers the whole retry cycle; an AMS Lite feeds at LITE_MMPS.
         speed = LITE_MMPS if self._is_lite() else DEADLINE_MMPS
         bulk_time = (feed_dist / speed) if speed > 0 else 0.0
         timeout = min(bulk_time + self.load_retry_timeout, LOAD_SENSOR_MAX_S)
-        # An AMS Lite reports how far it has fed, so its load also stops at
-        # the path plus LITE_OVERFEED_MM (see _feed_until_sensor).
+        # An AMS Lite reports how far it fed, so its load also stops at the path plus
+        # LITE_OVERFEED_MM.
         limit_mm = (self.afc_bowden_length + LITE_OVERFEED_MM
                     if self._is_lite() else None)
-        # A lane fed from a spool inserted this session travels the learned
-        # path; any other lane may be parked anywhere, so it has no expected
-        # travel and no jam is called on it.
+        # Only a spool inserted this session has a known travel; elsewhere no jam is called.
         slot = self._slot_of(cur_lane)
         fresh = getattr(self, "_lite_fresh", None) or set()
         expect_mm = (self.afc_bowden_length
@@ -13558,65 +12378,49 @@ class afcBambuAMS(afcUnit):
                          and self.afc_bowden_length != DEFAULT_BOWDEN_MM)
                      else None)
         self._load_overfed = None
-        # The odometer before any move; the sensor distance is the delta (see
-        # _measure_path_from_odom).
         self._load_odom_start = self._feed_odom_mm(cur_lane)
         self._load_odom_at_sensor = None
-        # Freshness mark for the spool measurement this load may produce, so a
-        # reading left in the bridge from an earlier load is not adopted as
-        # this one's.
+        # So a reading left from an earlier load is not adopted as this one's.
         self._load_t0 = afc.reactor.monotonic()
-        # Prime the bay before feeding (boxed units): a busy unit skips its preload and
-        # mode 03 cannot move filament the feeder has not brought up. Not while drying,
-        # where the prime reads as a follower arm a stock printer never sends.
+        # A busy unit skips its preload, and mode 03 cannot move filament the feeder has not
+        # brought up. Not while drying, where a prime reads as a follower arm.
         _dry_now = False
         try:
             _dry_now = self._heating_now()
         except Exception:
-            _dry_now = False           # never let a state read stop a load
+            _dry_now = False
         if _dry_now:
-            self.logger.debug(
-                f"AFC bambu {self.name}: skipping the pre-load prime -- the "
-                f"chamber is drying and mode 09/7F arms the follower before "
-                f"the select, which the printer never does")
+            self.logger.debug(f"AFC bambu {self.name}: skipping the pre-load prime -- the "
+                              f"chamber is drying and mode 09/7F arms the follower before "
+                              f"the select, which the printer never does")
         if (not self._is_ht()
             and not self._is_lite()
             and not _dry_now):
             try:
                 slot = self._slot_of(cur_lane)
                 if slot is not None:
-                    self._bridge.send({"cmd": "prime",
-                                       "unit": self.ams_index, "slot": slot})
+                    self._bridge.send({"cmd": "prime", "unit": self.ams_index, "slot": slot})
             except Exception:
-                # Never fail the load over staging, but log it so a failed
-                # prime is distinguishable from one that was skipped.
-                self.logger.debug(
-                    f"AFC bambu {self.name}: pre-load prime failed",
-                    traceback=traceback.format_exc())
+                # So a failed prime can be told from a skipped one.
+                self.logger.debug(f"AFC bambu {self.name}: pre-load prime failed",
+                                  traceback=traceback.format_exc())
         self.feed(cur_lane, feed_dist)
-        loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm,
-                                         expect_mm)
-        # Printer "Retry": re-home the stalled unit (0F/0E) and feed again. A
-        # unit that declared a fault already ran its own retries, so it gets
-        # none and the failure is reported now, like a stock printer waiting
-        # for Retry (AFC_BAMBU_FAULT_RELOAD).
+        loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm, expect_mm)
+        # Printer "Retry": re-home (0F/0E) and feed again. A unit that declared a fault already
+        # retried, so it fails now, like a stock printer waiting for Retry.
         attempts = self.load_recover_attempts
         if (self._declared_fault_text
-                and attempts > 0
-                and not loaded):
+            and attempts > 0
+            and not loaded):
             attempts = 0
-            self.logger.info(
-                f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
-                f"fault after its own retries, so there is no re-home retry; "
-                f"reporting the failure now.")
-        # Nor for a feed past its path: a retry would feed the same out again.
-        # Nor for an AMS Lite that reported its own stall: the A1 leaves that
-        # retry to its user.
+            self.logger.info(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
+                             f"fault after its own retries, so there is no re-home retry; "
+                             f"reporting the failure now.")
+        # A retry would feed past the path again, and the A1 leaves its own stall to its user.
         if (self._load_overfed is not None
             or getattr(self, "_lite_fault_err", None) is not None):
             attempts = 0
-        # No retry for a unit that is not listening (dropped its tray
-        # selection); checked every round, scoped to _load_t0.
+        # A unit that dropped its tray selection is not listening.
         def _not_listening() -> str:
             """
             Describe why the unit is not answering, for the error text.
@@ -13628,9 +12432,7 @@ class afcBambuAMS(afcUnit):
                 _br = self._bridge
                 if _br is None:
                     return ""
-                # A down link is the answer: the give-up test relies on what
-                # the unit said, so rounds would run in full against an
-                # unreachable bus.
+                # The give-up test relies on what the unit said, so rounds would run in full.
                 if not _br.is_connected():
                     return "the link to it is down"
                 if not _br.gave_up_since(self._load_t0, addr=_addr):
@@ -13638,103 +12440,88 @@ class afcBambuAMS(afcUnit):
                 _no_tray = _br.no_tray_since(self._load_t0, addr=_addr)
                 _dropped = _br.writes_dropped_since(self._load_t0)
             except Exception:
-                return ""                        # never block a live load
+                return ""
             return " and ".join(
                 w for w, on in (
                     ("it is rejecting moves with no tray selected", _no_tray),
                     ("the bridge is dropping commands to it", _dropped))
                 if on)
         recover = 0
-        while not loaded and recover < attempts:
+        while (not loaded
+               and recover < attempts):
             why = _not_listening()
             if why:
-                self.logger.info(
-                    f"AFC bambu {self.name}: {cur_lane.name} -- the AMS gave "
-                    f"up AND {why}, so it is not listening; failing now "
-                    f"instead of re-homing into a unit that cannot answer. "
-                    f"{_RETRY_HINT}.")
+                self.logger.info(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS gave "
+                                 f"up AND {why}, so it is not listening; failing now "
+                                 f"instead of re-homing into a unit that cannot answer. "
+                                 f"{_RETRY_HINT}.")
                 break
             recover += 1
-            # A re-home parks the unit and unstages the bay, and a drying unit
-            # holds its preload, so tray_exit clears and every retry feeds an
-            # "empty" bay. While drying, retry the feed without the park.
+            # A re-home unstages the bay and a drying unit holds its preload, so every retry would
+            # feed an "empty" bay.
             _hot = False
             try:
                 _hot = self._heating_now()
             except Exception:
-                _hot = False               # never let a state read stop a load
+                _hot = False
             _how = ("retrying without the re-home -- the chamber is drying "
                     "and a park would unstage the bay" if _hot
                     else "re-homing AMS and retrying")
-            self.logger.info(
-                f"AFC bambu {self.name}: load of {cur_lane.name} stalled; "
-                f"{_how} (recover {recover}/{attempts})")
-            self.stop()                          # halt before the reset motion
+            self.logger.info(f"AFC bambu {self.name}: load of {cur_lane.name} stalled; "
+                             f"{_how} (recover {recover}/{attempts})")
+            self.stop()
             if not _hot:
-                self.rehome()                    # ~3s mode-0F/0E re-home reset
-            # Re-baseline after the re-home: mode 0F/0E is a reset and the
-            # odometer moves with it, so a delta measured from before it would
-            # be the re-home's motion plus the load's, not the path.
+                self.rehome()  # ~3 s mode-0F/0E reset
+            # The odometer moves with the re-home.
             self._load_odom_start = self._feed_odom_mm(cur_lane)
-            self._load_full_path = False         # restarts partway along
-            self.feed(cur_lane, feed_dist)       # re-attempt the load
-            loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm,
-                                             expect_mm)
-        # The tip has moved, so the bay no longer holds a fresh spool's.
+            self._load_full_path = False
+            self.feed(cur_lane, feed_dist)
+            loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm, expect_mm)
         fresh.discard(slot)
         if not loaded:
-            # Read before any reel back, which moves the odometer too.
+            # Before any reel back, which moves the odometer too.
             try:
                 span = self._load_odom_span_mm()
             except Exception:
                 span = None
-            # The AMS retries loads on its own, so by default the filament is
-            # not reeled back on a miss (that would fight the AMS's attempts).
-            # It is left staged; unwind only when reel_back_on_load_fail is set.
-            # A unit that declared a fault is past its retries, so its
-            # filament is reeled into the bay, which also clears the hub for
-            # a retry.
+            # The AMS retries loads itself, so a miss stays staged unless reel_back_on_load_fail is
+            # set. A unit that declared a fault is past its retries, so it reels into the bay.
             reeled = False
             if self._declared_fault_text:
                 try:
                     reeled = self.eject_lane(cur_lane)
                 except Exception as e:
-                    self.logger.warning(
-                        f"AFC bambu {self.name}: reel-back after failed load "
-                        f"of {cur_lane.name} did not complete: {e}")
+                    self.logger.warning(f"AFC bambu {self.name}: reel-back after failed load "
+                                        f"of {cur_lane.name} did not complete: {e}")
                 tail = ("reeled it back to the bay" if reeled
                         else "could not reel it back -- clear the path manually")
             elif self.reel_back_on_load_fail:
-                self.stop()      # stop before reversing the direction
+                self.stop()
                 try:
                     self.retract(cur_lane, feed_dist)
                     self._wait_move(feed_dist)
-                    self.bridge_unload(cur_lane)  # AMS multi-stage unwind to bay
+                    self.bridge_unload(cur_lane)  # multi-stage unwind to bay
                     cur_lane.loaded_to_hub = False
                     reeled = True
                 except Exception as e:
-                    self.logger.warning(
-                        f"AFC bambu {self.name}: unload-back after failed load "
-                        f"of {cur_lane.name} did not complete: {e}")
+                    self.logger.warning(f"AFC bambu {self.name}: unload-back after failed load "
+                                        f"of {cur_lane.name} did not complete: {e}")
                 finally:
                     self.stop()
                 tail = ("reeled it back to the bay" if reeled
                         else "could not reel it back -- clear the path manually")
             else:
-                # Leave the AMS as-is (still staged/retrying); do not stop it.
                 tail = ("left it staged -- the AMS keeps retrying; clear "
                         "the path manually if it can't finish")
-            # A load that ended because the AMS gave up is a different failure
-            # from one that ran out of time, so quote the unit when it spoke.
+            # Quote the unit when it gave up, since that differs from running out of time.
             lite_err = getattr(self, "_lite_fault_err", None)
             if lite_err is not None:
-                cause = self._lite_stall_cause(
-                    cur_lane, lite_err, getattr(self, "_lite_stall_mm", None),
-                    expect_mm, sensor)
+                cause = self._lite_stall_cause(cur_lane, lite_err,
+                                               getattr(self, "_lite_stall_mm", None),
+                                               expect_mm, sensor)
             elif self._declared_fault_text:
                 cause = (f"The AMS declared a fault during the load and stopped "
-                         f"trying; {tail}.\nAMS said: "
-                         f"{_fault_reason(self._declared_fault_text)}\n"
+                         f"trying; {tail}.\nAMS said: {_fault_reason(self._declared_fault_text)}\n"
                          f"Clear the path at the unit. {_RETRY_HINT}.")
             elif self._load_overfed is not None:
                 end = ("reached the toolhead sensor" if sensor
@@ -13745,15 +12532,13 @@ class afcBambuAMS(afcUnit):
                          f"{self._load_overfed:.0f}mm, past its {limit_mm:.0f}mm "
                          f"limit (the {self.afc_bowden_length:.0f}mm path plus "
                          f"{LITE_OVERFEED_MM:.0f}mm), and it never {end}, so "
-                         f"the feed was stopped.\n"
-                         f"Check that the tube from the AMS Lite to the "
+                         f"the feed was stopped.\nCheck that the tube from the AMS Lite to the "
                          f"toolhead is connected{check}. {_RETRY_HINT}.")
             elif not sensor:
                 cause = (f"The AMS Lite never showed where {cur_lane.name} "
                          f"stopped within {timeout:.0f}s; {tail}.\n"
                          f"With no toolhead sensor its odometer ends the "
-                         f"load, so check that the bridge is reporting it. "
-                         f"{_RETRY_HINT}.")
+                         f"load, so check that the bridge is reporting it. {_RETRY_HINT}.")
             else:
                 cause = (f"Filament did not reach the toolhead sensor for "
                          f"{cur_lane.name} within {timeout:.0f}s; {tail}.\n"
@@ -13761,9 +12546,7 @@ class afcBambuAMS(afcUnit):
                          f"that the toolhead sensor is reading. The AMS meters "
                          f"this feed itself, so the distance is not a setting "
                          f"to tune.\n{_RETRY_HINT}.")
-            # How far the odometer went separates a blockage upstream of the
-            # AMS from one downstream. The raw span is quoted to compare with
-            # the tube length. A feed past its limit has already said where.
+            # The odometer span places a blockage upstream or downstream of the AMS.
             try:
                 where = self._jam_location(span)
             except Exception:
@@ -13771,61 +12554,49 @@ class afcBambuAMS(afcUnit):
             if (where
                 and self._load_overfed is None):
                 cause = f"{cause}\n{where}"
-            # A load that gave up owes a reload on RESUME. The mid-print stall
-            # detector never runs for it, so mark the reload here along with
-            # _fault_lane, which _resume_reload_target reads for the lane.
+            # The mid-print stall detector never runs for it; _resume_reload_target reads
+            # _fault_lane.
             if afc.function.in_print():
                 self._fault_lane = cur_lane
                 self._resume_needs_reload = True
             else:
                 self._failed_load_lane = cur_lane
-            afc.error.handle_lane_failure(
-                cur_lane, cause, pause=afc.function.in_print())
+            afc.error.handle_lane_failure(cur_lane, cause, pause=afc.function.in_print())
             return False
 
-        # The bowden feed is the biggest and most variable part of a Bambu
-        # load (it includes any AMS retries), so it gets its own marker.
+        # The bowden feed is the biggest and most variable part (it includes AMS retries).
         self._log_delta("Bambu: fed to toolhead sensor")
 
-        # Sensor hit and the AMS is already stopped (inside _feed_until_sensor).
-        # Tell it the load is complete (mode-07 "STEP7:finish") so it commits.
+        # mode-07 "STEP7:finish" so the load commits.
         self.bridge_finish(cur_lane)
         if (lite
             and getattr(self, "_lite_fault_err", None) is not None):
-            # A sensorless AMS Lite that flagged its own stall at the gears:
-            # clear it (00), then hold the tray for the extruder. The grip
-            # check below tells the gears from a stuck spool.
-            self.logger.info(
-                f"AFC bambu {self.name}: the AMS Lite stopped {cur_lane.name} "
-                f"itself ({self._lite_fault_words(self._lite_fault_err)}); "
-                f"clearing it and checking that the extruder takes it")
+            # A sensorless AMS Lite flagged a stall at the gears: clear it, hold the tray. The grip
+            # check tells the gears from a stuck spool.
+            self.logger.info(f"AFC bambu {self.name}: the AMS Lite stopped {cur_lane.name} "
+                             f"itself ({self._lite_fault_words(self._lite_fault_err)}); "
+                             f"clearing it and checking that the extruder takes it")
             self.rehome()
             afc.reactor.pause(afc.reactor.monotonic() + LITE_CLEAR_S)
             self.select_lane(cur_lane)
-        # What has left the tray so far (an AMS Lite), or where the buffer
-        # sits (a boxed unit), for the grip check.
         grip0 = self._feed_odom_mm(cur_lane) if lite else None
         mark = None if lite else self._grip_mark()
 
-        # Advance to the nozzle and engage the follower (mode:4) for the print.
-        # No re-select at arrival: a mode-09 select pulls the tray back and
-        # jams.
+        # No re-select at arrival: a mode-09 select pulls the tray back and jams.
         try:
             self._advance_into_extruder(cur_lane, cur_extruder)
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu {self.name}: tool_stn advance failed for "
-                f"{cur_lane.name}: {e}")
+            self.logger.warning(f"AFC bambu {self.name}: tool_stn advance failed for "
+                                f"{cur_lane.name}: {e}")
             self.stop()
 
-        # The sensor has the last word: the filament can fall back after the
-        # trigger (e.g. a dead link dropping the assist during the advance),
-        # so re-read the sensor after the advance.
+        # The filament can fall back after the trigger, such as a dead link dropping the assist.
         if (sensor
             and not self._toolhead_sensor_triggered(cur_lane)):
             dropped = ""
             try:
-                if self._bridge is not None and not self._bridge.is_connected():
+                if (self._bridge is not None
+                    and not self._bridge.is_connected()):
                     dropped = (" The link to the bridge is down, so the assist "
                                "that holds the filament through the advance was "
                                "dropped -- restore it before retrying.")
@@ -13843,42 +12614,37 @@ class afcBambuAMS(afcUnit):
                 self._resume_needs_reload = True
             else:
                 self._failed_load_lane = cur_lane
-            afc.error.handle_lane_failure(
-                cur_lane, cause, pause=afc.function.in_print())
+            afc.error.handle_lane_failure(cur_lane, cause, pause=afc.function.in_print())
             return False
         if lite:
             cause = self._lite_grip_check(cur_lane, cur_extruder, grip0)
         else:
             cause = self._boxed_grip_check(cur_lane, cur_extruder, mark)
             tries = 0
-            while cause is not None and tries < GRIP_RETRIES:
+            while (cause is not None
+                   and tries < GRIP_RETRIES):
                 tries += 1
-                self.logger.info(
-                    f"AFC bambu {self.name}: {cause} Backing it off "
-                    f"{GRIP_BACK_MM:.0f}mm and feeding it again "
-                    f"({tries}/{GRIP_RETRIES}).")
-                mark = self._grip_refeed(cur_lane, cur_extruder, feed_dist,
-                                         timeout)
+                self.logger.info(f"AFC bambu {self.name}: {cause} Backing it off "
+                                 f"{GRIP_BACK_MM:.0f}mm and feeding it again "
+                                 f"({tries}/{GRIP_RETRIES}).")
+                mark = self._grip_refeed(cur_lane, cur_extruder, feed_dist, timeout)
                 if mark is None:
                     cause = (f"{cur_lane.name} was backed off "
                              f"{GRIP_BACK_MM:.0f}mm because the extruder did "
                              f"not take it, and the feed did not bring it "
-                             f"back to the toolhead sensor within "
-                             f"{timeout:.0f}s.")
+                             f"back to the toolhead sensor within {timeout:.0f}s.")
                     break
                 cause = self._boxed_grip_check(cur_lane, cur_extruder, mark)
             if cause is not None:
                 again = ""
                 if mark is not None:
-                    # Off the gears, so a reload starts from a clear toolhead.
                     self._grip_back_off(cur_lane, cur_extruder)
                     again = (" Backing it off and feeding it again did not "
                              "help, so it was left backed off "
                              f"{GRIP_BACK_MM:.0f}mm." if tries else
                              f" It was backed off {GRIP_BACK_MM:.0f}mm.")
                 cause = (f"{cause}{again}\nCheck that the filament reaches "
-                         f"the extruder gears and that they turn. "
-                         f"{_RETRY_HINT}.")
+                         f"the extruder gears and that they turn. {_RETRY_HINT}.")
         if cause is not None:
             self.stop()
             if afc.function.in_print():
@@ -13886,19 +12652,14 @@ class afcBambuAMS(afcUnit):
                 self._resume_needs_reload = True
             else:
                 self._failed_load_lane = cur_lane
-            afc.error.handle_lane_failure(
-                cur_lane, cause, pause=afc.function.in_print())
+            afc.error.handle_lane_failure(cur_lane, cause, pause=afc.function.in_print())
             return False
         cur_lane.loaded_to_hub = True
         cur_lane.status = AFCLaneState.TOOL_LOADED
         self._failed_load_lane = None
-        # Acknowledge anything the AMS complained about during this load, so
-        # the follower's first tick does not report its own retries as a
-        # fault. Reaching the toolhead sensor settles those stalls.
+        # So the follower's first tick does not report the load's retries as a fault.
         self._ack_faults()
-        # Adopt the path measurement again: the unit reports it at the end of a
-        # load. Odometer first, tube_len as fallback. Every completed load may
-        # update it (see _adopt_measured_path).
+        # The unit reports it at the end of a load; odometer first, tube_len as fallback.
         _mm, _src = self._path_measurement()
         self._path_wait_load = False
         self._adopt_measured_path(_mm, _src, update=True)
@@ -13916,8 +12677,7 @@ class afcBambuAMS(afcUnit):
 
         :return list: the slot records for bays this unit has
         """
-        # `scanning` is true from arm until the window closes, so a consumer
-        # can tell "not yet" from "no tag" while a read-plus-measure runs.
+        # So a consumer can tell "not yet" from "no tag".
         out = []
         for i, info in enumerate(self._slots[:self.unit_slots]):
             rec = dict(info) if isinstance(info, dict) else info
@@ -13925,7 +12685,7 @@ class afcBambuAMS(afcUnit):
                 if isinstance(rec, dict):
                     rec["scanning"] = bool(self._scan_in_flight(i))
             except Exception:
-                pass          # a status field must never break the status frame
+                pass  # must never break the status frame
             out.append(rec)
         return out
 
@@ -13949,10 +12709,12 @@ class afcBambuAMS(afcUnit):
         except Exception:
             return False
         for unit in units:
-            if unit is self or not isinstance(unit, afcBambuAMS):
+            if (unit is self
+                or not isinstance(unit, afcBambuAMS)):
                 continue
             for other in (getattr(unit, "_slots", None) or []):
-                if not other or not other.get("present"):
+                if (not other
+                    or not other.get("present")):
                     continue
                 if (other.get("rfid_uid") or "").strip().lower() == uid:
                     return True
@@ -13977,16 +12739,14 @@ class afcBambuAMS(afcUnit):
         try:
             if getattr(lane, "spool_id", None) in (None, "", 0):
                 return
-            self.logger.debug(
-                f"AFC bambu {self.name}: unbinding {lane.name} from spool "
-                f"{lane.spool_id} -- {reason}")
+            self.logger.debug(f"AFC bambu {self.name}: unbinding {lane.name} from spool "
+                              f"{lane.spool_id} -- {reason}")
             lane.spool_id = ''
             restore = getattr(self, "_restore_config_tare", None)
             if restore is not None:
                 restore(lane)
         except Exception as e:
-            self.logger.debug(
-                f"AFC bambu {self.name}: could not unbind {lane}: {e}")
+            self.logger.debug(f"AFC bambu {self.name}: could not unbind {lane}: {e}")
 
     def _restore_config_tare(self, lane: Any) -> None:
         """
@@ -14006,17 +12766,12 @@ class afcBambuAMS(afcUnit):
             cfg = getattr(lane, "_config", None)
             if cfg is None:
                 return
-            lane.empty_spool_weight = cfg.getfloat(
-                "empty_spool_weight", 190, minval=1)
+            lane.empty_spool_weight = cfg.getfloat("empty_spool_weight", 190, minval=1)
         except Exception:
             pass
-    # ── Spoolman shims ──
-    #
-    # These forward to AFC_BambuAMS_rfid when an [AFC_BambuAMS_rfid] section
-    # exists and no-op without it.
+    # Spoolman shims, forwarded to AFC_BambuAMS_rfid when its section exists
 
-    #: The Spoolman delegate, or None. Class attributes so the lookup can be
-    #: lazy and an object that skipped __init__ still reads as "no Spoolman".
+    #: Class attributes, so an object that skipped __init__ still reads as "no Spoolman".
     _spool_obj: Any = None
     _spool_looked_up: bool = False
 
@@ -14037,19 +12792,14 @@ class afcBambuAMS(afcUnit):
                 if rfid is not None:
                     self._spool_obj = rfid.for_unit(self)
             except Exception:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: could not attach the Spoolman "
-                    f"module", traceback=traceback.format_exc())
+                self.logger.debug(f"AFC bambu {self.name}: could not attach the Spoolman module",
+                                  traceback=traceback.format_exc())
                 self._spool_obj = None
         return self._spool_obj
 
-    # ── The measurement's owner ──
-    #
-    # _measure is the delegate or, without one, a Spoolman-off BambuSpoolman.
-    # Spoolman itself stays on _spool.
+    # The measurement's owner: the delegate, or a Spoolman-off BambuSpoolman
 
-    #: The measurement-only delegate, built on first use when no Spoolman
-    #: delegate exists. Class attributes for the same reason as _spool_obj.
+    #: Built on first use when no Spoolman delegate exists.
     _meas_obj: Any = None
     _meas_looked_up: bool = False
 
@@ -14075,10 +12825,9 @@ class afcBambuAMS(afcUnit):
                 from extras.AFC_BambuAMS_rfid import measurement_only
                 self._meas_obj = measurement_only(self)
             except Exception:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: could not build the measurement "
-                    f"delegate -- measurements will not reach the lanes",
-                    traceback=traceback.format_exc())
+                self.logger.debug(f"AFC bambu {self.name}: could not build the measurement "
+                                  f"delegate -- measurements will not reach the lanes",
+                                  traceback=traceback.format_exc())
                 self._meas_obj = None
         return self._meas_obj
 
@@ -14118,7 +12867,8 @@ class afcBambuAMS(afcUnit):
             objs = [self, getattr(self, "_spool", None)]
         out: List[Any] = []
         for o in objs:
-            if o is not None and all(o is not x for x in out):
+            if (o is not None
+                and all(o is not x for x in out)):
                 out.append(o)
         return out
 
@@ -14136,7 +12886,7 @@ class afcBambuAMS(afcUnit):
             return {}
         held: dict = {}
         try:
-            # Unit first, so a delegate's figure (the live one) wins a clash.
+            # So a delegate's live figure wins a clash.
             for o in afcBambuAMS._built_measure_objs(self):
                 held.update(getattr(o, "_measured_remain", None) or {})
         except Exception:
@@ -14205,7 +12955,8 @@ class afcBambuAMS(afcUnit):
         :param sl: the bay's published slot dict (its weight is the nominal)
         :return Optional[int]: 0..100, or None when the lane cannot say
         """
-        if getattr(self, "pool", False) or slot is None:
+        if (getattr(self, "pool", False)
+            or slot is None):
             return None
         try:
             nominal = float(sl.get("weight") or 0)
@@ -14259,7 +13010,8 @@ class afcBambuAMS(afcUnit):
         sp = getattr(self, "_spool", None)
         if not sp:
             return
-        if len(args) >= 2 and isinstance(args[1], dict):
+        if (len(args) >= 2
+            and isinstance(args[1], dict)):
             afcBambuAMS._answer_binding_check(self, sp, args[0], args[1])
         sp._spoolman_sync(*args, **kwargs)
 
@@ -14280,13 +13032,13 @@ class afcBambuAMS(afcUnit):
         try:
             for o in afcBambuAMS._built_measure_objs(self):
                 fn = getattr(o, "_apply_remain_weight", None)
-                if o is not self and callable(fn):
+                if (o is not self
+                    and callable(fn)):
                     fn(*args, **kwargs)
         except Exception:
             try:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: owed measurement follow-up "
-                    f"failed", traceback=traceback.format_exc())
+                self.logger.debug(f"AFC bambu {self.name}: owed measurement follow-up failed",
+                                  traceback=traceback.format_exc())
             except Exception:
                 pass
 
@@ -14310,15 +13062,11 @@ class afcBambuAMS(afcUnit):
             return bool(sp._adopt_measured_remain(*args, **kwargs)) if sp else False
         except Exception as e:
             try:
-                # The raise can come after the lane was written (the summary,
-                # the save), so the message does not claim the lane is
-                # unchanged; the traceback says where it failed.
-                self.logger.warning(
-                    f"AFC bambu {self.name}: could not apply a measurement "
-                    f"({e}); the log has where it failed")
-                self.logger.debug(
-                    f"AFC bambu {self.name}: measurement apply failed",
-                    traceback=traceback.format_exc())
+                # The raise can come after the lane was written; the traceback says where.
+                self.logger.warning(f"AFC bambu {self.name}: could not apply a measurement "
+                                    f"({e}); the log has where it failed")
+                self.logger.debug(f"AFC bambu {self.name}: measurement apply failed",
+                                  traceback=traceback.format_exc())
             except Exception:
                 pass
             return False
@@ -14338,9 +13086,8 @@ class afcBambuAMS(afcUnit):
             if sp: sp._drain_spool_summary(*args, **kwargs)
         except Exception:
             try:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: spool summary failed",
-                    traceback=traceback.format_exc())
+                self.logger.debug(f"AFC bambu {self.name}: spool summary failed",
+                                  traceback=traceback.format_exc())
             except Exception:
                 pass
 
@@ -14354,14 +13101,11 @@ class afcBambuAMS(afcUnit):
         getf = getattr(self._bridge, "last_fault", None) if self._bridge else None
         if callable(getf):
             try:
-                self._fault_seen = getf(
-                    unit=getattr(self, "ams_index", None))[0]
+                self._fault_seen = getf(unit=getattr(self, "ams_index", None))[0]
             except Exception:
                 pass
 
-    #: How long to let a re-home settle before re-reading the unit's state.
-    #: The motion itself is ~3s (mode 0F/0E); a little over that lets the
-    #: state byte catch up without stalling the unload.
+    #: The 0F/0E motion is ~3 s; a little over that lets the state byte catch up.
     REHOME_SETTLE_S = 3.5
 
     def _clear_latched_error(self, lane: Any, what: str) -> bool:
@@ -14398,30 +13142,24 @@ class afcBambuAMS(afcUnit):
         if before != self.AMS_STATE_STALLED:
             return True
 
-        self.logger.debug(
-            f"AFC bambu {self.name}: unit is latched in error (state "
-            f"{before}) before {what} for {lane.name}, re-homing to clear it "
-            f"first")
+        self.logger.debug(f"AFC bambu {self.name}: unit is latched in error (state "
+                          f"{before}) before {what} for {lane.name}, re-homing to clear it first")
         try:
             self.rehome()
-            self.afc.reactor.pause(
-                self.afc.reactor.monotonic() + self.REHOME_SETTLE_S)
+            self.afc.reactor.pause(self.afc.reactor.monotonic() + self.REHOME_SETTLE_S)
             after = self._unit_state(self._bridge.latest_status())
         except Exception:
-            self.logger.debug(
-                f"AFC bambu {self.name}: re-home for {lane.name} raised",
-                traceback=traceback.format_exc())
+            self.logger.debug(f"AFC bambu {self.name}: re-home for {lane.name} raised",
+                              traceback=traceback.format_exc())
             return True
 
         if after == self.AMS_STATE_STALLED:
-            self.logger.warning(
-                f"AFC bambu {self.name}: {lane.name}, the unit would not "
-                f"leave its error state after a re-home, so it is jammed "
-                f"rather than merely latched. Not sending {what}.")
+            self.logger.warning(f"AFC bambu {self.name}: {lane.name}, the unit would not "
+                                f"leave its error state after a re-home, so it is jammed "
+                                f"rather than merely latched. Not sending {what}.")
             return False
-        self.logger.debug(
-            f"AFC bambu {self.name}: {lane.name}, error cleared by the "
-            f"re-home (state {before} -> {after}), continuing with {what}")
+        self.logger.debug(f"AFC bambu {self.name}: {lane.name}, error cleared by the "
+                          f"re-home (state {before} -> {after}), continuing with {what}")
         return True
 
     def _unload_ran_out(self, cur_lane: Any, cur_extruder: Any) -> bool:
@@ -14439,21 +13177,19 @@ class afcBambuAMS(afcUnit):
         :return bool: True; the toolhead side is done
         """
         afc = self.afc
-        # A unit latched in its stalled state feeds nothing.
+        # A latched unit feeds nothing.
         self._clear_latched_error(cur_lane, "pushing the leftover out")
         self.set_feed_assist(cur_lane, True)
         cur_lane.unsync_to_extruder()
         if cur_extruder.tool_stn_unload > 0:
-            afc.move_e_pos(cur_extruder.tool_stn_unload * -1,
-                           cur_extruder.tool_unload_speed, "STN unload",
-                           wait_tool=True)
-        self.logger.warning(
-            f"AFC bambu {self.name}: {cur_lane.name} ran out, so its leftover "
-            f"filament cannot be reeled back into the AMS. Skipped the AMS "
-            f"retract; the follower keeps pushing so the leftover can be "
-            f"pulled out of {cur_lane.name}'s path, until the hub sensor reads "
-            f"it gone, a spool goes into its bay, a lane on {self.name} "
-            f"loads, or AFC_BAMBU_FOLLOWER LANE={cur_lane.name} ENABLE=0.")
+            afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
+                           "STN unload", wait_tool=True)
+        self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} ran out, so its leftover "
+                            f"filament cannot be reeled back into the AMS. Skipped the AMS "
+                            f"retract; the follower keeps pushing so the leftover can be "
+                            f"pulled out of {cur_lane.name}'s path, until the hub sensor reads "
+                            f"it gone, a spool goes into its bay, a lane on {self.name} "
+                            f"loads, or AFC_BAMBU_FOLLOWER LANE={cur_lane.name} ENABLE=0.")
         cur_lane.set_tool_unloaded(normal_toolchange=True)
         cur_lane.status = AFCLaneState.NONE
         cur_lane.loaded_to_hub = False
@@ -14479,107 +13215,77 @@ class afcBambuAMS(afcUnit):
         afc = self.afc
         if cur_extruder is None:
             cur_extruder = getattr(cur_lane, "extruder_obj", None)
-        # An earlier unload left this lane half done: the AMS reeled it home and
-        # only the toolhead held on. Nothing is left to reel, so the toolhead
-        # sensor alone decides (the hub sensor, when a buffer stands in for it).
+        # An earlier unload reeled this lane home and only the toolhead held on: the sensor decides.
         if getattr(self, "_reeled_home_lane", None) == cur_lane.name:
             sensor = self._left_filament_at(cur_lane)
             if self._unload_left_filament(cur_lane):
                 in_print = afc.function.in_print()
                 afc.error.handle_lane_failure(
-                    cur_lane,
-                    f"AFC bambu unload of {cur_lane.name}: the AMS already "
+                    cur_lane, f"AFC bambu unload of {cur_lane.name}: the AMS already "
                     f"reeled it home, but the {sensor} still sees "
-                    f"filament. {self._clear_toolhead_hint(in_print)}",
-                    pause=in_print)
+                    f"filament. {self._clear_toolhead_hint(in_print)}", pause=in_print)
                 return False
-            self.logger.debug(
-                f"AFC bambu {self.name}: the {sensor} is clear and the "
-                f"AMS already reeled {cur_lane.name} home, so it is unloaded")
+            self.logger.debug(f"AFC bambu {self.name}: the {sensor} is clear and the "
+                              f"AMS already reeled {cur_lane.name} home, so it is unloaded")
             return self._finish_unload(cur_lane)
         if self._bridge is None:
-            self.logger.warning(
-                f"AFC bambu {self.name}: bridge not connected, cannot unload "
-                f"{cur_lane.name}")
+            self.logger.warning(f"AFC bambu {self.name}: bridge not connected, cannot unload "
+                                f"{cur_lane.name}")
             return False
 
-        # A lane that ran out (its tail is past the feeder), or whose bay reads
-        # empty behind it after a restart: the AMS cannot reel it back.
+        # The AMS cannot reel back a run-out lane or one whose bay reads empty after a restart.
         runout_empty = (cur_lane.name in self._runout_empty
                         or afcBambuAMS._bay_ran_out(self, cur_lane))
         self._runout_empty.discard(cur_lane.name)
         cur_lane.status = AFCLaneState.TOOL_UNLOADING
         self._unload_in_progress = True
-        # The follower stand-down for this unload is the explicit assist-off
-        # (set_feed_assist(False)) below, before the retract.
+        # The stand-down is the explicit assist-off below.
         try:
-            # Shared toolhead phase. do_tool_cut_tip_form self-gates on
-            # tool_cut/form_tip, so it's a no-op when both are disabled.
-            afc.move_e_pos(-2, cur_extruder.tool_unload_speed, "Quick Pull",
-                           wait_tool=False)
+            # do_tool_cut_tip_form gates on tool_cut/form_tip itself.
+            afc.move_e_pos(-2, cur_extruder.tool_unload_speed, "Quick Pull", wait_tool=False)
             cur_lane.disable_buffer()
             cur_lane.sync_to_extruder()
             cur_lane.select_lane()
-            # The assist takes up the tip-forming retracts. A unit that dropped
-            # it (an overfeed stop, a latched error) leaves them pushing into a
-            # path nothing takes up, so the extruder stalls on the tip. A lane
-            # that ran out has nothing to take up; its own path handles it.
+            # The assist takes up the tip-forming retracts; without it the extruder stalls.
             if not runout_empty:
                 self._clear_latched_error(cur_lane, "tip forming")
                 self.set_feed_assist(cur_lane, True)
             afc.do_tool_cut_tip_form(cur_lane, cur_extruder)
 
             if runout_empty:
-                return afcBambuAMS._unload_ran_out(
-                    self, cur_lane, cur_extruder)
+                return afcBambuAMS._unload_ran_out(self, cur_lane, cur_extruder)
 
-            # Stop feed assist, unsync the extruder, and hard-STOP first: a
-            # unit still streaming mode 03 swallows the retract. Same as the
-            # eject path.
+            # A unit still streaming mode 03 swallows the retract. Same as the eject path.
             self.set_feed_assist(cur_lane, False)
             self.stop()
             cur_lane.unsync_to_extruder()
 
-            # Clear a latched unit before any filament is driven at it, including
-            # the STN retracts below: a unit in its error state takes up nothing,
-            # so the filament buckles at the bay entry.
+            # A latched unit takes up nothing, so the filament buckles at the bay entry.
             self._clear_latched_error(cur_lane, "the toolhead retract")
 
-            # 1) Full STN unload: drive the tip fully out of the extruder gears
-            #    and wait for it to finish before the AMS starts reeling, so the
-            #    filament has cleared the hotend/gears first.
+            # 1) Drive the tip fully out of the gears before the AMS reels.
             if cur_extruder.tool_stn_unload > 0:
-                afc.move_e_pos(cur_extruder.tool_stn_unload * -1,
-                               cur_extruder.tool_unload_speed, "STN unload",
-                               wait_tool=True)
-            # 2) Reel the bowden back while an async STN-unload retract keeps
-            #    the
-            #    extruder gears driving toward the AMS, so it never drags against
-            #    holding gears. Queue the retract first so the two overlap.
+                afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
+                               "STN unload", wait_tool=True)
+            # 2) Reel while an async STN retract keeps the gears driving toward the AMS.
             retract_dist = self.afc_unload_bowden_length
             if cur_extruder.tool_stn_unload > 0:
-                # Logged because move_e_pos ignores its log_string; separates a
-                # stalled retract from a jammed AMS.
+                # move_e_pos ignores its log_string.
                 try:
                     _e0 = afc.gcode_move.last_position[3]
                 except Exception:
                     _e0 = None
-                self.logger.debug(
-                    f"AFC bambu {self.name}: toolhead retract issued for "
-                    f"{cur_lane.name}: {cur_extruder.tool_stn_unload:.0f}mm at "
-                    f"{cur_extruder.tool_unload_speed:.0f}mm/s from E="
-                    f"{'?' if _e0 is None else format(_e0, '.1f')} "
-                    f"(queued, overlaps the AMS reel)")
-                afc.move_e_pos(cur_extruder.tool_stn_unload * -1,
-                               cur_extruder.tool_unload_speed,
-                               "STN unload (concurrent with AMS reel)",
-                               wait_tool=False)
-            # Mark before the first retract: anything past this is a fault this
-            # unload provoked, not one left over from the preceding load.
+                self.logger.debug(f"AFC bambu {self.name}: toolhead retract issued for "
+                                  f"{cur_lane.name}: {cur_extruder.tool_stn_unload:.0f}mm at "
+                                  f"{cur_extruder.tool_unload_speed:.0f}mm/s from E="
+                                  f"{'?' if _e0 is None else format(_e0, '.1f')} "
+                                  f"(queued, overlaps the AMS reel)")
+                afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
+                               "STN unload (concurrent with AMS reel)", wait_tool=False)
+            # Anything past this is a fault this unload provoked.
             fault0 = self._ams_fault_seq()
             tray0 = self._tray_release_seq()
-            # Re-check: the unit can latch again during the STN retracts.
-            # Only a status read when it is healthy.
+            # The unit can latch again during the STN retracts.
             self._clear_latched_error(cur_lane, "the unload retract")
             if self._is_lite():
                 if not self._lite_unload_retract(cur_lane):
@@ -14587,8 +13293,7 @@ class afcBambuAMS(afcUnit):
                     if (splitter is not None
                         and not self._toolhead_sensor_triggered(cur_lane)):
                         stuck = (f"[AFC_hub {splitter.name}] at the splitter "
-                                 f"still sees filament after "
-                                 f"{LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
+                                 f"still sees filament after {LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
                                  f"retract. An AMS Lite pulls back at most "
                                  f"{LITE_UNLOAD_GUARD_MM:.0f}mm, so that switch "
                                  f"has to sit closer than that to the "
@@ -14597,22 +13302,17 @@ class afcBambuAMS(afcUnit):
                         stuck = (f"the toolhead sensor still sees filament "
                                  f"after {LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
                                  f"retract. Free it at the toolhead")
-                    msg = (f"AFC bambu unload failed for {cur_lane.name}: "
-                           f"{stuck}, then run "
+                    msg = (f"AFC bambu unload failed for {cur_lane.name}: {stuck}, then run "
                            f"{self.get_lane_reset_command(cur_lane, 0.0)}.")
-                    afc.error.handle_lane_failure(
-                        cur_lane, msg, pause=afc.function.in_print())
+                    afc.error.handle_lane_failure(cur_lane, msg, pause=afc.function.in_print())
                     return False
                 return self._finish_unload(cur_lane)
             self.retract(cur_lane, retract_dist)
-            # End the wait on the unit's own word; the sensor check below
-            # decides whether the filament is home.
-            self._wait_move(retract_dist, fault_mark=fault0,
-                            accept_switch_finish=True,
+            # The sensor check below decides whether the filament is home.
+            self._wait_move(retract_dist, fault_mark=fault0, accept_switch_finish=True,
                             accept_tray_release=self._slot_of(cur_lane))
 
-            # Verify the filament left the toolhead: three checks, two
-            # re-kicks.
+            # Three checks, two re-kicks.
             RETRIES = 2
             cleared = False
             latched = None
@@ -14626,16 +13326,13 @@ class afcBambuAMS(afcUnit):
                     cleared = True
                     break
                 if attempt == RETRIES:
-                    break                 # out of re-kicks; this pass judged
-                # Stop asking a unit that has given up. Only consulted once the
-                # sensor says something is wrong, since a lone stall mid-reel is
-                # ordinary. Consumed, so the follower tick does not raise it again.
+                    break
+                # Only once the sensor says something is wrong: a lone stall mid-reel is ordinary.
+                # Consumed, so the follower tick does not raise it again.
                 latched = self._ams_fault_since(fault0)
                 if latched:
                     break
-                # Include the AMS's own slot state ("retracting" = it is
-                # reeling; "idle"/"empty" = it ignored the command) so the log
-                # distinguishes a mechanical jam from a dead command.
+                # "retracting" = reeling; "idle"/"empty" = it ignored the command.
                 try:
                     slot = self._slot_of(cur_lane)
                     info = (self._slots[slot]
@@ -14644,34 +13341,24 @@ class afcBambuAMS(afcUnit):
                     ams_state = (info or {}).get("state", "?")
                 except Exception:
                     ams_state = "?"
-                self.logger.debug(
-                    f"AFC bambu {self.name}: {sensor} still sees "
-                    f"filament after retract for {cur_lane.name} (AMS slot "
-                    f"state: {ams_state}), re-kicking (stop/select/retract, "
-                    f"attempt {attempt + 1})")
+                self.logger.debug(f"AFC bambu {self.name}: {sensor} still sees "
+                                  f"filament after retract for {cur_lane.name} (AMS slot "
+                                  f"state: {ams_state}), re-kicking (stop/select/retract, "
+                                  f"attempt {attempt + 1})")
                 self.stop()
-                # Do not kick a latched unit; each command would wait out its
-                # deadline. If the clear will not take, stop and let the
-                # failure path report it.
-                if not self._clear_latched_error(cur_lane,
-                                                 f"re-kick {attempt + 1}"):
+                # Each command to a latched unit would wait out its deadline.
+                if not self._clear_latched_error(cur_lane, f"re-kick {attempt + 1}"):
                     break
                 self.select_lane(cur_lane)
                 self.retract(cur_lane, retract_dist)
-                self._wait_move(retract_dist, fault_mark=fault0,
-                                accept_switch_finish=True)
+                self._wait_move(retract_dist, fault_mark=fault0, accept_switch_finish=True)
             if not cleared:
                 if latched:
-                    # Halt only on a stated give-up; without one a retract may
-                    # still succeed. A latched unit is polling a retract it
-                    # will never finish.
+                    # A latched unit polls a retract it will never finish.
                     self.stop()
-                    # Re-read the sensor: the loop breaks on the latch without
-                    # another sensor pass, and "gripped at the toolhead" and
-                    # "stalled reeling home" need different manual fixes.
+                    # "Gripped at the toolhead" and "stalled reeling home" need different fixes.
                     try:
-                        still_gripped = bool(
-                            self._unload_left_filament(cur_lane))
+                        still_gripped = bool(self._unload_left_filament(cur_lane))
                     except Exception:
                         still_gripped = True
                     if still_gripped:
@@ -14686,15 +13373,13 @@ class afcBambuAMS(afcUnit):
                         msg = (f"AFC bambu unload failed for "
                                f"{cur_lane.name}: the filament cleared the "
                                f"toolhead but the AMS latched before reeling "
-                               f"it home, the tip is stranded in the "
-                               f"bowden. Run "
+                               f"it home, the tip is stranded in the bowden. Run "
                                f"{self.get_lane_reset_command(cur_lane, 0.0)}"
                                f" then LANE_UNLOAD to finish the reel.\n"
                                f"AMS said: {_fault_reason(latched)}")
                 elif self._tray_released_since(tray0, cur_lane):
-                    # The AMS finished its part; a piece is left in the
-                    # toolhead or the sensor is stuck. The next unload of this
-                    # lane only waits for the sensor to clear.
+                    # A piece is left in the toolhead or the sensor is stuck; the next unload only
+                    # waits for the sensor.
                     self._reeled_home_lane = cur_lane.name
                     if afcBambuAMS._buffer_is_toolhead_sensor(cur_lane):
                         then = ("resume" if afc.function.in_print()
@@ -14715,21 +13400,16 @@ class afcBambuAMS(afcUnit):
                     msg = (f"AFC bambu unload failed for {cur_lane.name}: "
                            f"filament still at the {sensor} after "
                            f"retract retries, and the AMS did not report "
-                           f"reeling it home; run LANE_UNLOAD (eject) or "
-                           f"check the unit")
-                afc.error.handle_lane_failure(
-                    cur_lane, msg, pause=afc.function.in_print())
+                           f"reeling it home; run LANE_UNLOAD (eject) or check the unit")
+                afc.error.handle_lane_failure(cur_lane, msg, pause=afc.function.in_print())
                 return False
-            # The filament is home, so stop polling the target tray; otherwise
-            # the unit answers "there is no tray" at ~2 Hz for ~34s, audible and
-            # noise on a shared bus.
+            # Or the unit answers "there is no tray" at ~2 Hz for ~34 s.
             self.stop()
             return self._finish_unload(cur_lane)
         except Exception as e:
-            afc.error.handle_lane_failure(
-                cur_lane,
-                f"AFC bambu unload failed for {cur_lane.name}: {e}",
-                pause=afc.function.in_print())
+            afc.error.handle_lane_failure(cur_lane,
+                                          f"AFC bambu unload failed for {cur_lane.name}: {e}",
+                                          pause=afc.function.in_print())
             return False
         finally:
             self._unload_in_progress = False
@@ -14761,14 +13441,10 @@ class afcBambuAMS(afcUnit):
             self._reeled_home_lane = None
         cur_lane.set_tool_unloaded(normal_toolchange=True)
         cur_lane.status = AFCLaneState.NONE
-        # Tip is staged near the hub, ready for a fast reload.
         cur_lane.loaded_to_hub = True
-        # Refresh virtual-hub occupancy now so a toolchange does not bail
-        # "hub not clear" before the next poll; wait for a reported hub
-        # sensor to clear.
+        # So a toolchange does not bail "hub not clear" before the next poll.
         if self._is_virtual_hub(cur_lane):
-            cur_lane._load_state = not afcBambuAMS._wait_hub_clear(
-                self, cur_lane)
+            cur_lane._load_state = not afcBambuAMS._wait_hub_clear(self, cur_lane)
         afc.save_vars()
         return True
 
@@ -14809,13 +13485,11 @@ class afcBambuAMS(afcUnit):
                         and not self._toolhead_sensor_triggered(cur_lane)):
                         at_head = False
                         if splitter is not None:
-                            self.logger.debug(
-                                f"AFC bambu {self.name}: {cur_lane.name} "
-                                f"cleared the toolhead sensor; on to the "
-                                f"splitter switch {splitter.name}")
+                            self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} "
+                                              f"cleared the toolhead sensor; on to the "
+                                              f"splitter switch {splitter.name}")
                     if (not at_head
-                        and (splitter is None
-                             or not splitter.state)):
+                        and (splitter is None or not splitter.state)):
                         clear_t = now
                         clear_odom = self._odom_now_mm()
                         if splitter is not None:
@@ -14824,9 +13498,8 @@ class afcBambuAMS(afcUnit):
                             last = "the toolhead sensor"
                         else:
                             last = "the extruder"
-                        self.logger.debug(
-                            f"AFC bambu {self.name}: {cur_lane.name} cleared "
-                            f"{last}; {past:.0f}mm more")
+                        self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} cleared "
+                                          f"{last}; {past:.0f}mm more")
                     elif now >= deadline:
                         return False
                     elif (self._unit_state(self._bridge.latest_status()
@@ -14834,14 +13507,10 @@ class afcBambuAMS(afcUnit):
                           == afcBambuAMS.AMS_STATE_STALLED):
                         where = ("the toolhead sensor" if at_head
                                  else f"the splitter switch {splitter.name}")
-                        self.logger.warning(
-                            f"AFC bambu {self.name}: the AMS Lite stalled "
-                            f"retracting {cur_lane.name} before it cleared "
-                            f"{where}")
+                        self.logger.warning(f"AFC bambu {self.name}: the AMS Lite stalled "
+                                            f"retracting {cur_lane.name} before it cleared {where}")
                         return False
                 if clear_t is not None:
-                    # Odometer runs up as filament goes back on an AMS Lite;
-                    # either way, the distance is how far it moved.
                     odom = self._odom_now_mm()
                     if (clear_odom is not None
                         and odom is not None):
@@ -14856,7 +13525,7 @@ class afcBambuAMS(afcUnit):
         finally:
             self.stop()
 
-    # ── PREP / eject helpers (base afcUnit overrides) ──
+    # PREP and eject helpers
 
     def prep_load(self, lane: Any) -> None:
         """
@@ -14887,10 +13556,8 @@ class afcBambuAMS(afcUnit):
         if (getattr(lane, "tool_loaded", False)
             and self._bridge is not None
             and slot is not None):
-            # A tray threaded across a reboot goes straight back into mode:4.
-            self.logger.debug(
-                f"AFC bambu {self.name}: {lane.name} tool-loaded at prep, "
-                f"engaging follower")
+            self.logger.debug(f"AFC bambu {self.name}: {lane.name} tool-loaded at prep, "
+                              f"engaging follower")
             self._engage_follower(lane)
 
     def get_lane_reset_command(self, lane: Any, dis: float) -> str:
@@ -14908,9 +13575,8 @@ class afcBambuAMS(afcUnit):
         """
         return f"AFC_BAMBU_RECOVER UNIT={self.name} LANE={lane.name}"
 
-    #: Bounds on a path length derived from the odometer, in mm: a
-    #: garbled-read guard, wide enough for any real tube and narrow enough to
-    #: reject a sign flip or a stuck sentinel.
+    #: Odometer path bounds in mm: wide enough for any real tube, narrow enough to reject
+    #: a sign flip or a stuck sentinel.
     ODOM_PATH_MIN_MM = 300.0
     ODOM_PATH_MAX_MM = 8000.0
 
@@ -14932,7 +13598,8 @@ class afcBambuAMS(afcUnit):
             latest = self._bridge.latest_status() if self._bridge else None
             u = afcBambuAMS._unit_entry(self, latest or {})
             v = u.get("odom") if u is not None else None
-            if v is None or int(v) == -1:
+            if (v is None
+                or int(v) == -1):
                 return None
             return float(v)
         except Exception:
@@ -14960,7 +13627,7 @@ class afcBambuAMS(afcUnit):
             if int(u.get("seltray")) != self._slot_of(lane):
                 return None
         except Exception:
-            return None            # no tray selected yet, or a torn frame
+            return None  # no tray selected yet, or a torn frame
         return -odom
 
     def _load_fed_mm(self, lane: Any) -> Optional[float]:
@@ -14981,7 +13648,6 @@ class afcBambuAMS(afcUnit):
         if now is None:
             return None
         return now - self._load_odom_start
-
 
     def _dw_len_str(self) -> str:
         """
@@ -15018,7 +13684,9 @@ class afcBambuAMS(afcUnit):
         if not mm:
             return None
         mine = int(getattr(self, "dry_dev_addr", 0) or 0)
-        if addr and mine and int(addr) != mine:
+        if (addr
+            and mine
+            and int(addr) != mine):
             return None
         if not (self.ODOM_PATH_MIN_MM <= mm <= self.ODOM_PATH_MAX_MM):
             return None
@@ -15067,18 +13735,12 @@ class afcBambuAMS(afcUnit):
         if br is None:
             return None
         try:
-            # By unit first: an AMS 1 and AMS 2 Pro share 0x0700. Address-only
-            # is the fallback for a bridge without ``unit``.
-            return br.tube_len(getattr(self, "dry_dev_addr", None),
-                               unit=self.ams_index)
+            # By unit first: an AMS 1 and AMS 2 Pro share 0x0700.
+            return br.tube_len(getattr(self, "dry_dev_addr", None), unit=self.ams_index)
         except TypeError:
             return br.tube_len(getattr(self, "dry_dev_addr", None))
         except Exception:
             return None
-
-
-
-
 
     def _measure_path_from_odom(self) -> Optional[float]:
         """
@@ -15105,7 +13767,8 @@ class afcBambuAMS(afcUnit):
         """
         a = getattr(self, "_load_odom_start", None)
         b = getattr(self, "_load_odom_at_sensor", None)
-        if a is None or b is None:
+        if (a is None
+            or b is None):
             return None
         span = b - a
         low = self.ODOM_PATH_MIN_MM
@@ -15115,8 +13778,8 @@ class afcBambuAMS(afcUnit):
             return None
         return span
 
-    def _adopt_measured_path(self, measured: Optional[float] = None,
-                             source: str = "", update: bool = False) -> None:
+    def _adopt_measured_path(self, measured: Optional[float] = None, source: str = "",
+                             update: bool = False) -> None:
         """
         Adopt the AMS's own path measurement as afc_bowden_length, in memory.
 
@@ -15157,45 +13820,42 @@ class afcBambuAMS(afcUnit):
           after a figure was adopted this claim
         """
         if getattr(self, "_path_adopted", False):
-            if not update or not getattr(self, "_load_full_path", False):
+            if (not update
+                or not getattr(self, "_load_full_path", False)):
                 return
-        if measured is None and getattr(self, "_path_wait_load", False):
+        if (measured is None
+            and getattr(self, "_path_wait_load", False)):
             return
         if measured is None:
             measured, source = self._path_measurement()
         if measured is None:
-            # No measurement. Not warned about: the path length is advisory
-            # (commanded distance and give-up window).
-            return                      # nothing to adopt; the default stands
+            # Not warned about: the path length is advisory.
+            return  # the default stands
         old = self.afc_bowden_length
         if abs(measured - old) < PATH_ADOPT_TOLERANCE_MM:
-            self._path_adopted = True   # already right; nothing to write
+            self._path_adopted = True
             return
         self._path_adopted = True
         follow_unload = (self.afc_unload_bowden_length == old)
         self.afc_bowden_length = measured
         if follow_unload:
             self.afc_unload_bowden_length = measured
-        # Persisted through the master, never by ConfigRewrite (see the
-        # docstring). Best effort.
+        # Through the master, never ConfigRewrite. Best effort.
         saved = False
         master = getattr(self, "_master", None)
         if master is not None:
             try:
-                saved = master.persist_learned(
-                    self.name, "afc_bowden_length", round(measured, 1))
+                saved = master.persist_learned(self.name, "afc_bowden_length", round(measured, 1))
                 if follow_unload:
-                    master.persist_learned(
-                        self.name, "afc_unload_bowden_length",
-                        round(measured, 1))
+                    master.persist_learned(self.name, "afc_unload_bowden_length",
+                                           round(measured, 1))
             except Exception:
                 saved = False
-        self.logger.info(
-            f"AFC bambu {self.name}: the AMS measured its own filament path at "
-            f"{measured:.0f}mm (was {old:.0f}mm)"
-            f"{' via ' + source if source else ''}. Adopting it"
-            f"{' and saving it' if saved else ' for this session'} -- this "
-            f"sizes the load give-up deadline.")
+        self.logger.info(f"AFC bambu {self.name}: the AMS measured its own filament path at "
+                         f"{measured:.0f}mm (was {old:.0f}mm)"
+                         f"{' via ' + source if source else ''}. Adopting it"
+                         f"{' and saving it' if saved else ' for this session'} -- this "
+                         f"sizes the load give-up deadline.")
 
     def _ready_to_follow(self, lane: Any = None) -> bool:
         """
@@ -15245,29 +13905,22 @@ class afcBambuAMS(afcUnit):
         :return bool: True if the AMS reported the reel-back complete
         """
         if self._bridge is None:
-            self.logger.warning(
-                f"AFC bambu {self.name}: bridge not connected, cannot eject "
-                f"{lane.name}")
+            self.logger.warning(f"AFC bambu {self.name}: bridge not connected, cannot eject "
+                                f"{lane.name}")
             return False
         if self._is_lite():
-            # Its spring-loaded holder cannot take the tube's length back, so
-            # nothing is reeled: the unit is let go and the filament comes out
-            # by hand.
+            # Its spring-loaded holder cannot take the tube back, so the filament comes out by hand.
             self._lite_release()
-            self.logger.info(
-                f"AFC bambu {self.name}: an AMS Lite cannot reel "
-                f"{getattr(lane, 'name', 'a lane')} back to its spool. It is "
-                f"released: pull the filament out at the AMS Lite.")
+            self.logger.info(f"AFC bambu {self.name}: an AMS Lite cannot reel "
+                             f"{getattr(lane, 'name', 'a lane')} back to its spool. It is "
+                             f"released: pull the filament out at the AMS Lite.")
             lane.loaded_to_hub = False
             if self._is_virtual_hub(lane):
                 lane._load_state = False
             return True
-        # Halt a unit still mid feed/retry, then select and reel back. Works
-        # whatever the lane's error state, so a stuck load can be recovered.
+        # Works whatever the lane's error state, so a stuck load can be recovered.
         done = False
         self._unload_in_progress = True
-        # The stop() below halts AMS motion and is the follower stand-down for
-        # the eject.
         try:
             self.stop()
             self.select_lane(lane)
@@ -15276,26 +13929,21 @@ class afcBambuAMS(afcUnit):
             self.retract(lane, dist)
             finished = self._wait_move(dist, fault_mark=fault0)
             self.stop()
-            # The unit's own verdict, reported here: the follower tick's fault
-            # check is muted while _unload_in_progress.
+            # The follower tick's fault check is muted while _unload_in_progress.
             latched = self._ams_fault_since(fault0)
             if latched:
-                self.logger.warning(
-                    f"AFC bambu {self.name}: "
-                    f"{getattr(lane, 'name', 'lane')} could not be reeled back "
-                    f"-- the AMS gave up and latched. The filament is still "
-                    f"out of the bay; free it by hand before loading this lane "
-                    f"again.\nAMS said: {_fault_reason(latched)}")
+                self.logger.warning(f"AFC bambu {self.name}: "
+                                    f"{getattr(lane, 'name', 'lane')} could not be reeled back "
+                                    f"-- the AMS gave up and latched. The filament is still "
+                                    f"out of the bay; free it by hand before loading this lane "
+                                    f"again.\nAMS said: {_fault_reason(latched)}")
             elif not finished:
-                # No sensor here: _wait_move may return on its deadline short
-                # of the bay. getattr, since a recovery path must not raise on
-                # a bare lane.
-                self.logger.warning(
-                    f"AFC bambu {self.name}: "
-                    f"{getattr(lane, 'name', 'lane')} eject stopped on a "
-                    f"timeout, not on the AMS's own completion report -- the "
-                    f"filament may not be fully back in the bay. Check the "
-                    f"bay before loading it again.")
+                # _wait_move may return on its deadline short of the bay.
+                self.logger.warning(f"AFC bambu {self.name}: "
+                                    f"{getattr(lane, 'name', 'lane')} eject stopped on a "
+                                    f"timeout, not on the AMS's own completion report -- the "
+                                    f"filament may not be fully back in the bay. Check the "
+                                    f"bay before loading it again.")
             else:
                 done = True
         finally:

@@ -4,22 +4,10 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
-# ACE 2 Pro RFID integration.
-#
-# Contains, bottom-to-top:
-#   Ace2Link      ACE2 V2 serial frame + the firmware passthrough commands:
-#                 MFRC522 register read / write and reader power.
-#   _Ace2RegLink  the same passthrough spoken over the live ACE2 serial object.
-#   AFC_ACE2_RFID  the Klipper [AFC_ACE2_rfid] object: read a lane/slot tag and
-#                 apply the decoded filament to an AFC lane (+ optional Spoolman).
-#
-# The MFRC522 primitives, MIFARE access and multi-brand tag decoders this
-# transport feeds live in extras/AFC_rfid_readers.py, shared with the
-# ViViD/OpenAMS readers.
-#
-# The firmware only ever exposes reg_read(reg)->byte, reg_write(reg,val) and
-# reader_power(on); every bit of MIFARE/crypto/brand logic stays host-side and
-# editable without reflashing.
+# ACE 2 Pro RFID. Ace2Link speaks the ACE2 V2 frame and the firmware passthrough
+# (MFRC522 register read/write and reader power); _Ace2RegLink sends it over the live
+# ACE2 serial object; AFC_ACE2_RFID reads a slot's tag and applies it to the lane.
+# The MIFARE, crypto and brand logic stays host side in AFC_rfid_readers.
 from __future__ import annotations
 import struct
 import traceback
@@ -37,8 +25,6 @@ except:
     error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
     raise error(error_str)
 
-# Shared MFRC522/MIFARE primitives + multi-brand decoders. This module supplies
-# the ACE2 transport they run on.
 from extras.AFC_rfid_readers import read_tag, Mfrc522, MifareClassic
 from extras.AFC_rfid_write import StageError, register_reader
 try: from extras.AFC_RFID import (sync_rfid_to_spoolman, apply_filament_defaults,
@@ -51,12 +37,7 @@ except:
     raise error(error_str)
 
 
-# ═════════════════════════════
-# ACE2 frame + passthrough, pure logic, unit-testable in isolation; the
-# shared register/crypto/brand stack it feeds lives in AFC_rfid_readers.
-# ═════════════════════════════
-
-# ── ACE2 V2 frame ──────────────────────
+# ACE2 V2 frame
 PREAMBLE = b"\xff\xaa"
 END = b"\xfe"
 
@@ -77,7 +58,6 @@ def crc16_kermit(data: bytes, init: int = 0xFFFF) -> int:
     return c & 0xFFFF
 
 
-# Opcodes for the passthrough commands, registered in firmware.
 CMD_MFRC522_REG_READ = 0x50
 CMD_MFRC522_REG_WRITE = 0x51
 CMD_MFRC522_READER_POWER = 0x52     # v2: host-owned reader power (Bambu reads)
@@ -136,7 +116,7 @@ class Ace2Link:
         self._tx = transport
         self._ftype = ftype
         self._seq = 0
-        self.slot = slot            # which ACE2 reader slot (0..3) this link drives
+        self.slot = slot
 
     def _next_seq(self) -> int:
         """
@@ -204,19 +184,17 @@ class Ace2Link:
         :param resp: raw response frame
         :return int: decoded value
         """
-        if not resp or resp[:2] != PREAMBLE:
+        if (not resp
+            or resp[:2] != PREAMBLE):
             error_str = "bad ACE2 response preamble"
             raise IOError(error_str)
         ln = resp[6]
         payload = resp[7:7 + ln]
-        if len(payload) >= 2 and payload[0] == 0x08:
+        if (len(payload) >= 2
+            and payload[0] == 0x08):
             return _varint_decode(payload, 1)[0] & 0xFF
         return 0
 
-
-# ═════════════════════════════
-# Klipper integration, [AFC_ACE2_rfid]
-# ═════════════════════════════
 
 class _Ace2RegLink:
     """Adapts an ACE2 serial object to the reg_read/reg_write reader contract.
@@ -236,16 +214,13 @@ class _Ace2RegLink:
         :param power_index: slot index for the power command, defaults to slot
         :param reg_timeout: seconds to wait for a register reply
         """
-        self._ace2 = ace2            # the afcACE2 printer object
-        # reg r/w chip-select index (each slot has its own MFRC522 on the shared
-        # SPI2 bus, selected by this field).
+        self._ace2 = ace2
+        # Each slot has its own MFRC522 on the shared SPI2 bus, selected by this index.
         self.slot = slot & 0xFF
-        # reader-power index. Power is per reader pair (PD12/PD13 cover slots
-        # 0-1 / 2-3), so it can differ from the per-slot reg index above.
+        # Power is per reader pair (PD12/PD13 cover slots 0-1 / 2-3).
         self.power_index = (self.slot if power_index is None
                             else power_index & 0xFF)
-        # Per-register serial timeout. A cold reader can stall a reg op, so each
-        # one is bounded to keep a long read from wedging the link.
+        # A cold reader can stall a reg op, so each one is bounded.
         self._reg_timeout = reg_timeout
 
     def _conn(self) -> Any:
@@ -270,8 +245,7 @@ class _Ace2RegLink:
         :return int: register value
         """
         arg = (self.slot << 16) | (reg & 0xFF)
-        res = self._conn().send_command(
-            "mfrc522_reg_read", {"arg": arg}, timeout=self._reg_timeout)
+        res = self._conn().send_command("mfrc522_reg_read", {"arg": arg}, timeout=self._reg_timeout)
         return int((res or {}).get("val", 0)) & 0xFF
 
     def reg_write(self, reg: int, val: int) -> None:
@@ -282,8 +256,7 @@ class _Ace2RegLink:
         :param val: value to write
         """
         arg = (self.slot << 16) | ((reg & 0xFF) << 8) | (val & 0xFF)
-        self._conn().send_command(
-            "mfrc522_reg_write", {"arg": arg}, timeout=self._reg_timeout)
+        self._conn().send_command("mfrc522_reg_write", {"arg": arg}, timeout=self._reg_timeout)
 
     def reader_power(self, on: bool) -> None:
         """
@@ -295,8 +268,7 @@ class _Ace2RegLink:
         :param on: True to power the reader
         """
         arg = (self.power_index << 16) | (1 if on else 0)
-        self._conn().send_command(
-            "mfrc522_reader_power", {"arg": arg}, timeout=self._reg_timeout)
+        self._conn().send_command("mfrc522_reader_power", {"arg": arg}, timeout=self._reg_timeout)
 
     def set_rfid_enable(self, phys_slot: int, enable: bool) -> None:
         """
@@ -311,8 +283,8 @@ class _Ace2RegLink:
         :param enable: True to hand the reader back to the firmware
         """
         conn = self._conn()
-        conn.send_command_async(
-            "set_rfid_enable", {"index": phys_slot & 0xFF, "enable": bool(enable)})
+        conn.send_command_async("set_rfid_enable",
+                                {"index": phys_slot & 0xFF, "enable": bool(enable)})
 
 
 class _StageCmd:
@@ -351,86 +323,50 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         """
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
-        # Take AFC's logger now (load_object builds AFC if needed). self.afc
-        # stays None until klippy:ready on purpose: the guards use it as the
-        # ready marker.
+        # self.afc stays None until klippy:ready; the guards use it as the ready marker.
         self.logger = self.printer.load_object(config, 'AFC').logger
-        # One scan at a time; see cmd_ACE_RFID_SCAN.
         self._scan_running = False
         self.gcode = self.printer.lookup_object("gcode")
 
         key = (config.get("bambu_master_key", "") or "").strip()
         self.bambu_master_key = bytes.fromhex(key) if key else None
-        # Creality CFS keys (both required to decode Creality tags): key = the
-        # UID->MIFARE-key AES key (u_key), encryption_key = the AES-CBC payload
-        # key (d_key). Every other format needs no config key.
+        # Creality CFS keys, both needed: key is the u_key, encryption_key the d_key.
         ck = (config.get("creality_key", "") or "").strip()
         cek = (config.get("creality_encryption_key", "") or "").strip()
         self.creality_key = bytes.fromhex(ck) if ck else None
         self.creality_encryption_key = bytes.fromhex(cek) if cek else None
         self.auto_create = config.getboolean("auto_spoolman_create", False)
-        self.log_prefix = "ACE2 RFID"          # AFCUnitRFID.apply_to_lane / Spoolman
-        # Auto-read the tag when a spool is inserted (the insert preload/feed
-        # spins the spool, sweeping the tag past the reader). Retries a few times
-        # to catch it as it settles.
+        self.log_prefix = "ACE2 RFID"
+        # The insert feed spins the spool past the reader; retries catch the tag as it settles.
         self.read_on_insert = config.getboolean("read_on_insert", True)
-        self.read_on_insert_attempts = config.getint(
-            "read_on_insert_attempts", 3, minval=1)
-        self.read_on_insert_delay = config.getfloat(
-            "read_on_insert_delay", 1.0, minval=0.0)
-        # Per-register serial timeout (see _Ace2RegLink). A healthy reg op takes
-        # a few ms, so a short bound makes a wedged passthrough fail fast.
-        self.read_reg_timeout = config.getfloat(
-            "read_reg_timeout", 0.8, minval=0.2)
-        # Reg chip-select index. This unit has two MFRC522 readers, one per slot
-        # pair, so reg r/w uses slot>>1 unless per-slot is opted in.
+        self.read_on_insert_attempts = config.getint("read_on_insert_attempts", 3, minval=1)
+        self.read_on_insert_delay = config.getfloat("read_on_insert_delay", 1.0, minval=0.0)
+        self.read_reg_timeout = config.getfloat("read_reg_timeout", 0.8, minval=0.2)
+        # Two readers, one per slot pair, so reg r/w uses slot>>1 unless per-slot is opted in.
         self.reader_reg_per_slot = config.getboolean("reader_reg_per_slot", False)
-        # disable_rfid: no automatic tag reads. Inserts still stage to the hub
-        # as a plain feed; ACE_RFID_READ still works.
+        # Inserts still stage to the hub as a plain feed; ACE_RFID_READ still works.
         self.disable_rfid = config.getboolean("disable_rfid", False)
-        # stage_read: poll the reader during the staging feed and stop on the
-        # first UID so the tag is read at rest. Feed assist is suppressed for the
-        # read, or its stuck-spool check would trip while the feed pauses.
+        # Feed assist is suppressed for the read, or its stuck-spool check would trip while
+        # the feed pauses.
         self.stage_read = config.getboolean("stage_read", True)
-        # Scan feed speed (mm/s). Slower coasts less past the antenna after the
-        # stop; the remainder is fed at full feed_speed.
-        self.stage_scan_speed = min(90.0, config.getfloat(
-            "stage_scan_speed", 25.0, minval=1.0))
-        # Parked-read attempts after stop-on-detect, before the re-center sweep.
-        self.stage_read_hold_attempts = config.getint(
-            "stage_read_hold_attempts", 3, minval=1)
-        # Re-center sweep: if the parked read misses, retract in small steps (the
-        # tag coasts past the read zone) up to this total; 0 disables it. The
-        # retract is fed back with the remainder.
-        self.stage_recenter_max = config.getfloat(
-            "stage_recenter_max", 42.0, minval=0.0)
-        self.stage_recenter_step = config.getfloat(
-            "stage_recenter_step", 3.0, minval=0.5)
-        # Deprecated (chunked staging is gone), still read so existing configs
-        # that set it don't raise an "unused option" error at startup.
-        self.stage_read_chunk = config.getfloat(
-            "stage_read_chunk", 25.0, minval=2.0)
-        # auto_tag_adjust: when the shared-reader sister's tag blocks a read,
-        # retract that sibling to turn its tag off the coil, then restore it. Only
-        # an idle, hub-staged sibling is moved, never during a print. When off, the
+        # Slower coasts less past the antenna after the stop.
+        self.stage_scan_speed = min(90.0, config.getfloat("stage_scan_speed", 25.0, minval=1.0))
+        self.stage_read_hold_attempts = config.getint("stage_read_hold_attempts", 3, minval=1)
+        # If the parked read misses, retract in small steps up to this total; 0 disables it.
+        self.stage_recenter_max = config.getfloat("stage_recenter_max", 42.0, minval=0.0)
+        self.stage_recenter_step = config.getfloat("stage_recenter_step", 3.0, minval=0.5)
+        # Deprecated, still read so existing configs don't fail on an unused option.
+        self.stage_read_chunk = config.getfloat("stage_read_chunk", 25.0, minval=2.0)
+        # Only an idle, hub-staged sibling is moved, never during a print; when off, the
         # console asks the user to turn the sibling spool by hand.
         self.auto_tag_adjust = config.getboolean("auto_tag_adjust", True)
-        self.auto_tag_adjust_dist = config.getfloat(
-            "auto_tag_adjust_dist", 75.0, minval=1.0)
-        # Scan window: how far to feed at scan speed while polling. It must exceed
-        # one spool revolution so the tag sweeps past; it adds no net distance.
-        self.stage_scan_dist = config.getfloat(
-            "stage_scan_dist", 600.0, minval=0.0)
-        # Two slots share one reader, so a read can return the neighbour's parked
-        # tag. With dedup on, a UID matching the sibling's known tag (while that
-        # sibling holds a spool) is rejected and the scan keeps looking.
+        self.auto_tag_adjust_dist = config.getfloat("auto_tag_adjust_dist", 75.0, minval=1.0)
+        # It must exceed one spool revolution so the tag sweeps past.
+        self.stage_scan_dist = config.getfloat("stage_scan_dist", 600.0, minval=0.0)
+        # Two slots share one reader, so a UID matching the loaded sibling's tag is rejected.
         self.shared_reader_dedup = config.getboolean("shared_reader_dedup", True)
-        # Last UID successfully read per PHYSICAL slot, used for the dedup above.
         self._slot_uid: Dict[int, str] = {}
-        # skip_factory_autostage and stage_initial_dist are the unit's now
-        # ([AFC_ACE2 <name>]), which turns identify off at connect. Deprecated:
-        # the old identify-off retry's bounds, still read so existing configs that
-        # set them don't raise an "unused option" error at startup.
+        # Deprecated, still read so existing configs don't fail on an unused option.
         config.getfloat("identify_disable_retry", 0.5, minval=0.05)
         config.getint("identify_disable_max_tries", 60, minval=1)
         # Restore factory identify after each read; unset, only when the unit
@@ -438,7 +374,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         self._restore_identify = config.getboolean("restore_identify", None)
         self.probe_power_off = config.getboolean("probe_power_off", True)
         self.probe_settle = config.getfloat("probe_settle", 0.2, minval=0.0)
-        # Name of the ACE2 printer object exposing send_command (afcACE subclass).
         self.ace2_name = config.get("ace2_object", "AFC_ACE2")
         # "lane1:0, lane2:1" -> {lane_name: physical slot}
         self._lane_slot: Dict[str, int] = {}
@@ -456,37 +391,24 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             n = n.strip()
             if n:
                 self._scanner_lanes.add(n)
-        # How long ACE_RFID_SCAN reads for (seconds) and the dwell between read
-        # attempts. Present the spool's tag to the reader during this window.
         self.scan_seconds = config.getfloat("scan_seconds", 30.0, minval=1.0)
         self.scan_interval = config.getfloat("scan_interval", 0.3, minval=0.05)
         # A scan accepts a UID only after this many consecutive matching decodes,
         # so a stray read can't pick the wrong Spoolman spool.
-        self.scanner_confirm_reads = config.getint(
-            "scanner_confirm_reads", 2, minval=1)
+        self.scanner_confirm_reads = config.getint("scanner_confirm_reads", 2, minval=1)
 
         self.afc: Optional["afc"] = None
         self.ace2: Optional[Any] = None
         self.printer.register_event_handler("klippy:ready", self._on_ready)
-        self.printer.register_event_handler("afc_ace:post_insert",
-                                            self._on_post_insert)
-        # Continuous read during staging (see stage_read).
+        self.printer.register_event_handler("afc_ace:post_insert", self._on_post_insert)
         self._probe: Optional[dict] = None
-        # slots whose feed assist we suppressed
         self._assist_slots: Optional[Tuple[int, ...]] = None
-        # (sibling_slot, dist, speed) when a shared-reader sister was retracted to
-        # clear its tag off the antenna during this stage; None otherwise. Restored
-        # (re-fed the same distance) in _stage_probe_end.
+        # (sibling_slot, dist, speed) of a sister retracted off the antenna this stage;
+        # _stage_probe_end re-feeds it.
         self._sister_retracted: Optional[Tuple[Any, float, float]] = None
-        # True once we've told the user (this stage) to nudge the sister spool by
-        # hand, so the console isn't spammed with repeat hints during one stage.
         self._sister_hint_shown = False
-        # The staging feed fires begin (the whole scan-and-read runs there) and
-        # end (teardown).
-        self.printer.register_event_handler("afc_ace:stage_probe_begin",
-                                            self._stage_probe_begin)
-        self.printer.register_event_handler("afc_ace:stage_probe_end",
-                                            self._stage_probe_end)
+        self.printer.register_event_handler("afc_ace:stage_probe_begin", self._stage_probe_begin)
+        self.printer.register_event_handler("afc_ace:stage_probe_end", self._stage_probe_end)
         # No digit in the command names: Klipper parses a token like "ACE2" as a
         # G/M-style command ("Unknown command ACE2").
         self.gcode.register_command(
@@ -521,8 +443,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             """
             if self.ace2 is None:
                 return None
-            return self._new_link(self._reg_index(slot) & 0xFF,
-                                  power_index=(slot >> 1) & 0xFF)
+            return self._new_link(self._reg_index(slot) & 0xFF, power_index=(slot >> 1) & 0xFF)
 
         def _prepare(link: _Ace2RegLink, slot: int) -> None:
             """
@@ -534,9 +455,9 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             pair = (slot >> 1) & 0xFF
             for s in (pair * 2, pair * 2 + 1):
                 link.set_rfid_enable(s, False)
-            self._dwell(0.1)                    # let the firmware stop
+            self._dwell(0.1)
             link.reader_power(True)
-            self._dwell(0.1)                    # oscillator/power-on settle
+            self._dwell(0.1)
 
         def _release(link: _Ace2RegLink, slot: int) -> None:
             """
@@ -560,9 +481,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 try:
                     link.set_rfid_enable(s, True)
                 except Exception:
-                    self.logger.error(
-                        "ACE2 RFID: re-enable identify failed",
-                        traceback=traceback.format_exc())
+                    self.logger.error("ACE2 RFID: re-enable identify failed",
+                                      traceback=traceback.format_exc())
 
         for slot in range(n):
             register_reader(
@@ -579,20 +499,17 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         Resolve AFC and the ACE2 unit at klippy:ready and finish wiring.
         """
         self.afc = self.printer.lookup_object("AFC", None)
-        # Fall back to the shared [AFC_rfid_keys] section for any brand key this
-        # section didn't set.
         (self.bambu_master_key, self.creality_key,
          self.creality_encryption_key) = resolve_rfid_keys(
             self.printer, self.bambu_master_key, self.creality_key,
             self.creality_encryption_key)
-        # The ACE2 serial object is a named section: "AFC_ACE2 <name>" (e.g.
-        # "AFC_ACE2 Ace2_1"). Try the configured/bare name, else auto-discover
-        # the first AFC_ACE2* object.
+        # Try the configured name, else the first AFC_ACE2* object.
         self.ace2 = (self.printer.lookup_object(self.ace2_name, None)
                      or self.printer.lookup_object("AFC_ACE2", None))
         if self.ace2 is None:
             for name, obj in self.printer.lookup_objects():
-                if name == self.ace2_name or name.startswith("AFC_ACE2 "):
+                if (name == self.ace2_name
+                    or name.startswith("AFC_ACE2 ")):
                     self.ace2 = obj
                     break
         if self.ace2 is None:
@@ -624,7 +541,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             return self._restore_identify
         return not self.skip_factory_autostage
 
-    # ── mapping ───────────────────────
     def _slot_for_lane(self, lane_name: str) -> Optional[int]:
         """
         Resolve the physical reader slot for a lane.
@@ -658,9 +574,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             "last_reads": self.last_reads_status(),
         }
 
-    # ── read + apply ─────────────────────
-    def _new_link(self, reg_idx: int,
-                  power_index: Optional[int] = None) -> _Ace2RegLink:
+    def _new_link(self, reg_idx: int, power_index: Optional[int] = None) -> _Ace2RegLink:
         """
         Build a register link to one of this unit's readers.
 
@@ -684,10 +598,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             return None
         return uid.hex() if uid is not None else None
 
-    def _read_tag(self, link: Any,
-                  is_excluded: Optional[Callable[[str], bool]] = None,
-                  seen: Optional[List[Any]] = None,
-                  dump_blocks: Any = None) -> Optional[dict]:
+    def _read_tag(self, link: Any, is_excluded: Optional[Callable[[str], bool]] = None,
+                  seen: Optional[List[Any]] = None, dump_blocks: Any = None) -> Optional[dict]:
         """
         Run read_tag with all configured brand keys (Bambu and Creality).
 
@@ -700,11 +612,9 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         return read_tag(link, bambu_master_key=self.bambu_master_key,
                         creality_key=self.creality_key,
                         creality_encryption_key=self.creality_encryption_key,
-                        is_excluded=is_excluded, seen=seen,
-                        dump_blocks=dump_blocks)
+                        is_excluded=is_excluded, seen=seen, dump_blocks=dump_blocks)
 
-    def read_slot(self, slot: int, manage_power: bool = True,
-                  reg_slot: Optional[int] = None,
+    def read_slot(self, slot: int, manage_power: bool = True, reg_slot: Optional[int] = None,
                   dump_blocks: Any = None) -> Optional[dict]:
         """
         Read the tag on a physical slot (0..3).
@@ -731,7 +641,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             reg_idx = self._reg_index(slot) & 0xFF
             power_idx = (slot >> 1) & 0xFF
         else:
-            # Diagnostic: REG is the reader index; power the same reader.
             reg_idx = int(reg_slot) & 0xFF
             power_idx = reg_idx
         link = self._new_link(reg_idx, power_index=power_idx)
@@ -745,14 +654,13 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         for s in shared:
             link.set_rfid_enable(s, False)
         sibling = sib if sib + 1 == slot else sib + 1
-        self._dwell(0.1)                        # let the firmware stop identifying
-        link.reader_power(True)                 # host powers the reader itself
-        self._dwell(0.1)                        # MFRC522 oscillator/power-on settle
+        self._dwell(0.1)
+        link.reader_power(True)
+        self._dwell(0.1)
         try:
             # Halt the sibling's parked tag so this slot's own tag is read.
             excluder = self._probe_excluder(slot, sibling)
-            tag = self._read_tag(link, is_excluded=excluder,
-                                 dump_blocks=dump_blocks)
+            tag = self._read_tag(link, is_excluded=excluder, dump_blocks=dump_blocks)
             uid = (tag or {}).get("uid")
             if uid is not None:
                 if self._is_sibling_tag(slot, sibling, uid):
@@ -767,8 +675,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             try:
                 link.reader_power(False)
             except Exception:
-                self.logger.error(
-                    "ACE2 RFID: reader power-off failed", traceback=traceback.format_exc())
+                self.logger.error("ACE2 RFID: reader power-off failed",
+                                  traceback=traceback.format_exc())
             # Re-enable identify only when not keeping it off for
             # skip_factory_autostage (else the next insert would autostage).
             if self.probe_restore_identify:
@@ -776,9 +684,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     try:
                         link.set_rfid_enable(s, True)
                     except Exception:
-                        self.logger.error(
-                            "ACE2 RFID: re-enable identify failed",
-                                traceback=traceback.format_exc())
+                        self.logger.error("ACE2 RFID: re-enable identify failed",
+                                          traceback=traceback.format_exc())
 
     def _dwell(self, seconds: float) -> None:
         """
@@ -790,8 +697,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if r is not None:
             r.pause(r.monotonic() + seconds)
 
-    # apply_to_lane() comes from AFCUnitRFID. The unit's auto_spoolman_create wins;
-    # the [AFC_ACE2_rfid] value is only the fallback default.
+    # The unit's auto_spoolman_create wins; [AFC_ACE2_rfid]'s is the fallback.
 
     def read_lane(self, lane_name: str) -> Optional[dict]:
         """
@@ -817,9 +723,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             self.apply_to_lane(lane, tag)
         return tag
 
-    # ── scanner lane: read a presented tag, stage it as the next spool id ─────
-    def _scan_slot(self, slot: int, duration: float,
-                   lane_name: str = "") -> Optional[dict]:
+    def _scan_slot(self, slot: int, duration: float, lane_name: str = "") -> Optional[dict]:
         """
         Power the slot's reader and read repeatedly for up to ``duration`` seconds.
 
@@ -850,12 +754,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         self._dwell(0.1)
         deadline = self.reactor.monotonic() + max(0.0, duration)
         excluder = self._probe_excluder(slot, sibling)
-        seen_uids: Dict[str, bool] = {}   # uid_hex -> whether it was decoded
+        seen_uids: Dict[str, bool] = {}
         confirm = max(1, self.scanner_confirm_reads)
-        cand_uid = None         # UID of the current confirmation candidate
-        streak = 0              # consecutive full decodes of cand_uid
-        detected_shown = False  # "hold the spool" popup shown once per scan
-        # Fresh scan: no sister retracted, no manual-nudge hint shown yet.
+        cand_uid = None
+        streak = 0
+        detected_shown = False
         self._sister_retracted = None
         self._sister_hint_shown = False
         try:
@@ -864,27 +767,26 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 try:
                     tag = self._read_tag(link, is_excluded=excluder, seen=seen)
                 except Exception:
-                    self.logger.error(
-                        "ACE2 RFID scan: read error", traceback=traceback.format_exc())
+                    self.logger.error("ACE2 RFID scan: read error",
+                                      traceback=traceback.format_exc())
                     tag = None
                 for h, _s, _e in seen:
                     seen_uids.setdefault(h, False)
                 # First sight of the presented tag: ask the user to hold it
                 # steady while the confirmation reads complete. Once per scan.
-                if not detected_shown and (
-                        any(not e for _h, _s, e in seen)
-                        or (tag and tag.get("uid"))):
-                    prompt_hold_spool(self.gcode.respond_raw,
-                                      lane_name or (f"slot {slot}"))
+                if (not detected_shown
+                    and (any(not e for _h, _s, e in seen) or (tag and tag.get("uid")))):
+                    prompt_hold_spool(self.gcode.respond_raw, lane_name or f"slot {slot}")
                     detected_shown = True
                 # Only the sister's tag in the field: it blocks the coil. Clear
                 # it if allowed, otherwise ask the user once to nudge it.
                 if (any(e for _h, _s, e in seen)
-                        and not any(not e for _h, _s, e in seen)):
+                    and not any(not e for _h, _s, e in seen)):
                     self._handle_sister_domination(sibling)
                 # Only trust a full decode, and only once the same UID has
                 # decoded `confirm` times in a row, so a stray tag can't win.
-                if tag and tag.get("filament"):
+                if (tag
+                    and tag.get("filament")):
                     uid = tag.get("uid")
                     if uid == cand_uid:
                         streak += 1
@@ -894,13 +796,12 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                         if uid is not None:
                             self._slot_uid[slot] = uid
                         return tag
-                    # decoded but not yet confirmed, already in seen_uids (False)
                     self._dwell(self.scan_interval)
                     continue
-                # A miss/no-decode breaks the confirmation streak.
                 cand_uid, streak = None, 0
-                if tag and tag.get("uid"):
-                    seen_uids[tag["uid"]] = True   # read a UID but it didn't decode
+                if (tag
+                    and tag.get("uid")):
+                    seen_uids[tag["uid"]] = True
                 self._dwell(self.scan_interval)
             # Diagnostic: report exactly what the antenna saw so a misread UID
             # (differs from another reader) or a decode-that-never-completes is
@@ -909,8 +810,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 saw = ", ".join(
                     f"{h}{' (uid-only, no decode)' if v else ''}"
                     for h, v in sorted(seen_uids.items()))
-                self.logger.info(
-                    f"ACE2 RFID scan: no full decode; saw UID(s) {saw}")
+                self.logger.info(f"ACE2 RFID scan: no full decode; saw UID(s) {saw}")
             # Nothing to report -> close the "hold the spool" popup (on success
             # the result notification replaces it instead).
             if detected_shown:
@@ -920,21 +820,18 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             try:
                 link.reader_power(False)
             except Exception:
-                self.logger.error(
-                    "ACE2 RFID scan: reader power-off failed", traceback=traceback.format_exc())
-            # Put any sister we retracted to clear the antenna back where it was.
+                self.logger.error("ACE2 RFID scan: reader power-off failed",
+                                  traceback=traceback.format_exc())
             self._restore_sister()
             if self.probe_restore_identify:
                 for s in shared:
                     try:
                         link.set_rfid_enable(s, True)
                     except Exception:
-                        self.logger.error(
-                            "ACE2 RFID scan: re-enable identify failed",
-                                traceback=traceback.format_exc())
+                        self.logger.error("ACE2 RFID scan: re-enable identify failed",
+                                          traceback=traceback.format_exc())
 
-    def scan_lane(self, lane_name: str,
-                  seconds: Optional[float] = None) -> Optional[dict]:
+    def scan_lane(self, lane_name: str, seconds: Optional[float] = None) -> Optional[dict]:
         """
         Scan the lane's reader for a presented tag and stage it as the next spool id.
 
@@ -958,7 +855,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             self.logger.info(f"ACE2 RFID scan: no tag on lane {lane_name} in {duration:.0f}s")
             return None
         lane = None
-        if self.afc is not None and hasattr(self.afc, "lanes"):
+        if (self.afc is not None
+            and hasattr(self.afc, "lanes")):
             lane = self.afc.lanes.get(lane_name)
         slot_info = self._map(tag)
         self.record_tag_read(lane_name, slot_info)
@@ -968,18 +866,15 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 allow_create = get_auto_spoolman_create(lane, self.auto_create)
             except Exception:
                 pass
-        if self.afc is not None and getattr(self.afc, "spoolman", None):
+        if (self.afc is not None
+            and getattr(self.afc, "spoolman", None)):
             try:
-                sync_rfid_to_spoolman(
-                    self.afc, lane, slot_info, self.logger, "ACE2 RFID scan",
-                    allow_create=allow_create, set_next=True)
+                sync_rfid_to_spoolman(self.afc, lane, slot_info, self.logger, "ACE2 RFID scan",
+                                      allow_create=allow_create, set_next=True)
             except Exception as e:
                 self.logger.warning(f"ACE2 RFID scan Spoolman sync failed: {e}")
-        # Pop a UI notification (Mainsail/Fluidd action:prompt) with what we read,
-        # like the U1 scanner does on a match/create.
         spool = getattr(self.afc, "spool", None) if self.afc is not None else None
-        self._notify_scan(slot_info, lane_name,
-                          getattr(spool, "next_spool_id", None))
+        self._notify_scan(slot_info, lane_name, getattr(spool, "next_spool_id", None))
         return tag
 
     def _spool_details(self, spool_id: Any, slot_info: dict) -> dict:
@@ -1004,7 +899,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             "name": "",
         }
         mr = getattr(self.afc, "moonraker", None) if self.afc is not None else None
-        if not spool_id or mr is None:
+        if (not spool_id
+            or mr is None):
             return d
         try:
             # SpoolmanClient's, not moonraker's: upstream's get_spool is a
@@ -1024,14 +920,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         d["diameter"] = fil.get("diameter") or d["diameter"]
         d["ext"] = fil.get("settings_extruder_temp") or d["ext"]
         d["bed"] = fil.get("settings_bed_temp") or d["bed"]
-        # Prefer remaining weight (what's actually left on the spool).
         rem = sp.get("remaining_weight")
-        d["weight"] = rem if rem is not None else (
-            fil.get("weight") or d["weight"])
+        d["weight"] = rem if rem is not None else (fil.get("weight") or d["weight"])
         return d
 
-    def _notify_scan(self, slot_info: dict, lane_name: str,
-                     spool_id: Any) -> None:
+    def _notify_scan(self, slot_info: dict, lane_name: str, spool_id: Any) -> None:
         """
         Show a popup and console summary of the scanned spool, like the U1 scanner.
 
@@ -1045,11 +938,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         try:
             d = self._spool_details(spool_id, slot_info)
             color = d["color"]
-            # Prefer the matched Spoolman name; fall back to the shared rich
-            # "<brand> <material> <sub_type>" builder so an unmatched tag still
-            # reads e.g. "Bambu PLA Basic".
-            name = d["name"] or build_filament_name(
-                d["brand"], d["material"], slot_info.get("sub_type", ""))
+            name = d["name"] or build_filament_name(d["brand"], d["material"],
+                                                    slot_info.get("sub_type", ""))
             lines = []
             if name:
                 lines.append(f"Name: {name}")
@@ -1082,14 +972,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             respond("// action:prompt_footer_button "
                     "OK|RESPOND TYPE=command MSG=action:prompt_end|info")
             respond("// action:prompt_show")
-            # Auto-dismiss after 10s so it doesn't linger if unattended.
-            self.reactor.register_callback(
-                lambda e: self.gcode.respond_raw("// action:prompt_end"),
-                self.reactor.monotonic() + 10.0)
+            self.reactor.register_callback(lambda e: self.gcode.respond_raw("// action:prompt_end"),
+                                           self.reactor.monotonic() + 10.0)
         except Exception as e:
             self.logger.warning(f"ACE2 RFID scan: notification error: {e}")
 
-    # ── auto-read on insert ───────────────────
     def _on_post_insert(self, lane: "AFCLane") -> None:
         """
         Auto-read the tag after ``afc_ace:post_insert`` fed a new spool to the hub.
@@ -1099,15 +986,16 @@ class AFC_ACE2_RFID(AFCUnitRFID):
 
         :param lane: the lane that was inserted
         """
-        # RFID off: no automatic insert read.
         if self.disable_rfid:
             return
         # When stage_read is on, the tag is read during staging (stage_probe*),
         # so skip the after-staging read to avoid a redundant reader-power cycle.
-        if self.stage_read or not self.read_on_insert:
+        if (self.stage_read
+            or not self.read_on_insert):
             return
         name = getattr(lane, "name", None)
-        if name is None or not self._rfid_enabled(name):
+        if (name is None
+            or not self._rfid_enabled(name)):
             return
         self.reactor.register_callback(lambda et, n=name: self._auto_read(n))
 
@@ -1139,14 +1027,14 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 "default_color": getattr(afc, "default_color", None)})
             after = (getattr(lane, "material", None), getattr(lane, "color", None))
             if after == before:
-                return                  # nothing configured, or nothing unset
+                return
             unit = getattr(lane, "unit_obj", None)
-            if unit is not None and hasattr(unit, "lane_illuminate_spool"):
+            if (unit is not None
+                and hasattr(unit, "lane_illuminate_spool")):
                 unit.lane_illuminate_spool(lane)
             afc.save_vars()
-            self.logger.info(
-                f"ACE2 RFID: {lane.name} has no readable tag; AFC defaults applied "
-                f"(material {after[0] or '-'}, color {after[1] or '-'})")
+            self.logger.info(f"ACE2 RFID: {lane.name} has no readable tag; AFC defaults applied "
+                             f"(material {after[0] or '-'}, color {after[1] or '-'})")
         except Exception:
             self.logger.error("ACE2 RFID: applying defaults failed",
                               traceback=traceback.format_exc())
@@ -1165,22 +1053,20 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 self.logger.info(f"ACE2 RFID auto-read {name}: {e}")
                 return
             except Exception:
-                self.logger.error(
-                    f"ACE2 RFID auto-read failed for {name}", traceback=traceback.format_exc())
+                self.logger.error(f"ACE2 RFID auto-read failed for {name}",
+                                  traceback=traceback.format_exc())
                 tag = None
             if tag:
                 if not tag.get("filament"):
-                    # A tag, but nothing it says could be decoded.
                     self._apply_untagged_defaults(name)
                 return
-            if attempt < self.read_on_insert_attempts - 1 and self.read_on_insert_delay:
-                self.reactor.pause(
-                    self.reactor.monotonic() + self.read_on_insert_delay)
+            if (attempt < self.read_on_insert_attempts - 1
+                and self.read_on_insert_delay):
+                self.reactor.pause(self.reactor.monotonic() + self.read_on_insert_delay)
         self.logger.info(
             f"ACE2 RFID auto-read {name}: no tag after {self.read_on_insert_attempts} attempts")
         self._apply_untagged_defaults(name)
 
-    # ── chunked read during staging ────────────────
     def _physical_slot(self, name: str) -> Optional[int]:
         """
         Return the lane's ACE slot.
@@ -1192,7 +1078,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :return Optional[int]: physical slot, or None when unmapped
         """
         sm = getattr(self.ace2, "_slot_map", None)
-        if isinstance(sm, dict) and name in sm:
+        if (isinstance(sm, dict)
+            and name in sm):
             return sm[name]
         return self._lane_slot.get(name)
 
@@ -1232,7 +1119,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :param slot: physical slot
         :return Optional[AFCLane]: the lane, or None
         """
-        if self.afc is None or not hasattr(self.afc, "lanes"):
+        if (self.afc is None
+            or not hasattr(self.afc, "lanes")):
             return None
         sm = getattr(self.ace2, "_slot_map", None)
         maps = [sm] if isinstance(sm, dict) else []
@@ -1273,8 +1161,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :return bool: True when the UID is the sibling's
         """
         if (not self.shared_reader_dedup
-                or not uid
-                or sibling_slot is None):
+            or not uid
+            or sibling_slot is None):
             return False
         if not self._sibling_present(sibling_slot):
             return False
@@ -1293,7 +1181,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :param ctx: shared staging context, updated in place
         """
         try:
-            if not self.stage_read or self.ace2 is None:
+            if (not self.stage_read
+                or self.ace2 is None):
                 return
             name = getattr(lane, "name", None)
             if name is None:
@@ -1308,13 +1197,10 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             if slot is None:
                 return
             slot = int(slot)
-            pair = (slot >> 1) & 0xFF          # per-pair power domain
-            link = self._new_link(self._reg_index(slot) & 0xFF,
-                                  power_index=pair)
+            pair = (slot >> 1) & 0xFF
+            link = self._new_link(self._reg_index(slot) & 0xFF, power_index=pair)
             shared = (pair * 2, pair * 2 + 1)
             sibling = shared[0] if shared[1] == slot else shared[1]
-            # Disable identify on the pair: frees the reader and suppresses the
-            # firmware autostage for this fresh insert (restore stays optional).
             for s in shared:
                 link.set_rfid_enable(s, False)
             # set_rfid_enable is fire-and-forget; a synchronous reader_power(off)
@@ -1325,10 +1211,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             # Fresh spool in the active slot: forget its old UID so its own new
             # tag is never mistaken for stale history.
             self._slot_uid.pop(slot, None)
-            self._probe = {"link": link, "shared": shared, "lane": lane,
-                           "slot": slot, "sibling": sibling}
-            # Fresh stage: no sister has been retracted, no manual-nudge hint
-            # shown yet.
+            self._probe = {"link": link, "shared": shared, "lane": lane, "slot": slot,
+                           "sibling": sibling}
             self._sister_retracted = None
             self._sister_hint_shown = False
             # Stop + suppress the ACE feed assist on these slots for the whole
@@ -1336,12 +1220,10 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             # watching the encoder it trips the stuck-spool error (fast flash).
             self._suppress_assist(shared)
             ctx["active"] = True
-            # Run the scan-and-read now on a continuous feed; report how far it fed
-            # so the feeder stages the remainder at full speed.
             ctx["fed"] = self._run_stage_scan(lane, ctx)
         except Exception:
-            self.logger.error(
-                "ACE2 RFID: stage_probe_begin failed", traceback=traceback.format_exc())
+            self.logger.error("ACE2 RFID: stage_probe_begin failed",
+                              traceback=traceback.format_exc())
             self._safe_probe_teardown()
             self._restore_assist()
 
@@ -1363,15 +1245,15 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             try:
                 if isinstance(sup, set):
                     sup.add(s)
-                if isinstance(active, set) and s in active:
+                if (isinstance(active, set)
+                    and s in active):
                     ace2._stop_feed_assist(s)
                 elif conn is not None:
-                    conn.stop_feed_assist_sync(s)   # force stop; tracking drifted
+                    conn.stop_feed_assist_sync(s)
                 self.logger.info(f"ACE2 RFID: feed assist stopped on slot {s}")
             except Exception:
-                self.logger.error(
-                    f"ACE2 RFID: failed to stop feed assist on slot {s}",
-                        traceback=traceback.format_exc())
+                self.logger.error(f"ACE2 RFID: failed to stop feed assist on slot {s}",
+                                  traceback=traceback.format_exc())
 
     def _restore_assist(self) -> None:
         """
@@ -1380,7 +1262,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         """
         slots = self._assist_slots
         self._assist_slots = None
-        if not slots or self.ace2 is None:
+        if (not slots
+            or self.ace2 is None):
             return
         sup = getattr(self.ace2, "_assist_suppressed", None)
         for s in slots:
@@ -1389,13 +1272,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     sup.discard(s)
                 self.logger.info(f"ACE2 RFID: feed assist restored on slot {s}")
             except Exception:
-                self.logger.error(
-                    f"ACE2 RFID: failed to restore feed assist on slot {s}",
-                        traceback=traceback.format_exc())
+                self.logger.error(f"ACE2 RFID: failed to restore feed assist on slot {s}",
+                                  traceback=traceback.format_exc())
 
     def _probe_excluder(self, active_slot: int,
-                        sibling_slot: Optional[int]
-                        ) -> Optional[Callable[[str], bool]]:
+                        sibling_slot: Optional[int]) -> Optional[Callable[[str], bool]]:
         """
         Build a ``uid_hex -> bool`` predicate that flags the sibling's tag.
 
@@ -1407,7 +1288,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :return Optional[Callable[[str], bool]]: the predicate, or None when
             there is nothing to exclude
         """
-        if not self.shared_reader_dedup or sibling_slot is None:
+        if (not self.shared_reader_dedup
+            or sibling_slot is None):
             return None
         return lambda uid: self._is_sibling_tag(active_slot, sibling_slot, uid)
 
@@ -1444,8 +1326,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         sib_lane = self._lane_at_slot(sibling)
         sib_has_spool = (sib_lane is not None
                          and bool(getattr(sib_lane, "prep_state", False)))
-        # Host owns the reader for the whole scan, power is held across the feed
-        # (the continuous scan keeps it powered and polls throughout).
         link.reader_power(True)
         self._dwell(0.1)
         try:
@@ -1456,23 +1336,22 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         # sister's, parked. Retract a movable sister, else exclude that UID for
         # the scan (dedup alone misses a sister staged in an earlier session).
         baseline = None
-        blocked_sib = None            # a present sibling we couldn't move off the coil
+        blocked_sib = None
         if sib_has_spool:
             parked = None
-            for _ in range(3):                       # a couple retries, read is
-                parked = self._probe_uid(link)   # reliable for a still tag
+            for _ in range(3):
+                parked = self._probe_uid(link)
                 if parked is not None:
                     break
                 self._dwell(0.05)
             if parked is not None:
-                self.logger.info(
-                    f"ACE2 RFID: stage scan slot {slot}, tag {parked} "
-                    f"parked on the shared reader (sibling slot {sibling}); "
-                    f"clearing it before the read")
+                self.logger.info(f"ACE2 RFID: stage scan slot {slot}, tag {parked} "
+                                 f"parked on the shared reader (sibling slot {sibling}); "
+                                 f"clearing it before the read")
                 # Unmovable: exclude its tag and try anyway; the user is only
                 # asked to move it if the read comes up empty.
                 self._maybe_retract_sister(sibling)
-                if self._sister_retracted is None:   # couldn't move it
+                if self._sister_retracted is None:
                     baseline = parked
                     blocked_sib = sibling
         t0 = self.reactor.monotonic()
@@ -1505,15 +1384,15 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                             pass
                         ctx["removed"] = True
                         self._reader_power_off(link)
-                        return min(scan_dist,
-                                   (self.reactor.monotonic() - t0) * eff)
+                        return min(scan_dist, (self.reactor.monotonic() - t0) * eff)
                 except Exception:
                     pass
             uidhex = self._probe_uid(link)
             if uidhex is not None:
                 # The stationary parked sibling tag captured at baseline, never
                 # this lane's; keep feeding so our own tag sweeps in.
-                if baseline is not None and uidhex == baseline:
+                if (baseline is not None
+                    and uidhex == baseline):
                     continue
                 # A neighbour's tag on the antenna: retract the idle sibling and
                 # keep feeding so our tag sweeps in. Restored in _stage_probe_end.
@@ -1532,8 +1411,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 except Exception as e:
                     self.logger.info(f"ACE2 RFID: stage scan stop_feed err: {e}")
                 break
-            # End the scan when the feed finishes with no tag seen.
-            if callable(slot_moving) and callable(get_status):
+            if (callable(slot_moving)
+                and callable(get_status)):
                 try:
                     moving = slot_moving(get_status(timeout=2.0), slot)
                 except Exception:
@@ -1546,21 +1425,22 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     if idle >= 2:
                         net_fed = scan_dist
                         break
-        if not detected and net_fed == 0.0:
+        if (not detected
+            and net_fed == 0.0):
             net_fed = scan_dist
-        # Parked read (+ re-center sweep) now that we've stopped on our own tag.
         if detected:
             tag, extra_retract = self._parked_read(link, slot, sibling, baseline)
             net_fed -= extra_retract
-            if tag and tag.get("filament"):
+            if (tag
+                and tag.get("filament")):
                 uid = tag.get("uid")
                 if uid is not None:
                     self._slot_uid[int(slot)] = uid
                 ctx["done"] = True
-                # Release the reader before the feeder stages the remainder.
                 self._safe_probe_teardown()
                 try:
-                    if self.afc is not None and hasattr(self.afc, "lanes"):
+                    if (self.afc is not None
+                        and hasattr(self.afc, "lanes")):
                         lane = self.afc.lanes.get(getattr(lane, "name", None), lane)
                     self.apply_to_lane(lane, tag)
                     f = tag.get("filament") or {}
@@ -1568,9 +1448,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                         f"ACE2 RFID: read {getattr(lane, 'name', '?')} during staging, uid="
                         f"{tag.get('uid', '')} type={tag.get('tag_type', '')} {f.get('type', '')}")
                 except Exception:
-                    self.logger.error(
-                        "ACE2 RFID: apply after stage read failed",
-                            traceback=traceback.format_exc())
+                    self.logger.error("ACE2 RFID: apply after stage read failed",
+                                      traceback=traceback.format_exc())
             else:
                 self.logger.info(
                     f"ACE2 RFID: stage scan slot {slot} detected uid={detected} but the tag did "
@@ -1588,8 +1467,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         return max(0.0, net_fed)
 
     def _parked_read(self, link: Any, slot: int, sibling: Optional[int],
-                     baseline: Optional[str] = None
-                     ) -> Tuple[Optional[dict], float]:
+                     baseline: Optional[str] = None) -> Tuple[Optional[dict], float]:
         """
         Read the just-stopped tag at rest.
 
@@ -1614,7 +1492,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             :param u: UID read from the tag being evaluated
             :return bool: True when the UID should be excluded from this lane's read
             """
-            if baseline is not None and u == baseline:
+            if (baseline is not None
+                and u == baseline):
                 return True
             return bool(sib_excluder and sib_excluder(u))
 
@@ -1639,12 +1518,13 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         retracted = 0.0
         step = max(0.5, float(self.stage_recenter_step))
         rspeed = float(getattr(self.ace2, "retract_speed", self.stage_scan_speed))
-        while retracted + 1e-6 < self.stage_recenter_max and conn is not None:
+        while (retracted + 1e-6 < self.stage_recenter_max
+               and conn is not None):
             try:
                 conn.unwind_filament(slot, step, rspeed)
             except Exception:
-                self.logger.error(
-                    "ACE2 RFID: re-center retract failed", traceback=traceback.format_exc())
+                self.logger.error("ACE2 RFID: re-center retract failed",
+                                  traceback=traceback.format_exc())
                 break
             retracted += step
             self._dwell(0.15)
@@ -1665,8 +1545,6 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :param ctx: shared staging context (unused)
         """
         self._safe_probe_teardown()
-        # Put any sister we retracted to clear the antenna back where it was
-        # (re-fed the same distance) before restoring assist.
         self._restore_sister()
         self._restore_assist()
 
@@ -1698,18 +1576,19 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if sibling_slot is None:
             return "blocked"
         if self._sister_retracted is not None:
-            return "retracted"          # already cleared it this stage
-        if not self.auto_tag_adjust or self.ace2 is None:
-            return "blocked"            # feature off → manual nudge
+            return "retracted"
+        if (not self.auto_tag_adjust
+            or self.ace2 is None):
+            return "blocked"
         lane = self._lane_at_slot(sibling_slot)
         if lane is None:
             return "blocked"
         if getattr(lane, "tool_loaded", False):
-            return "blocked"            # loaded to toolhead, never move
+            return "blocked"
         if not getattr(lane, "loaded_to_hub", False):
-            return "blocked"            # not staged at hub, don't guess its pos
+            return "blocked"
         if self._is_printing():
-            return "blocked"            # print in progress, never move
+            return "blocked"
         dist = float(self.auto_tag_adjust_dist)
         speed = float(getattr(self.ace2, "feed_speed", 80.0))
         conn = getattr(self.ace2, "_ace", None)
@@ -1719,9 +1598,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             conn.unwind_filament(sibling_slot, dist, speed)
             self.ace2._wait_for_feed_complete(sibling_slot, dist, speed)
         except Exception:
-            self.logger.error(
-                f"ACE2 RFID: sister retract on slot {sibling_slot} failed",
-                    traceback=traceback.format_exc())
+            self.logger.error(f"ACE2 RFID: sister retract on slot {sibling_slot} failed",
+                              traceback=traceback.format_exc())
             return "blocked"
         self._sister_retracted = (sibling_slot, dist, speed)
         self.logger.info(
@@ -1737,7 +1615,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         """
         info = self._sister_retracted
         self._sister_retracted = None
-        if not info or self.ace2 is None:
+        if (not info
+            or self.ace2 is None):
             return
         slot, dist, speed = info
         conn = getattr(self.ace2, "_ace", None)
@@ -1749,9 +1628,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             self.logger.info(
                 f"ACE2 RFID: restored sister slot {slot} (+{dist:.0f}mm) after stage read")
         except Exception:
-            self.logger.error(
-                f"ACE2 RFID: sister restore on slot {slot} failed",
-                    traceback=traceback.format_exc())
+            self.logger.error(f"ACE2 RFID: sister restore on slot {slot} failed",
+                              traceback=traceback.format_exc())
 
     def _handle_sister_domination(self, sibling_slot: Optional[int]) -> None:
         """
@@ -1772,11 +1650,10 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         lname = getattr(lane, "name", None) or (f"slot {sibling_slot}")
         self.gcode.respond_info(
             f"AFC ACE2: the tag on lane {lname} is sitting on the shared reader and blocking this "
-                f"read. Give that spool about a quarter turn by hand to move its tag off the "
-                f"reader, then it should read.")
+            f"read. Give that spool about a quarter turn by hand to move its tag off the "
+            f"reader, then it should read.")
 
-    def _sister_blocked_hint(self, active_lane: "AFCLane",
-                             sibling_slot: Optional[int]) -> None:
+    def _sister_blocked_hint(self, active_lane: "AFCLane", sibling_slot: Optional[int]) -> None:
         """
         Tell the user a parked sibling probably blocked an empty stage read.
 
@@ -1786,7 +1663,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         :param active_lane: the lane whose read failed
         :param sibling_slot: the sibling that could not be moved, if any
         """
-        if sibling_slot is None or self._sister_hint_shown:
+        if (sibling_slot is None
+            or self._sister_hint_shown):
             return
         self._sister_hint_shown = True
         sib_lane = self._lane_at_slot(sibling_slot)
@@ -1794,8 +1672,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         act = getattr(active_lane, "name", None) or "this lane"
         self.gcode.respond_info(
             f"AFC ACE2: couldn't read {act}'s RFID, lane {sib_name}'s spool is on the shared "
-                f"reader blocking it. Manually move lane {sib_name}'s spool a little and re-stage "
-                f"{act}, or set {act}'s spool id by hand.")
+            f"reader blocking it. Manually move lane {sib_name}'s spool a little and re-stage "
+            f"{act}, or set {act}'s spool id by hand.")
 
     def _reader_power_off(self, link: Any) -> None:
         """
@@ -1808,8 +1686,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         try:
             link.reader_power(False)
         except Exception:
-            self.logger.error(
-                "ACE2 RFID: stage read reader power-off failed", traceback=traceback.format_exc())
+            self.logger.error("ACE2 RFID: stage read reader power-off failed",
+                              traceback=traceback.format_exc())
 
     def _safe_probe_teardown(self) -> None:
         """
@@ -1831,8 +1709,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 link.reader_power(False)
                 self.logger.info("ACE2 RFID teardown: reader_power(off) done")
             except Exception:
-                self.logger.error(
-                    "ACE2 RFID: probe power-off failed", traceback=traceback.format_exc())
+                self.logger.error("ACE2 RFID: probe power-off failed",
+                                  traceback=traceback.format_exc())
         if self.probe_restore_identify:
             for s in shared:
                 self.logger.info(f"ACE2 RFID teardown: set_rfid_enable({s},on)...")
@@ -1840,13 +1718,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     link.set_rfid_enable(s, True)
                     self.logger.info(f"ACE2 RFID teardown: set_rfid_enable({s},on) done")
                 except Exception:
-                    self.logger.error(
-                        "ACE2 RFID: probe re-enable identify failed",
-                            traceback=traceback.format_exc())
+                    self.logger.error("ACE2 RFID: probe re-enable identify failed",
+                                      traceback=traceback.format_exc())
         else:
             self.logger.info("ACE2 RFID teardown: identify NOT restored (config)")
 
-    # ── gcode ───────────────────────
     def cmd_ACE_RFID_READ(self, gcmd: "GCodeCommand") -> None:
         """
         Read the tag for a lane, or a raw slot for diagnostics, and report it.
@@ -1877,7 +1753,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 slot = gcmd.get_int("SLOT", 0)
                 tag = self.read_slot(slot, reg_slot=reg_slot)
         except self.printer.command_error:
-            raise                                 # normal user error (no shutdown)
+            raise
         except Exception as e:
             # A serial timeout or reader glitch must never shut Klipper down.
             self.logger.error("ACE2 RFID read failed", traceback=traceback.format_exc())
@@ -1890,10 +1766,9 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         color = ""
         if f.get("color_argb") is not None:
             color = f'{(f.get("color_argb") or 0) & 0xFFFFFF:06x}'
-        gcmd.respond_info(
-            f'ACE2 RFID: uid={tag.get("uid", "")} type={tag.get("tag_type", "")} '
-            f'brand={f.get("manufacturer", "")} material={f.get("type", "")} '
-            f'color={color}')
+        gcmd.respond_info(f'ACE2 RFID: uid={tag.get("uid", "")} type={tag.get("tag_type", "")} '
+                          f'brand={f.get("manufacturer", "")} material={f.get("type", "")} '
+                          f'color={color}')
 
     def cmd_ACE_RFID_BLOCKS(self, gcmd: "GCodeCommand") -> None:
         """
@@ -1925,8 +1800,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             if lane_name is not None:
                 slot = self._slot_for_lane(lane_name)
                 if slot is None:
-                    error_str = (f"lane {lane_name!r} has no ACE2 reader slot "
-                                 f"(set lane_slot_map)")
+                    error_str = f"lane {lane_name!r} has no ACE2 reader slot (set lane_slot_map)"
                     raise self.printer.command_error(error_str)
             else:
                 slot = gcmd.get_int("SLOT", 0)
@@ -1999,10 +1873,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         """
         lane, slot = self._rescan_target(lane_name, gcmd.error)
         dist = self._rescan_dist(lane, lane_name,
-                                 gcmd.get_float("DIST", 500.0, minval=10.0),
-                                 gcmd.error)
-        speed = gcmd.get_float("SPEED", float(self.stage_scan_speed),
-                               minval=1.0, maxval=140.0)
+                                 gcmd.get_float("DIST", 500.0, minval=10.0), gcmd.error)
+        speed = gcmd.get_float("SPEED", float(self.stage_scan_speed), minval=1.0, maxval=140.0)
         gcmd.respond_info(f"ACE2 RFID: winding {lane_name} back {dist:.0f}mm "
                           f"and feeding it past the reader...")
         tag, seen = self._rescan_run(lane_name, slot, dist, speed, gcmd)
@@ -2017,8 +1889,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             self._slot_uid[slot] = uid
         self.apply_to_lane(lane, tag)
 
-    def _rescan_target(self, lane_name: str,
-                       fail: Callable[[str], Exception]) -> Tuple[Any, int]:
+    def _rescan_target(self, lane_name: str, fail: Callable[[str], Exception]) -> Tuple[Any, int]:
         """
         The lane and slot a rescan or a staged tag write turns, or ``fail``
         raised with why it may not.
@@ -2035,7 +1906,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if slot is None:
             error_str = f"lane {lane_name!r} has no ACE2 slot (set lane_slot_map)"
             raise fail(error_str)
-        if self.disable_rfid or not self._rfid_enabled(lane_name):
+        if (self.disable_rfid
+            or not self._rfid_enabled(lane_name)):
             error_str = f"ACE2 RFID is off for {lane_name}"
             raise fail(error_str)
         lane = (getattr(self.afc, "lanes", None) or {}).get(lane_name)
@@ -2047,20 +1919,18 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                          f"before its spool is turned past the reader")
             raise fail(error_str)
         if self._is_printing():
-            error_str = ("turning the spool past the reader moves filament; "
-                         "not while printing")
+            error_str = "turning the spool past the reader moves filament; not while printing"
             raise fail(error_str)
         if not getattr(lane, "loaded_to_hub", False):
-            error_str = (f"{lane_name} is not staged, so there is no filament "
-                         f"to turn the spool with")
+            error_str = f"{lane_name} is not staged, so there is no filament to turn the spool with"
             raise fail(error_str)
         conn = getattr(ace2, "_ace", None)
-        if conn is None or not getattr(conn, "connected", False):
+        if (conn is None
+            or not getattr(conn, "connected", False)):
             error_str = "ACE serial not connected"
             raise fail(error_str)
         if getattr(ace2, "_operation_active", False):
-            error_str = ("the ACE is loading or unloading; try again when it "
-                         "is done")
+            error_str = "the ACE is loading or unloading; try again when it is done"
             raise fail(error_str)
         return lane, int(slot)
 
@@ -2113,8 +1983,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         pair = (slot >> 1) * 2
         sibling = pair if pair + 1 == slot else pair + 1
         excluded = self._probe_excluder(slot, sibling)
-        link = self._new_link(self._reg_index(slot) & 0xFF,
-                              power_index=pair >> 1)
+        link = self._new_link(self._reg_index(slot) & 0xFF, power_index=pair >> 1)
 
         def log(msg: str) -> None:
             """
@@ -2128,7 +1997,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         # feed assist while the lane is wound back, and assist off on the pair.
         ace2._operation_active = True
         self._suppress_assist((pair, pair + 1))
-        pos = 0.0                         # mm from where the lane started
+        pos = 0.0
         tag = None
         seen = None
         hold_error: Optional[Exception] = None
@@ -2143,8 +2012,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             link.reader_power(True)
             self._dwell(0.1)
             try:
-                seen = self._rescan_pass(slot, link, dist, speed, excluded, log,
-                                         gcmd)
+                seen = self._rescan_pass(slot, link, dist, speed, excluded, log, gcmd)
                 pos = 0.0
                 if seen is not None:
                     back = dist - seen
@@ -2153,12 +2021,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     if back > 0.5:
                         self._rescan_move(slot, -back, gcmd)
                         pos = -back
-                    tag, pos = self._rescan_seek(slot, link, pos, excluded, log,
-                                                 gcmd,
+                    tag, pos = self._rescan_seek(slot, link, pos, excluded, log, gcmd,
                                                  need_decode=hold is None)
-                    if tag and hold is not None:
-                        log(f"holding tag {tag.get('uid')} at the reader for "
-                            f"the write")
+                    if (tag
+                        and hold is not None):
+                        log(f"holding tag {tag.get('uid')} at the reader for the write")
                         try:
                             hold(excluded)
                         except Exception as e:
@@ -2183,8 +2050,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             raise hold_error
         return tag, seen
 
-    def _stage_write_around(self, lane_name: str, slot: int,
-                            body: Callable[..., Any]) -> None:
+    def _stage_write_around(self, lane_name: str, slot: int, body: Callable[..., Any]) -> None:
         """
         AFC_RFID_WRITE / AFC_RFID_ENROLL LANE= on an ACE 2 lane: run the
         rescan's motion and write the tag where it comes to rest, then put the
@@ -2201,8 +2067,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                          f"with READER=ace2:slot{lane_slot}")
             raise StageError(error_str)
         dist = self._rescan_dist(lane, lane_name, 500.0, StageError)
-        tag, seen = self._rescan_run(lane_name, slot, dist,
-                                     float(self.stage_scan_speed),
+        tag, seen = self._rescan_run(lane_name, slot, dist, float(self.stage_scan_speed),
                                      _StageCmd(), hold=body)
         if not tag:
             error_str = (f"no tag on {lane_name} "
@@ -2224,14 +2089,14 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             error_str = f"{lane_name} is not an AFC lane"
             raise RuntimeError(error_str)
         slot = self._physical_slot(lane_name)
-        if slot is not None and tag.get("uid") is not None:
+        if (slot is not None
+            and tag.get("uid") is not None):
             self._slot_uid[int(slot)] = tag["uid"]
         self.apply_to_lane(lane, tag)
 
     def _rescan_move(self, slot: int, mm: float, gcmd: "GCodeCommand",
                      speed: Optional[float] = None,
-                     poll: Optional[Callable[[], None]] = None
-                     ) -> Tuple[float, float]:
+                     poll: Optional[Callable[[], None]] = None) -> Tuple[float, float]:
         """
         Move a rescan lane ``mm`` (negative winds back) and wait until the
         ACE reports the move started and finished, calling ``poll`` between
@@ -2288,7 +2153,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 if t_end is None:
                     t_end = t
                 if idle >= 2:
-                    if t_end - t_start >= shortest or shortest < 1.0:
+                    if (t_end - t_start >= shortest
+                        or shortest < 1.0):
                         return t_start, t_end
                     t_start = t_end = None
                     idle = 0
@@ -2303,8 +2169,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         raise gcmd.error(error_str)
 
     def _rescan_pass(self, slot: int, link: Any, dist: float, speed: float,
-                     excluded: Optional[Callable[[str], bool]],
-                     log: Callable[[str], None],
+                     excluded: Optional[Callable[[str], bool]], log: Callable[[str], None],
                      gcmd: "GCodeCommand") -> Optional[float]:
         """
         Feed ``dist`` at ``speed`` to completion while polling the reader,
@@ -2331,11 +2196,11 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             Note the time whenever this slot's tag is in the reader's field.
             """
             uidhex = self._probe_uid(link)
-            if uidhex is not None and not (excluded and excluded(uidhex)):
+            if (uidhex is not None
+                and not (excluded and excluded(uidhex))):
                 sightings.append(self.reactor.monotonic())
 
-        t_start, t_end = self._rescan_move(slot, dist, gcmd, speed=speed,
-                                           poll=poll)
+        t_start, t_end = self._rescan_move(slot, dist, gcmd, speed=speed, poll=poll)
         sightings = [t for t in sightings if t_start <= t <= t_end]
         if not sightings:
             log(f"no tag went past in {dist:.0f}mm")
@@ -2352,8 +2217,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         return max(0.0, min(dist, seen))
 
     def _rescan_seek(self, slot: int, link: Any, pos: float,
-                     excluded: Optional[Callable[[str], bool]],
-                     log: Callable[[str], None],
+                     excluded: Optional[Callable[[str], bool]], log: Callable[[str], None],
                      gcmd: "GCodeCommand",
                      need_decode: bool = True) -> Tuple[Optional[dict], float]:
         """
@@ -2383,9 +2247,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 except Exception:
                     t = None
                 if (t
-                    and (t.get("filament")
-                         or (not need_decode
-                             and t.get("uid")))):
+                    and (t.get("filament") or (not need_decode and t.get("uid")))):
                     return t
                 self._dwell(0.12)
             return None
@@ -2394,10 +2256,10 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         tag = _read()
         step = self.RESCAN_SEEK_STEP_MM
         k = 1
-        while not tag and k * step <= self.RESCAN_SEEK_SPAN_MM + 1e-6:
+        while (not tag
+               and k * step <= self.RESCAN_SEEK_SPAN_MM + 1e-6):
             for off in (-k * step, k * step):
                 target = aim + off
-                # never feed past where the lane started
                 if target > 0.0:
                     continue
                 self._rescan_move(slot, target - pos, gcmd)
@@ -2436,8 +2298,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             else:
                 error_str = "ACE_RFID_SCAN requires LANE= (no single scanner_lanes lane)"
                 raise self.printer.command_error(error_str)
-        seconds = gcmd.get_float("SECONDS", self.scan_seconds,
-                                 minval=1.0, maxval=600.0)
+        seconds = gcmd.get_float("SECONDS", self.scan_seconds, minval=1.0, maxval=600.0)
         if self._scan_running:
             error_str = "ACE2 RFID scan: a scan is already running"
             raise self.printer.command_error(error_str)
@@ -2447,8 +2308,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         # pause() is legal. Holding the g-code queue for the whole scan read as a frozen
         # printer. Results go to the console since there is no command left to answer.
         self._scan_running = True
-        self.reactor.register_callback(
-            lambda et: self._scan_in_background(lane_name, seconds))
+        self.reactor.register_callback(lambda et: self._scan_in_background(lane_name, seconds))
 
     def _scan_in_background(self, lane_name: str, seconds: float) -> None:
         """
@@ -2463,8 +2323,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         except Exception as e:
             # A reader glitch must never shut Klipper down, and there is no
             # command left to raise to, so even a command_error is reported.
-            self.logger.error("ACE2 RFID scan failed",
-                              traceback=traceback.format_exc())
+            self.logger.error("ACE2 RFID scan failed", traceback=traceback.format_exc())
             say(f"ACE2 RFID scan: error: {e}")
             return
         finally:
@@ -2475,9 +2334,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         f = tag.get("filament") or {}
         spool = getattr(self.afc, "spool", None) if self.afc is not None else None
         nid = getattr(spool, "next_spool_id", None)
-        say(
-            f'ACE2 RFID scan: staged next spool from {lane_name}, uid={tag.get("uid", "")} type='
-                f'{f.get("type", "")}{((f" (spool #{nid})") if nid else "")}')
+        say(f'ACE2 RFID scan: staged next spool from {lane_name}, uid={tag.get("uid", "")} type='
+            f'{f.get("type", "")}{((f" (spool #{nid})") if nid else "")}')
 
 
 def load_config(config: "ConfigWrapper") -> AFC_ACE2_RFID:

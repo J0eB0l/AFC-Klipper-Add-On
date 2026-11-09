@@ -6,38 +6,28 @@
 #
 # BoxTurtle lane RFID: read a spool's tag by turning the spool.
 #
-# Two RC522-family readers share one Pico running the rfid_bridge firmware,
-# one reader per pair of lanes:
+# Two RC522-family readers share one Pico running the rfid_bridge firmware, one
+# reader per pair of lanes:
 #
 #   [AFC_BoxTurtle_rfid]           coordinator: serial port, keys, knobs
 #   [AFC_BoxTurtle_rfid reader0]   bus: 0   lanes: lane8, lane9
 #   [AFC_BoxTurtle_rfid reader1]   bus: 1   lanes: lane10, lane11
 #
-# The Pico is not a Klipper [mcu] but a plain USB-CDC device this module opens
-# itself, so an absent or wedged reader only reports offline and can never take
-# the printer down.
+# The Pico is a plain USB-CDC device, not a Klipper [mcu], so an absent reader only
+# reports offline. Its firmware is a register wire ("r<bus> <reg>" / "w<bus> <reg> <val>",
+# hex), so the shared reader stack runs host side. Bus 0 is GP4/GP5, bus 1 is GP6/GP7.
 #
-# The firmware is a register wire ("r<bus> <reg>" / "w<bus> <reg> <val>", hex,
-# one op per line), so the shared reader stack runs host side unchanged and
-# results reach Spoolman through AFC_RFID. Bus 0 is GP4/GP5, bus 1 is GP6/GP7.
-# A read takes about a second over USB, so reads run on a worker thread.
-#
-# The tag sits at one angle on the spool, so reading it means turning the
-# spool: feed while polling, stop when the tag answers, put the filament back.
-# The sweep is bounded in spool revolutions. A sister lane's parked tag on the
-# shared antenna is rolled clear first (see _clear_sibling).
-#
-# This runs on insert from afc:lane_prep_loaded, after the filament is homed to
-# the load switch and before it feeds the hub. AFC_BT_RFID_READ and
-# AFC_BT_RFID_STAGE do it on demand.
+# The tag sits at one angle on the spool, so a read feeds while polling, stops when the
+# tag answers and puts the filament back. It runs on insert (afc:lane_prep_loaded),
+# after the filament homes to the load switch; AFC_BT_RFID_READ and AFC_BT_RFID_STAGE
+# do it on demand.
 from __future__ import annotations
 import math
 import threading
 import traceback
 import chelper
 from configparser import Error as error
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional,
-                    Tuple)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple)
 
 # pyserial is only needed when the bridge actually opens a port; the tests
 # and any host without a reader Pico must import cleanly without it.
@@ -58,9 +48,7 @@ except:
 
 from extras.AFC_rfid_readers import read_tag
 from extras.AFC_rfid_write import StageError, register_reader
-from extras.AFC_RFID import (AFCUnitRFID,
-                             map_tag_to_slot_info,
-                             resolve_rfid_keys)
+from extras.AFC_RFID import (AFCUnitRFID, map_tag_to_slot_info, resolve_rfid_keys)
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
@@ -73,7 +61,6 @@ _VERSION_REG = 0x37
 #: reply is a failed reply.
 _OP_TIMEOUT_S = 0.25
 
-#: How often the connect timer retries an absent bridge.
 _RETRY_S = 5.0
 
 
@@ -117,11 +104,9 @@ class _BridgeSerial:
             if self._ser is not None:
                 return True
             try:
-                self._ser = serial.Serial(
-                    self.port, 115200, timeout=_OP_TIMEOUT_S,
-                    write_timeout=_OP_TIMEOUT_S)
-                self.logger.info(
-                    f"BT RFID: bridge connected on {self.port}")
+                self._ser = serial.Serial(self.port, 115200, timeout=_OP_TIMEOUT_S,
+                                          write_timeout=_OP_TIMEOUT_S)
+                self.logger.info(f"BT RFID: bridge connected on {self.port}")
                 return True
             except Exception:
                 self._ser = None
@@ -139,9 +124,8 @@ class _BridgeSerial:
         except Exception:
             pass
         if self._ser is not None:
-            self.logger.warning(
-                f"BT RFID: bridge dropped on {self.port}, retrying in "
-                f"the background")
+            self.logger.warning(f"BT RFID: bridge dropped on {self.port}, retrying in "
+                                f"the background")
         self._ser = None
 
     def request(self, line: str) -> Optional[str]:
@@ -164,7 +148,7 @@ class _BridgeSerial:
                 for _ in range(8):          # skip interleaved JSON events
                     resp = self._ser.readline().decode(errors="replace")
                     if not resp:
-                        return None         # timeout
+                        return None
                     resp = resp.strip()
                     if resp.startswith("="):
                         return resp[1:]
@@ -211,8 +195,7 @@ class _SerialRegLink:
         :param reg: MFRC522 register index
         :param val: value to write
         """
-        resp = self.bridge.request(
-            f"w{self.bus} {reg & 0xFF:02X} {val & 0xFF:02X}")
+        resp = self.bridge.request(f"w{self.bus} {reg & 0xFF:02X} {val & 0xFF:02X}")
         if resp is None:
             error_str = f"rfid bridge bus {self.bus}: no answer writing " \
                         f"reg 0x{reg:02X}"
@@ -233,7 +216,6 @@ class AFC_BoxTurtle_rfid_reader:
         """
         self.printer = config.get_printer()
         self.name = config.get_name().split()[-1]
-        # Take AFC's logger at construction; load_object builds AFC if needed.
         self.logger = self.printer.load_object(config, "AFC").logger
         self.bus = config.getint("bus", 0, minval=0, maxval=1)
         self.link: Optional[_SerialRegLink] = None
@@ -243,10 +225,8 @@ class AFC_BoxTurtle_rfid_reader:
             if ln:
                 self.lanes.append(ln)
         if not self.lanes:
-            error_str = (f"AFC_BoxTurtle_rfid {self.name}: 'lanes' must name at "
-                         f"least one lane")
+            error_str = f"AFC_BoxTurtle_rfid {self.name}: 'lanes' must name at least one lane"
             raise config.error(error_str)
-        # Filled by the coordinator's connect probe; None = offline.
         self.version: Optional[int] = None
 
 
@@ -275,8 +255,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object("gcode")
-        # Take AFC's logger at construction; load_object builds AFC if needed.
-        # self.afc stays None until klippy:ready: guards use it as the ready marker.
+        # self.afc stays None until klippy:ready; guards use it as the ready marker.
         self.logger = self.printer.load_object(config, "AFC").logger
         self.afc: Any = None
         self.log_prefix = "BT RFID"
@@ -284,7 +263,6 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         self.serial_port = config.get("serial")
         self.bridge = _BridgeSerial(self.serial_port, self.logger)
 
-        # Brand keys: this section wins, [AFC_rfid_keys] fills the gaps.
         bmk = (config.get("bambu_master_key", "") or "").strip()
         ck = (config.get("creality_key", "") or "").strip()
         cek = (config.get("creality_encryption_key", "") or "").strip()
@@ -293,54 +271,34 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         self.creality_encryption_key = bytes.fromhex(cek) if cek else None
         self.auto_create = config.getboolean("auto_spoolman_create", False)
 
-        # Tag-homing defaults (all overridable per AFC_BT_RFID_STAGE call). The
-        # sweep is bounded in spool revolutions, since the tag passes the reader
-        # once per turn (~630mm of filament on a full 200mm spool).
-        self.spool_diameter_mm = config.getfloat(
-            "spool_diameter_mm", 200.0, above=0.0)
-        self.tag_sweep_revs = config.getfloat(
-            "tag_sweep_revs", 2.0, above=0.0)
+        # The tag passes the reader once per turn (~630mm on a full 200mm spool).
+        self.spool_diameter_mm = config.getfloat("spool_diameter_mm", 200.0, above=0.0)
+        self.tag_sweep_revs = config.getfloat("tag_sweep_revs", 2.0, above=0.0)
         # Limited by dwell: the tag must stay in the coil's field for a whole
         # read. 100 is measured (20-100 all read). Too fast and tags are missed,
         # which shows up as lanes needing extra turns, not as an error.
-        self.tag_sweep_speed = config.getfloat(
-            "tag_sweep_speed", 100.0, above=0.0)
+        self.tag_sweep_speed = config.getfloat("tag_sweep_speed", 100.0, above=0.0)
         # Chunk size, the abort granularity. 0 (default) sizes it from the
         # lane's speed and acceleration (see _sweep_step_for).
-        self.tag_sweep_step_mm = config.getfloat(
-            "tag_sweep_step_mm", 0.0, minval=0.0)
-        self.read_timeout_s = config.getfloat(
-            "read_timeout_s", 6.0, above=0.0)
-        self.retract_after_read = config.getboolean(
-            "retract_after_read", True)
-        # Speed for the restoring retract; 0 means the lane's long-move speed.
-        self.tag_retract_speed = config.getfloat(
-            "tag_retract_speed", 0.0, minval=0.0)
-        # Scan the tag automatically when a spool is inserted (reader lanes only).
+        self.tag_sweep_step_mm = config.getfloat("tag_sweep_step_mm", 0.0, minval=0.0)
+        self.read_timeout_s = config.getfloat("read_timeout_s", 6.0, above=0.0)
+        self.retract_after_read = config.getboolean("retract_after_read", True)
+        self.tag_retract_speed = config.getfloat("tag_retract_speed", 0.0, minval=0.0)
         self.scan_on_insert = config.getboolean("scan_on_insert", True)
-        # Roll a sister lane back so its parked tag leaves the shared antenna
-        # during the scan, like ACE2's auto_tag_adjust.
-        self.sibling_tag_adjust = config.getboolean(
-            "sibling_tag_adjust", True)
+        self.sibling_tag_adjust = config.getboolean("sibling_tag_adjust", True)
         # 45mm is measured: the tag clears the coil well before 75mm.
-        self.sibling_tag_adjust_dist = config.getfloat(
-            "sibling_tag_adjust_dist", 45.0, minval=1.0)
-        # Set while a sweep owns the lane. See _refuse_if_busy.
+        self.sibling_tag_adjust_dist = config.getfloat("sibling_tag_adjust_dist", 45.0, minval=1.0)
         self._sweeping = False
-        # One probe thread at a time; see _connect_timer.
         self._probing = False
-        self.printer.register_event_handler(
-            "afc:lane_prep_loaded", self._on_lane_prep_loaded)
+        self.printer.register_event_handler("afc:lane_prep_loaded", self._on_lane_prep_loaded)
 
         self._readers: List[AFC_BoxTurtle_rfid_reader] = []
         self._reader_by_lane: Dict[str, AFC_BoxTurtle_rfid_reader] = {}
         self._last_uid_by_lane: Dict[str, str] = {}
-        # ACE2's `baseline`: the parked sibling UID to exclude from a read when
-        # the sister could not be moved off the antenna. See _clear_sibling.
+        # The parked sibling UID to exclude when the sister could not be moved off the antenna.
         self._baseline_uid: Optional[str] = None
 
-        self.printer.register_event_handler(
-            "klippy:ready", self._handle_ready)
+        self.printer.register_event_handler("klippy:ready", self._handle_ready)
         self.gcode.register_command(
             "AFC_BT_RFID_READ", self.cmd_AFC_BT_RFID_READ,
             desc="Read the tag on a BoxTurtle lane's reader and apply it. "
@@ -403,8 +361,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         self.apply_to_lane(lane, tag)
 
     def _stage_for_write(self, lane_name: str,
-                         target: Optional[AFC_BoxTurtle_rfid_reader] = None
-                         ) -> Optional[tuple]:
+                         target: Optional[AFC_BoxTurtle_rfid_reader] = None) -> Optional[tuple]:
         """
         Spin the lane's spool until its tag reaches the antenna and hold it,
         so a write lands on a tag the reader can actually see.
@@ -423,27 +380,28 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         """
         lane = self._lane_obj(lane_name)
         rdr = self._reader_by_lane.get(lane_name)
-        if target is not None and rdr is not None and rdr is not target:
-            error_str = (f"{lane_name} is not on {target.name}; write it "
-                         f"with READER=bt:{rdr.name}")
+        if (target is not None
+            and rdr is not None
+            and rdr is not target):
+            error_str = f"{lane_name} is not on {target.name}; write it with READER=bt:{rdr.name}"
             raise StageError(error_str)
-        if lane is None or rdr is None or rdr.version is None:
-            self.logger.info(
-                f"AFC_BT_RFID: stage-for-write skipped {lane_name} "
-                f"(lane={lane is not None}, rdr={rdr is not None}, "
-                f"ver={None if rdr is None else rdr.version})")
+        if (lane is None
+            or rdr is None
+            or rdr.version is None):
+            self.logger.info(f"AFC_BT_RFID: stage-for-write skipped {lane_name} "
+                             f"(lane={lane is not None}, rdr={rdr is not None}, "
+                             f"ver={None if rdr is None else rdr.version})")
             return None
         if self._sweeping:
-            self.logger.info(
-                f"AFC_BT_RFID: stage-for-write busy, skipping {lane_name}")
+            self.logger.info(f"AFC_BT_RFID: stage-for-write busy, skipping {lane_name}")
             return None
         if getattr(lane, "tool_loaded", False):
             error_str = (f"{lane_name} is loaded in the toolhead. The write "
-                         f"turns the spool by moving its filament, so unload "
-                         f"it first.")
+                         f"turns the spool by moving its filament, so unload it first.")
             raise StageError(error_str)
         staged = bool(getattr(lane, "loaded_to_hub", False))
-        if staged and not self._homing_available(lane):
+        if (staged
+            and not self._homing_available(lane)):
             error_str = (f"{lane_name} is staged at the hub and homing is "
                          f"off, so there is no load switch to bring it back "
                          f"to. Eject it and insert it again to write it.")
@@ -453,8 +411,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         advance, cut = self._sweep_room(lane, advance, staged=False)
         if advance <= 0.0:
             error_str = (f"{cut}, and {lane_name}'s dist_hub leaves no room "
-                         f"before it. Unload that lane first to write this "
-                         f"one.")
+                         f"before it. Unload that lane first to write this one.")
             raise StageError(error_str)
         if cut:
             self.logger.info(f"AFC_BT_RFID: stage-for-write limited: {cut}.")
@@ -469,12 +426,11 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                 except RuntimeError as e:
                     raise StageError(str(e))
             sib = self._clear_sibling(lane_name, rdr)
-            tag, fed = self._sweep_for_tag(lane, lane_name, rdr, advance,
-                                           step, self.tag_sweep_speed)
+            tag, fed = self._sweep_for_tag(lane, lane_name, rdr, advance, step,
+                                           self.tag_sweep_speed)
             settled = 0.0
             if tag is not None:
-                settled = self._settle_on_tag(lane, lane_name, rdr,
-                                              step + 25.0)
+                settled = self._settle_on_tag(lane, lane_name, rdr, step + 25.0)
                 fed += settled
         except Exception:
             # Not re-staged: where the tip is after a failed move is not
@@ -484,14 +440,12 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             finally:
                 self._sweeping = False
             raise
-        self.logger.info(
-            f"AFC_BT_RFID: staged {lane_name} for write: tag "
-            f"{'found ' + str(tag.get('uid')) if tag else 'NOT found'} after "
-            f"{fed:.0f}mm (re-centred {settled:.0f}mm); holding for the write.")
+        self.logger.info(f"AFC_BT_RFID: staged {lane_name} for write: tag "
+                         f"{'found ' + str(tag.get('uid')) if tag else 'NOT found'} after "
+                         f"{fed:.0f}mm (re-centred {settled:.0f}mm); holding for the write.")
         return (lane, fed, staged, sib)
 
-    def _settle_on_tag(self, lane: Any, lane_name: str,
-                       rdr: AFC_BoxTurtle_rfid_reader,
+    def _settle_on_tag(self, lane: Any, lane_name: str, rdr: AFC_BoxTurtle_rfid_reader,
                        back_limit: float) -> float:
         """
         Ease a just-swept tag back to mid-field so a write couples.
@@ -564,7 +518,6 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         No hardware I/O here: the timer owns the port.
         """
         self.afc = self.printer.lookup_object("AFC", None)
-        # The bridge is a plain object, so hand it AFC's logger here.
         self.bridge.logger = self.logger
         (self.bambu_master_key, self.creality_key,
          self.creality_encryption_key) = resolve_rfid_keys(
@@ -579,8 +532,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             for ln in rdr.lanes:
                 self._reader_by_lane[ln] = rdr
         self._register_writers()
-        self.reactor.register_timer(
-            self._connect_timer, self.reactor.monotonic() + 1.0)
+        self.reactor.register_timer(self._connect_timer, self.reactor.monotonic() + 1.0)
 
     def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
         """
@@ -600,8 +552,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                         for rdr in self._readers},
         }
 
-    def _probe_all(self) -> Tuple[bool, List[Tuple[Any, bool, Optional[int],
-                                                   Optional[Exception]]]]:
+    def _probe_all(self) -> Tuple[bool, List[Tuple[Any, bool, Optional[int], Optional[Exception]]]]:
         """
         Open the port and probe readers. Blocking, so never on the reactor.
 
@@ -616,12 +567,13 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             return (False, [])
         fresh = not was
         # Do not probe during a sweep on the same link; the next tick will do.
-        if not fresh and self._sweeping:
+        if (not fresh
+            and self._sweeping):
             return (True, [])
         probed = []
         for rdr in self._readers:
             if not (fresh or rdr.version is None):
-                continue                  # answering already: leave it alone
+                continue
             try:
                 ver = rdr.link.reg_read(_VERSION_REG)
                 probed.append((rdr, fresh, ver, None))
@@ -645,8 +597,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                 ok, probed = (False, [])
             # Register before clearing the flag, so the next tick cannot start
             # a probe while these results are still in flight.
-            self.reactor.register_async_callback(
-                lambda et: self._apply_probe(ok, probed))
+            self.reactor.register_async_callback(lambda et: self._apply_probe(ok, probed))
         finally:
             self._probing = False
 
@@ -666,15 +617,14 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             rdr.version = ver
             # Edge-driven, so an absent reader does not warn every retry.
             if err is not None:
-                if fresh or was is not None:
-                    self.logger.warning(
-                        f"BT RFID {rdr.name}: bridge is up but bus "
-                        f"{rdr.bus} has no reader ({err}), check wiring")
-            elif fresh or was is None:
-                self.logger.info(
-                    f"BT RFID {rdr.name}: version reg "
-                    f"0x{ver:02X} (bus {rdr.bus}, lanes "
-                    f"{', '.join(rdr.lanes)})")
+                if (fresh
+                    or was is not None):
+                    self.logger.warning(f"BT RFID {rdr.name}: bridge is up but bus "
+                                        f"{rdr.bus} has no reader ({err}), check wiring")
+            elif (fresh
+                  or was is None):
+                self.logger.info(f"BT RFID {rdr.name}: version reg "
+                                 f"0x{ver:02X} (bus {rdr.bus}, lanes {', '.join(rdr.lanes)})")
 
     def _connect_timer(self, eventtime: float) -> float:
         """
@@ -738,20 +688,18 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         :return Optional[str]: the parked tag's UID hex, or None if the antenna
             is clear
         """
-        if rdr.link is None or not self.bridge.connected():
+        if (rdr.link is None
+            or not self.bridge.connected()):
             return None
         try:
-            tag = read_tag(
-                rdr.link,
-                bambu_master_key=self.bambu_master_key,
-                creality_key=self.creality_key,
-                creality_encryption_key=self.creality_encryption_key)
+            tag = read_tag(rdr.link, bambu_master_key=self.bambu_master_key,
+                           creality_key=self.creality_key,
+                           creality_encryption_key=self.creality_encryption_key)
         except Exception:
             return None                   # a probe that fails is "no collision"
         return (tag or {}).get("uid") or None
 
-    def _read_blocking(self, lane_name: str,
-                       rdr: AFC_BoxTurtle_rfid_reader) -> Optional[dict]:
+    def _read_blocking(self, lane_name: str, rdr: AFC_BoxTurtle_rfid_reader) -> Optional[dict]:
         """
         Run one pass of the shared read stack. Worker thread only.
 
@@ -762,22 +710,19 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         :param rdr: the reader to poll
         :return Optional[dict]: the raw read_tag dict, or None
         """
-        if rdr.link is None or not self.bridge.connected():
+        if (rdr.link is None
+            or not self.bridge.connected()):
             return None
         try:
-            return read_tag(
-                rdr.link,
-                bambu_master_key=self.bambu_master_key,
-                is_excluded=self._excluder_for(lane_name, rdr),
-                creality_key=self.creality_key,
-                creality_encryption_key=self.creality_encryption_key)
+            return read_tag(rdr.link, bambu_master_key=self.bambu_master_key,
+                            is_excluded=self._excluder_for(lane_name, rdr),
+                            creality_key=self.creality_key,
+                            creality_encryption_key=self.creality_encryption_key)
         except Exception as e:
-            self.logger.warning(
-                f"BT RFID {rdr.name}: read failed: {e}")
+            self.logger.warning(f"BT RFID {rdr.name}: read failed: {e}")
             return None
 
-    def _read_once(self, lane_name: str,
-                   rdr: AFC_BoxTurtle_rfid_reader) -> Optional[dict]:
+    def _read_once(self, lane_name: str, rdr: AFC_BoxTurtle_rfid_reader) -> Optional[dict]:
         """
         Run one read on a worker thread and wait reactor-friendly: the
         calling g-code blocks, the printer does not.
@@ -799,11 +744,9 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             except Exception:
                 pass
             result[0] = self._read_blocking(lane_name, rdr)
-            self.reactor.register_async_callback(
-                lambda et: completion.complete(None))
+            self.reactor.register_async_callback(lambda et: completion.complete(None))
 
-        threading.Thread(target=worker, daemon=True,
-                         name="afc_bt_rfid_rd").start()
+        threading.Thread(target=worker, daemon=True, name="afc_bt_rfid_rd").start()
         completion.wait(self.reactor.monotonic() + 30.0)
         return result[0]
 
@@ -830,11 +773,9 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             except Exception:
                 pass
             result[0] = self._parked_tag(rdr)
-            self.reactor.register_async_callback(
-                lambda et: completion.complete(None))
+            self.reactor.register_async_callback(lambda et: completion.complete(None))
 
-        threading.Thread(target=worker, daemon=True,
-                         name="afc_bt_rfid_rd").start()
+        threading.Thread(target=worker, daemon=True, name="afc_bt_rfid_rd").start()
         completion.wait(self.reactor.monotonic() + 30.0)
         return result[0]
 
@@ -849,9 +790,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         self._last_uid_by_lane[lane_name] = (tag.get("uid") or "").lower()
         lane = self._lane_obj(lane_name)
         if lane is None:
-            gcmd.respond_info(
-                f"AFC_BT_RFID: read uid {tag.get('uid')} but lane {lane_name} "
-                f"is not an AFC lane, nothing applied.")
+            gcmd.respond_info(f"AFC_BT_RFID: read uid {tag.get('uid')} but lane {lane_name} "
+                              f"is not an AFC lane, nothing applied.")
             return
         self.apply_to_lane(lane, tag)
 
@@ -864,8 +804,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         """
         return map_tag_to_slot_info(tag)
 
-    def _require_lane_reader(
-            self, gcmd: Any) -> Tuple[str, AFC_BoxTurtle_rfid_reader]:
+    def _require_lane_reader(self, gcmd: Any) -> Tuple[str, AFC_BoxTurtle_rfid_reader]:
         """
         Resolve LANE= to (lane_name, reader) or raise the g-code error.
 
@@ -875,8 +814,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         lane_name = gcmd.get("LANE")
         rdr = self._reader_by_lane.get(lane_name)
         if rdr is None:
-            error_str = (f"AFC_BT_RFID: no reader serves lane {lane_name}. "
-                         f"Configured: "
+            error_str = (f"AFC_BT_RFID: no reader serves lane {lane_name}. Configured: "
                          f"{sorted(self._reader_by_lane) or 'none'}")
             raise gcmd.error(error_str)
         return lane_name, rdr
@@ -901,10 +839,9 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         lane_name, rdr = self._require_lane_reader(gcmd)
         tag = self._read_once(lane_name, rdr)
         if tag is None:
-            gcmd.respond_info(
-                f"AFC_BT_RFID_READ: nothing readable in {rdr.name}'s field for "
-                f"{lane_name}. If the tag rides the spool, use AFC_BT_RFID_STAGE "
-                f"to spin it past the antenna.")
+            gcmd.respond_info(f"AFC_BT_RFID_READ: nothing readable in {rdr.name}'s field for "
+                              f"{lane_name}. If the tag rides the spool, use AFC_BT_RFID_STAGE "
+                              f"to spin it past the antenna.")
             return
         self._apply(lane_name, tag, gcmd)
 
@@ -923,15 +860,12 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         ```
         """
         if not self._readers:
-            gcmd.respond_info(
-                "AFC_BT_RFID: no reader sections configured "
-                "([AFC_BoxTurtle_rfid <name>] with bus + lanes).")
+            gcmd.respond_info("AFC_BT_RFID: no reader sections configured "
+                              "([AFC_BoxTurtle_rfid <name>] with bus + lanes).")
             return
-        lines = [f"bridge: "
-                 f"{'connected' if self.bridge.connected() else 'OFFLINE'} "
+        lines = [f"bridge: {'connected' if self.bridge.connected() else 'OFFLINE'} "
                  f"({self.serial_port})"]
         for rdr in self._readers:
-            # "retrying": the connect timer keeps probing offline readers.
             ver = ("offline (retrying)" if rdr.version is None
                    else f"version reg 0x{rdr.version:02X}")
             lines.append(f"{rdr.name}: {ver}  lanes: {', '.join(rdr.lanes)}")
@@ -952,20 +886,19 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         :param lane: the AFCLane being inserted
         """
         name = getattr(lane, "name", None)
-        if not self.scan_on_insert or name is None:
+        if (not self.scan_on_insert
+            or name is None):
             return
         rdr = self._reader_by_lane.get(name)
         if rdr is None:
-            return                    # no reader watches this lane
+            return
         if self._sweeping:
-            self.logger.warning(
-                f"AFC_BT_RFID: {name} inserted while a sweep was already "
-                f"running, not scanning this one.")
+            self.logger.warning(f"AFC_BT_RFID: {name} inserted while a sweep was already "
+                                f"running, not scanning this one.")
             return
         if rdr.version is None:
-            self.logger.warning(
-                f"AFC_BT_RFID: {name} inserted but {rdr.name} is offline, "
-                f"skipping the tag scan. Check AFC_BT_RFID_STATUS.")
+            self.logger.warning(f"AFC_BT_RFID: {name} inserted but {rdr.name} is offline, "
+                                f"skipping the tag scan. Check AFC_BT_RFID_STATUS.")
             return
         advance = math.pi * self.spool_diameter_mm * self.tag_sweep_revs
         advance, cut = self._sweep_room(lane, advance)
@@ -977,39 +910,34 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                    "hub is clear."))
             if advance <= 0.0:
                 return
-        back = self.tag_retract_speed or getattr(
-            lane, "long_moves_speed", None) or self.tag_sweep_speed
+        back = self.tag_retract_speed or getattr(lane, "long_moves_speed",
+                                                 None) or self.tag_sweep_speed
         self._sweeping = True
         token = None
         try:
             token = self._clear_sibling(name, rdr)
             step = (self.tag_sweep_step_mm
                     or self._sweep_step_for(lane, self.tag_sweep_speed))
-            tag, fed = self._sweep_for_tag(lane, name, rdr, advance,
-                                           step, self.tag_sweep_speed)
+            tag, fed = self._sweep_for_tag(lane, name, rdr, advance, step, self.tag_sweep_speed)
             self._restore(lane, fed, back)
             if tag is None:
-                self.logger.info(
-                    f"AFC_BT_RFID: no tag on {name} after {fed:.0f}mm "
-                    f"({fed / (math.pi * self.spool_diameter_mm):.1f} turns); "
-                    f"filament restored.")
+                self.logger.info(f"AFC_BT_RFID: no tag on {name} after {fed:.0f}mm "
+                                 f"({fed / (math.pi * self.spool_diameter_mm):.1f} turns); "
+                                 f"filament restored.")
                 return
             self.apply_to_lane(lane, tag)
             self._last_uid_by_lane[name] = (tag.get("uid") or "").lower()
-            self.logger.info(
-                f"AFC_BT_RFID: {name} tag {tag.get('uid')} read after "
-                f"{fed:.0f}mm at {self.tag_sweep_speed:.0f}mm/s in "
-                f"{step:.0f}mm chunks; filament restored.")
+            self.logger.info(f"AFC_BT_RFID: {name} tag {tag.get('uid')} read after "
+                             f"{fed:.0f}mm at {self.tag_sweep_speed:.0f}mm/s in "
+                             f"{step:.0f}mm chunks; filament restored.")
         except Exception as e:
-            self.logger.warning(
-                f"AFC_BT_RFID: tag scan failed for {name} ({e}), the insert "
-                f"carries on without it.")
+            self.logger.warning(f"AFC_BT_RFID: tag scan failed for {name} ({e}), the insert "
+                                f"carries on without it.")
         finally:
             self._restore_sibling(token)
             self._sweeping = False
 
-    def _sibling_lane(self, lane_name: str,
-                      rdr: AFC_BoxTurtle_rfid_reader) -> Optional[Any]:
+    def _sibling_lane(self, lane_name: str, rdr: AFC_BoxTurtle_rfid_reader) -> Optional[Any]:
         """
         Return the other lane on this reader's antenna, if AFC knows it.
 
@@ -1025,8 +953,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                 return obj
         return None
 
-    def _clear_sibling(self, lane_name: str,
-                       rdr: AFC_BoxTurtle_rfid_reader) -> Optional[tuple]:
+    def _clear_sibling(self, lane_name: str, rdr: AFC_BoxTurtle_rfid_reader) -> Optional[tuple]:
         """
         Roll the sister lane back so its parked tag leaves the shared antenna.
 
@@ -1055,35 +982,33 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         # _last_uid_by_lane (as ACE2's _is_sibling_tag does). An unknown UID
         # stays a collision.
         mine = (self._last_uid_by_lane.get(lane_name) or "").lower()
-        if mine and parked.lower() == mine:
-            self.logger.info(
-                f"AFC_BT_RFID: tag {parked} on {rdr.name}'s antenna is "
-                f"{lane_name}'s own, no collision, leaving {sib.name} "
-                f"alone.")
+        if (mine
+            and parked.lower() == mine):
+            self.logger.info(f"AFC_BT_RFID: tag {parked} on {rdr.name}'s antenna is "
+                             f"{lane_name}'s own, no collision, leaving {sib.name} alone.")
             return None
         # An empty or unseated sister cannot own the parked tag, so it is this
         # lane's: set no baseline and let the sweep read it.
-        if not getattr(sib, "prep_state", False) or not self._seated(sib):
-            self.logger.info(
-                f"AFC_BT_RFID: tag {parked} on {rdr.name}'s antenna, but "
-                f"{sib.name} holds no seated spool: it is {lane_name}'s own, "
-                f"reading it.")
+        if (not getattr(sib, "prep_state", False)
+            or not self._seated(sib)):
+            self.logger.info(f"AFC_BT_RFID: tag {parked} on {rdr.name}'s antenna, but "
+                             f"{sib.name} holds no seated spool: it is {lane_name}'s own, "
+                             f"reading it.")
             return None
         # The tag is the seated sister's: exclude it as a baseline, since any
         # gate below may leave it on the coil. Cleared once she is rolled clear.
         self._baseline_uid = parked
-        self.logger.info(
-            f"AFC_BT_RFID: tag {parked} is parked on {rdr.name}'s antenna "
-            f"while {lane_name} is read, clearing {sib.name} off it.")
+        self.logger.info(f"AFC_BT_RFID: tag {parked} is parked on {rdr.name}'s antenna "
+                         f"while {lane_name} is read, clearing {sib.name} off it.")
         if getattr(sib, "tool_loaded", False):
-            return None                   # loaded to the toolhead: never move
+            return None
         # loaded_to_hub is remembered, not measured; _seated above checked the
         # load switch, which has the last word.
         if not getattr(sib, "loaded_to_hub", False):
-            return None                   # position unknown: do not guess
+            return None
         try:
             if self.afc.function.is_printing():
-                return None               # never mid-print
+                return None
         except Exception:
             pass
         want = self.sibling_tag_adjust_dist
@@ -1093,22 +1018,21 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         try:
             # Stepped so the distance is a maximum: stop before the sister
             # would come off its load switch.
-            while moved < want and self._seated(sib):
+            while (moved < want
+                   and self._seated(sib)):
                 hop = min(step, want - moved)
                 self._lane_move(sib, -hop, speed, assist=True)
                 moved += hop
         except Exception as e:
-            self.logger.warning(
-                f"AFC_BT_RFID: could not roll {sib.name} back off the shared "
-                f"antenna ({e}); reading {lane_name} anyway.")
+            self.logger.warning(f"AFC_BT_RFID: could not roll {sib.name} back off the shared "
+                                f"antenna ({e}); reading {lane_name} anyway.")
             return (sib, moved, speed) if moved > 0.0 else None
         if moved <= 0.0:
             return None
-        self._baseline_uid = None     # it is off the antenna now
+        self._baseline_uid = None
         short = " (stopped early at its load switch)" if moved < want else ""
-        self.logger.info(
-            f"AFC_BT_RFID: rolled {sib.name} back {moved:.0f}mm to clear its "
-            f"tag off {rdr.name}'s antenna while {lane_name} is read{short}.")
+        self.logger.info(f"AFC_BT_RFID: rolled {sib.name} back {moved:.0f}mm to clear its "
+                         f"tag off {rdr.name}'s antenna while {lane_name} is read{short}.")
         return (sib, moved, speed)
 
     def _restore_sibling(self, token: Optional[tuple]) -> None:
@@ -1138,23 +1062,20 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                 self._lane_move(sib, step, slowf, assist=False)
                 crept += step
             if crept:
-                self.logger.info(
-                    f"AFC_BT_RFID: fed {sib.name} a further {crept:.0f}mm to "
-                    f"put it back on its load switch.")
+                self.logger.info(f"AFC_BT_RFID: fed {sib.name} a further {crept:.0f}mm to "
+                                 f"put it back on its load switch.")
             if not self._seated(sib):
                 # Tell the operator this move is why the lane reads as removed.
                 sib.loaded_to_hub = False
-                self.logger.warning(
-                    f"AFC_BT_RFID: {sib.name} is NOT back on its load switch "
-                    f"after the read; its filament may have come out of the "
-                    f"lane. Re-seat it and check the spool.")
+                self.logger.warning(f"AFC_BT_RFID: {sib.name} is NOT back on its load switch "
+                                    f"after the read; its filament may have come out of the "
+                                    f"lane. Re-seat it and check the spool.")
                 return
             self._restage_sibling(sib, dist)
         except Exception as e:
             sib.loaded_to_hub = False
-            self.logger.warning(
-                f"AFC_BT_RFID: could not restore {sib.name} after the read "
-                f"({e}); its next load will re-home it.")
+            self.logger.warning(f"AFC_BT_RFID: could not restore {sib.name} after the read "
+                                f"({e}); its next load will re-home it.")
 
     def _home_back_to_load(self, lane: Any, dist: float) -> None:
         """
@@ -1167,9 +1088,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         :param lane: the AFC lane to retract
         :param dist: how far to retract, mm; the endstop is what stops it
         """
-        lane.move_to(dist * MoveDirection.NEG, SpeedMode.LONG,
-                     endstop=lane.load_es, assist_active=AssistActive.YES,
-                     use_homing=True)
+        lane.move_to(dist * MoveDirection.NEG, SpeedMode.LONG, endstop=lane.load_es,
+                     assist_active=AssistActive.YES, use_homing=True)
 
     def _homing_available(self, lane: Any) -> bool:
         """
@@ -1196,10 +1116,11 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         :param given_back: distance already re-fed, mm, for the log only
         """
         hub = getattr(lane, "hub_obj", None)
-        if hub is None or getattr(lane, "is_direct_hub", lambda: False)():
-            return                        # nothing between the lane and the tool
+        if (hub is None
+            or getattr(lane, "is_direct_hub", lambda: False)()):
+            return
         if not getattr(lane, "load_to_hub", False):
-            return                        # config says this lane does not stage
+            return
         unit = getattr(lane, "unit_obj", None)
         dist_hub = getattr(lane, "dist_hub", None)
         if (unit is None
@@ -1209,10 +1130,9 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             return
         if not self._homing_available(lane):
             lane.loaded_to_hub = False
-            self.logger.warning(
-                f"AFC_BT_RFID: homing is off, so {lane.name} was only re-fed "
-                f"{given_back:.0f}mm rather than re-staged. Its next load "
-                f"will put it back at the hub.")
+            self.logger.warning(f"AFC_BT_RFID: homing is off, so {lane.name} was only re-fed "
+                                f"{given_back:.0f}mm rather than re-staged. Its next load "
+                                f"will put it back at the hub.")
             return
         # 1. Back to the load switch, the way a load and an unload do it.
         #    First the reverse home eject_lane makes...
@@ -1221,21 +1141,18 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         # where the switch releases and prep_post_load needs load_state.
         unit.prep_load(lane)
         if not self._seated(lane):
-            # The homing moves should have made the switch; something is wrong.
             lane.loaded_to_hub = False
-            self.logger.warning(
-                f"AFC_BT_RFID: {lane.name} would not come back to its load "
-                f"switch, so it is not staged. Check the spool. Its next "
-                f"load will re-home it.")
+            self.logger.warning(f"AFC_BT_RFID: {lane.name} would not come back to its load "
+                                f"switch, so it is not staged. Check the spool. Its next "
+                                f"load will re-home it.")
             return
         # 2. Feed dist_hub. prep_post_load's own job, and it sets
         #    loaded_to_hub itself; it only runs when the flag is clear.
         lane.loaded_to_hub = False
         unit.prep_post_load(lane)
-        self.logger.info(
-            f"AFC_BT_RFID: re-staged {lane.name} the way a load does: "
-            f"homed to its load switch, then fed dist_hub "
-            f"({dist_hub:.0f}mm). The hub is untouched.")
+        self.logger.info(f"AFC_BT_RFID: re-staged {lane.name} the way a load does: "
+                         f"homed to its load switch, then fed dist_hub "
+                         f"({dist_hub:.0f}mm). The hub is untouched.")
 
     def _seated(self, lane: Any) -> bool:
         """
@@ -1271,7 +1188,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         if fed <= 0.0:
             # A tip left behind its load switch reads as an empty lane, so
             # home it forward onto the switch.
-            if fed < 0.0 and not self._seated(lane):
+            if (fed < 0.0
+                and not self._seated(lane)):
                 return -self._home_onto_load(lane, -fed, speed)
             return 0.0
         # Nothing on the sensor to home against: give back the measured distance.
@@ -1297,7 +1215,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
             back += bulk
         # Step the tail so the sensor is checked between moves; the step size
         # is the overshoot bound.
-        while self._seated(lane) and back < fed + tail:
+        while (self._seated(lane)
+               and back < fed + tail):
             self._lane_move(lane, -short, slow, assist=True)
             back += short
         # Off the sensor now: creep forward until it catches again, which is
@@ -1364,7 +1283,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         # included, so only a real switch says anything here.
         virtual = getattr(hub, "is_virtual_pin", None)
         try:
-            if not (callable(virtual) and virtual()) and getattr(hub, "state", False):
+            if (not (callable(virtual) and virtual())
+                and getattr(hub, "state", False)):
                 return "its switch reads filament"
         except Exception:
             pass
@@ -1418,8 +1338,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         lane.loaded_to_hub = False
         if not self._seated(lane):
             error_str = (f"{lane.name} did not come back onto its load "
-                         f"switch. Check the spool; its next load will "
-                         f"re-home it")
+                         f"switch. Check the spool; its next load will re-home it")
             raise RuntimeError(error_str)
 
     def _restage_after_scan(self, lane: Any) -> bool:
@@ -1432,19 +1351,17 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         """
         lane.loaded_to_hub = False
         if not self._seated(lane):
-            self.logger.warning(
-                f"AFC_BT_RFID: {lane.name} is not on its load switch after "
-                f"the scan, so it was not re-staged. Its next load will "
-                f"re-home it.")
+            self.logger.warning(f"AFC_BT_RFID: {lane.name} is not on its load switch after "
+                                f"the scan, so it was not re-staged. Its next load will "
+                                f"re-home it.")
             return False
         lane.unit_obj.prep_post_load(lane)
         if not getattr(lane, "loaded_to_hub", False):
             # The unit's prep_post_load skips its feed without a word (no
             # load_to_hub, a direct hub, a sensor off), so say it here.
-            self.logger.warning(
-                f"AFC_BT_RFID: {lane.name} is back on its load switch, but "
-                f"re-staging it at the hub did not take, so it was left at "
-                f"the load switch.")
+            self.logger.warning(f"AFC_BT_RFID: {lane.name} is back on its load switch, but "
+                                f"re-staging it at the hub did not take, so it was left at "
+                                f"the load switch.")
             return False
         return True
 
@@ -1478,8 +1395,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                          "Try again once it is idle.")
             raise gcmd.error(error_str)
 
-    def _lane_move(self, lane: Any, distance: float, speed: float,
-                   assist: bool) -> None:
+    def _lane_move(self, lane: Any, distance: float, speed: float, assist: bool) -> None:
         """
         Move the lane, driving the espooler only when asked.
 
@@ -1522,13 +1438,12 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         :return float: chunk length, mm
         """
         accel = getattr(lane, "long_moves_accel", None) or 400.0
-        ramps = (speed * speed) / accel          # both ramps together
+        ramps = (speed * speed) / accel
         step = ramps / max(0.05, 1.0 - self.SWEEP_CRUISE_FRACTION)
         return min(self.SWEEP_STEP_MAX, max(self.SWEEP_STEP_MIN, step))
 
-    def _sweep_for_tag(self, lane: Any, lane_name: str,
-                       rdr: AFC_BoxTurtle_rfid_reader, advance: float,
-                       step: float, speed: float) -> tuple:
+    def _sweep_for_tag(self, lane: Any, lane_name: str, rdr: AFC_BoxTurtle_rfid_reader,
+                       advance: float, step: float, speed: float) -> tuple:
         """
         Home on the tag: feed the lane while polling the reader continuously
         and stop when a tag answers; the distance bound is the failsafe.
@@ -1568,7 +1483,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         th = threading.Thread(target=poller, daemon=True, name="afc_bt_rfid_sw")
         th.start()
         try:
-            while fed[0] < advance and not stop.is_set():
+            while (fed[0] < advance
+                   and not stop.is_set()):
                 hop = min(step, advance - fed[0])
                 self._lane_move(lane, hop, speed, assist=False)
                 fed[0] += hop
@@ -1627,7 +1543,8 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         # and re-staged afterwards, so the scan runs from where the insert
         # scan does. Both ends are homing moves, so homing has to be on.
         staged = bool(getattr(lane, "loaded_to_hub", False))
-        if staged and not self._homing_available(lane):
+        if (staged
+            and not self._homing_available(lane)):
             error_str = (f"AFC_BT_RFID_STAGE: {lane_name} is staged at the "
                          f"hub and homing is off, so there is no load switch "
                          f"to bring it back to for the scan. Eject it and "
@@ -1640,12 +1557,10 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         step = gcmd.get_float("STEP", self.tag_sweep_step_mm, minval=0.0)
         if step <= 0.0:
             step = self._sweep_step_for(lane, speed)
-        retract = gcmd.get_int("RETRACT", 1 if self.retract_after_read else 0,
-                               minval=0, maxval=1)
+        retract = gcmd.get_int("RETRACT", 1 if self.retract_after_read else 0, minval=0, maxval=1)
         if staged:
-            retract = 1        # it goes back to the hub, via its load switch
-        back = gcmd.get_float("RETRACT_SPEED", self.tag_retract_speed,
-                              minval=0.0)
+            retract = 1
+        back = gcmd.get_float("RETRACT_SPEED", self.tag_retract_speed, minval=0.0)
         if back <= 0.0:
             back = getattr(lane, "long_moves_speed", None) or speed
         # Room is judged from the load switch, where the sweep will start.
@@ -1678,14 +1593,10 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                     raise gcmd.error(error_str)
             try:
                 token = self._clear_sibling(lane_name, rdr)
-                tag, fed = self._sweep_for_tag(lane, lane_name, rdr, advance,
-                                               step, speed)
+                tag, fed = self._sweep_for_tag(lane, lane_name, rdr, advance, step, speed)
             finally:
                 self._restore_sibling(token)
                 if retract:
-                    # Homes on the load sensor when there is filament there
-                    # to home against; falls back to the measured distance
-                    # when there is not.
                     self._restore(lane, fed, back)
                 if staged:
                     restaged = self._restage_after_scan(lane)
@@ -1700,8 +1611,7 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
         if tag is None:
             if cut:
                 verdict = (f"Only {fed / one_turn:.1f} of a turn fitted "
-                           f"because {cut}. Unload that lane to give the "
-                           f"scan a full turn.")
+                           f"because {cut}. Unload that lane to give the scan a full turn.")
             elif fed >= one_turn:
                 verdict = ("That is a full pass of the spool, so the tag "
                            "never enters this antenna's field; move the "
@@ -1710,15 +1620,12 @@ class AFC_BoxTurtle_rfid(AFCUnitRFID):
                 verdict = (f"That is only {fed / one_turn:.1f} of a turn, so "
                            f"the tag may simply not have come round yet; "
                            f"raise REVS before suspecting the mounting.")
-            gcmd.respond_info(
-                f"AFC_BT_RFID_STAGE: no tag in {fed:.0f}mm of sweep on "
-                f"{rdr.name}{restored}. {verdict}")
+            gcmd.respond_info(f"AFC_BT_RFID_STAGE: no tag in {fed:.0f}mm of sweep on "
+                              f"{rdr.name}{restored}. {verdict}")
             return
         self._apply(lane_name, tag, gcmd)
         # Not a number to tune with: the tag's starting angle is arbitrary.
-        gcmd.respond_info(
-            f"AFC_BT_RFID_STAGE: tag answered after {fed:.0f}mm of feed"
-            f"{restored}.")
+        gcmd.respond_info(f"AFC_BT_RFID_STAGE: tag answered after {fed:.0f}mm of feed{restored}.")
 
 
 def load_config(config: "ConfigWrapper") -> AFC_BoxTurtle_rfid:

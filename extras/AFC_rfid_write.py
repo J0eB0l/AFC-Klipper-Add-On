@@ -4,17 +4,10 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
-# Writing blank NTAG stickers, for every unit that has a host-side reader.
-#
-# The reader stack is transport-agnostic, so any reader with a reg_read/reg_write
-# link can program a tag. Each RFID unit registers its readers here at ready and
-# this module owns the commands:
+# Writes blank NTAG stickers through any registered host-side reader:
 #
 #   AFC_RFID_READERS                list what is available and which are online
 #   AFC_RFID_WRITE READER=<name>    write a tag on one of them
-#
-# There is no config section. The registry lives on the printer object, and the
-# first unit to register also registers the commands.
 #
 # NTAG only: Bambu and Snapmaker tags are MIFARE Classic behind per-tag derived
 # keys and are refused by name.
@@ -25,10 +18,8 @@ import chelper
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from extras.AFC_RFID import _cached_spoolman_client
-from extras.AFC_rfid_readers import (ANYCUBIC_IMAGE_START,
-                                     CLASSIC_DEFAULT_KEY,
-                                     classic_write_block, decode_afc_block,
-                                     decode_anycubic, encode_tag_payload,
+from extras.AFC_rfid_readers import (ANYCUBIC_IMAGE_START, CLASSIC_DEFAULT_KEY, classic_write_block,
+                                     decode_afc_block, decode_anycubic, encode_tag_payload,
                                      read_tag, write_tag)
 
 #: How long a write may take before the g-code gives up. Every page write and
@@ -201,9 +192,9 @@ def register_reader(printer: Any, name: str, label: str, unit: Any,
         scan around the write (see RfidWriteTarget)
     :param serves: lane name -> whether this reader serves that lane
     """
-    _registry(printer)[name] = RfidWriteTarget(
-        name, label, unit, open_link, prepare, release, threaded,
-        write_payload, stage, unstage, exclude, stage_around, serves)
+    _registry(printer)[name] = RfidWriteTarget(name, label, unit, open_link, prepare, release,
+                                               threaded, write_payload, stage, unstage, exclude,
+                                               stage_around, serves)
     _ensure_commands(printer)
 
 
@@ -222,8 +213,7 @@ def _ensure_commands(printer: Any) -> None:
     printer._afc_rfid_write_cmds = True
     gcode.register_command(
         "AFC_RFID_READERS", lambda gcmd: cmd_AFC_RFID_READERS(printer, gcmd),
-        desc="List every RFID reader that can write a tag, and which are "
-             "online. AFC_RFID_READERS")
+        desc="List every RFID reader that can write a tag, and which are online. AFC_RFID_READERS")
     gcode.register_command(
         "AFC_RFID_WRITE", lambda gcmd: cmd_AFC_RFID_WRITE(printer, gcmd),
         desc="Write a blank NTAG sticker so a third-party spool reads like a "
@@ -272,8 +262,7 @@ def _online(target: RfidWriteTarget) -> bool:
 
 
 def resolve_reader(printer: Any, name: Optional[str],
-                   lane: Optional[str] = None
-                   ) -> Tuple[Optional[RfidWriteTarget], Optional[str]]:
+                   lane: Optional[str] = None) -> Tuple[Optional[RfidWriteTarget], Optional[str]]:
     """
     Find the reader a READER= value names.
 
@@ -290,8 +279,7 @@ def resolve_reader(printer: Any, name: Optional[str],
     reg = _registry(printer)
     if not reg:
         return None, ("no RFID readers are registered. AFC_RFID_WRITE needs a "
-                      "unit with a host-side reader (BoxTurtle, ACE2, ViViD "
-                      "or OpenAMS).")
+                      "unit with a host-side reader (BoxTurtle, ACE2, ViViD or OpenAMS).")
     names = ", ".join(reg)
     if not name:
         if len(reg) == 1:
@@ -302,14 +290,12 @@ def resolve_reader(printer: Any, name: Optional[str],
             if len(hits) == 1:
                 return hits[0], None
             if not hits:
-                return None, (f"no reader serves {lane}; give READER=. "
-                              f"Available: {names}")
+                return None, f"no reader serves {lane}; give READER=. Available: {names}"
         return None, f"READER= is required. Available: {names}"
     want = name.strip().lower()
     for key, target in reg.items():
         if key.lower() == want:
             return target, None
-    # Bare reader name, unqualified by unit.
     hits = [t for k, t in reg.items() if k.split(":")[-1].lower() == want]
     if len(hits) == 1:
         return hits[0], None
@@ -365,8 +351,7 @@ def spool_fields(unit: Any, spool_id: int) -> Tuple[Dict[str, Any], str]:
     if fil.get("name"):
         out["sku"] = fil["name"]
     if fil.get("color_hex"):
-        out["color_argb"] = 0xFF000000 | (
-            int(str(fil["color_hex"]).lstrip("#")[:6], 16) & 0xFFFFFF)
+        out["color_argb"] = 0xFF000000 | (int(str(fil["color_hex"]).lstrip("#")[:6], 16) & 0xFFFFFF)
     if fil.get("diameter"):
         out["diameter_mm"] = float(fil["diameter"])
     if fil.get("density"):
@@ -380,10 +365,8 @@ def spool_fields(unit: Any, spool_id: int) -> Tuple[Dict[str, Any], str]:
     return out, f"spool {spool_id}"
 
 
-def _write_blocking(target: RfidWriteTarget, spool_id: int,
-                    overrides: Dict[str, Any],
-                    is_excluded: Optional[Callable[[str], bool]] = None
-                    ) -> Tuple[Any, ...]:
+def _write_blocking(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
+                    is_excluded: Optional[Callable[[str], bool]] = None) -> Tuple[Any, ...]:
     """
     Fetch, encode, write, verify and bind. Worker thread only.
 
@@ -411,12 +394,13 @@ def _write_blocking(target: RfidWriteTarget, spool_id: int,
             return None, f"{target.name} is offline", {}, ""
         target.prepare(link)
         try:
-            uid, err = write_tag(link, payload,
-                                     is_excluded=is_excluded)
+            uid, err = write_tag(link, payload, is_excluded=is_excluded)
         finally:
             target.release(link)
     # Bind the tag's factory UID to the spool so the next scan resolves it.
-    if not err and spool_id and uid:
+    if (not err
+        and spool_id
+        and uid):
         try:
             _cached_spoolman_client(
                 getattr(target.unit, "afc", None)).write_spool_metadata(
@@ -444,7 +428,8 @@ def _with_staging(target: RfidWriteTarget, lane: Optional[str],
         to pass over (the target's exclude for this staging, or None)
     :return tuple: whatever body returns
     """
-    if lane and target.stage_around is not None:
+    if (lane
+        and target.stage_around is not None):
         result: List[Any] = []
 
         def _once(excluded: Optional[Callable[[str], bool]] = None) -> Any:
@@ -471,12 +456,12 @@ def _with_staging(target: RfidWriteTarget, lane: Optional[str],
                     else None)
         return body(excluded)
     finally:
-        if token is not None and target.unstage is not None:
+        if (token is not None
+            and target.unstage is not None):
             target.unstage(token)
 
 
-def run_write(target: RfidWriteTarget, spool_id: int,
-              overrides: Dict[str, Any],
+def run_write(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
               lane: Optional[str] = None) -> Tuple[Any, ...]:
     """
     Run a write, on a worker thread where the transport allows it.
@@ -515,8 +500,7 @@ def run_write(target: RfidWriteTarget, spool_id: int,
             except Exception:
                 pass
             try:
-                result[0] = _write_blocking(target, spool_id, overrides,
-                                            excluded)
+                result[0] = _write_blocking(target, spool_id, overrides, excluded)
             except Exception as e:
                 result[0] = (None, str(e), {}, "")
             reactor.register_async_callback(lambda et: completion.complete(None))
@@ -548,8 +532,7 @@ def _read_keys(unit: Any) -> Dict[str, Any]:
     }
 
 
-def _read_blocking(target: RfidWriteTarget) -> Tuple[Optional[dict],
-                                                     Optional[str]]:
+def _read_blocking(target: RfidWriteTarget) -> Tuple[Optional[dict], Optional[str]]:
     """
     Read whatever tag is in a reader's field, through its own link.
 
@@ -563,14 +546,14 @@ def _read_blocking(target: RfidWriteTarget) -> Tuple[Optional[dict],
     if link is None:
         return None, f"{target.name} is offline"
     if not hasattr(link, "reg_read"):
-        return None, (f"{target.name} cannot be read on demand here; its "
-                      f"reader scans on its own")
+        return None, f"{target.name} cannot be read on demand here; its reader scans on its own"
     target.prepare(link)
     try:
         tag = read_tag(link, **_read_keys(target.unit))
     finally:
         target.release(link)
-    if tag is None or tag.get("uid") is None:
+    if (tag is None
+        or tag.get("uid") is None):
         return None, "no tag in the reader's field"
     return tag, None
 
@@ -580,8 +563,7 @@ def _read_blocking(target: RfidWriteTarget) -> Tuple[Optional[dict],
 _ERASE_LEN = 144
 
 
-def _erase_blocking(target: RfidWriteTarget) -> Tuple[Optional[str],
-                                                      Optional[str]]:
+def _erase_blocking(target: RfidWriteTarget) -> Tuple[Optional[str], Optional[str]]:
     """
     Zero a tag's record so it reads blank, on a worker or reactor per target.
 
@@ -633,8 +615,7 @@ def run_erase(target: RfidWriteTarget) -> Tuple[Optional[str], Optional[str]]:
             result[0] = (None, str(e))
         reactor.register_async_callback(lambda et: completion.complete(None))
 
-    threading.Thread(target=worker, daemon=True,
-                     name="afc_rfid_er").start()
+    threading.Thread(target=worker, daemon=True, name="afc_rfid_er").start()
     completion.wait(reactor.monotonic() + WRITE_TIMEOUT_S)
     return result[0]
 
@@ -688,8 +669,7 @@ def _classic_write_run(target: RfidWriteTarget, block: int, data16: bytes,
         except Exception as e:
             result[0] = (None, str(e))
         reactor.register_async_callback(lambda et: completion.complete(None))
-    threading.Thread(target=worker, daemon=True,
-                     name="afc_cw").start()
+    threading.Thread(target=worker, daemon=True, name="afc_cw").start()
     completion.wait(reactor.monotonic() + WRITE_TIMEOUT_S)
     return result[0]
 
@@ -725,8 +705,7 @@ def cmd_AFC_RFID_CLASSIC_WRITE(printer: Any, gcmd: Any) -> None:
         error_str = "AFC_RFID_CLASSIC_WRITE: DATA is not hex"
         raise gcmd.error(error_str)
     if len(data16) != 16:
-        error_str = (f"AFC_RFID_CLASSIC_WRITE: DATA is {len(data16)} bytes, "
-                     f"need 16 (32 hex chars)")
+        error_str = f"AFC_RFID_CLASSIC_WRITE: DATA is {len(data16)} bytes, need 16 (32 hex chars)"
         raise gcmd.error(error_str)
     key_hex = gcmd.get("KEY", "").strip()
     if key_hex:
@@ -745,9 +724,8 @@ def cmd_AFC_RFID_CLASSIC_WRITE(printer: Any, gcmd: Any) -> None:
         where = f" (tag {uid})" if uid else ""
         error_str = f"AFC_RFID_CLASSIC_WRITE: {err}{where}"
         raise gcmd.error(error_str)
-    gcmd.respond_info(
-        f"AFC_RFID_CLASSIC_WRITE: wrote block {block} on tag {uid} "
-        f"({target.name}), verified.")
+    gcmd.respond_info(f"AFC_RFID_CLASSIC_WRITE: wrote block {block} on tag {uid} "
+                      f"({target.name}), verified.")
 
 
 def cmd_AFC_RFID_ERASE(printer: Any, gcmd: Any) -> None:
@@ -776,9 +754,8 @@ def cmd_AFC_RFID_ERASE(printer: Any, gcmd: Any) -> None:
         where = f" (tag {uid})" if uid else ""
         error_str = f"AFC_RFID_ERASE: {err}{where}"
         raise gcmd.error(error_str)
-    gcmd.respond_info(
-        f"AFC_RFID_ERASE: erased tag {uid} on {target.name}. It now reads "
-        f"blank; write or enroll it again to re-use it.")
+    gcmd.respond_info(f"AFC_RFID_ERASE: erased tag {uid} on {target.name}. It now reads "
+                      f"blank; write or enroll it again to re-use it.")
 
 
 def run_read(target: RfidWriteTarget) -> Tuple[Optional[dict], Optional[str]]:
@@ -810,8 +787,7 @@ def run_read(target: RfidWriteTarget) -> Tuple[Optional[dict], Optional[str]]:
             result[0] = (None, str(e))
         reactor.register_async_callback(lambda et: completion.complete(None))
 
-    threading.Thread(target=worker, daemon=True,
-                     name="afc_rfid_rd").start()
+    threading.Thread(target=worker, daemon=True, name="afc_rfid_rd").start()
     completion.wait(reactor.monotonic() + WRITE_TIMEOUT_S)
     return result[0]
 
@@ -834,10 +810,9 @@ def _fmt_tag(tag: dict) -> str:
         lines.append("filament: (undecoded: blank or unknown layout)")
         return "\n".join(lines)
     argb = fil.get("color_argb")
-    order = [("manufacturer", "brand"), ("type", "material"),
-             ("detailed", "detail"), ("sku", "sku"), ("weight_g", "weight g"),
-             ("diameter_mm", "diameter"), ("density", "density"),
-             ("hotend_min_c", "hotend min"), ("hotend_max_c", "hotend max"),
+    order = [("manufacturer", "brand"), ("type", "material"), ("detailed", "detail"),
+             ("sku", "sku"), ("weight_g", "weight g"), ("diameter_mm", "diameter"),
+             ("density", "density"), ("hotend_min_c", "hotend min"), ("hotend_max_c", "hotend max"),
              ("bed_temp_c", "bed"), ("spool_id", "spool id")]
     for key, label in order:
         if fil.get(key) not in (None, "", 0):
@@ -893,10 +868,9 @@ def cmd_AFC_RFID_READERS(printer: Any, gcmd: Any) -> None:
     """
     reg = _registry(printer)
     if not reg:
-        gcmd.respond_info(
-            "AFC_RFID_READERS: none registered. A host-side reader "
-            "(BoxTurtle, ACE2, ViViD or OpenAMS) is what provides them; the "
-            "Bambu AMS and the U1 read their own tags and cannot write.")
+        gcmd.respond_info("AFC_RFID_READERS: none registered. A host-side reader "
+                          "(BoxTurtle, ACE2, ViViD or OpenAMS) is what provides them; the "
+                          "Bambu AMS and the U1 read their own tags and cannot write.")
         return
     lines = ["AFC RFID readers (READER= takes any name below)"]
     for target in reg.values():
@@ -918,8 +892,7 @@ def _overrides_from(gcmd: Any, command: str) -> Dict[str, Any]:
     :raises gcmd.error: on a malformed colour
     """
     out: Dict[str, Any] = {}
-    for name, key in (("BRAND", "manufacturer"), ("SKU", "sku"),
-                      ("TYPE", "ftype")):
+    for name, key in (("BRAND", "manufacturer"), ("SKU", "sku"), ("TYPE", "ftype")):
         if gcmd.get(name, None) is not None:
             out[key] = gcmd.get(name)
     if gcmd.get("COLOR", None) is not None:
@@ -931,8 +904,7 @@ def _overrides_from(gcmd: Any, command: str) -> Dict[str, Any]:
             raise gcmd.error(error_str)
     for name, key in (("WEIGHT", "weight_g"), ("HOTEND_MIN", "hotend_min_c"),
                       ("HOTEND_MAX", "hotend_max_c"), ("BED", "bed_temp_c"),
-                      ("DRY_TEMP", "drying_temp_c"),
-                      ("DRY_TIME", "drying_time_h")):
+                      ("DRY_TEMP", "drying_temp_c"), ("DRY_TIME", "drying_time_h")):
         if gcmd.get(name, None) is not None:
             out[key] = gcmd.get_int(name, 0, minval=0)
     for name, key in (("DIAMETER", "diameter_mm"), ("DENSITY", "density")):
@@ -955,12 +927,11 @@ def tag_from_fields(uid: Optional[str], fields: Dict[str, Any]) -> dict:
     image = b"\x00" * ANYCUBIC_IMAGE_START + encode_tag_payload(**fields)
     fil = dict(decode_anycubic(image) or {})
     fil.update(decode_afc_block(image) or {})
-    return {"uid": uid, "sak": 0, "tag_type": "MifareUltralight",
-            "filament": fil or None}
+    return {"uid": uid, "sak": 0, "tag_type": "MifareUltralight", "filament": fil or None}
 
 
-def apply_written(target: RfidWriteTarget, lane_name: str,
-                  uid: Optional[str], fields: Dict[str, Any]) -> str:
+def apply_written(target: RfidWriteTarget, lane_name: str, uid: Optional[str],
+                  fields: Dict[str, Any]) -> str:
     """
     Give the lane the tag just written to its spool. Runs on the reactor.
 
@@ -984,7 +955,8 @@ def apply_written(target: RfidWriteTarget, lane_name: str,
         afc = getattr(unit, "afc", None)
         lane = (getattr(afc, "lanes", None) or {}).get(lane_name)
         apply = getattr(unit, "apply_to_lane", None)
-        if lane is None or apply is None:
+        if (lane is None
+            or apply is None):
             return f"not applied: {lane_name} is not a lane this unit can set"
         apply(lane, tag)
         send = getattr(lane, "send_lane_data", None)
@@ -1021,14 +993,14 @@ def cmd_AFC_RFID_WRITE(printer: Any, gcmd: Any) -> None:
     AFC_RFID_WRITE READER=reader0 TYPE=PETG BRAND=Generic COLOR=FF0000 WEIGHT=1000
     ```
     """
-    target, err = resolve_reader(printer, gcmd.get("READER", None),
-                                 gcmd.get("LANE", None))
+    target, err = resolve_reader(printer, gcmd.get("READER", None), gcmd.get("LANE", None))
     if target is None:
         error_str = f"AFC_RFID_WRITE: {err}"
         raise gcmd.error(error_str)
     spool_id = gcmd.get_int("SPOOL", 0, minval=0)
     overrides = _overrides_from(gcmd, "AFC_RFID_WRITE")
-    if not spool_id and not overrides:
+    if (not spool_id
+        and not overrides):
         error_str = ("AFC_RFID_WRITE: nothing to write. Give a SPOOL= id to "
                      "take the record from Spoolman, or at least TYPE=.")
         raise gcmd.error(error_str)
@@ -1037,8 +1009,7 @@ def cmd_AFC_RFID_WRITE(printer: Any, gcmd: Any) -> None:
         overrides.setdefault("diameter_mm", 1.75)
     lane = gcmd.get("LANE", None)
     try:
-        uid, err, fields, note = run_write(target, spool_id, overrides,
-                                           lane=lane)
+        uid, err, fields, note = run_write(target, spool_id, overrides, lane=lane)
     except StageError as e:
         error_str = f"AFC_RFID_WRITE: {e}"
         raise gcmd.error(error_str)
@@ -1050,17 +1021,13 @@ def cmd_AFC_RFID_WRITE(printer: Any, gcmd: Any) -> None:
         applied = apply_written(target, lane, uid, fields)
         note = f"{note}, {applied}" if note else applied
     weight = fields.get("weight_g")
-    gcmd.respond_info(
-        f"AFC_RFID_WRITE: wrote tag {uid} on {target.name}: "
-        f"{fields.get('manufacturer') or 'unbranded'} "
-        f"{fields.get('ftype') or 'filament'}"
-        f"{f', {weight}g' if weight else ''}"
-        f"{f' ({note})' if note else ''}. "
-        f"Stick it on the spool and scan to confirm.")
+    gcmd.respond_info(f"AFC_RFID_WRITE: wrote tag {uid} on {target.name}: "
+                      f"{fields.get('manufacturer') or 'unbranded'} "
+                      f"{fields.get('ftype') or 'filament'}{f', {weight}g' if weight else ''}"
+                      f"{f' ({note})' if note else ''}. Stick it on the spool and scan to confirm.")
 
 
-def _create_spool_blocking(unit: Any,
-                           fields: Dict[str, Any]) -> Tuple[int, Optional[str]]:
+def _create_spool_blocking(unit: Any, fields: Dict[str, Any]) -> Tuple[int, Optional[str]]:
     """
     Create a Spoolman vendor + filament + spool from tag fields. Worker only.
 
@@ -1082,25 +1049,25 @@ def _create_spool_blocking(unit: Any,
     try:
         vendor = client.get_or_create_vendor(brand)
         vid = vendor.get("id") if isinstance(vendor, dict) else None
-        fil = client.create_filament(
-            name=sku or f"{brand} {ftype}", vendor_id=vid, material=ftype,
-            density=fields.get("density"), diameter=fields.get("diameter_mm"),
-            color_hex=color_hex,
-            settings_extruder_temp=fields.get("hotend_max_c") or None,
-            settings_bed_temp=fields.get("bed_temp_c") or None,
-            weight=weight, article_number=sku)
-        if not isinstance(fil, dict) or "id" not in fil:
+        fil = client.create_filament(name=sku or f"{brand} {ftype}", vendor_id=vid, material=ftype,
+                                     density=fields.get("density"),
+                                     diameter=fields.get("diameter_mm"), color_hex=color_hex,
+                                     settings_extruder_temp=fields.get("hotend_max_c") or None,
+                                     settings_bed_temp=fields.get("bed_temp_c") or None,
+                                     weight=weight, article_number=sku)
+        if (not isinstance(fil, dict)
+            or "id" not in fil):
             return 0, f"Spoolman filament create failed ({fil})"
         spool = client.create_spool(fil["id"], initial_weight=weight)
-        if not isinstance(spool, dict) or "id" not in spool:
+        if (not isinstance(spool, dict)
+            or "id" not in spool):
             return 0, f"Spoolman spool create failed ({spool})"
         return int(spool["id"]), None
     except Exception as e:
         return 0, f"Spoolman create failed: {e}"
 
 
-def run_enroll(target: RfidWriteTarget, spool_id: int,
-               overrides: Dict[str, Any],
+def run_enroll(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
                lane: Optional[str] = None) -> Tuple[Any, ...]:
     """
     Enroll a blank tag: create the Spoolman spool if one was not named, then
@@ -1126,7 +1093,8 @@ def run_enroll(target: RfidWriteTarget, spool_id: int,
             # missing tag cannot leave an orphan spool. A hand-off reader (the
             # U1) relies on the write's own no-tag check instead.
             _tag, rerr = _read_blocking(target)
-            if rerr and ("no tag" in rerr or "offline" in rerr):
+            if (rerr
+                and ("no tag" in rerr or "offline" in rerr)):
                 return None, rerr, {}, ""
             sid, err = _create_spool_blocking(target.unit, overrides)
             if err:
@@ -1137,19 +1105,15 @@ def run_enroll(target: RfidWriteTarget, spool_id: int,
             tag_only = {key: overrides[key]
                         for key in ("hotend_min_c", "drying_temp_c", "drying_time_h")
                         if key in overrides}
-            uid, err, fields, note = _write_blocking(target, sid, tag_only,
-                                                     excluded)
+            uid, err, fields, note = _write_blocking(target, sid, tag_only, excluded)
             if err:
-                # Name the new spool so it is reused rather than created again.
                 err = (f"{err}. Spool {sid} was created in Spoolman: give "
                        f"SPOOL={sid} when you enroll a writable tag, or delete it")
         else:
-            uid, err, fields, note = _write_blocking(target, sid, overrides,
-                                                     excluded)
+            uid, err, fields, note = _write_blocking(target, sid, overrides, excluded)
         return uid, err, fields, prefix + (note or "")
 
-    def _dispatch(excluded: Optional[Callable[[str], bool]]
-                  ) -> Tuple[Any, ...]:
+    def _dispatch(excluded: Optional[Callable[[str], bool]]) -> Tuple[Any, ...]:
         """
         Run the enroll, on a worker thread when the target allows it.
 
@@ -1175,11 +1139,9 @@ def run_enroll(target: RfidWriteTarget, spool_id: int,
                 result[0] = _do(excluded)
             except Exception as e:
                 result[0] = (None, str(e), {}, "")
-            reactor.register_async_callback(
-                lambda et: completion.complete(None))
+            reactor.register_async_callback(lambda et: completion.complete(None))
 
-        threading.Thread(target=worker, daemon=True,
-                         name="afc_rfid_en").start()
+        threading.Thread(target=worker, daemon=True, name="afc_rfid_en").start()
         completion.wait(reactor.monotonic() + WRITE_TIMEOUT_S + 30.0)
         return result[0]
 
@@ -1208,8 +1170,7 @@ def cmd_AFC_RFID_ENROLL(printer: Any, gcmd: Any) -> None:
     AFC_RFID_ENROLL LANE=lane1 TYPE=PLA BRAND=Generic COLOR=00FF00 WEIGHT=1000
     ```
     """
-    target, err = resolve_reader(printer, gcmd.get("READER", None),
-                                 gcmd.get("LANE", None))
+    target, err = resolve_reader(printer, gcmd.get("READER", None), gcmd.get("LANE", None))
     if target is None:
         error_str = f"AFC_RFID_ENROLL: {err}"
         raise gcmd.error(error_str)
@@ -1220,8 +1181,7 @@ def cmd_AFC_RFID_ENROLL(printer: Any, gcmd: Any) -> None:
         overrides.setdefault("diameter_mm", 1.75)
     lane = gcmd.get("LANE", None)
     try:
-        uid, err, fields, note = run_enroll(target, spool_id, overrides,
-                                            lane=lane)
+        uid, err, fields, note = run_enroll(target, spool_id, overrides, lane=lane)
     except StageError as e:
         error_str = f"AFC_RFID_ENROLL: {e}"
         raise gcmd.error(error_str)
@@ -1233,9 +1193,7 @@ def cmd_AFC_RFID_ENROLL(printer: Any, gcmd: Any) -> None:
         applied = apply_written(target, lane, uid, fields)
         note = f"{note}, {applied}" if note else applied
     weight = fields.get("weight_g")
-    gcmd.respond_info(
-        f"AFC_RFID_ENROLL: tag {uid} on {target.name}: "
-        f"{fields.get('manufacturer') or 'unbranded'} "
-        f"{fields.get('ftype') or 'filament'}"
-        f"{f', {weight}g' if weight else ''}"
-        f"{f' ({note})' if note else ''}.")
+    gcmd.respond_info(f"AFC_RFID_ENROLL: tag {uid} on {target.name}: "
+                      f"{fields.get('manufacturer') or 'unbranded'} "
+                      f"{fields.get('ftype') or 'filament'}{f', {weight}g' if weight else ''}"
+                      f"{f' ({note})' if note else ''}.")

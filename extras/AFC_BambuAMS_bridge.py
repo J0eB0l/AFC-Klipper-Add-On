@@ -50,15 +50,11 @@ import chelper
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# How long an in-flight measurement may stay declared before it is treated as
-# abandoned. A real one takes 8-20s; this matches the follower backstop so the
-# two cannot disagree about whether a calibrate is still running.
+# A real measurement takes 8-20s; this matches the follower backstop.
 _MEAS_LIVE_MAX_S = 120.0
 
-#: Writer pacing: queue depth at which the writer starts spacing writes, and
-#: the gap between them. A reconnect re-announce (~115 commands on a
-#: twelve-unit chain) would otherwise make a WiFi bridge drop the link; normal
-#: traffic never reaches this depth.
+#: Queue depth at which the writer starts spacing writes, and the gap between them.
+#: A reconnect re-announce (~115 commands) would otherwise drop a WiFi bridge's link.
 WRITE_PACE_DEPTH = 8
 WRITE_PACE_S = 0.02
 
@@ -67,14 +63,11 @@ WRITE_PACE_S = 0.02
 #: underneath.
 CONNECT_GRACE_S = 2.0
 
-#: A gap between frames longer than this is logged once, when the next frame
-#: arrives (see _note_frame_gap). Typical causes: an AMS 1 capscan blocking the
-#: bridge for 10-15 s, or a WiFi gap on a TCP bridge.
+#: A gap between frames longer than this is logged once (see _note_frame_gap).
 SILENCE_LOG_S = 2.5
 
 
-
-# ── Pure helpers (unit-tested; no Klipper/hardware needed) ──────────────────────
+# Pure helpers (no Klipper or hardware needed)
 
 def _queued_cmd_name(data: Any) -> str:
     """
@@ -118,11 +111,8 @@ def parse_bridge_line(line: str) -> Optional[dict]:
 _BLDC_I_RE = re.compile(r"bldc_i:([0-9.]+)A")
 
 
-# ── Plain-English narration ──────────────────────────────────────────────────
-# Narration table (_AMS_HUMAN): only matched entries reach the console;
-# everything goes to AFC.log verbatim. An entry is (pattern, render) or
-# (pattern, render, log_only), where log_only keeps the sentence off the
-# console.
+# Narration table (_AMS_HUMAN): only matched entries reach the console; everything
+# goes to AFC.log verbatim. An entry is (pattern, render) or (pattern, render, log_only).
 #
 # Drying telemetry, every ~10 s while a cycle runs (both separators occur):
 #   [AMS_CHMB]s:2|rf:55,0|vt:44.0|ap:35.3|hts:34,31,00|pw:100|ad:2|...
@@ -131,9 +121,8 @@ _BLDC_I_RE = re.compile(r"bldc_i:([0-9.]+)A")
 #: The `ad:` field, the unit's external power adapter:
 #:   AMS 2 Pro   ... pw:32,73,66,30,35,29,34, ad:4,23.9 wd:0,0,0,0, fa:104,99
 #:   AMS HT      ... pw:100, ad:2, wd:0,0,0,0, fa:99
-#: On an AMS 2 the second number is the 24 V jack voltage (~23.8 with the
-#: adapter, ~0.5 without). _bus_supply_conflict uses it: two AMS 2s drying off
-#: bus power collapse the supply and reset every unit on the wire.
+#: On an AMS 2 the second number is the 24 V jack voltage (~23.8 with the adapter,
+#: ~0.5 without): two AMS 2s drying off bus power collapse the supply.
 _CHMB_AD_RE = re.compile(r"\[AMS_CHMB\].*?\bad:(\d+)(?:\s*,\s*([0-9.]+))?")
 
 _CHMB_STATE_RE = re.compile(
@@ -153,21 +142,17 @@ _CHMB_STATE_RE = re.compile(
 #:   [AMS_SWITCH]feed to dw ok / feed to normal, len_det:...     (HT)
 #: "pull" must precede "sucess" so the per-feed "state_switch finish,
 #: sucessful" does not match.
-_MOTION_FINISH_RE = re.compile(
-    r"\b(?:(?:feed|pull|preload)\s+finish|pull\s+suc+ess"
-    r"|feed\s+to\s+(?:normal|dw\s+ok))\b",
-    re.IGNORECASE)
+_MOTION_FINISH_RE = re.compile(r"\b(?:(?:feed|pull|preload)\s+finish|pull\s+suc+ess"
+                               r"|feed\s+to\s+(?:normal|dw\s+ok))\b", re.IGNORECASE)
 
 #: The end of a retract, which _MOTION_FINISH_RE does not see:
 #:   [AMS_SWITCH]SRL_state_switch finish, sucessful, err_code:0x00
 #:   [AMS_SWITCH]AMS_CTRL_state_switch finish, sucessful, err_code:0x00
 #: The prefix varies; err_code:0x00 is required, so a unit that never says it
 #: falls back to the deadline.
-_STATE_SWITCH_DONE_RE = re.compile(
-    r"state_switch\s+finish\s*,\s*\w+\s*,\s*err_code:0x00\b",
-    re.IGNORECASE)
+_STATE_SWITCH_DONE_RE = re.compile(r"state_switch\s+finish\s*,\s*\w+\s*,\s*err_code:0x00\b",
+                                   re.IGNORECASE)
 
-#: The value ``tray_now`` carries when no tray is the current one.
 TRAY_NONE = 255
 
 #: The unit's current tray, from [AMS_COMMON]state:N,tray_now:M,tray_exit:K.
@@ -194,15 +179,12 @@ _BUFF_POS_RE = re.compile(r"buff_pos:(-?[0-9]+\.[0-9]+)")
 #:   [AMS_SWITCH]BUFF,pos:0.09->0.74, det:6mm,  i:0.583A
 #: pos before -> after, det the filament fed. "BUFF,pos:" differs from
 #: "buff_pos:", so it needs its own pattern.
-_BUFF_REFILL_RE = re.compile(
-    r"BUFF,\s*pos:(-?[0-9.]+)\s*->\s*(-?[0-9.]+)"
-    r"(?:[^\n]*?det:(\d+)\s*mm)?",
-    re.IGNORECASE)
+_BUFF_REFILL_RE = re.compile(r"BUFF,\s*pos:(-?[0-9.]+)\s*->\s*(-?[0-9.]+)"
+                             r"(?:[^\n]*?det:(\d+)\s*mm)?", re.IGNORECASE)
 
 #: A clean completion, e.g. the HT's "feed finish, buff_pos:1.28". Requires a
 #: comma or end-of-line after "finish" so "finish -1" cannot match.
-_CLEAN_FINISH_RE = re.compile(r"\b(?:feed|pull|preload)\s+finish\s*(?:,|$)",
-                              re.IGNORECASE)
+_CLEAN_FINISH_RE = re.compile(r"\b(?:feed|pull|preload)\s+finish\s*(?:,|$)", re.IGNORECASE)
 
 #: How far short of its measured path (mm) a stall still counts as arrived: a
 #: normal load stalls tens of mm short, a short move hundreds.
@@ -216,8 +198,7 @@ _ODOM_RESET_RE = re.compile(r"odom\s+reset\s+tray\s*\d+", re.IGNORECASE)
 #:   [AMS_LINK]err_code:0x00->0x80      hex, unspaced (AMS 2)
 #: The value after the arrow is the new level; 0 means no error. Read as a
 #: level, not an edge (see handle_line).
-_ERR_CODE_RE = re.compile(
-    r"err_code:\s*(0x[0-9A-Fa-f]+|\d+)\s*->\s*(0x[0-9A-Fa-f]+|\d+)")
+_ERR_CODE_RE = re.compile(r"err_code:\s*(0x[0-9A-Fa-f]+|\d+)\s*->\s*(0x[0-9A-Fa-f]+|\d+)")
 
 _ODOM_NO_TRAY_RE = re.compile(r"odom\s+tray_id\s+error\s*255", re.IGNORECASE)
 
@@ -280,18 +261,15 @@ _CAP_MEASURE_ALT_RE = re.compile(
 #: The save line carries the same radius at full precision, tying it to the
 #: reading. It resolves the bay within a unit only (boxed units share an
 #: address), so it is used as a veto, never a new attribution.
-_CAP_SAVE_RE = re.compile(
-    r"odom\s+save\s+tray:(\d+)\s*,\s*R:([0-9.]+)", re.IGNORECASE)
+_CAP_SAVE_RE = re.compile(r"odom\s+save\s+tray:(\d+)\s*,\s*R:([0-9.]+)", re.IGNORECASE)
 
 #: The calibration verdict. The HT misspells it, hence succ?ess:
 #:   HT     [AMS_RFID] STEP4,odom calib sucess
 #:   AMS 1  [AMS_DEV]  STEP:odom calib success exit 0,dis:0.989
-_CALI_DONE_RE = re.compile(
-    r"odom\s+calib\s+succ?ess(?:\s+exit\s+(\d+))?", re.IGNORECASE)
+_CALI_DONE_RE = re.compile(r"odom\s+calib\s+succ?ess(?:\s+exit\s+(\d+))?", re.IGNORECASE)
 
-_DRY_CFG_RE = re.compile(
-    r"\[AMS_CHMB\]\s*rotate:(\d+),\s*(\d+),\s*pw_lim:(\d+),"
-    r"\s*cool_down:\d+,\s*(\d+),\s*dur:(\d+),\s*tmpr:(\d+)")
+_DRY_CFG_RE = re.compile(r"\[AMS_CHMB\]\s*rotate:(\d+),\s*(\d+),\s*pw_lim:(\d+),"
+                         r"\s*cool_down:\d+,\s*(\d+),\s*dur:(\d+),\s*tmpr:(\d+)")
 
 #: The STEP marker's punctuation in all dialects: "STEP:" on boxed units,
 #: "STEP3," on the HT. A literal "STEP:" never matches the HT.
@@ -383,7 +361,6 @@ _AMS_HUMAN = (
      lambda m: (f"AMS: bay {int(m.group(1)) + 1} remembers about "
                 f"{m.group(2)}% left from its last measurement"),
      True),
-    # The unit committing a fresh measure to flash.
     (re.compile(r"odom\s+save\s+tray:(\d+)"),
      lambda m: f"AMS stored a new measurement for bay {int(m.group(1)) + 1}",
      True),
@@ -411,7 +388,6 @@ _AMS_HUMAN = (
      lambda m: f"AMS raised error 0x{m.group(1).upper()}"),
     (re.compile(r"err_code:0x[0-9A-Fa-f]+\s*->\s*0x0+\b"),
      lambda m: "AMS cleared its error"),
-    # A spool leaving the bay, and the calibration that goes with it.
     (re.compile(r"tray\s+(\d+)\s+out\s*,\s*clear\s+magic_num"),
      lambda m: f"AMS: bay {int(m.group(1)) + 1} is now empty",
      True),
@@ -463,11 +439,9 @@ _AMS_HUMAN = (
      True),
     (re.compile(r"\[AMS_LED\]\s*TIMEOUT error (\d+)"),
      lambda m: "AMS: TIMEOUT -- the unit gave up on the move"),
-    # Feed milestones, with the distance that makes them meaningful.
     (re.compile(r"\bfeed tray:(\d+)\s*,"),
      lambda m: f"AMS: feeding from bay {int(m.group(1)) + 1}",
      True),
-    # The assist giving up; the unit says whether it overfed or jammed.
     (re.compile(r"assist finish stall!\s*pos:(-?[0-9.]+)->(-?[0-9.]+)"),
      lambda m: (f"AMS stopped its assist (buffer {m.group(1)} -> "
                 f"{m.group(2)})"),
@@ -482,11 +456,9 @@ _AMS_HUMAN = (
     (re.compile(r"new tube_len:(\d+)\s*mm"),
      lambda m: f"AMS learned the bay-to-hub path length: {m.group(1)} mm",
      True),
-    # Staging the spool at the feeder, and the bay lock that goes with it.
     (re.compile(r"preload start", re.IGNORECASE),
      lambda m: "AMS is staging the spool at its feeder",
      True),
-    # Power-up of the whole unit: its follower state is gone.
     (re.compile(r"\[AMS_ADA\]\s*init", re.IGNORECASE),
      lambda m: "AMS powered up (any follower state it held is gone)",
      True),
@@ -511,10 +483,7 @@ _RFID_READ_OK_RE = re.compile(
 # The HT's terminal-only subset: its "read success" lines also fire on failed
 # sub-cycles, so only the flash-commit family counts there.
 _RFID_READ_OK_HT_RE = re.compile(
-    _STEP_SEP + r"save to flash"
-    r"|card info valid"
-    r"|info write to flash"
-    r"|info same as last read")
+    _STEP_SEP + r"save to flash|card info valid|info write to flash|info same as last read")
 
 #: A foreign tag: a non-Bambu Mifare chip answers anticollision, then "auth
 #: fail -4" / "info_valid 0 or bbl:-1". Tells a non-Bambu spool from an empty
@@ -556,8 +525,7 @@ _MEAS_END_RE = re.compile(r"odom\s+calib\s+succ?ess", re.IGNORECASE)
 # The unit's own retries are spent: "AMS_CTRL_state_switch finish, fail,
 # retry:5, ...". Unlike a stall, which the unit recovers from. An AMS 1 emits
 # no AMS_CTRL line and keeps its deadline.
-_AMS_GAVE_UP_RE = re.compile(
-    r"state_switch\s+finish\s*,\s*fail\b", re.IGNORECASE)
+_AMS_GAVE_UP_RE = re.compile(r"state_switch\s+finish\s*,\s*fail\b", re.IGNORECASE)
 
 # "Not pointed at a bay": after a fault latches the unit rejects every move
 # ("odom tray_id error N"), so a retry is pointless. Stamped like the give-up
@@ -574,11 +542,8 @@ _AMS_TRAY_SW_RE = re.compile(
 # The true terminal ("STEP7:cali end" / "STEP7:finish") for callers that must
 # not overlap the unit's cycle; "odom calib success" can arrive with the next
 # move.
-_RFID_TERMINAL_RE = re.compile(
-    r"STEP7:\s*(?:finish|cali\s+end)"
-    r"|Calibration\s+rst:\d+"
-    r"|tray\s+capacity\s+no\s+en",
-    re.IGNORECASE)
+_RFID_TERMINAL_RE = re.compile(r"STEP7:\s*(?:finish|cali\s+end)|Calibration\s+rst:\d+"
+                               r"|tray\s+capacity\s+no\s+en", re.IGNORECASE)
 
 # Link-layer chatter, kept in AFC.log but off the console, and only when every
 # bracketed segment in the line is noise.
@@ -618,10 +583,8 @@ _AMS_NOISE_RE = re.compile(
     r"|\[AMS_LINK\]\s*en:\d+\s*,\s*mode:\d+\s*,\s*idx:\d+\s*,\s*ref:\d+"
     # The select ack, named by bus address ("ams-0x00", dash and 0x optional).
     r"|\[AMS_(?:LINK|CALL)\]\s*ams-?(?:0x)?[0-9A-Fa-f]+\s+select[^\[]*"
-    # [AMS_LINK]get_slot is not listed: the dedupe loop handles its repetition,
-    # and muting it would hide a stuck unit (pinned by
-    # TestTheHeartbeatCannotBreakTheDedupe). Only the feed-cycle sw_sta
-    # transitions are noise; "0 -> 1" and "1 -> 0" (spool in/out) stay visible.
+    # [AMS_LINK]get_slot is not listed: muting it would hide a stuck unit. Only the
+    # feed-cycle sw_sta transitions are noise; "0 -> 1" and "1 -> 0" (spool in/out) stay.
     r"|\[AMS_TRAY\]\s*tray\[?\d*\]?\s*sw_sta\s*update\s*,\s*"
     r"(?:3\s*->\s*\d+|\d+\s*->\s*3)[^\[]*"
     r"|\[AMS_BDC\]\s*tray lock:[^\[]*"
@@ -684,9 +647,8 @@ _BRIDGE_EVENTS_KNOWN = frozenset((
     "sniff_mode", "slow",
     # command echoes
     "dry", "mon", "resync", "mcaddr", "armms", "arrivems", "hb",
-    # AMS firmware-update replay echoes (driven by the AMS updater, not this
-    # module; listed so a connected module does not flood the log if the
-    # updater runs while it is attached).
+    # AMS firmware-update replay echoes, so a connected module does not flood the log
+    # while the updater runs.
     "fwreplay", "txbuf", "txsend",
     "htunit", "mute", "units", "variant", "baud",
     # ("unload" is bridge_unload()'s echo; it is unit/slot-addressed.)
@@ -696,13 +658,10 @@ _BRIDGE_EVENTS_KNOWN = frozenset((
     # Scan-path echoes of host commands; unlisted, each would log a line and
     # could starve the MCU.
     "scan", "reid", "reread", "prime",
-    # "tx" is the event, "txecho" only the echo. Both must be listed: the
-    # unknown-event catch-all runs before the per-event branches.
-    "tx", "loops",     # both also need a handler in handle_line: "known"
-                       # without one means the catch-all stops logging it
-                       # and it vanishes.
-    # Enrollment echoes (bind, htuid) every status round; listed so they stay
-    # silent.
+    # "tx" and "loops" also need a handler in handle_line: listed without one, the
+    # catch-all stops logging them and they vanish.
+    "tx", "loops",
+    # Enrollment echoes every status round.
     "bind", "htuid",
     # A BB_WIFI firmware's radio state, printed by the Pico on change only.
     # Has a handler in handle_line as well (see "tx"/"loops"): membership alone
@@ -776,7 +735,6 @@ class TcpPort:
     on one socket is otherwise fine: the directions are independent.
     """
 
-    #: Wire default when a tcp:// spec omits the port.
     DEFAULT_PORT = 8888
 
     @staticmethod
@@ -812,10 +770,8 @@ class TcpPort:
             error_str = f"bad port in bridge address {spec!r}"
             raise ValueError(error_str)
 
-    def __init__(self, host: str, port: int, timeout: float = 0.1,
-                 write_timeout: float = 0.5,
-                 connect_timeout: float = 3.0,
-                 key: Optional[str] = None) -> None:
+    def __init__(self, host: str, port: int, timeout: float = 0.1, write_timeout: float = 0.5,
+                 connect_timeout: float = 3.0, key: Optional[str] = None) -> None:
         """
         Open a TCP link to the bridge.
 
@@ -826,8 +782,7 @@ class TcpPort:
         :param connect_timeout: how long the initial connect may take
         :param key: the link key, or None/"" for an unauthenticated link
         """
-        self._sock = socket.create_connection((host, int(port)),
-                                              timeout=connect_timeout)
+        self._sock = socket.create_connection((host, int(port)), timeout=connect_timeout)
         self._timeout = float(timeout)
         self._pushback = b""
         self._sock.settimeout(timeout)
@@ -842,8 +797,7 @@ class TcpPort:
         # Probe after 20 s idle, every 5 s, give up after 3 (~35 s instead of
         # the two-hour default). Linux-only options; the silence watchdog
         # covers the rest.
-        for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5),
-                         ("TCP_KEEPCNT", 3)):
+        for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
             num = getattr(socket, opt, None)
             if num is None:
                 continue
@@ -874,38 +828,38 @@ class TcpPort:
         buf = b""
         self._sock.settimeout(0.2)
         try:
-            while time.monotonic() < deadline and b"\n" not in buf:
+            while (time.monotonic() < deadline
+                   and b"\n" not in buf):
                 try:
                     chunk = self._sock.recv(256)
                 except (socket.timeout, TimeoutError):
                     if not key:
-                        return          # no key configured: nothing to wait for
+                        return
                     continue
                 if not chunk:
                     error_str = f"{self.name}: closed during authentication"
                     raise OSError(error_str)
                 buf += chunk
             if b"\n" not in buf:
-                # No challenge: an open board with nothing buffered.
                 return
             line = buf.split(b"\n", 1)[0].decode("utf-8", "replace")
-            if '"auth"' not in line or '"nonce"' not in line:
+            if ('"auth"' not in line
+                or '"nonce"' not in line):
                 # Not a challenge: this board is open and has started talking.
                 # Push it back so the reader sees the frame just consumed.
                 self._pushback = buf
                 return
             if not key:
-                error_str = (
-                    f"{self.name}: the bridge asked for a link key and none is "
-                    f"configured -- set tcp_key to match the board")
+                error_str = (f"{self.name}: the bridge asked for a link key and none is "
+                             f"configured -- set tcp_key to match the board")
                 raise LinkKeyError(error_str)
             self.challenged = True
             nonce = bytes.fromhex(json.loads(line)["nonce"])
             mac = hmac.new(key.encode(), nonce, hashlib.sha512).digest()[:32]
-            self._sock.sendall(
-                f'{{"cmd":"auth","mac":"{mac.hex()}"}}\n'.encode())
+            self._sock.sendall(f'{{"cmd":"auth","mac":"{mac.hex()}"}}\n'.encode())
             reply = buf.split(b"\n", 1)[1]
-            while time.monotonic() < deadline and b"\n" not in reply:
+            while (time.monotonic() < deadline
+                   and b"\n" not in reply):
                 try:
                     chunk = self._sock.recv(256)
                 except (socket.timeout, TimeoutError):
@@ -961,7 +915,7 @@ class TcpPort:
             try:
                 sent = self._sock.send(view)
             except (socket.timeout, TimeoutError, BlockingIOError):
-                continue                    # the deadline above ends this
+                continue
             if not sent:
                 error_str = f"{self.name}: bridge closed the connection"
                 raise OSError(error_str)
@@ -978,16 +932,15 @@ class TcpPort:
             pass
 
 
-# ── Bridge connection (threaded reader, reactor hop) ────────────────────────────
+# Bridge connection (threaded reader, reactor hop)
 
 # Per-chunk write timeout during a firmware transfer: the bridge stops
 # answering while it programs a staging sector.
 BB_RAW_WRITE_TIMEOUT = 5.0
 
 
-# One BambuBridge per serial port, shared by every unit on that Pico. Read it
-# as `<module>._BRIDGES`, not an imported name, so a rebinding (e.g. in tests)
-# is always seen.
+# One BambuBridge per serial port, shared by every unit on that Pico. Read it as
+# `<module>._BRIDGES` so a rebinding is always seen.
 _BRIDGES: Dict[str, "BambuBridge"] = {}
 
 # The WifiLink of each chain whose bridge keys itself over WiFi, by serial
@@ -1079,8 +1032,8 @@ def probe_bridge(path: str) -> Optional[dict]:
             for raw in lines:
                 obj = parse_bridge_line(raw.decode("utf-8", "replace"))
                 if (obj is not None
-                        and obj.get("evt") == "info"
-                        and obj.get("proto") == "bambubus-1"):
+                    and obj.get("evt") == "info"
+                    and obj.get("proto") == "bambubus-1"):
                     return obj
         return None
     except Exception:
@@ -1109,10 +1062,8 @@ class WifiLink:
     RETRY_S = 60.0
 
     def __init__(self, key: str, save: Callable[[str], None], label: str,
-                 usb_path: Optional[str] = None,
-                 addr: Optional[str] = None,
-                 ssid: Optional[str] = None,
-                 password: str = "") -> None:
+                 usb_path: Optional[str] = None, addr: Optional[str] = None,
+                 ssid: Optional[str] = None, password: str = "") -> None:
         """
         Set up the link; attach() hands it its bridge.
 
@@ -1134,7 +1085,6 @@ class WifiLink:
         # Set once the network went to the board, so one it cannot join does
         # not restart it again and again.
         self._creds_sent = False
-        #: True while the open port is TCP.
         self.on_wifi = False
         self._bridge: Optional["BambuBridge"] = None
         self._usb_open: Optional[Callable[[], Any]] = None
@@ -1171,8 +1121,7 @@ class WifiLink:
         self._said = None
         self._creds_sent = False
 
-    def _say(self, state: str, message: str, warning: bool = False,
-             console: bool = True) -> None:
+    def _say(self, state: str, message: str, warning: bool = False, console: bool = True) -> None:
         """
         Tell the console about a link state, once each time it changes.
 
@@ -1181,7 +1130,8 @@ class WifiLink:
         :param warning: log it as a warning
         :param console: False to write it to AFC.log only
         """
-        if state == self._said or self._bridge is None:
+        if (state == self._said
+            or self._bridge is None):
             return
         self._said = state
         if not console:
@@ -1201,11 +1151,11 @@ class WifiLink:
         :return Any: an open port, pyserial-shaped either way
         """
         usb_in = bool(self.usb_path) and os.path.exists(self.usb_path)
-        if self.addr and (not usb_in or time.monotonic() >= self._retry_at):
+        if (self.addr
+            and (not usb_in or time.monotonic() >= self._retry_at)):
             host, port = TcpPort.parse(self.addr)
             try:
-                link = TcpPort(host, port, timeout=0.1, write_timeout=0.5,
-                               key=self.key)
+                link = TcpPort(host, port, timeout=0.1, write_timeout=0.5, key=self.key)
             except Exception as e:
                 self._tcp_failed(e, usb_in)
                 if not usb_in:
@@ -1213,16 +1163,13 @@ class WifiLink:
             else:
                 self.on_wifi = True
                 self._failed_addr = None
-                self._say("wifi", f"BridgeBox connected over WiFi at "
-                                  f"{self.addr}")
+                self._say("wifi", f"BridgeBox connected over WiFi at {self.addr}")
                 return link
         elif (not self.addr
-                and not usb_in
-                and self.usb_path not in _AUTO_FINDERS):
-            # A chain on serial_port: auto still looking says so itself.
+              and not usb_in
+              and self.usb_path not in _AUTO_FINDERS):
             self._say("no-addr", "connection: wifi needs the BridgeBox on "
-                                 "this printer's USB once, to learn its WiFi "
-                                 "address", warning=True)
+                      "this printer's USB once, to learn its WiFi address", warning=True)
         self.on_wifi = False
         return self._usb_open()
 
@@ -1235,25 +1182,24 @@ class WifiLink:
         """
         self._failed_addr = self.addr
         self._retry_at = time.monotonic() + self.RETRY_S
-        if isinstance(error, LinkKeyError) and usb_in:
+        if (isinstance(error, LinkKeyError)
+            and usb_in):
             self._say("key", f"the BridgeBox at {self.addr} holds another "
-                             f"printer's link key; staying on USB, which "
-                             f"gives it this printer's key", warning=True)
+                      f"printer's link key; staying on USB, which "
+                      f"gives it this printer's key", warning=True)
         elif isinstance(error, LinkKeyError):
             self._say("key", f"the BridgeBox at {self.addr} holds another "
-                             f"printer's link key. Plug it into this "
-                             f"printer's USB to give it this printer's key, "
-                             f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer "
-                             f"that set it up.", warning=True)
+                      f"printer's link key. Plug it into this "
+                      f"printer's USB to give it this printer's key, "
+                      f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer "
+                      f"that set it up.", warning=True)
         elif usb_in:
             self._say("usb", f"can't reach the BridgeBox on WiFi at "
-                             f"{self.addr} ({error}); staying on USB",
-                      warning=True)
+                      f"{self.addr} ({error}); staying on USB", warning=True)
         else:
             self._say("down", f"can't reach the BridgeBox at {self.addr} "
-                              f"({error}). If it is new, finish its WiFi "
-                              f"setup from its bb-bridge hotspot; Klipper "
-                              f"keeps trying.", warning=True)
+                      f"({error}). If it is new, finish its WiFi "
+                      f"setup from its bb-bridge hotspot; Klipper keeps trying.", warning=True)
 
     def on_connect(self, port: Any) -> None:
         """
@@ -1264,10 +1210,10 @@ class WifiLink:
 
         :param port: the port just opened
         """
-        self._pending = None          # a new link: nothing is in flight
+        self._pending = None
         if (self.on_wifi
-                and self._bridge is not None
-                and not getattr(port, "challenged", False)):
+            and self._bridge is not None
+            and not getattr(port, "challenged", False)):
             self._pending = ("claim", str(self.addr))
             self._bridge.send({"cmd": "linkkey", "key": self.key})
 
@@ -1282,7 +1228,8 @@ class WifiLink:
             self._key_stored(obj)
         elif obj.get("cleared") == 1:
             self._cleared(obj)
-        elif not self.on_wifi and self.usb_path:
+        elif (not self.on_wifi
+              and self.usb_path):
             self._usb_wifi_state(obj)
 
     def _cleared(self, obj: dict) -> None:
@@ -1300,27 +1247,24 @@ class WifiLink:
         :param obj: the wifi frame
         """
         if (obj.get("by") != "button"
-                or self._bridge is None
-                or self._said == "cleared"):
+            or self._bridge is None
+            or self._said == "cleared"):
             return
         usb_in = bool(self.usb_path) and os.path.exists(self.usb_path)
         addr = self.addr
         self.forget(self.key)
         if usb_in:
             if addr:
-                self._bridge.reactor.register_async_callback(
-                    lambda et: self._save(""))
+                self._bridge.reactor.register_async_callback(lambda et: self._save(""))
             self._say("cleared", "the BridgeBox's BOOT button cleared its "
-                                 "WiFi and key; the link is on USB until its "
-                                 "WiFi is set up again")
+                      "WiFi and key; the link is on USB until its WiFi is set up again")
         else:
             self.addr = addr
             self._say("cleared", "the BridgeBox's BOOT button cleared its "
-                                 "WiFi and key. Set it up again from its "
-                                 "bb-bridge hotspot; Klipper keeps trying to "
-                                 "reach it.", warning=True)
+                      "WiFi and key. Set it up again from its "
+                      "bb-bridge hotspot; Klipper keeps trying to reach it.", warning=True)
         if self.on_wifi:
-            self._bridge._drop_port()  # the reader reopens through open()
+            self._bridge._drop_port()
 
     def _usb_wifi_state(self, obj: dict) -> None:
         """
@@ -1335,46 +1279,49 @@ class WifiLink:
         :param obj: an info or wifi frame
         """
         is_info = obj.get("evt") == "info"
-        if is_info and obj.get("link") != "wifi":
+        if (is_info
+            and obj.get("link") != "wifi"):
             self._say("no-radio", "this BridgeBox's firmware has no WiFi, so "
-                                  "it stays on USB", warning=True)
+                      "it stays on USB", warning=True)
             return
-        if not is_info and "saved" in obj:
+        if (not is_info
+            and "saved" in obj):
             saved = obj.get("saved")
-            if isinstance(saved, int) and saved < 0:
+            if (isinstance(saved, int)
+                and saved < 0):
                 self._say("creds-failed", f"the BridgeBox did not store the "
-                                          f"WiFi network ({obj})",
-                          warning=True)
+                          f"WiFi network ({obj})", warning=True)
             return
-        if is_info and self._send_creds(obj):
+        if (is_info
+            and self._send_creds(obj)):
             return
         up = obj.get("wlink") if is_info else obj.get("link")
         ip = str(obj.get("ip") or "0.0.0.0")
         # With its hotspot up the board is still in setup, even once joined:
         # it serves no link until the restart that ends the setup.
         if (up != _WIFI_LINK_UP
-                or ip == "0.0.0.0"
-                or obj.get("portal")):
-            if self._creds_sent and obj.get("portal"):
+            or ip == "0.0.0.0"
+            or obj.get("portal")):
+            if (self._creds_sent
+                and obj.get("portal")):
                 self._say("join-failed", f"the BridgeBox could not join "
-                                         f"{self.ssid}. Check wifi_ssid and "
-                                         f"wifi_password, then "
-                                         f"FIRMWARE_RESTART, or set it up "
-                                         f"from its bb-bridge hotspot.",
-                          warning=True)
-            elif obj.get("portal") or (is_info and not obj.get("ssid")):
+                          f"{self.ssid}. Check wifi_ssid and wifi_password, then "
+                          f"FIRMWARE_RESTART, or set it up "
+                          f"from its bb-bridge hotspot.", warning=True)
+            elif (obj.get("portal")
+                  or (is_info and not obj.get("ssid"))):
                 self._say("setup", "the BridgeBox isn't on your WiFi yet. "
-                                   "Join its bb-bridge hotspot from a phone "
-                                   "and choose your network; it moves to "
-                                   "WiFi by itself and stays on USB until "
-                                   "then.")
+                          "Join its bb-bridge hotspot from a phone "
+                          "and choose your network; it moves to "
+                          "WiFi by itself and stays on USB until then.")
             return
         addr = f"tcp://{ip}:{TcpPort.DEFAULT_PORT}"
         if (is_info
-                and addr == self._failed_addr
-                and time.monotonic() < self._retry_at):
+            and addr == self._failed_addr
+            and time.monotonic() < self._retry_at):
             return
-        if self._pending == ("move", addr) or self._bridge is None:
+        if (self._pending == ("move", addr)
+            or self._bridge is None):
             return
         self._pending = ("move", addr)
         self._bridge.send({"cmd": "linkkey", "key": self.key})
@@ -1391,17 +1338,17 @@ class WifiLink:
         :return bool: whether the network was sent
         """
         if (not self.ssid
-                or self._creds_sent
-                or self._bridge is None):
+            or self._creds_sent
+            or self._bridge is None):
             return False
-        if obj.get("ssid") == self.ssid and not obj.get("portal"):
+        if (obj.get("ssid") == self.ssid
+            and not obj.get("portal")):
             return False
         self._creds_sent = True
-        self._bridge.send({"cmd": "wifi", "ssid": self.ssid,
-                           "pass": self._password, "key": self.key})
+        self._bridge.send({"cmd": "wifi", "ssid": self.ssid, "pass": self._password,
+                           "key": self.key})
         self._say("creds", f"giving the BridgeBox the WiFi network "
-                           f"{self.ssid} from the config; it restarts to "
-                           f"join it")
+                  f"{self.ssid} from the config; it restarts to join it")
         return True
 
     def _key_stored(self, obj: dict) -> None:
@@ -1411,25 +1358,25 @@ class WifiLink:
         :param obj: the linkkey frame
         """
         pending, self._pending = self._pending, None
-        if pending is None or self._bridge is None:
+        if (pending is None
+            or self._bridge is None):
             return                    # a tcp_key -store write, not ours
         kind, addr = pending
         if obj.get("saved") not in (0, 1):
             self._say("key-failed", f"the BridgeBox did not store its link "
-                                    f"key ({obj})", warning=True)
+                      f"key ({obj})", warning=True)
             return
         if kind == "claim":
             self._say("claimed", "the BridgeBox now holds this printer's link "
-                                 "key, so only this printer can connect to it")
+                      "key, so only this printer can connect to it")
             return
         self.addr = addr
         self._failed_addr = None
         self._retry_at = 0.0
-        self._bridge.reactor.register_async_callback(
-            lambda et, a=addr: self._save(a))
-        self._say("moving", f"the BridgeBox joined WiFi at {addr}; moving "
-                            f"the link there", console=False)
-        self._bridge._drop_port()     # the reader reopens through open()
+        self._bridge.reactor.register_async_callback(lambda et, a=addr: self._save(a))
+        self._say("moving", f"the BridgeBox joined WiFi at {addr}; moving the link there",
+                  console=False)
+        self._bridge._drop_port()
 
 
 def attach_wifi(serial_port: Optional[str], bridge: "BambuBridge") -> None:
@@ -1455,10 +1402,8 @@ class BambuBridge:
     # Console narration lines per second before the rest of a burst goes to
     # AFC.log only, so a retry storm cannot stall the reactor.
     NARRATION_CONSOLE_MAX_PER_S = 12
-    #: Whether the AMS's raw narration also goes to the console. Off: the
-    #: console gets the _AMS_HUMAN sentences, AFC.log and the narration file
-    #: keep every raw line. Each model words the same event its own way, so
-    #: raw lines read as noise to anyone not decoding them.
+    #: Whether raw AMS narration also goes to the console. Off: the console gets the
+    #: _AMS_HUMAN sentences, and AFC.log and the narration file keep every raw line.
     RAW_NARRATION_CONSOLE = False
     #: A link that comes back sooner than this is logged to AFC.log only.
     RECONNECT_SAY_S = 10.0
@@ -1467,8 +1412,7 @@ class BambuBridge:
     # before it.
     STALE_ERROR_S = 1.0
 
-    def __init__(self, serial_factory: Callable[[], Any], reactor: Any,
-                 logger: Any) -> None:
+    def __init__(self, serial_factory: Callable[[], Any], reactor: Any, logger: Any) -> None:
         """
         Set up the bridge connection; the reader starts on connect.
 
@@ -1480,24 +1424,14 @@ class BambuBridge:
         self._serial_factory = serial_factory
         self.reactor = reactor
         self.logger = logger
-        # tcp_key ... -store: written into the board's flash on each connect
-        # that did not already prove the board holds it. Over USB that is
-        # every connect (the console is not gated, and an identical key costs
-        # the board no flash write); over TCP only an open board, since a
-        # keyed one either challenged with this key or refused the link.
+        # Written into the board's flash on each connect that did not already prove the board
+        # holds it: every USB connect, and an open board over TCP.
         self.store_key: Optional[str] = None
-        #: The WifiLink opening this bridge's ports, if its chain has one.
         self.wifi: Optional[WifiLink] = None
-        # Interpolated by _narrate_human. Not a unit name: one bridge can carry
-        # several units and the narration is bus-wide; the address in each
-        # message identifies the unit.
+        # Not a unit name: one bridge carries several units, and each message names its unit.
         self.name = "bridge"
-        # Chain index -> unit name, so a console sentence names the unit that
-        # spoke (see name_unit).
         self._unit_names: Dict[int, str] = {}
         self._listeners: List[Callable[[dict], None]] = []
-        # The last uartdiag report's edge and frame counts, and which bus
-        # state the console was last told (see _note_uartdiag).
         self._diag_prev: Optional[Tuple[str, int, int]] = None
         self._bus_said: Optional[str] = None
         self._serial: Optional[Any] = None
@@ -1509,22 +1443,18 @@ class BambuBridge:
         self._last_human: Optional[str] = None
         self._last_chmb_t: float = 0.0
         self._last_human_t: float = 0.0
-        # Drying records keyed by chain index, which the firmware stamps on
-        # every line; keying by device address would merge chain-mates.
+        # Keyed by chain index, which the firmware stamps on every line; keying by address
+        # would merge chain-mates.
         #: unit -> {"temp","target","state","seen"}: the [AMS_CHMB] telemetry.
         self._chmb_by_unit: Dict[int, dict] = {}
         #: addr -> True between "first detected" and the unit's cycle end. A
         #: calibrate must not cut across a live measurement.
         self._meas_live: Dict[int, bool] = {}
-        # When each in-flight measurement was declared, so a stalled one cannot
-        # latch forever. See cap_calibrating.
         self._meas_live_t: Dict[int, float] = {}
-        # When each device last said it finished (see _RFID_TERMINAL_RE).
         self._rfid_term_by_addr: Dict[int, float] = {}
         #: unit -> the last drying refusal, so the panel can say why a start
         #: did nothing. Cleared when that unit actually begins a cycle.
         self._dry_err_u: Dict[int, str] = {}
-        #: unit -> {"rotate","dur","tmpr"}, as the unit last echoed them.
         self._dry_cfg_u: Dict[int, Dict[str, int]] = {}
         #: unit -> {"rst","t"}; the AMS HT's calibration verdict, which it
         #: reports instead of the boxed units' percent line.
@@ -1532,17 +1462,13 @@ class BambuBridge:
         # Scan-window scoped (one scan runs at a time, globally enforced), so
         # the address is unambiguous for the window that is open.
         self._cap_measure: Dict[int, Dict[str, Any]] = {}
-        # Dedicated narration log; see set_narration_log().
         self._nar_lg: Optional[Any] = None
-        # The AMS's self-calibrated PTFE path length (mm) per narrating
-        # address; only positive values are stored. Preferred over any
-        # configured value.
+        # The AMS's self-calibrated PTFE path length (mm) per address, preferred over config.
         self._tube_by_addr: Dict[int, float] = {}
         # Per-unit path length, keyed by the commanded unit: an AMS 1 and an
         # AMS 2 Pro share 0x0700. The address map is the single-unit fallback.
         self._tube_by_unit: Dict[int, float] = {}
-        # Per-unit dw_len and how often it was seen, keyed by unit because
-        # boxed units share 0x0700.
+        # Keyed by unit because boxed units share 0x0700.
         self._dw_by_unit: Dict[int, float] = {}
         self._dw_n_by_unit: Dict[int, int] = {}
         # The device address each value arrived on, so a consumer can refuse a
@@ -1550,30 +1476,21 @@ class BambuBridge:
         # _active_unit names the last loader, which is wrong after the load.
         self._dw_addr_by_unit: Dict[int, int] = {}
         self._active_unit: Optional[int] = None
-        # Repeat tracking for the narration dedupe. An identical line is
-        # re-emitted periodically with a count, so a repeating fault stays
-        # visible as a fault rather than being suppressed into silence.
+        # An identical line is re-emitted periodically with a count, so a repeating fault
+        # stays visible.
         self._last_dbg_n: int = 0
         self._last_dbg_t: float = 0.0
-        # Monotonic time of the last successful tag read (see
-        # _RFID_READ_OK_RE). None means never seen, since 0.0 can be a real
-        # reactor time.
+        # None means never seen, since 0.0 can be a real reactor time.
         self._rfid_ok_t: Optional[float] = None
-        # Monotonic time the last scan cycle ended (see _RFID_CYCLE_END_RE),
-        # success or failure alike. Bridge-wide, as above.
         self._rfid_end_t: Optional[float] = None
         # The same stamps per device, so an AMS 1 read cannot credit an HT
         # mid-scan. The address cannot separate two boxed units.
         self._rfid_ok_by_addr: Dict[int, float] = {}
         self._rfid_end_by_addr: Dict[int, float] = {}
-        # When each device last said its own retries were spent. See
-        # _AMS_GAVE_UP_RE and gave_up_since().
         self._gave_up_by_addr: Dict[int, float] = {}
         # When each device last refused a move for having no tray, and when the
         # writer last dropped a command: together, "the unit is not listening".
         self._no_tray_by_addr: Dict[int, float] = {}
-        # The last switch state each bay narrated, and when, keyed by
-        # (address, chain index, bay). See tray_switches().
         self._tray_sw: Dict[Tuple[int, int, int], Tuple[int, float]] = {}
         self._write_drop_t: Optional[float] = None
         # Timed-out writes, counted for the reader's silence line: the writer
@@ -1595,8 +1512,6 @@ class BambuBridge:
         self._spoke_since_connect: bool = True
         self._silence_logged_t: Optional[float] = None
         self._drop_logged_epoch: int = -1
-        # The unit said a chip is present but its keys are not Bambu's
-        # ("auth fail -4"). Distinguishes a third-party tag from an empty bay.
         self._rfid_foreign_t: Optional[float] = None
         self._rfid_foreign_by_addr: Dict[int, float] = {}
         # Last motion completion the AMS reported, as (sequence, ok, text). The
@@ -1608,54 +1523,41 @@ class BambuBridge:
         # (see _wait_move's accept_switch_finish).
         self._switch_seq: int = 0
         self._switch_text: str = ""
-        # Bumped when the unit finishes the push-forward half.
         self._assist_seq: int = 0
         self._finish_ok: bool = False
         self._finish_text: str = ""
-        # The AMS's own named fault reports ("feed finish -1, stall", ...),
-        # more reliable than inferring from buffer position. The sequence tells
-        # fresh faults from handled ones.
+        # The AMS's own named fault reports, more reliable than the buffer position. The
+        # sequence tells fresh faults from handled ones.
         self._fault_seq: int = 0
         self._fault_text: str = ""
-        # Per unit, the _fault_seq at that unit's last fault, so one unit's
-        # fault does not fail another's load. Keyed on the narration's unit
-        # index.
+        # Per unit, so one unit's fault does not fail another's load.
         self._fault_seq_by_unit: Dict[int, int] = {}
         self._fault_text_by_unit: Dict[int, str] = {}
-        # The last fault no unit could be credited with (the firmware sends
-        # unit -1 when it cannot tell), as a stamp of _fault_seq.
+        # The last fault the firmware could not credit to a unit (unit -1).
         self._fault_seq_unattr: int = 0
         self._fault_text_unattr: str = ""
-        # The unit's current tray and its release edge, the AMS 2's unload
-        # completion (see _TRAY_NOW_RE). Per unit, as boxed units share 0x0700.
+        # Per unit, as boxed units share 0x0700 (see _TRAY_NOW_RE).
         self._tray_now_by_unit: Dict[int, int] = {}
         self._tray_release_seq_by_unit: Dict[int, int] = {}
         self._tray_release_from_by_unit: Dict[int, int] = {}
-        # The unit's last reported error level (0 = healthy) and when.
         # None means it has never said, which is not the same as zero.
         self._err_code: Optional[int] = None
         self._err_code_t: float = 0.0
         self._bldc_i: float = 0.0
-        self._chain_uids: List[str] = []       # index -> 24-hex UID (from `chain`)
-        # Parsed `chain` replies so far; chain_snapshot hands it out so a
-        # reader can tell two reads of the same reply from a new one.
+        self._chain_uids: List[str] = []
+        # So a reader can tell two reads of the same reply from a new one.
         self._chain_seq: int = 0
-        self._last_raw_reply: str = ""         # last `reply` frame (diagnostic)
-        # Last idsave outcome as (state, n), or None; AFC_BAMBU_SAVEIDS waits
-        # on it instead of a clock.
+        self._last_raw_reply: str = ""
+        # AFC_BAMBU_SAVEIDS waits on this instead of a clock.
         self._last_idsave: Optional[tuple] = None
-        # Last fw state as (state, detail); AFC_BAMBU_FLASH waits on these
-        # answers (ready, crc_ok, crc_bad, stalled).
+        # AFC_BAMBU_FLASH waits on these (ready, crc_ok, crc_bad, stalled).
         self._last_fw: Optional[tuple] = None
-        # True during a raw firmware transfer: send() then writes only fw*
-        # commands, since a raw stream cannot survive interleaved writes.
+        # A raw firmware stream cannot survive interleaved writes.
         self._fw_raw: bool = False
-        # Outbound bytes to the writer thread. Bounded, but sized for a whole
-        # reconnect re-announce (see WRITE_PACE_DEPTH).
+        # Sized for a whole reconnect re-announce (see WRITE_PACE_DEPTH).
         self._wq: "queue.Queue" = queue.Queue(maxsize=512)
         self._wthread: Optional[threading.Thread] = None
-        # Last {"evt":"info"} payload. Older firmware omits "chip"; callers
-        # must treat that as "unknown", never as a particular chip.
+        # Older firmware omits "chip": treat that as unknown, never as a particular chip.
         self._info: Optional[dict] = None
         #: Capture integrity from the firmware's counters: host pipe drops and
         #: UART overruns. A capture is complete only if both stay 0.
@@ -1665,40 +1567,27 @@ class BambuBridge:
         self._sniff_ovr0: Optional[int] = None
         self._sniff_rf: int = 0
         self._sniff_rf0: Optional[int] = None
-        # True between sending {"cmd":"reset"} and the disconnect it causes, so
-        # the reader can tell "the Pico is rebooting on request" from
-        # "the link died".
+        # So the reader can tell a requested reboot from a dead link.
         self._expect_reset: bool = False
-        # Bus-wide spool-operation ownership (see try_claim_bus).
         self._bus_owner: Optional[str] = None
         self._bus_claim_t: float = 0.0
-        # unit -> the MC address the firmware read back: the receipt that an
-        # mcaddr command arrived and was applied.
+        # The MC address the firmware read back: the receipt for an mcaddr command.
         self._mcaddr_ack: Dict[int, int] = {}
-        # Last fstate seen, for the change-only trace. _UNSET (not None) so the
-        # very first frame is recorded (a unit that comes up in a mode and
-        # never leaves it is still logged), and None is a legitimate value.
+        # _UNSET, not None, so the very first frame is recorded; None is a real value.
         self._fstate_last: Any = _UNSET
-        # Latch for the tray-gone edge. The unit repeats "odom tray_id error
-        # 255" for as long as it is asked, so only the rising edge is a
-        # completion; re-armed when a tray is engaged again.
+        # The unit repeats "odom tray_id error 255" while asked, so only the rising edge
+        # counts; re-armed when a tray is engaged again.
         self._tray_gone: bool = False
-        # Last buffer position the unit reported; None until it says one.
         self._buff_pos: Optional[float] = None
-        # Last buffer refill as (sagged_to, recovered_to, mm_fed). mm is None
-        # when the line omitted det.
+        # (sagged_to, recovered_to, mm_fed); mm is None when the line omitted det.
         self._buff_refill: Optional[Tuple[float, float, Optional[float]]] = None
-        # Counts refills, so a caller can tell a new one from the last.
         self._buff_refill_seq: int = 0
         self._reconnect_cbs: List[Callable[[], None]] = []
-        #: Bridge uptime (ms) from the last `info`, and whether it went
-        #: backwards (a reboot, not a blip). None until known or on firmware
-        #: older than 1.88, which means "cannot tell".
+        #: Bridge uptime (ms) from the last `info`, and whether it went backwards (a reboot).
+        #: None on firmware older than 1.88.
         self._fw_up_ms: Optional[int] = None
         self._fw_rebooted = False
-        #: Whether `info` has been asked for on this connection. See
-        #: _mark_connected: the ask rides the first status frame, because that
-        #: is the first moment the link is provably authenticated.
+        #: The ask rides the first status frame, the first moment the link is authenticated.
         self._info_asked = False
 
     def add_listener(self, cb: Callable[[dict], None]) -> None:
@@ -1707,8 +1596,8 @@ class BambuBridge:
 
         :param cb: Callable taking one decoded status dict
         """
-        if cb not in self._listeners:      # idempotent: a re-claim must not
-            self._listeners.append(cb)     # stack a second copy of the same cb
+        if cb not in self._listeners:  # a re-claim must not add it twice
+            self._listeners.append(cb)
 
     def remove_listener(self, cb: Callable[[dict], None]) -> None:
         """
@@ -1826,30 +1715,25 @@ class BambuBridge:
         """
         try:
             self._serial = self._serial_factory()
-            # Cleared here too: _down_t is stamped at construction and start()
-            # skips the reconnect path, so the first outage would report the
-            # construction age.
+            # start() skips the reconnect path, so the first outage would report the build age.
             self._down_t = None
             self._mark_connected()
         except Exception as e:
-            if not defer_open and self.wifi is None:
+            if (not defer_open
+                and self.wifi is None):
                 raise
             self._serial = None
-            # Not an error: a bridge still booting or on its way over WiFi is
-            # normal at start, and a warning would pop up in Mainsail/Fluidd
-            self.logger.info(
-                f"AFC bambu: bridge not reachable yet ({e}); the reader will "
-                f"keep trying")
+            # A bridge still booting or coming over WiFi is normal at start.
+            self.logger.info(f"AFC bambu: bridge not reachable yet ({e}); the reader will "
+                             f"keep trying")
         self._run = True
-        self._thread = threading.Thread(target=self._reader,
-                                        name="afc_bambu_read", daemon=True)
+        self._thread = threading.Thread(target=self._reader, name="afc_bambu_read", daemon=True)
         self._thread.start()
-        self._wthread = threading.Thread(target=self._writer,
-                                         name="afc_bambu_write", daemon=True)
+        self._wthread = threading.Thread(target=self._writer, name="afc_bambu_write", daemon=True)
         self._wthread.start()
 
-    # A write to a busy Pico blocks, and a reactor stall causes "Timer too
-    # close", so reactor callbacks only queue bytes and this thread waits.
+    # A write to a busy Pico blocks and a reactor stall causes "Timer too close", so
+    # reactor callbacks only queue bytes and this thread waits.
     def _writer(self) -> None:
         """
         Writer-thread loop: drain the queue onto the port and absorb stalls.
@@ -1866,18 +1750,14 @@ class BambuBridge:
                 continue
             s = self._serial
             if s is None:
-                continue                  # dropped mid-flight; the reader reconnects
+                continue
             try:
                 s.write(data)
             except _SerialTimeout:
-                # Busy is not gone, so debug, not a warning. Stamped so the
-                # load path can tell "still working" from "not listening"; the
-                # writer owns it.
+                # Busy is not gone: stamped so a load can tell "still working" from "not listening".
                 self._write_drop_t = time.monotonic()
                 self._write_timeouts += 1
-                # Timed out is not dropped: on USB the line usually goes out
-                # late and in order. Named so a late feed or stop stands out
-                # from a poll.
+                # Timed out is not dropped: on USB the line usually goes out late and in order.
                 try:
                     _tmo = getattr(s, "_write_timeout", None)
                     if _tmo is None:
@@ -1887,21 +1767,16 @@ class BambuBridge:
                               else "")
                 except Exception:
                     _after = ""
-                # AFC.log only, even with the console debug printout on: the
-                # write nearly always lands late and its ack follows, so it is
-                # not a console-worthy failure.
-                self.logger.debug(
-                    f"AFC bambu: bridge busy, write of "
-                    f"'{_queued_cmd_name(data)}' timed out{_after} "
-                    f"(may still be delivered)", only_debug=True)
+                # AFC.log only: the write nearly always lands late and its ack follows.
+                self.logger.debug(f"AFC bambu: bridge busy, write of "
+                                  f"'{_queued_cmd_name(data)}' timed out{_after} "
+                                  f"(may still be delivered)", only_debug=True)
             except Exception as e:
-                self.logger.warning(
-                    f"AFC bambu: bridge write failed: {e}; reconnecting")
+                self.logger.warning(f"AFC bambu: bridge write failed: {e}; reconnecting")
                 self._drop_port()
-            # Space out a backlog so a reconnect's re-announce does not go out
-            # as one burst (see WRITE_PACE_DEPTH). Never during a firmware
-            # transfer: that path drains the queue against a deadline.
-            if not self._fw_raw and self._wq.qsize() > WRITE_PACE_DEPTH:
+            # Never during a firmware transfer, which drains the queue against a deadline.
+            if (not self._fw_raw
+                and self._wq.qsize() > WRITE_PACE_DEPTH):
                 time.sleep(WRITE_PACE_S)
 
     def _drain_writes(self, timeout: float = 2.0) -> bool:
@@ -1967,9 +1842,8 @@ class BambuBridge:
         with self._lock:
             return self._rfid_end_t
 
-    # One spool operation on the bus at a time, across every unit, as a real
-    # printer does. Released by the unit's cycle-end marker; this timer is only
-    # a backstop (a real scan-and-measure takes ~60 s).
+    # One spool operation on the bus at a time, across every unit, as a real printer does.
+    # Released by the unit's cycle-end marker; this is a backstop (a scan takes ~60 s).
     BUS_CLAIM_MAX_S = 120.0
 
     def try_claim_bus(self, owner: str, now: float) -> bool:
@@ -1982,12 +1856,14 @@ class BambuBridge:
         """
         with self._lock:
             cur = getattr(self, "_bus_owner", None)
-            if cur is not None and cur != owner:
+            if (cur is not None
+                and cur != owner):
                 claimed = getattr(self, "_bus_claim_t", 0.0)
                 ended = self._rfid_end_t
                 done = (ended is not None and ended >= claimed)
-                if not done and (now - claimed) < self.BUS_CLAIM_MAX_S:
-                    return False                  # genuinely busy elsewhere
+                if (not done
+                    and (now - claimed) < self.BUS_CLAIM_MAX_S):
+                    return False
             self._bus_owner = owner
             self._bus_claim_t = now
             return True
@@ -2028,15 +1904,12 @@ class BambuBridge:
         with self._lock:
             if unit is None:
                 return (self._fault_seq, self._fault_text, self._bldc_i)
-            # The newer of this unit's last fault and the last unattributed
-            # one; an unattributed stall counts for every unit.
+            # An unattributed stall counts for every unit.
             _u = int(unit)
             mine = self._fault_seq_by_unit.get(_u, 0)
             if mine >= self._fault_seq_unattr:
-                return (mine, self._fault_text_by_unit.get(_u, ""),
-                        self._bldc_i)
-            return (self._fault_seq_unattr, self._fault_text_unattr,
-                    self._bldc_i)
+                return (mine, self._fault_text_by_unit.get(_u, ""), self._bldc_i)
+            return (self._fault_seq_unattr, self._fault_text_unattr, self._bldc_i)
 
     def set_narration_log(self, log_dir: str, tag: str = "",
                           max_bytes: int = 10 * 1024 * 1024) -> bool:
@@ -2057,36 +1930,28 @@ class BambuBridge:
         """
         if self._nar_lg is not None:
             return True
-        # One log per bus master: two Picos in one file cannot be untangled,
-        # since boxed units on different buses both narrate as 0x0700. The
-        # first master's tag is empty, so a single Pico writes plain
-        # AFC_BambuAMS.log.
+        # One log per bus master: boxed units on different buses both narrate as 0x0700.
         suffix = ("_" + tag) if tag else ""
         lg = logging.getLogger("AFC_BambuAMS_file" + suffix)
-        # Test for the handler actually needed: getLogger() is process-global,
-        # so another handler may already be attached.
+        # getLogger() is process-global, so another handler may already be attached.
         if not any(isinstance(h, logging.handlers.RotatingFileHandler)
                    for h in lg.handlers):
             try:
                 fh = logging.handlers.RotatingFileHandler(
-                    os.path.join(log_dir, f"AFC_BambuAMS{suffix}.log"),
-                    maxBytes=max_bytes, backupCount=1)
-                fh.setFormatter(logging.Formatter(
-                    "%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+                    os.path.join(log_dir, f"AFC_BambuAMS{suffix}.log"), maxBytes=max_bytes,
+                    backupCount=1)
+                fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
                 lg.addHandler(fh)
             except Exception as e:
-                self.logger.warning(
-                    f"AFC bambu: could not open AFC_BambuAMS{suffix}.log: {e}")
+                self.logger.warning(f"AFC bambu: could not open AFC_BambuAMS{suffix}.log: {e}")
                 return False
         lg.setLevel(logging.DEBUG)
-        # Never propagate: this would otherwise duplicate every narration line
-        # into AFC.log, which is the flooding this file exists to avoid.
+        # Never propagate, or every narration line floods AFC.log.
         lg.propagate = False
         self._nar_lg = lg
         return True
 
-    def _narrate_to_file(self, text: str, addr: Optional[int],
-                         unit: Optional[int] = None) -> None:
+    def _narrate_to_file(self, text: str, addr: Optional[int], unit: Optional[int] = None) -> None:
         """
         Record one narration line verbatim.
 
@@ -2104,12 +1969,12 @@ class BambuBridge:
         :param unit: chain index the firmware attributed it to, if it could
         """
         lg = self._nar_lg
-        if lg is None or not text:
+        if (lg is None
+            or not text):
             return
         try:
             lg.debug(f'{((f"0x{int(addr):04X}") if addr else "0x----")}'
-                     f'{(f" u{int(unit)}" if unit is not None else " u?")}'
-                     f' {text}')
+                     f'{(f" u{int(unit)}" if unit is not None else " u?")} {text}')
         except Exception:
             pass          # a log must never take the reader thread down
 
@@ -2165,28 +2030,28 @@ class BambuBridge:
         :param addr: device address that produced it
         :param unit: chain index when the caller already knows it
         """
-        if not text or not addr:
+        if (not text
+            or not addr):
             return
         try:
             m = _DRY_REFUSED_RE.search(text)
             if m:
                 if unit is None:
-                    return          # unattributable stray
+                    return
                 with self._lock:
                     self._dry_err_u[unit] = m.group(1).strip()
             elif ("CTC_STATE_HEATING" in text
                   or "CTC_STATE_SELF_CHECK" in text
                   or "check ok!" in text
                   or "shell ok!" in text):
-                # "dry_mode:1, check ok!" is an accepted start in both
-                # dialects, and "ams-ht shell ok!" is the HT's lid closing;
-                # either clears the shell-open note.
+                # "dry_mode:1, check ok!" is an accepted start and "ams-ht shell ok!" the HT's lid
+                # closing; either clears the shell-open note.
                 if unit is None:
                     return
                 with self._lock:
                     self._dry_err_u.pop(unit, None)
         except Exception:
-            pass          # a diagnostic must never take the reader thread down
+            pass
 
     def _note_dry_cfg(self, text: Optional[str], addr: Optional[int],
                       unit: Optional[int] = None) -> None:
@@ -2201,14 +2066,15 @@ class BambuBridge:
         :param addr: device address that produced it
         :param unit: chain index when the caller already knows it
         """
-        if not text or not addr:
+        if (not text
+            or not addr):
             return
         try:
             m = _DRY_CFG_RE.search(text)
             if not m:
                 return
             if unit is None:
-                return              # unattributable stray
+                return
             with self._lock:
                 self._dry_cfg_u[unit] = {
                     "rotate": 1 if (int(m.group(1)) or int(m.group(2))) else 0,
@@ -2216,7 +2082,7 @@ class BambuBridge:
                     "tmpr":   int(m.group(6)),
                 }
         except Exception:
-            pass          # a diagnostic must never take the reader thread down
+            pass
 
     def last_dry_cfg(self, unit: Optional[int]) -> Optional[Dict[str, int]]:
         """
@@ -2238,28 +2104,24 @@ class BambuBridge:
         :param sv: a _CAP_SAVE_RE match, or None
         :param addr: device address the narration came from
         """
-        if not sv or not addr:
+        if (not sv
+            or not addr):
             return
         try:
             with self._lock:
                 rec = self._cap_measure.get(int(addr))
-                # The save must belong to this reading: matched on radius (six
-                # decimals against three), so a save from an earlier cycle
-                # cannot re-label it.
+                # Matched on radius (six decimals vs three), so an older save cannot re-label it.
                 if (rec is not None
                     and rec.get("radius_m") is not None
-                    and abs(round(float(sv.group(2)), 3)
-                            - float(rec["radius_m"])) < 0.0005):
+                    and abs(round(float(sv.group(2)), 3) - float(rec["radius_m"])) < 0.0005):
                     rec["save_tray"] = int(sv.group(1))
-                    # Keep the full-precision radius too: near a full spool one
-                    # millimetre of radius is ~2% of the mass. The rounded one
-                    # is what the percent came from.
+                    # Near a full spool one millimetre of radius is ~2% of the mass.
                     rec["save_radius_m"] = float(sv.group(2))
         except Exception:
-            pass          # a label is a diagnostic; it may never raise
+            pass
 
-    def _note_cap_measure(self, text: Optional[str], addr: Optional[int],
-                          now: float, unit: Optional[int] = None) -> None:
+    def _note_cap_measure(self, text: Optional[str], addr: Optional[int], now: float,
+                          unit: Optional[int] = None) -> None:
         """
         Record a narrated capacity measurement (see _CAP_MEASURE_RE).
 
@@ -2269,71 +2131,55 @@ class BambuBridge:
             fresh measurement from a stale one
         :param unit: chain index when the caller already knows it
         """
-        if not text or not addr:
+        if (not text
+            or not addr):
             return
         try:
-            # The AMS HT's calibration verdict, which carries no percent (see
-            # _HT_CALI_RST_RE). Recorded so a caller can tell "the cycle
-            # finished" from "the cycle was never heard from".
+            # Recorded so a caller can tell "the cycle finished" from "never heard from".
             c = _HT_CALI_RST_RE.search(text)
             if c:
                 if unit is not None:
                     with self._lock:
-                        self._ht_cali_u[unit] = {"rst": int(c.group(1)),
-                                                 "t": now}
+                        self._ht_cali_u[unit] = {"rst": int(c.group(1)), "t": now}
             else:
-                # Map the AMS 1's "odom calib success exit 0" onto rst 0. Not
-                # for the HT, which emits both lines and would record two
-                # verdicts.
+                # Not for the HT, which emits both lines and would record two verdicts.
                 d = _CALI_DONE_RE.search(text)
-                if d and unit is not None and int(addr) != 0x1800:
+                if (d
+                    and unit is not None
+                    and int(addr) != 0x1800):
                     with self._lock:
                         self._ht_cali_u[unit] = {"rst": 0, "t": now}
-            # Parsed here, applied after the store below: the save line and its
-            # reading usually share a batch, so applying first would tag the
-            # previous record.
+            # The save line and its reading usually share a batch, so this applies after the store.
             sv = _CAP_SAVE_RE.search(text)
             m = _CAP_MEASURE_RE.search(text)
             if m:
                 tray, circ, radius, pct = m.groups()
             else:
-                # The colon-less HT form. Tried only after the primary, so a
-                # line that matches both is read by the primary pattern.
                 m = _CAP_MEASURE_ALT_RE.search(text)
                 if not m:
                     self._attach_save_tray(sv, addr)
                     return
                 tray, radius, pct = m.groups()
-                circ = None          # this form states no circumference
+                circ = None
             with self._lock:
                 self._cap_measure[int(addr)] = {
-                    # Clamped for callers that drive a 0-100 display, but the
-                    # raw value is kept: a fresh spool can legitimately read
-                    # over 100.
+                    # Clamped for 0-100 displays; a fresh spool can read over 100.
                     "pct": min(100, int(pct)),
                     "pct_raw": int(pct),
                     "radius_m": float(radius),
-                    # Present only on a live measurement; a restore from flash
-                    # reports no circumference. None means "not stated", which
-                    # is not the same as zero.
+                    # None on a restore from flash, which states no circumference.
                     "circumference_m": float(circ) if circ else None,
-                    # The restore form names its tray; the live form does not,
-                    # because it can only be the tray just measured.
                     "tray": int(tray) if tray is not None else None,
-                    # Distinguishes "the unit just measured this" from "the
-                    # unit recalled it at power-on". Both are valid readings,
-                    # but only the first means a spool was physically pulled.
+                    # Only a live measurement means a spool was physically pulled.
                     "restored": tray is not None,
-                    # Filled by _attach_save_tray from the following "odom save
-                    # tray:N" line: the bay the unit says it measured, and that
-                    # line's radius. None if unsaid.
+                    # Filled by _attach_save_tray from the following "odom save tray:N" line.
                     "save_tray": None,
                     "save_radius_m": None,
                     "t": now,
                 }
             self._attach_save_tray(sv, addr)
         except Exception:
-            pass          # a diagnostic must never take the reader thread down
+            pass
 
     def last_ht_cali(self, unit: Optional[int]) -> Optional[Dict[str, Any]]:
         """
@@ -2365,14 +2211,13 @@ class BambuBridge:
         with self._lock:
             if not self._meas_live.get(int(addr)):
                 return False
-            # Set on "first detected" and cleared on a terminal sentence. A calibrate
-            # that stalls before its terminal sentence would leave the flag set and
-            # refuse every later calibrate, so it expires after _MEAS_LIVE_MAX_S.
-            # Aged on the reactor clock handle_line stamps it with.
+            # A calibrate that stalls before its terminal sentence would leave the flag set, so
+            # it expires after _MEAS_LIVE_MAX_S.
             t0 = self._meas_live_t.get(int(addr))
             mono = getattr(self.reactor, "monotonic", None)
             now = mono() if callable(mono) else 0.0
-            if t0 is not None and (now - t0) > _MEAS_LIVE_MAX_S:
+            if (t0 is not None
+                and (now - t0) > _MEAS_LIVE_MAX_S):
                 self._meas_live[int(addr)] = False
                 return False
             return True
@@ -2437,8 +2282,7 @@ class BambuBridge:
         with self._lock:
             return self._dry_err_u.get(int(unit))
 
-    def _finish_succeeded(self, text: str, low: str,
-                          addr: Optional[int]) -> bool:
+    def _finish_succeeded(self, text: str, low: str, addr: Optional[int]) -> bool:
         """
         Whether a motion completion means the filament arrived.
 
@@ -2462,9 +2306,9 @@ class BambuBridge:
         :param addr: device address that narrated, if known
         :return bool: True if the move achieved what it was asked to
         """
-        if "finish -1" not in low and "stall" not in low:
+        if ("finish -1" not in low
+            and "stall" not in low):
             return True
-        # A clean completion can share the line with the stall.
         if _CLEAN_FINISH_RE.search(text):
             return True
         det = _LEN_DET_M_RE.search(text)
@@ -2475,7 +2319,7 @@ class BambuBridge:
         target = (float(tube.group(1)) * 1000.0 if tube
                   else self.tube_len(addr))
         if not target:
-            return False          # nothing to judge against; stall stands
+            return False
         return travelled >= target - FINISH_ARRIVAL_TOLERANCE_MM
 
     def _trace_fstate(self, obj: dict) -> None:
@@ -2497,9 +2341,9 @@ class BambuBridge:
                 return
             prev, self._fstate_last = self._fstate_last, v
             self._nar_lg.debug(f'HOST-- fstate {("-" if prev is _UNSET else prev)} -> {v} (buff='
-                f'{obj.get("buff")})')
+                               f'{obj.get("buff")})')
         except Exception:
-            pass          # a trace must never take the reader thread down
+            pass
 
     def name_unit(self, unit: int, name: str) -> None:
         """
@@ -2554,18 +2398,15 @@ class BambuBridge:
         with self._lock:
             if unit is not None:
                 u = int(unit)
-                return (self._dw_by_unit.get(u),
-                        self._dw_n_by_unit.get(u, 0),
+                return (self._dw_by_unit.get(u), self._dw_n_by_unit.get(u, 0),
                         self._dw_addr_by_unit.get(u, 0))
             if not self._dw_by_unit:
                 return (None, 0, 0)
             u = max(self._dw_n_by_unit, key=self._dw_n_by_unit.get)
-            return (self._dw_by_unit.get(u),
-                    self._dw_n_by_unit.get(u, 0),
+            return (self._dw_by_unit.get(u), self._dw_n_by_unit.get(u, 0),
                     self._dw_addr_by_unit.get(u, 0))
 
-    def tube_len(self, addr: Optional[int] = None,
-                 unit: Optional[int] = None) -> Optional[float]:
+    def tube_len(self, addr: Optional[int] = None, unit: Optional[int] = None) -> Optional[float]:
         """
         The AMS's own measured PTFE path length in mm, if it has told us.
 
@@ -2584,18 +2425,14 @@ class BambuBridge:
                 if int(unit) in self._tube_by_unit:
                     return self._tube_by_unit[int(unit)]
                 if self._tube_by_unit:
-                    # This unit has not measured yet. Do not fall back to the
-                    # address, which same-class units share; unknown keeps the
-                    # configured value.
+                    # Not the address, which same-class units share; unknown keeps the config value.
                     return None
             if addr is not None:
                 v = self._tube_by_addr.get(int(addr))
                 if v:
                     return v
                 return None
-            # No address: only safe to answer when exactly one unit has
-            # reported. With two units on the bridge, "the most recent" could
-            # hand an HT's path length to an AMS 2.
+            # With two units on a bridge, "the most recent" could give an HT's path to an AMS 2.
             vals = list(self._tube_by_addr.values())
             return vals[0] if len(vals) == 1 else None
 
@@ -2634,8 +2471,7 @@ class BambuBridge:
         with self._lock:
             return (self._switch_seq, self._switch_text)
 
-    def last_tray_release(self, unit: Optional[int] = None
-                          ) -> Tuple[int, Optional[int]]:
+    def last_tray_release(self, unit: Optional[int] = None) -> Tuple[int, Optional[int]]:
         """
         The unit's last tray release: ``tray_now`` leaving a tray for 255.
 
@@ -2700,14 +2536,11 @@ class BambuBridge:
         s = self._serial
         if s is None:
             return False
-        # fwbegin went through send() and may still be queued; the image must
-        # not overtake it.
+        # fwbegin went through send() and may still be queued; the image must not overtake it.
         if not self._drain_writes():
-            self.logger.warning("AFC bambu: queued writes did not drain; "
-                                "not starting the image")
+            self.logger.warning("AFC bambu: queued writes did not drain; not starting the image")
             return False
-        # The image gets its own write budget (a chunk waits on flash writes);
-        # restored in the finally so later commands still fail fast.
+        # A chunk waits on flash writes; restored in the finally so later commands fail fast.
         _tmo_attr = ("_write_timeout" if hasattr(s, "_write_timeout")
                      else ("write_timeout" if hasattr(s, "write_timeout")
                            else None))
@@ -2716,26 +2549,22 @@ class BambuBridge:
             try:
                 setattr(s, _tmo_attr, BB_RAW_WRITE_TIMEOUT)
             except Exception:
-                _tmo_attr = None            # pyserial can refuse mid-flight
+                _tmo_attr = None
         try:
-            # Chunked so the write timeout applies per chunk; the bridge
-            # throttles while it programs each staging sector.
+            # The bridge throttles while it programs each staging sector.
             view = memoryview(data)
-            step = 4096                     # one staging sector's worth
+            step = 4096
             while view:
                 n = min(step, len(view))
                 s.write(view[:n])
                 view = view[n:]
             return True
         except _SerialTimeout as e:
-            # Fatal to this transfer and nothing else. The caller aborts and
-            # the bridge discards its partial image; the link itself is fine,
-            # so it does not get torn down.
+            # Fatal to this transfer only: the bridge discards its partial image, the link is fine.
             self.logger.warning(f"AFC bambu: bridge busy mid-transfer: {e}")
             return False
         except Exception as e:
-            self.logger.warning(
-                f"AFC bambu: bridge raw write failed: {e}; reconnecting")
+            self.logger.warning(f"AFC bambu: bridge raw write failed: {e}; reconnecting")
             self._drop_port()
             return False
         finally:
@@ -2753,46 +2582,32 @@ class BambuBridge:
         """
         s = self._serial
         if s is None:
-            # Log the first dropped command of each outage only, so a dead link
-            # is visible without flooding the log at poll rate.
+            # The first dropped command of each outage only.
             if self._drop_logged_epoch != self._down_epoch:
                 self._drop_logged_epoch = self._down_epoch
-                # Before the first connection (epoch 0) this is the start, not
-                # an outage, so it stays off the Mainsail/Fluidd warnings.
+                # Before the first connection this is the start, not an outage.
                 log = self.logger.info if self._down_epoch == 0 \
                     else self.logger.warning
-                log(
-                    f"AFC bambu: link is down -- dropped "
-                    f"{obj.get('cmd', '?')}, and anything else sent until it "
-                    f"is back")
+                log(f"AFC bambu: link is down -- dropped "
+                    f"{obj.get('cmd', '?')}, and anything else sent until it is back")
             return
-        # A raw firmware transfer owns the port. Anything else here is a timer
-        # poll that is free to skip and would corrupt the image.
-        if self._fw_raw and not str(obj.get("cmd", "")).startswith("fw"):
-            self.logger.debug(
-                f"AFC bambu: dropped {obj.get('cmd')} during a firmware "
-                "transfer")
+        # A raw firmware transfer owns the port; a timer poll here would corrupt the image.
+        if (self._fw_raw
+            and not str(obj.get("cmd", "")).startswith("fw")):
+            self.logger.debug(f"AFC bambu: dropped {obj.get('cmd')} during a firmware transfer")
             return
-        # Arm the expected-disconnect flag before the write: a reset can take
-        # the port down before this call even returns.
+        # A reset can take the port down before this call even returns.
         if obj.get("cmd") in ("reset", "bootsel"):
             self._expect_reset = True
-        # Queued, never written here: this runs on the reactor (see _writer).
+        # Queued, never written here: this runs on the reactor.
         try:
             self._wq.put_nowait((json.dumps(obj) + "\n").encode())
             return
         except queue.Full:
-            # A full queue means the link is not draining. Everything here is a
-            # poll or re-arm the next tick resends, so dropping the newest is
-            # cheapest.
-            self.logger.warning(
-                f"AFC bambu: write queue full, dropped {obj.get('cmd')}")
-        # Link errors (Errno 5 after a glitch, another process taking the
-        # port) happen on the write, which is the writer thread's job; it
-        # drops the port for them there.
+            # Everything here is a poll or re-arm the next tick resends.
+            self.logger.warning(f"AFC bambu: write queue full, dropped {obj.get('cmd')}")
 
-    def _narrate_human(self, text: str, now: float,
-                       addr: Optional[int] = None,
+    def _narrate_human(self, text: str, now: float, addr: Optional[int] = None,
                        unit: Optional[int] = None) -> None:
         """
         Surface the AMS's own words on the console, in English.
@@ -2817,31 +2632,23 @@ class BambuBridge:
             m = pattern.search(text)
             if not m:
                 continue
-            # render None = matched deliberately to say nothing (see the
-            # 0x16 assist-slip pair). Stop here rather than falling through
-            # to a later, more general pattern that would speak for it.
+            # render None = matched deliberately to say nothing; stop before a more general pattern.
             if render is None:
                 return
             msg = f"AFC bambu {self._speaker(unit)}: {render(m)}"
             if log_only:
-                # Log-only lines go to AFC.log before the console dedupe and
-                # rate limit, and still reach the tube_len/dw_len/chamber
-                # parsing below.
+                # Log-only lines skip the console dedupe and rate limit but reach the parsing below.
                 self.logger.debug(msg, only_debug=True)
                 continue
-            # Consecutive duplicates say nothing; the AMS repeats state lines.
             if msg == getattr(self, "_last_human", None):
                 continue
-            # Hard floor between console lines. The AMS narrates continuously
-            # and a burst (a load, a dry start) can match several patterns in
-            # under a second; the console is the operator's, not a log tail.
+            # The AMS narrates continuously and a burst can match several patterns in a second.
             if now - getattr(self, "_last_human_t", 0.0) < 1.0:
                 continue
             self._last_human = msg
             self._last_human_t = now
             self.logger.info(msg)
-        # The unit's own PTFE measurement, stored per address so an AMS 2 and
-        # an HT on one bridge keep their own path lengths.
+        # Per address, so an AMS 2 and an HT on one bridge keep their own path lengths.
         mm = None
         tl = _TUBE_LEN_MM_RE.search(text)
         if tl:
@@ -2850,61 +2657,53 @@ class BambuBridge:
             tl = _TUBE_LEN_M_RE.search(text)
             if tl:
                 mm = float(tl.group(1)) * 1000.0
-        # > 0 only: the unit reports 0.000 m until it has calibrated, and
-        # adopting that would set every deadline to zero.
-        if mm and mm > 0.0 and addr:
+        # The unit reports 0.000 m until it has calibrated.
+        if (mm
+            and mm > 0.0
+            and addr):
             with self._lock:
                 prev = self._tube_by_addr.get(int(addr))
                 self._tube_by_addr[int(addr)] = mm
                 if self._active_unit is not None:
                     self._tube_by_unit[int(self._active_unit)] = mm
             if prev is None:
-                self.logger.debug(
-                    f"AFC bambu {self.name}: AMS 0x{int(addr):04X} reports its "
-                    f"measured filament path as {mm:.0f}mm -- using it to size "
-                    f"move timeouts instead of the configured estimate")
+                self.logger.debug(f"AFC bambu {self.name}: AMS 0x{int(addr):04X} reports its "
+                                  f"measured filament path as {mm:.0f}mm -- using it to size "
+                                  f"move timeouts instead of the configured estimate")
 
-        # dw_len: recorded, not used (see _DW_LEN_M_RE). Same > 0 rule as
-        # tube_len: a load that fails reports dw_len:0.000, meaning "this feed
-        # measured nothing", which must never reach a deadline.
+        # Recorded, not used. A failed load reports dw_len:0.000, which must never reach a deadline.
         dw = _DW_LEN_M_RE.search(text)
         if dw:
             dw_mm = float(dw.group(1)) * 1000.0
-            if dw_mm > 0.0 and self._active_unit is not None:
+            if (dw_mm > 0.0
+                and self._active_unit is not None):
                 with self._lock:
                     u = int(self._active_unit)
                     self._dw_by_unit[u] = dw_mm
                     self._dw_n_by_unit[u] = self._dw_n_by_unit.get(u, 0) + 1
                     self._dw_addr_by_unit[u] = int(addr or 0)
 
-        # Drying telemetry is reported on its own slow cadence, not per line.
-        # The heater self-check lines (resistance per element, before heating
-        # starts) are logged verbatim until their fields are understood:
+        # The heater self-check lines are logged verbatim until their fields are understood:
         #   setR]state[1]:0 -> 1, pwm:0.57, i:0.75 A
         #   wind_door[0] res ok,i_0:3, i_sum:125, i_avr:627, cnt:200, res:7968
         #   PTC[0] ok! i_0:1, res:9174
         if ("[AMS_CHMB]" in text
-            and ("res:" in text
-                 or "i_avr:" in text
-                 or " i:" in text)):
+            and ("res:" in text or "i_avr:" in text or " i:" in text)):
             self.logger.debug(f"AFC bambu {self.name}: selfcheck | "
                              + text.split("[AMS_CHMB]", 1)[-1].strip()[:150])
         m = _CHMB_STATE_RE.search(text)
         if m:
-            # Chamber temperature, streamed only here while drying (the binary
-            # protocol hardcodes -1). vt is the chamber probe; ap runs ~4C
-            # higher and is not published. Keyed by unit.
+            # Chamber temperature, streamed only here while drying (the binary protocol hardcodes
+            # -1). vt is the chamber probe; ap runs ~4C higher and is not published.
             try:
-                rec = {"temp": float(m.group(3)), "seen": now,
-                       "state": int(m.group(1)), "target": float(m.group(2))}
-                # %RH alongside the temperature, when the model reports it.
+                rec = {"temp": float(m.group(3)), "seen": now, "state": int(m.group(1)),
+                       "target": float(m.group(2))}
                 if m.group(4) is not None:
                     rec["humidity"] = int(m.group(4))
             except (TypeError, ValueError):
                 rec = None
-            if rec is not None and unit is not None:
-                # ad: when the line carried it (see _CHMB_AD_RE), stored beside
-                # the temperature it came with.
+            if (rec is not None
+                and unit is not None):
                 ma = _CHMB_AD_RE.search(text)
                 if ma:
                     rec["ad_n"] = int(ma.group(1))
@@ -2914,18 +2713,17 @@ class BambuBridge:
                         except ValueError:
                             pass
                 self._chmb_by_unit[int(unit)] = rec
-        if m and now - getattr(self, "_last_chmb_t", 0.0) >= 60.0:
+        if (m
+            and now - getattr(self, "_last_chmb_t", 0.0) >= 60.0):
             self._last_chmb_t = now
-            # Humidity rides along only on models that report ht:.
             hum = f", humidity {int(m.group(4))}%" if m.group(4) else ""
             ma = _CHMB_AD_RE.search(text)
             ad = ""
             if ma:
                 ad = (f", ad {ma.group(1)}"
                       + (f"/{ma.group(2)}" if ma.group(2) else ""))
-            self.logger.debug(
-                f"AFC bambu {self.name}: drying -- chamber {m.group(3)}C{ad}"
-                f"{hum}, target {m.group(2)}C")
+            self.logger.debug(f"AFC bambu {self.name}: drying -- chamber {m.group(3)}C{ad}"
+                              f"{hum}, target {m.group(2)}C")
 
     def _rfid_stamp(self, wide: Optional[float], by_addr: Dict[int, float],
                     addr: Optional[int]) -> Optional[float]:
@@ -2947,13 +2745,11 @@ class BambuBridge:
             if got is not None:
                 return got
             if by_addr:
-                # This bridge attributes narration and this device has said
-                # nothing of the kind. That is an answer, not a gap.
+                # This device has said nothing of the kind: an answer, not a gap.
                 return None
         return wide
 
-    def rfid_read_succeeded_since(self, since: Optional[float],
-                                  addr: Optional[int] = None) -> bool:
+    def rfid_read_succeeded_since(self, since: Optional[float], addr: Optional[int] = None) -> bool:
         """
         Whether a tag read has landed since ``since``.
 
@@ -2975,8 +2771,7 @@ class BambuBridge:
         ok = self._rfid_stamp(self._rfid_ok_t, self._rfid_ok_by_addr, addr)
         return ok is not None and since is not None and ok >= since
 
-    def rfid_foreign_tag_since(self, since: Optional[float],
-                               addr: Optional[int] = None) -> bool:
+    def rfid_foreign_tag_since(self, since: Optional[float], addr: Optional[int] = None) -> bool:
         """
         Whether the unit refused a chip it could not authenticate since ``since``.
 
@@ -2988,12 +2783,10 @@ class BambuBridge:
         :param addr: device address to scope the answer to
         :return bool: True if a foreign tag was refused at or after ``since``
         """
-        t = self._rfid_stamp(self._rfid_foreign_t,
-                             self._rfid_foreign_by_addr, addr)
+        t = self._rfid_stamp(self._rfid_foreign_t, self._rfid_foreign_by_addr, addr)
         return t is not None and since is not None and t >= since
 
-    def gave_up_since(self, since: Optional[float],
-                      addr: Optional[int] = None) -> bool:
+    def gave_up_since(self, since: Optional[float], addr: Optional[int] = None) -> bool:
         """
         Has this device said its own retries are spent, at or after ``since``?
 
@@ -3012,8 +2805,7 @@ class BambuBridge:
         t = self._rfid_stamp(None, self._gave_up_by_addr, addr)
         return t is not None and t >= since
 
-    def no_tray_since(self, since: Optional[float],
-                      addr: Optional[int] = None) -> bool:
+    def no_tray_since(self, since: Optional[float], addr: Optional[int] = None) -> bool:
         """
         Has this device refused a move for having no tray selected since ``since``?
 
@@ -3043,7 +2835,8 @@ class BambuBridge:
         :param slot: 0-based bay index
         :return tuple: (switch state, reactor time), or None if never narrated
         """
-        if not addr or unit is None:
+        if (not addr
+            or unit is None):
             return None
         return self._tray_sw.get((int(addr), int(unit), int(slot)))
 
@@ -3066,8 +2859,7 @@ class BambuBridge:
         t = self._write_drop_t
         return t is not None and t >= since
 
-    def rfid_cycle_ended_since(self, since: Optional[float],
-                               addr: Optional[int] = None) -> bool:
+    def rfid_cycle_ended_since(self, since: Optional[float], addr: Optional[int] = None) -> bool:
         """
         Whether a scan cycle has run to completion since ``since``.
 
@@ -3097,220 +2889,184 @@ class BambuBridge:
         if obj is None:
             return
         if (self.wifi is not None
-                and obj.get("evt") in ("info", "wifi", "linkkey")):
+            and obj.get("evt") in ("info", "wifi", "linkkey")):
             self.wifi.on_frame(obj)
         if obj.get("evt") == "status":
             with self._lock:
                 self._latest = obj
-            # The first status frame proves the link is up and authenticated,
-            # so ask the bridge's identity here, once per connection.
+            # The first status frame proves the link is up and authenticated.
             if not self._info_asked:
                 self._info_asked = True
                 self.request_info()
             self._trace_fstate(obj)
             for cb in self._listeners:
-                self.reactor.register_async_callback(
-                    lambda et, o=obj, c=cb: c(o))
+                self.reactor.register_async_callback(lambda et, o=obj, c=cb: c(o))
         elif obj.get("evt") in ("reply", "raw"):
-            # Raw AMS frame, held for diagnostics: {"evt":"reply","hex":...}
-            # from AFC_BAMBU_BUFFER_PROBE, {"evt":"raw","rx":...} from
-            # {"cmd":"raw"}.
+            # Raw AMS frames, held for diagnostics.
             with self._lock:
-                self._last_raw_reply = str(
-                    obj.get("hex") or obj.get("rx") or "")
+                self._last_raw_reply = str(obj.get("hex") or obj.get("rx") or "")
         elif obj.get("evt") == "error":
-            # The board answers a line it already had queued, or one the tty
-            # echoed back before the port went raw, the moment a USB port
-            # opens. "unknown command" then answers nothing this connection
-            # sent (every command sent is one the firmware knows); other
-            # errors can answer the linkkey sent on connect, so they stay.
+            # The moment a USB port opens, the board answers a line it already had queued, so an
+            # "unknown command" then answers nothing this connection sent.
             since = (time.monotonic() - self._connected_t
                      if self._connected_t is not None else None)
             if (obj.get("msg") == "unknown command"
                 and since is not None
                 and since < self.STALE_ERROR_S):
-                self.logger.debug(
-                    f"AFC bambu: bridge error {since:.2f}s after connect, "
-                    f"from a line sent before it (ignored): {obj.get('msg')}",
-                    only_debug=True)
+                self.logger.debug(f"AFC bambu: bridge error {since:.2f}s after connect, "
+                                  f"from a line sent before it (ignored): {obj.get('msg')}",
+                                  only_debug=True)
             else:
-                self.logger.warning(
-                    f"AFC bambu: bridge error: {obj.get('msg')}")
+                self.logger.warning(f"AFC bambu: bridge error: {obj.get('msg')}")
         elif obj.get("evt") == "uartdiag":
             self._note_uartdiag(obj)
         elif obj.get("evt") == "fw":
-            # Firmware transfer, one line per stage. AFC_BAMBU_FLASH waits on
-            # each answer; the CRC answer is the only receipt for a raw stream.
+            # AFC_BAMBU_FLASH waits on each answer; the CRC is the only receipt for a raw stream.
             state = str(obj.get("state") or "")
             detail = obj.get("detail")
-            if detail is None and "want" in obj:
-                # Both CRCs, because "crc_bad" alone cannot tell a stream that
-                # arrived wrong from an expected value that arrived wrong.
+            if (detail is None
+                and "want" in obj):
+                # "crc_bad" alone cannot tell a bad stream from a bad expected value.
                 detail = (f"{obj.get('got')}/{obj.get('len')} bytes, "
                           f"computed 0x{int(obj.get('crc', 0)):08X}, "
-                          f"expected 0x{int(obj.get('want', 0)):08X}"
-                          f", head {obj.get('head', '?')}"
+                          f"expected 0x{int(obj.get('want', 0)):08X}, head {obj.get('head', '?')}"
                           f", tail {obj.get('tail', '?')}")
-            elif detail is None and "got" in obj:
+            elif (detail is None
+                  and "got" in obj):
                 detail = f"{obj.get('got')}/{obj.get('len')} bytes"
             with self._lock:
                 self._last_fw = (state, str(detail or ""))
             if state in ("crc_bad", "stalled", "refused", "busy"):
-                self.logger.warning(
-                    f"AFC bambu: firmware transfer {state}: {detail}")
+                self.logger.warning(f"AFC bambu: firmware transfer {state}: {detail}")
             elif state == "applying":
-                # The last thing the Pico says. Everything after this is a
-                # blank link until it comes back on the new image.
+                # The last thing the Pico says before it comes back on the new image.
                 self._expect_reset = True
-                self.logger.info(
-                    "AFC bambu: bridge is writing its own flash and will "
-                    "reboot; the link drops for a few seconds")
+                self.logger.info("AFC bambu: bridge is writing its own flash and will "
+                                 "reboot; the link drops for a few seconds")
             else:
                 self.logger.debug(f"AFC bambu: firmware transfer {state}: {detail}")
         elif obj.get("evt") == "idsave":
-            # The identity table persisted on the Pico. "match" is every
-            # ordinary boot; "written" should appear once after a change, so a
-            # record rewritten every boot shows at info.
+            # "match" is every ordinary boot; "written" should appear once after a change.
             state = obj.get("state")
             n = obj.get("n")
-            # Latched for AFC_BAMBU_SAVEIDS, which must not reboot the Pico
-            # until the firmware has actually said the record is down.
+            # AFC_BAMBU_SAVEIDS must not reboot the Pico until the record is down.
             with self._lock:
                 self._last_idsave = (str(state or ""), n)
             if state == "wiped":
-                self.logger.info(
-                    "AFC bambu: bridge ERASED its stored unit identities; the "
-                    "next power-up will enroll from announce order until prep "
-                    "writes a fresh record")
+                self.logger.info("AFC bambu: bridge ERASED its stored unit identities; the "
+                                 "next power-up will enroll from announce order until prep "
+                                 "writes a fresh record")
             elif state == "written":
-                self.logger.info(
-                    f"AFC bambu: bridge stored {n} unit identities -- the next "
-                    f"restart will enroll from them")
+                self.logger.info(f"AFC bambu: bridge stored {n} unit identities -- the next "
+                                 f"restart will enroll from them")
             elif state == "failed":
-                self.logger.warning(
-                    "AFC bambu: bridge could NOT store the unit identities; "
-                    "the chain will keep enrolling from announce order")
+                self.logger.warning("AFC bambu: bridge could NOT store the unit identities; "
+                                    "the chain will keep enrolling from announce order")
             else:
-                self.logger.debug(
-                    f"AFC bambu: bridge identities already stored ({n} units)")
+                self.logger.debug(f"AFC bambu: bridge identities already stored ({n} units)")
         elif obj.get("evt") == "ack":
-            # Motion-command acks through the AFC logger. Routine ones are
-            # log-only; feed and retract stay on the console.
+            # Routine acks are log-only; feed and retract stay on the console.
             _ack_cmd = str(obj.get("cmd") or "")
-            self.logger.debug(
-                f"AFC bambu: bridge ack {_ack_cmd} (slot {obj.get('slot')})",
-                only_debug=_ack_cmd in _ACK_ROUTINE)
+            self.logger.debug(f"AFC bambu: bridge ack {_ack_cmd} (slot {obj.get('slot')})",
+                              only_debug=_ack_cmd in _ACK_ROUTINE)
         elif obj.get("evt") == "amsdbg":
-            # The AMS's own narration. Repeats are deduplicated, not suppressed
-            # forever, since a repeating line is how a stuck loop shows. The
-            # "[DBG] ams time" heartbeat is dropped.
+            # Repeats are deduplicated, not suppressed: a repeating line is how a stuck loop shows.
             text = obj.get("text")
-            # Defensive: this runs on the reader thread, and a diagnostic must
-            # never be able to take the bridge down.
             mono = getattr(self.reactor, "monotonic", None)
             now = mono() if callable(mono) else 0.0
-            # The chain index of the unit whose drain pulled this text
-            # (-1/absent = unknown). The line then goes verbatim to the
-            # narration file, unfiltered.
+            # The chain index of the unit whose drain pulled this text (-1/absent = unknown).
             _dbg_unit = obj.get("unit")
             _dbg_unit = (int(_dbg_unit)
                          if isinstance(_dbg_unit, int) and _dbg_unit >= 0
                          else None)
             self._narrate_to_file(text, obj.get("addr"), _dbg_unit)
-            # Firmware diagnostics stop here, after the file and before every
-            # parser (see _FW_DIAG_RE).
-            if isinstance(text, str) and _FW_DIAG_RE.match(text):
-                self.logger.debug(f"AFC bambu: bridge diag {text}",
-                                  only_debug=True)
+            if (isinstance(text, str)
+                and _FW_DIAG_RE.match(text)):
+                self.logger.debug(f"AFC bambu: bridge diag {text}", only_debug=True)
                 return
             self._note_dry_refusal(text, obj.get("addr"), _dbg_unit)
             self._note_dry_cfg(text, obj.get("addr"), _dbg_unit)
             self._note_cap_measure(text, obj.get("addr"), now, _dbg_unit)
-            # RFID/measurement stamps from the raw line, before the dedupe
-            # blanks a repeat: a repeat still shows the read is alive.
+            # Stamped before the dedupe blanks a repeat: a repeat still shows the read is alive.
             _addr = obj.get("addr")
             _addr = int(_addr) if isinstance(_addr, int) and _addr else None
             _read_re = (_RFID_READ_OK_HT_RE if _addr == 0x1800
                         else _RFID_READ_OK_RE)
-            if text and _read_re.search(text):
+            if (text
+                and _read_re.search(text)):
                 self._rfid_ok_t = now
                 if _addr:
                     self._rfid_ok_by_addr[_addr] = now
-            if text and _addr and "first detected" in text:
+            if (text
+                and _addr
+                and "first detected" in text):
                 self._meas_live[_addr] = True
                 self._meas_live_t[_addr] = now
-            if text and _RFID_CYCLE_END_RE.search(text):
+            if (text
+                and _RFID_CYCLE_END_RE.search(text)):
                 self._rfid_end_t = now
                 if _addr:
                     self._rfid_end_by_addr[_addr] = now
                     self._meas_live[_addr] = False
-            if text and _addr and _MEAS_END_RE.search(text):
-                self._meas_live[_addr] = False
-            # Same shape and the same guards as its neighbours above, keyed on
-            # the stricter pattern. Recorded, never acted on here.
-            if text and _addr and _RFID_TERMINAL_RE.search(text):
-                self._rfid_term_by_addr[_addr] = now
-            # The unit's own "I am done retrying". Stamped here like every
-            # other narration fact; the load path asks about it via
-            # gave_up_since() rather than parsing text itself.
-            if text and _addr and _AMS_GAVE_UP_RE.search(text):
-                self._gave_up_by_addr[_addr] = now
-                self.logger.info(
-                    f"AFC bambu bridge: the AMS reported it has STOPPED "
-                    f"retrying ({text.strip()[:90]})")
-            # Same shape, same guards: the unit rejecting moves because it has
-            # no bay selected. Recorded here, acted on by the load path.
-            if text and _addr and _AMS_NO_TRAY_RE.search(text):
-                self._no_tray_by_addr[_addr] = now
-            # Bay switch changes, only when the line names its unit: two units
-            # of one model share an address.
-            if text and _addr and _dbg_unit is not None:
-                for m in _AMS_TRAY_SW_RE.finditer(text):
-                    self._tray_sw[(_addr, _dbg_unit, int(m.group(1)))] = (
-                        int(m.group(3)), now)
-            # A published measurement ends the in-flight state too: the unit
-            # narrates the percent and, on the boxed models, may go quiet
-            # afterwards without a terminal sentence at all.
             if (text
                 and _addr
-                and ("second detected" in text
-                     or "odom save" in text)):
+                and _MEAS_END_RE.search(text)):
                 self._meas_live[_addr] = False
-            # A chip the unit cannot authenticate, stamped above the dedupe
-            # too.
-            if text and _RFID_FOREIGN_TAG_RE.search(text):
+            if (text
+                and _addr
+                and _RFID_TERMINAL_RE.search(text)):
+                self._rfid_term_by_addr[_addr] = now
+            # The unit's own "I am done retrying"; the load path asks via gave_up_since().
+            if (text
+                and _addr
+                and _AMS_GAVE_UP_RE.search(text)):
+                self._gave_up_by_addr[_addr] = now
+                self.logger.info(f"AFC bambu bridge: the AMS reported it has STOPPED "
+                                 f"retrying ({text.strip()[:90]})")
+            # The unit rejecting moves because it has no bay selected.
+            if (text
+                and _addr
+                and _AMS_NO_TRAY_RE.search(text)):
+                self._no_tray_by_addr[_addr] = now
+            # Only when the line names its unit: two units of one model share an address.
+            if (text
+                and _addr
+                and _dbg_unit is not None):
+                for m in _AMS_TRAY_SW_RE.finditer(text):
+                    self._tray_sw[(_addr, _dbg_unit, int(m.group(1)))] = (int(m.group(3)), now)
+            # The boxed models may go quiet after the percent without a terminal sentence.
+            if (text
+                and _addr
+                and ("second detected" in text or "odom save" in text)):
+                self._meas_live[_addr] = False
+            if (text
+                and _RFID_FOREIGN_TAG_RE.search(text)):
                 self._rfid_foreign_t = now
                 if _addr:
                     self._rfid_foreign_by_addr[_addr] = now
-            # Strip the heartbeat before the dedupe: its changing timestamp
-            # would break every run of identical lines.
-            if text and "[DBG] ams time" in text:
+            # Its changing timestamp would break every run of identical lines.
+            if (text
+                and "[DBG] ams time" in text):
                 stripped = _DBG_AMSTIME_RE.sub("", text).strip()
-                # Nothing left but the frame's junk byte means nothing to report: a
-                # heartbeat-only frame strips down to a bare "," and would reach the console
-                # every 10 seconds. Keep the line only if real narration rode along.
+                # A heartbeat-only frame strips down to a bare "," and would reach the console.
                 text = stripped if "[" in stripped else None
-            # The parsers get the raw line: two identical completions for two
-            # moves must bump the sequence twice.
+            # Two identical completions for two moves must bump the sequence twice.
             raw = text
-            if text and text == self._last_dbg:
-                # Same line again: count it, and re-emit once a minute so a
-                # loop that is going nowhere still shows up.
+            if (text
+                and text == self._last_dbg):
+                # Re-emitted once a minute so a loop going nowhere still shows up.
                 self._last_dbg_n += 1
                 if now - self._last_dbg_t >= 60.0:
                     self._last_dbg_t = now
                     n = self._last_dbg_n
-                    self.logger.debug(f"AMS: (x{n} repeated) {text}",
-                                      only_debug=True)
+                    self.logger.debug(f"AMS: (x{n} repeated) {text}", only_debug=True)
                 text = None
             elif text:
                 self._last_dbg = text
                 self._last_dbg_n = 1
                 self._last_dbg_t = now
             if raw:
-                # Buffer position, from whichever line carries it. Recorded
-                # before the completion branches below so a line that is both
-                # (a feed finish carrying buff_pos) contributes both.
+                # Before the completion branches, so a feed finish carrying buff_pos counts as both.
                 bp = _BUFF_POS_RE.search(raw)
                 if bp:
                     with self._lock:
@@ -3319,35 +3075,28 @@ class BambuBridge:
                 if rf:
                     det = float(rf.group(3)) if rf.group(3) else None
                     with self._lock:
-                        # The position after recovery is the current one.
                         self._buff_pos = float(rf.group(2))
-                        self._buff_refill = (float(rf.group(1)),
-                                             float(rf.group(2)), det)
+                        self._buff_refill = (float(rf.group(1)), float(rf.group(2)), det)
                         self._buff_refill_seq += 1
-                # Motion completion.
                 low = raw.lower()
-                # Checked apart from the finish chain: one line can carry an
-                # assist and a finish.
+                # One line can carry an assist and a finish.
                 if _ASSIST_DONE_RE.search(raw):
                     with self._lock:
                         self._assist_seq += 1
-                # Asked separately from the finish chain below, and not part
-                # of it: this must not end an ordinary load's wait.
+                # This must not end an ordinary load's wait.
                 if _STATE_SWITCH_DONE_RE.search(raw):
                     with self._lock:
                         self._switch_seq += 1
                         self._switch_text = raw
-                # tray_now leaving a tray for 255, the AMS 2's unload
-                # completion. Unattributed narration is dropped, or a neighbour
-                # sharing the address could end this unit's retract.
+                # Unattributed narration is dropped, or a neighbour sharing the address could end
+                # this unit's retract.
                 if _dbg_unit is not None:
                     _tn = _TRAY_NOW_RE.findall(raw)
                     if _tn:
                         _u = int(_dbg_unit)
                         with self._lock:
                             _prev = self._tray_now_by_unit.get(_u)
-                            # Walk every [AMS_COMMON] segment in order; the
-                            # edge can fall between two.
+                            # The edge can fall between two [AMS_COMMON] segments.
                             for _v in (int(x) for x in _tn):
                                 if (_prev is not None
                                     and _prev != TRAY_NONE
@@ -3359,9 +3108,7 @@ class BambuBridge:
                                 _prev = _v
                             self._tray_now_by_unit[_u] = _prev
                 if _MOTION_FINISH_RE.search(raw):
-                    # Judged before taking the lock: it reads tube_len(), which
-                    # takes the same non-reentrant lock, so doing this inside
-                    # the with-block would deadlock the reader thread.
+                    # Outside the lock: tube_len() takes the same non-reentrant lock.
                     ok = self._finish_succeeded(raw, low, obj.get("addr"))
                     with self._lock:
                         self._finish_seq += 1
@@ -3369,33 +3116,26 @@ class BambuBridge:
                         self._finish_text = raw
                     self._tray_gone = False
                 elif _ODOM_RESET_RE.search(raw):
-                    # A tray engaged and its odometer zeroed: the feed arrived.
-                    # The only completion an [AMS_DEV] unit gives; it also
-                    # re-arms the tray-gone edge.
+                    # The only completion an [AMS_DEV] unit gives; it re-arms the tray-gone edge.
                     with self._lock:
                         self._finish_seq += 1
                         self._finish_ok = True
                         self._finish_text = raw
                     self._tray_gone = False
-                elif _ODOM_NO_TRAY_RE.search(raw) and not self._tray_gone:
-                    # The odometer has no tray, so a retract completed.
-                    # Edge-triggered: the unit repeats it at ~2 Hz, and only an
-                    # odom reset re-arms it.
+                elif (_ODOM_NO_TRAY_RE.search(raw)
+                      and not self._tray_gone):
+                    # Edge-triggered: the unit repeats it at ~2 Hz; only an odom reset re-arms it.
                     self._tray_gone = True
                     with self._lock:
                         self._finish_seq += 1
                         self._finish_ok = True
                         self._finish_text = raw
-                # Say the useful ones out loud, in English.
                 try:
-                    # addr identifies which AMS class narrated (0x0700 boxed
-                    # AMS, 0x1800 HT); may be absent.
+                    # addr: 0x0700 boxed AMS, 0x1800 HT; may be absent.
                     self._narrate_human(raw, now, obj.get("addr"), _dbg_unit)
                 except Exception:
                     pass          # a nicety must never break the reader thread
-                # Motor current, when the AMS reports it. It clamps at its
-                # limiter (~1.6A) against a ~0.07A typical draw, so this is a
-                # threshold signal rather than a proportional one.
+                # It clamps at its limiter (~1.6A) against ~0.07A typical: a threshold signal.
                 mi = _BLDC_I_RE.search(raw)
                 if mi:
                     try:
@@ -3403,11 +3143,10 @@ class BambuBridge:
                             self._bldc_i = float(mi.group(1))
                     except ValueError:
                         pass
-                # An explicit stall: "feed finish -1, stall" / "pull err, bdc
-                # stall" (AMS 2 Pro) or "TIMEOUT error N" (HT). Not assist_err
-                # or err_code, which cycle normally, and not the
-                # self-recovering "rocker stall, tray_cnt:..." family.
-                if "rocker stall" in low and "tray_cnt" in low:
+                # Not assist_err or err_code, which cycle normally, and not the self-recovering
+                # "rocker stall, tray_cnt:..." family.
+                if ("rocker stall" in low
+                    and "tray_cnt" in low):
                     pass
                 elif ("stall" in low
                       or "finish -1" in low
@@ -3424,16 +3163,11 @@ class BambuBridge:
                         else:
                             self._fault_seq_unattr = self._fault_seq
                             self._fault_text_unattr = raw.strip()
-                # err_code's current level, which a resume guard needs ("is
-                # this unit in error now"); an edge is not a fault:
-                #   [AMS_LINK]err_code: 0 -> 23      HT declaring a stall
-                #   [AMS_LINK]err_code: 18 -> 0      HT accepting the clear
-                #   [AMS_LINK]err_code:0x00->0x80    AMS 2, hex form
+                # err_code's current level, which a resume guard needs; an edge is not a fault.
                 me = _ERR_CODE_RE.search(raw)
                 if me:
                     try:
                         raw = me.group(2)
-                        # 0x-prefixed is hex, bare is decimal; both occur.
                         val = int(raw, 16) if raw.lower().startswith("0x") \
                             else int(raw, 10)
                         with self._lock:
@@ -3441,13 +3175,9 @@ class BambuBridge:
                             self._err_code_t = now
                     except ValueError:
                         pass
-                # The operator's console, the only consumer of the deduped
-                # text: a run of identical lines re-emits once a minute with a
-                # count. Bus chatter stays off the console (see _AMS_NOISE_RE).
+                # A run of identical lines re-emits once a minute with a count.
                 if text:
-                    # The console is rate-limited: filling Klipper's gcode pipe
-                    # stalls the reactor and takes the MCUs down. AFC.log keeps
-                    # everything.
+                    # Filling Klipper's gcode pipe stalls the reactor and takes the MCUs down.
                     _quiet = (not self.RAW_NARRATION_CONSOLE
                               or _ams_is_noise(
                                   _DBG_AMSTIME_RE.sub("", text).strip()))
@@ -3460,31 +3190,27 @@ class BambuBridge:
                             self._narr_said = False
                         self._narr_n = getattr(self, "_narr_n", 0) + 1
                         if self._narr_n > self.NARRATION_CONSOLE_MAX_PER_S:
-                            _quiet = True            # log-only from here
+                            _quiet = True
                             if not getattr(self, "_narr_said", False):
                                 self._narr_said = True
-                                self.logger.debug(
-                                    "AFC bambu: the AMS is narrating faster "
-                                    "than the console can take "
-                                    f"(>{self.NARRATION_CONSOLE_MAX_PER_S}/s); "
-                                    "the rest of this burst is in AFC.log")
+                                self.logger.debug("AFC bambu: the AMS is narrating faster "
+                                                  "than the console can take "
+                                                  f"(>{self.NARRATION_CONSOLE_MAX_PER_S}/s); "
+                                                  "the rest of this burst is in AFC.log")
                     self.logger.debug(f"AMS: {text}", only_debug=_quiet)
         elif obj.get("evt") == "linkkey":
-            # The answer to a -store write. The key itself is never echoed.
+            # The key itself is never echoed.
             saved = obj.get("saved")
             if saved == 1:
-                self.logger.debug(
-                    "AFC bambu: link key stored on the bridge; it is asked "
-                    "for from the next connection")
+                self.logger.debug("AFC bambu: link key stored on the bridge; it is asked "
+                                  "for from the next connection")
             elif saved == 0:
-                self.logger.debug("AFC bambu: link key already stored on "
-                                  "the bridge", only_debug=True)
+                self.logger.debug("AFC bambu: link key already stored on the bridge",
+                                  only_debug=True)
             else:
-                self.logger.warning(
-                    f"AFC bambu: the bridge did not store the link key {obj}")
+                self.logger.warning(f"AFC bambu: the bridge did not store the link key {obj}")
         elif obj.get("evt") == "mcaddr":
-            # The firmware echoes the address it applied, so zero means it did
-            # not take and the log drain falls back to 0x0700.
+            # Zero means it did not take and the log drain falls back to 0x0700.
             try:
                 with self._lock:
                     self._mcaddr_ack[int(obj.get("unit", 0))] = \
@@ -3492,10 +3218,8 @@ class BambuBridge:
             except Exception:
                 pass
         elif obj.get("evt") not in _BRIDGE_EVENTS_KNOWN:
-            # Anything no handler consumes, logged to file so a lost command
-            # and a lost reply are distinguishable.
-            self.logger.debug(f"AFC bambu: unhandled bridge event {obj}",
-                              only_debug=True)
+            # So a lost command and a lost reply are distinguishable.
+            self.logger.debug(f"AFC bambu: unhandled bridge event {obj}", only_debug=True)
         elif obj.get("evt") == "txecho":
             # Echo lines the firmware dropped because USB was behind; shown on
             # the console so the capture can be re-taken.
@@ -3504,20 +3228,15 @@ class BambuBridge:
             except Exception:
                 self._txecho_drops = 0
             if self._txecho_drops:
-                self.logger.info(
-                    f"AFC bambu bridge: TX echo dropped "
-                    f"{self._txecho_drops} frame(s) -- the USB link fell "
-                    f"behind the bus. Frames MISSING from this capture were "
-                    f"still transmitted; do not read a gap as a frame we "
-                    f"never sent.")
+                self.logger.info(f"AFC bambu bridge: TX echo dropped "
+                                 f"{self._txecho_drops} frame(s) -- the USB link fell "
+                                 f"behind the bus. Frames MISSING from this capture were "
+                                 f"still transmitted; do not read a gap as a frame we never sent.")
         elif obj.get("evt") == "loops":
-            # Main-loop iterations + a timestamp. Everything the master can do
-            # is bounded by this rate: the 21ms drive channel needs 48 passes a
-            # second. Straight to the narration file, like tx.
+            # The 21ms drive channel needs 48 passes a second.
             try:
-                self._narrate_to_file(
-                    f'{{"evt":"loops","n":{int(obj.get("n", 0))},'
-                    f'"us":{int(obj.get("us", 0))}}}', None)
+                self._narrate_to_file(f'{{"evt":"loops","n":{int(obj.get("n", 0))},'
+                                      f'"us":{int(obj.get("us", 0))}}}', None)
             except Exception:
                 pass
         elif obj.get("evt") == "slow":
@@ -3525,21 +3244,18 @@ class BambuBridge:
             # rr_* is time in the reply reader, capped the reads cut short,
             # capscan the blocking scans. AFC.log only.
             try:
-                self.logger.debug(
-                    f"AFC bambu: bridge loop held {int(obj.get('ms', 0))} ms "
-                    f"(bus reads {int(obj.get('rr_ms', 0))} ms over "
-                    f"{int(obj.get('rr_n', 0))}, longest "
-                    f"{int(obj.get('rr_max_us', 0))} us, capped "
-                    f"{int(obj.get('capped', 0))}, capscans "
-                    f"{int(obj.get('capscan', 0))})", only_debug=True)
+                self.logger.debug(f"AFC bambu: bridge loop held {int(obj.get('ms', 0))} ms "
+                                  f"(bus reads {int(obj.get('rr_ms', 0))} ms over "
+                                  f"{int(obj.get('rr_n', 0))}, longest "
+                                  f"{int(obj.get('rr_max_us', 0))} us, capped "
+                                  f"{int(obj.get('capped', 0))}, capscans "
+                                  f"{int(obj.get('capscan', 0))})", only_debug=True)
             except Exception:
                 pass
         elif obj.get("evt") == "tx":
             # Frames the bridge transmits, in the "sniff" shape so capture
             # tools read them unchanged. Narration file only.
             try:
-                # dir distinguishes what the bridge sent from what the AMS
-                # sent back.
                 _dir = str(obj.get("dir", "tx"))
                 self._narrate_to_file(
                     # Rebuilt from a fixed list of keys, not passed through:
@@ -3566,10 +3282,10 @@ class BambuBridge:
             if _sq is not None:
                 prev = self._sniff_sq
                 self._sniff_sq = int(_sq)
-                if prev is not None and int(_sq) != prev + 1:
+                if (prev is not None
+                    and int(_sq) != prev + 1):
                     self._sniff_lost += max(0, int(_sq) - prev - 1)
             if _ov is not None:
-                # ov counts from the Pico's boot, so baseline it per capture.
                 if self._sniff_ovr0 is None:
                     self._sniff_ovr0 = int(_ov)
                 self._sniff_ovr = int(_ov) - self._sniff_ovr0
@@ -3580,15 +3296,10 @@ class BambuBridge:
                     self._sniff_rf0 = int(_rf)
                 self._sniff_rf = int(_rf) - self._sniff_rf0
         elif obj.get("evt") == "sniff_mode":
-            # The firmware's ack of {"cmd":"sniff"}. On the console: a
-            # listen-only bridge is otherwise indistinguishable from quiet
-            # units.
+            # On the console: a listen-only bridge otherwise looks like quiet units.
             on = bool(obj.get("on"))
             with self._lock:
                 if on:
-                    # A capture's integrity is per-capture. Carrying the last
-                    # one's counters into this one would answer for the wrong
-                    # run.
                     self._sniff_sq = None
                     self._sniff_lost = 0
                     self._sniff_ovr = 0
@@ -3609,23 +3320,15 @@ class BambuBridge:
                         f"image")
             mode_str = ("ON -- listen-only, this bridge is NOT driving the bus"
                         if on else "OFF -- bus master again")
-            self.logger.info(
-                f"AFC bambu {self.name}: bridge sniff mode "
-                f"{mode_str}"
-                f"{verdict}")
+            self.logger.info(f"AFC bambu {self.name}: bridge sniff mode {mode_str}{verdict}")
         elif obj.get("evt") == "info":
-            # The bridge's own identity. `chip` is the one field the host
-            # cannot work out for itself and must not guess: it decides
-            # whether a firmware image is even loadable on this board.
+            # `chip` decides whether a firmware image is even loadable on this board.
             with self._lock:
                 self._info = dict(obj)
-            self.logger.debug(
-                f"AFC bambu: info REPLY chip={obj.get('chip')} "
-                f"fw={obj.get('fw')} up={obj.get('up')}")
-            # Reboot or link hiccup: uptime going backwards is a reboot (every
-            # AMS is left parked); a WiFi blip leaves them working. The first
-            # reading is only a baseline. Must live here: `chain` has "fw" but
-            # not "up".
+            self.logger.debug(f"AFC bambu: info REPLY chip={obj.get('chip')} "
+                              f"fw={obj.get('fw')} up={obj.get('up')}")
+            # Uptime going backwards is a reboot (every AMS is left parked); a WiFi blip leaves
+            # them working. Here because `chain` has "fw" but not "up".
             try:
                 up = obj.get("up")
                 up = None if up is None else int(up)
@@ -3633,23 +3336,20 @@ class BambuBridge:
                 up = None
             if up is not None:
                 prev = self._fw_up_ms
-                if prev is not None and up < prev:
+                if (prev is not None
+                    and up < prev):
                     self._fw_rebooted = True
-                    self.logger.debug(
-                        f"AFC bambu: bridge REBOOTED (uptime {prev} -> {up} "
-                        f"ms); units on the wire lost their master")
-                    self.logger.info(
-                        "AFC bambu: the BridgeBox restarted; "
-                        "reconnecting its AMS units")
+                    self.logger.debug(f"AFC bambu: bridge REBOOTED (uptime {prev} -> {up} "
+                                      f"ms); units on the wire lost their master")
+                    self.logger.info("AFC bambu: the BridgeBox restarted; "
+                                     "reconnecting its AMS units")
                 self._fw_up_ms = up
         elif obj.get("evt") == "wifi":
-            # A BB_WIFI board reporting its radio, logged when it changes:
-            # tells a wrong password from a board that never booted.
+            # Tells a wrong password from a board that never booted.
             try:
                 if "cleared" in obj:
                     msg = (f"AFC bambu {self.name}: bridge WiFi wiped, "
-                           f"cleared={obj.get('cleared')} "
-                           f"by={obj.get('by', 'command')}")
+                           f"cleared={obj.get('cleared')} by={obj.get('by', 'command')}")
                 else:
                     msg = (f"AFC bambu {self.name}: pico wifi "
                            f"link={obj.get('link')} ip={obj.get('ip')} "
@@ -3658,10 +3358,7 @@ class BambuBridge:
             except Exception:
                 pass
         elif obj.get("evt") == "cali":
-            # The bridge's ack of a calibrate, not its outcome: echoed whether
-            # it ran, was deferred or ignored. On an AMS 1 it follows the 10-15
-            # s blocking burst. File only; extra fields are carried through
-            # uninterpreted.
+            # An ack, not an outcome. On an AMS 1 it follows the 10-15 s blocking burst.
             try:
                 _extra = " ".join(f"{k}={v}" for k, v in obj.items()
                                   if k not in ("evt", "unit", "slot"))
@@ -3673,31 +3370,24 @@ class BambuBridge:
             except Exception:
                 pass
         elif obj.get("evt") == "chain":
-            # Enrollment map: comma-separated 24-hex UIDs by polling index.
             # Keep empty fields, or later units shift index.
             raw = (obj.get("uids") or "").strip().upper()
             uids = [] if not raw else [u.strip() for u in raw.split(",")]
             with self._lock:
                 self._chain_seq = getattr(self, "_chain_seq", 0) + 1
                 self._chain_uids = uids
-                # Diagnostics riding on the chain reply: which indices the
-                # firmware has HT-flagged, and the exact build running on the
-                # Pico (see chain_diag for why `info` is preferred for fw).
                 try:
                     self._chain_htmask = int(obj.get("htmask") or 0)
                 except Exception:
                     self._chain_htmask = 0
-                # Which indices may measure, as the firmware holds it. None
-                # when absent: "none measures" and "cannot tell" differ.
+                # None when absent: "none measures" and "cannot tell" differ.
                 try:
                     cm = obj.get("capmask")
                     self._chain_capmask = None if cm is None else int(cm)
                 except Exception:
                     self._chain_capmask = None
                 self._chain_fw = str(obj.get("fw") or "")
-                # 0x3702 dialect verdicts: a2mask = units that ever answered
-                # the version query (ams2); a2asks = queries per index, so many
-                # unanswered means ams1.
+                # a2mask = units that answered the version query (ams2); unanswered asks mean ams1.
                 try:
                     self._chain_a2mask = int(obj.get("a2mask") or 0)
                     self._chain_a2asks = [
@@ -3706,19 +3396,14 @@ class BambuBridge:
                 except Exception:
                     self._chain_a2mask = 0
                     self._chain_a2asks = []
-                # Announce-reply tag byte per discovered unit, in chain order.
-                # Diagnostic only: printed with the UID list, nothing acts on
-                # it.
+                # Diagnostic only, printed with the UID list.
                 self._chain_tags = str(obj.get("tags") or "")
                 try:
                     self._chain_capn = int(obj.get("capn") or 0)
                     self._chain_capdiag = int(obj.get("capdiag") or 0)
-                    # Why the last capacity window did or did not open.
-                    # None (field absent) stays distinct from 0 (no window
-                    # requested since boot).
+                    # None (field absent) stays distinct from 0 (no window requested since boot).
                     _cw = obj.get("capwhy")
                     self._chain_capwhy = None if _cw is None else int(_cw)
-                    # ...and the bay that verdict was about.
                     _u = obj.get("capwhyu")
                     _s = obj.get("capwhys")
                     self._chain_capwhy_unit = None if _u is None else int(_u)
@@ -3729,14 +3414,11 @@ class BambuBridge:
                     self._chain_capwhy = None
                     self._chain_capwhy_unit = None
                     self._chain_capwhy_slot = None
-                # Per-unit MC addressing as the firmware holds it. None
-                # (field absent, unknown) is kept distinct from [] (known-empty).
+                # None (unknown) is kept distinct from [] (known-empty).
                 mc = obj.get("mcaddr")
-                self._chain_mcaddr = (
-                    [int(x) for x in mc] if isinstance(mc, list) else None)
+                self._chain_mcaddr = ([int(x) for x in mc] if isinstance(mc, list) else None)
                 try:
-                    self._chain_sel = (int(obj.get("selid", -1)),
-                                       int(obj.get("selsent", 0)),
+                    self._chain_sel = (int(obj.get("selid", -1)), int(obj.get("selsent", 0)),
                                        int(obj.get("selack", 0)))
                 except Exception:
                     self._chain_sel = (-1, 0, 0)
@@ -3765,8 +3447,7 @@ class BambuBridge:
             (index -> UID, empties kept), htmask, a2mask, a2asks
         """
         with self._lock:
-            return {"seq": getattr(self, "_chain_seq", 0),
-                    "uids": list(self._chain_uids),
+            return {"seq": getattr(self, "_chain_seq", 0), "uids": list(self._chain_uids),
                     "htmask": getattr(self, "_chain_htmask", 0),
                     "a2mask": getattr(self, "_chain_a2mask", 0),
                     "a2asks": list(getattr(self, "_chain_a2asks", []))}
@@ -3810,8 +3491,7 @@ class BambuBridge:
                        queries each unit has seen; (0, []) until known
         """
         with self._lock:
-            return (getattr(self, "_chain_a2mask", 0),
-                    list(getattr(self, "_chain_a2asks", [])))
+            return (getattr(self, "_chain_a2mask", 0), list(getattr(self, "_chain_a2asks", [])))
 
     def chain_diag(self) -> tuple:
         """
@@ -3829,19 +3509,15 @@ class BambuBridge:
         """
         with self._lock:
             fw = str((getattr(self, "_info", None) or {}).get("fw") or "")
-            return (getattr(self, "_chain_htmask", 0),
-                    fw or getattr(self, "_chain_fw", ""),
+            return (getattr(self, "_chain_htmask", 0), fw or getattr(self, "_chain_fw", ""),
                     getattr(self, "_chain_sel", (-1, 0, 0)))
 
-    #: Silence before a bridge is called out, and the repeat interval.
     #: Generous, since a firmware transfer or a long AMS cycle can be quiet.
     QUIET_WARN_S = 45.0
     QUIET_REPEAT_S = 300.0
-    #: Silence this long on an open link means the far end is gone: drop it and
-    #: reconnect (see _check_quiet).
+    #: Silence this long on an open link means the far end is gone.
     QUIET_DROP_S = 30.0
-    #: Silence this long on a TCP link after a reset was asked for means the
-    #: board is rebooting (see _drop_if_silent).
+    #: After a requested reset, silence this long on TCP means the board is rebooting.
     RESET_QUIET_S = 2.0
 
     def _check_quiet(self) -> None:
@@ -3867,12 +3543,12 @@ class BambuBridge:
         if quiet_for < self.QUIET_WARN_S:
             return
         last = self._silence_logged_t
-        if last is not None and (now - last) < self.QUIET_REPEAT_S:
+        if (last is not None
+            and (now - last) < self.QUIET_REPEAT_S):
             return
         self._silence_logged_t = now
-        self.logger.warning(
-            f"AFC bambu: bridge has been {what} for {quiet_for:.0f}s"
-            f"{'; commands are being dropped' if self._serial is None else ''}")
+        self.logger.warning(f"AFC bambu: bridge has been {what} for {quiet_for:.0f}s"
+                            f"{'; commands are being dropped' if self._serial is None else ''}")
 
     def _note_uartdiag(self, obj: dict) -> None:
         """
@@ -3901,8 +3577,6 @@ class BambuBridge:
                 self._bus_said = None
                 self.logger.info(f"{label}: the AMS bus is talking again")
             return
-        # Judged across two reports of one silence, 60 s apart; a "base"
-        # report before it counts the traffic the units sent until then.
         if (why != "still"
             or prev is None
             or prev[0] not in ("silent", "still")
@@ -3914,14 +3588,12 @@ class BambuBridge:
             return
         self._bus_said = state
         if state == "no_signal":
-            self.logger.warning(
-                f"{label}: no signal on the AMS bus. Check the bus cable to "
-                f"the BridgeBox and that the AMS has power.")
+            self.logger.warning(f"{label}: no signal on the AMS bus. Check the bus cable to "
+                                f"the BridgeBox and that the AMS has power.")
         else:
-            self.logger.warning(
-                f"{label}: the BridgeBox hears the AMS bus but no message "
-                f"gets through. Press RST on the BridgeBox; it reconnects by "
-                f"itself.")
+            self.logger.warning(f"{label}: the BridgeBox hears the AMS bus but no message "
+                                f"gets through. Press RST on the BridgeBox; it reconnects by "
+                                f"itself.")
 
     def _mark_connected(self) -> None:
         """
@@ -3936,11 +3608,10 @@ class BambuBridge:
         self._connected_t = time.monotonic()
         self._grace_this_conn = self._spoke_since_connect
         self._spoke_since_connect = False
-        # Ask the bridge's identity on every connection, including the first;
-        # the wrong-chip flash guard needs it. Asked on the first status frame,
-        # after auth.
+        # The wrong-chip flash guard needs it; asked on the first status frame, after auth.
         self._info_asked = False
-        if self.store_key and not getattr(self._serial, "challenged", False):
+        if (self.store_key
+            and not getattr(self._serial, "challenged", False)):
             self.send({"cmd": "linkkey", "key": self.store_key})
         if self.wifi is not None:
             self.wifi.on_connect(self._serial)
@@ -3969,10 +3640,10 @@ class BambuBridge:
         while it receives an image, and dropping the link mid-flash would
         abort it.
         """
-        if self._serial is None or self._fw_raw:
+        if (self._serial is None
+            or self._fw_raw):
             return False
-        # Measured from the later of last frame and link open, or a reconnect
-        # after an outage would drop itself on its first tick.
+        # From the later of last frame and link open, or a reconnect would drop itself.
         since = self._last_frame_t
         if self._connected_t is not None:
             since = self._connected_t if since is None else max(since, self._connected_t)
@@ -3980,18 +3651,16 @@ class BambuBridge:
             return False
         quiet_for = time.monotonic() - since
         if (self._expect_reset
-                and isinstance(self._serial, TcpPort)
-                and quiet_for >= self.RESET_QUIET_S):
+            and isinstance(self._serial, TcpPort)
+            and quiet_for >= self.RESET_QUIET_S):
             self._expect_reset = False
-            self.logger.info(
-                "AFC bambu: bridge resetting as asked; reconnecting")
+            self.logger.info("AFC bambu: bridge resetting as asked; reconnecting")
             self._drop_port()
             return True
         if quiet_for < self.QUIET_DROP_S:
             return False
-        self.logger.warning(
-            f"AFC bambu: bridge silent for {self.QUIET_DROP_S:.0f}s on an open "
-            f"link -- dropping it to force a reconnect")
+        self.logger.warning(f"AFC bambu: bridge silent for {self.QUIET_DROP_S:.0f}s on an open "
+                            f"link -- dropping it to force a reconnect")
         self._drop_port()
         return True
 
@@ -4020,8 +3689,6 @@ class BambuBridge:
             return None
         now = time.monotonic()
         quiet = now - self._last_frame_t
-        # A new link gets CONNECT_GRACE_S of discount; the count underneath
-        # keeps running.
         if (self._grace_this_conn
             and self._connected_t is not None
             and (now - self._connected_t) < CONNECT_GRACE_S):
@@ -4049,15 +3716,13 @@ class BambuBridge:
         self._gap_timeouts_seen = total
         prev = self._last_frame_t
         if (prev is None
-            or (self._connected_t is not None
-                and prev < self._connected_t)):
+            or (self._connected_t is not None and prev < self._connected_t)):
             return
         gap = now - prev
         if gap <= SILENCE_LOG_S:
             return
-        self.logger.debug(
-            f"AFC bambu: bridge was silent {gap:.1f} s; {n} write(s) timed "
-            f"out meanwhile", only_debug=True)
+        self.logger.debug(f"AFC bambu: bridge was silent {gap:.1f} s; {n} write(s) timed "
+                          f"out meanwhile", only_debug=True)
 
     def down_since(self) -> Optional[float]:
         """
@@ -4077,15 +3742,13 @@ class BambuBridge:
         """
         s = self._serial
         self._serial = None
-        # No link, no connection stamp: silence is measured plainly while down.
         self._connected_t = None
-        # Stamp the outage on the transition; _down_epoch counts outages so
-        # send() logs one dropped command per outage.
-        if s is not None or self._down_t is None:
+        # _down_epoch counts outages so send() logs one dropped command per outage.
+        if (s is not None
+            or self._down_t is None):
             self._down_t = time.monotonic()
             self._down_epoch += 1
-        # Drop anything queued for the dead link: the Pico has reset and the
-        # units re-push their config on reconnect.
+        # The Pico has reset and the units re-push their config on reconnect.
         while True:
             try:
                 self._wq.get_nowait()
@@ -4109,9 +3772,7 @@ class BambuBridge:
         buf = b""
         backoff = 0.5
         while self._run:
-            # Reconnect if the port is gone (first-open failure, a read/write
-            # error, or a Pico re-plug). Back off so the loop doesn't spin while it's
-            # absent, and reset the backoff once reading again.
+            # Back off while the port is absent, and reset the backoff once reading again.
             if self._serial is None:
                 try:
                     self._serial = self._serial_factory()
@@ -4120,31 +3781,24 @@ class BambuBridge:
                     self._down_t = None
                     self._silence_logged_t = None
                     self._mark_connected()
-                    # A short drop is routine (a WiFi blip, a reconnect at
-                    # startup); the console hears only about a real outage.
+                    # A short drop is routine; the console hears only about a real outage.
                     if down_for >= self.RECONNECT_SAY_S:
-                        self.logger.info(
-                            f"AFC bambu: the BridgeBox link is back "
-                            f"after {down_for:.0f}s")
+                        self.logger.info(f"AFC bambu: the BridgeBox link is back "
+                                         f"after {down_for:.0f}s")
                     else:
                         self.logger.debug(
                             f"AFC bambu: bridge reconnected"
                             f"{f' after {down_for:.0f}s down' if down_for >= 1 else ''}")
                     buf = b""
                     backoff = 0.5
-                    # The firmware likely just booted (reflash/power-cycle): its
-                    # unit count and HT flags are factory-fresh. Let each unit
-                    # re-push its config (on the reactor, not this thread).
+                    # The firmware likely just booted, so let each unit re-push its config.
                     for cb in self._reconnect_cbs:
                         try:
-                            self.reactor.register_async_callback(
-                                lambda et, c=cb: c())
+                            self.reactor.register_async_callback(lambda et, c=cb: c())
                         except Exception:
                             pass
                 except Exception:
-                    # The watchdog runs here too, not only on the read path: a disconnected
-                    # reader never reaches the read, so a link that stays down would otherwise
-                    # never be reported.
+                    # Here too, or a link that stays down would never be reported.
                     self._check_quiet()
                     time.sleep(min(backoff, 5.0))
                     backoff = min(backoff * 2, 5.0)
@@ -4152,31 +3806,24 @@ class BambuBridge:
             try:
                 chunk = self._serial.read(64)
             except Exception as e:
-                # Never die on a read error: drop the port and reconnect so a
-                # transient glitch self-heals.
+                # Never die on a read error: drop the port and reconnect.
                 if self._expect_reset:
-                    # A requested reset drops the USB CDC endpoint, so the read
-                    # failing is the command working, not a fault; logged at
-                    # info rather than as a warning.
+                    # A requested reset drops the USB CDC endpoint, so the failing read is expected.
                     self._expect_reset = False
-                    self.logger.info(
-                        "AFC bambu: bridge resetting as asked; reconnecting")
+                    self.logger.info("AFC bambu: bridge resetting as asked; reconnecting")
                 else:
-                    self.logger.warning(
-                        f"AFC bambu: bridge read failed: {e}; reconnecting")
+                    self.logger.warning(f"AFC bambu: bridge read failed: {e}; reconnecting")
                 self._drop_port()
                 continue
             if not chunk:
                 self._check_quiet()
-                # A read timeout on an open link is normal; a long run of them
-                # is not. This turns a silently vanished bridge into a
-                # reconnect.
+                # A long run of read timeouts turns a silently vanished bridge into a reconnect.
                 self._drop_if_silent()
                 continue
             _now = time.monotonic()
-            self._note_frame_gap(_now)           # reads the previous stamp
+            self._note_frame_gap(_now)
             self._last_frame_t = _now
-            self._spoke_since_connect = True     # earns the next grace
+            self._spoke_since_connect = True
             buf += chunk
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)

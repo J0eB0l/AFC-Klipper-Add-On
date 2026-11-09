@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-# ── MFRC522 register map (subset used) ───────────────
+# MFRC522 register map (subset used)
 CommandReg, ComIrqReg, ErrorReg, Status2Reg = 0x01, 0x04, 0x06, 0x08
 FIFODataReg, FIFOLevelReg, ControlReg, BitFramingReg, CollReg = 0x09, 0x0A, 0x0C, 0x0D, 0x0E
 TxControlReg = 0x14
@@ -65,10 +65,8 @@ PICC_READ = 0x30
 PICC_WRITE_PAGE = 0xA2                 # NTAG / Ultralight 4-byte page write
 PICC_WRITE_CLASSIC = 0xA0              # MIFARE Classic 16-byte block write
 NTAG_ACK = 0x0A                        # 4-bit reply; anything else is a NAK
-# The writable window. Pages 0-3 and the pages past the user area hold lock
-# bits, config and password, and writing them is irreversible. A tag whose
-# capability container will not parse is held to the NTAG213 bound (see
-# MifareClassic.user_last_page).
+# Pages 0-3 and those past the user area hold lock bits, config and password, and
+# writing them is irreversible.
 NTAG_USER_FIRST_PAGE = 4
 NTAG213_LAST_PAGE = 39
 
@@ -88,7 +86,9 @@ def ntag_chip(data: bytes) -> Tuple[Optional[str], Optional[int]]:
     :param data: a tag read starting at page 0 (needs the first 16 bytes)
     :return tuple: (chip name or None, user-memory bytes or None)
     """
-    if len(data) < 16 or data[12] != 0xE1 or not data[14]:
+    if (len(data) < 16
+        or data[12] != 0xE1
+        or not data[14]):
         return None, None
     return NTAG_CC_CHIPS.get(data[14]), data[14] * 8
 
@@ -153,8 +153,7 @@ class Mfrc522:
         if not (self.l.reg_read(TxControlReg) & 0x03):
             self._set(TxControlReg, 0x03)
 
-    def _to_card(self, command: int, send: bytes,
-                 tx_last_bits: int = 0,
+    def _to_card(self, command: int, send: bytes, tx_last_bits: int = 0,
                  err_mask: int = 0x1B) -> Tuple[bool, bytes, int]:
         """
         Execute a Transceive or MFAuthent command.
@@ -217,7 +216,8 @@ class Mfrc522:
         """
         self.l.reg_write(BitFramingReg, 0x00)
         ok, uid5, _ = self._to_card(PCD_TRANSCEIVE, bytes([cmd, 0x20]))
-        if not ok or len(uid5) != 5:
+        if (not ok
+            or len(uid5) != 5):
             return None
         if uid5[0] ^ uid5[1] ^ uid5[2] ^ uid5[3] != uid5[4]:  # BCC
             return None
@@ -280,7 +280,8 @@ class Mfrc522:
             if level:
                 break
         last = self.l.reg_read(ControlReg) & 0x07
-        if level != 1 or last != 4:
+        if (level != 1
+            or last != 4):
             return False
         return (self.l.reg_read(FIFODataReg) & 0x0F) == NTAG_ACK
 
@@ -380,8 +381,7 @@ class Mfrc522:
         # Raw response for a failed write: (got_rx, ErrorReg, FIFOlevel,
         # RxLastBits, ack). Empty is a timeout; a 4-bit 0x00/0x01/0x05 is a NAK
         # (locked page / bad CRC / invalid arg); 0x0a is the ACK.
-        self.last_write_ack = (got, hex(err), level, last,
-                               None if ack is None else hex(ack))
+        self.last_write_ack = (got, hex(err), level, last, None if ack is None else hex(ack))
         # BufferOvfl or ParityErr is a real failure; ProtocolErr is expected on
         # a 4-bit frame and ignored. A valid ACK is exactly one byte, 4 bits,
         # value 0x0A.
@@ -457,7 +457,8 @@ class MifareClassic:
         self.m.antenna_on()
         if is_excluded is None:
             uid, sak = self._activate_once(wake=True)
-            if seen is not None and uid is not None:
+            if (seen is not None
+                and uid is not None):
                 seen.append((uid.hex(), sak, False))
             return uid, sak
         for i in range(MAX_FIELD_TAGS):
@@ -484,7 +485,7 @@ class MifareClassic:
         """
         if wake:
             if (self.m.request(PICC_WUPA) is None
-                    and self.m.request(PICC_REQA) is None):
+                and self.m.request(PICC_REQA) is None):
                 return None, None
         elif self.m.request(PICC_REQA) is None:
             return None, None
@@ -509,8 +510,7 @@ class MifareClassic:
             return None, None
         return uid[1:4] + rest, sak
 
-    def read_ntag(self, nbytes: int = 128,
-                  start_page: int = 0) -> Optional[bytes]:
+    def read_ntag(self, nbytes: int = 128, start_page: int = 0) -> Optional[bytes]:
         """
         MIFARE Ultralight / NTAG read (no auth). Each READ returns 4 pages.
 
@@ -541,7 +541,9 @@ class MifareClassic:
         :return int: last writable page number
         """
         blk = self.m.read_block(3)
-        if blk is None or blk[0] != 0xE1 or not blk[2]:
+        if (blk is None
+            or blk[0] != 0xE1
+            or not blk[2]):
             return NTAG213_LAST_PAGE
         return 3 + blk[2] * 2
 
@@ -565,8 +567,7 @@ class MifareClassic:
             return (f"page {start_page} is in the reserved area; the first "
                     f"writable page is {NTAG_USER_FIRST_PAGE}")
         if start_page + pages - 1 > last:
-            return (f"{pages} pages from {start_page} runs past the last "
-                    f"writable page ({last})")
+            return f"{pages} pages from {start_page} runs past the last writable page ({last})"
         for i in range(pages):
             chunk = payload[i * 4:i * 4 + 4]
             # Retry a page: over a slow bridge the ACK can be missed although
@@ -575,8 +576,7 @@ class MifareClassic:
                     or self.m.write_page(start_page + i, chunk)
                     or self.m.write_page(start_page + i, chunk)):
                 dbg = getattr(self.m, "last_write_ack", None)
-                return (f"tag did not ACK the write to page {start_page + i} "
-                        f"[resp {dbg}]")
+                return f"tag did not ACK the write to page {start_page + i} [resp {dbg}]"
         return self._verify_ntag(start_page, payload)
 
     def _verify_ntag(self, start_page: int, payload: bytes) -> Optional[str]:
@@ -602,8 +602,7 @@ class MifareClassic:
                         f"{blk[j:j + 4].hex()}, not {want[j:j + 4].hex()}")
         return None
 
-    def read_all(self, uid: bytes, keys_a: List[List[int]],
-                 sectors: int = 16) -> Optional[bytes]:
+    def read_all(self, uid: bytes, keys_a: List[List[int]], sectors: int = 16) -> Optional[bytes]:
         """
         Read the first ``sectors`` sectors (auth + 4 blocks each).
 
@@ -627,8 +626,7 @@ class MifareClassic:
                 data[block * 16:block * 16 + 16] = blk
         return bytes(data)
 
-    def read_blocks(self, uid: bytes, keys_a: List[List[int]],
-                    blocks: Any) -> Optional[bytes]:
+    def read_blocks(self, uid: bytes, keys_a: List[List[int]], blocks: Any) -> Optional[bytes]:
         """
         Read only the given blocks into a 1024-byte image (rest zero).
 
@@ -655,7 +653,7 @@ class MifareClassic:
         return bytes(data)
 
 
-# ── Bambu (HKDF key derivation + decode), port of OpenRFID ───────
+# Bambu (HKDF key derivation + decode), port of OpenRFID
 def hkdf_sha256(salt: bytes, ikm: bytes, info: bytes, length: int) -> bytes:
     """
     HKDF-SHA256 extract-and-expand.
@@ -750,7 +748,7 @@ def decode_bambu(d: bytes) -> dict:
     )
 
 
-# ── Anycubic (MIFARE Ultralight/NTAG, no auth), port of OpenRFID/DnG-Crafts ──
+# Anycubic (MIFARE Ultralight/NTAG, no auth), port of OpenRFID/DnG-Crafts
 ANYCUBIC_MAGIC = b"\x7b\x00\x65\x00"
 _ANY_WEIGHT = {330: 1000, 247: 750, 198: 600, 165: 500, 82: 250}
 
@@ -762,7 +760,8 @@ def decode_anycubic(d: bytes) -> Optional[dict]:
     :param d: tag image
     :return Optional[dict]: decoded fields, None without the Anycubic magic
     """
-    if len(d) < 0x7C or d[0x10:0x14] != ANYCUBIC_MAGIC:
+    if (len(d) < 0x7C
+        or d[0x10:0x14] != ANYCUBIC_MAGIC):
         return None
     sku = _s(d, 0x14, 16)
     brand = _s(d, 0x28, 16)
@@ -826,10 +825,8 @@ def anycubic_length_for_weight(weight_g: Optional[int]) -> int:
 
 def encode_anycubic(manufacturer: str = "", sku: str = "", ftype: str = "",
                     color_argb: int = 0xFFFFFFFF, diameter_mm: float = 1.75,
-                    weight_g: Optional[int] = None,
-                    length_m: Optional[int] = None,
-                    hotend_min_c: Optional[int] = None,
-                    hotend_max_c: Optional[int] = None,
+                    weight_g: Optional[int] = None, length_m: Optional[int] = None,
+                    hotend_min_c: Optional[int] = None, hotend_max_c: Optional[int] = None,
                     bed_temp_c: Optional[int] = None) -> bytes:
     """
     Build the Anycubic-layout bytes for pages 4-31 of a blank NTAG.
@@ -872,10 +869,9 @@ def encode_anycubic(manufacturer: str = "", sku: str = "", ftype: str = "",
     return bytes(buf[ANYCUBIC_IMAGE_START:ANYCUBIC_IMAGE_END])
 
 
-# ── AFC extension block ─────────────────────────────────────────────────────
-# The Anycubic layout cannot hold an exact weight or a Spoolman id, so those go
-# in our own block at page 32: past everything decode_anycubic reads and inside
-# an NTAG213's user area. Genuine Anycubic tags lack the magic and are unaffected.
+# AFC extension block: the Anycubic layout cannot hold an exact weight or a Spoolman
+# id, so those go in our own block at page 32, past everything decode_anycubic reads
+# and inside an NTAG213's user area. Genuine Anycubic tags lack the magic.
 AFC_BLOCK_MAGIC = b"AFC1"
 AFC_BLOCK_VERSION = 1
 AFC_BLOCK_PAGE = 32
@@ -885,10 +881,8 @@ AFC_BLOCK_LEN = 32                             # pages 32-39
 NTAG_SCAN_BYTES = AFC_BLOCK_OFFSET + AFC_BLOCK_LEN
 
 
-def encode_afc_block(weight_g: Optional[int] = None,
-                     spool_id: Optional[int] = None,
-                     density: Optional[float] = None,
-                     drying_temp_c: Optional[int] = None,
+def encode_afc_block(weight_g: Optional[int] = None, spool_id: Optional[int] = None,
+                     density: Optional[float] = None, drying_temp_c: Optional[int] = None,
                      drying_time_h: Optional[int] = None) -> bytes:
     """
     Build the AFC extension block: what the Anycubic layout cannot hold.
@@ -911,8 +905,7 @@ def encode_afc_block(weight_g: Optional[int] = None,
     return bytes(buf)
 
 
-def decode_afc_block(d: bytes, offset: int = AFC_BLOCK_OFFSET
-                     ) -> Optional[dict]:
+def decode_afc_block(d: bytes, offset: int = AFC_BLOCK_OFFSET) -> Optional[dict]:
     """
     Decode the AFC extension block out of a tag image.
 
@@ -924,7 +917,8 @@ def decode_afc_block(d: bytes, offset: int = AFC_BLOCK_OFFSET
     :return Optional[dict]: the fields that are set, None without the magic
     """
     p = offset
-    if len(d) < p + AFC_BLOCK_LEN or d[p:p + 4] != AFC_BLOCK_MAGIC:
+    if (len(d) < p + AFC_BLOCK_LEN
+        or d[p:p + 4] != AFC_BLOCK_MAGIC):
         return None
     if d[p + 4] > AFC_BLOCK_VERSION:
         return None                            # written by something newer
@@ -943,12 +937,9 @@ def decode_afc_block(d: bytes, offset: int = AFC_BLOCK_OFFSET
     return out
 
 
-def encode_tag_payload(weight_g: Optional[int] = None,
-                       spool_id: Optional[int] = None,
-                       density: Optional[float] = None,
-                       drying_temp_c: Optional[int] = None,
-                       drying_time_h: Optional[int] = None,
-                       **anycubic: Any) -> bytes:
+def encode_tag_payload(weight_g: Optional[int] = None, spool_id: Optional[int] = None,
+                       density: Optional[float] = None, drying_temp_c: Optional[int] = None,
+                       drying_time_h: Optional[int] = None, **anycubic: Any) -> bytes:
     """
     Build the whole record for a blank NTAG: Anycubic layout plus the AFC block.
 
@@ -970,15 +961,15 @@ def encode_tag_payload(weight_g: Optional[int] = None,
                                drying_time_h=drying_time_h))
 
 
-# ── Snapmaker U1 (MIFARE Classic, HKDF-derived keys), port of DnG-Crafts U1 ──
+# Snapmaker U1 (MIFARE Classic, HKDF-derived keys), port of DnG-Crafts U1.
 # Per-tag sector keys: PRK = HMAC-SHA256(salt, UID); sector key A =
-# HMAC-SHA256(PRK, b"key_a_<sector>\x01")[:6], one HKDF-expand block, exactly
-# what hkdf_sha256() computes for length 6. (RSA signature check is skipped.)
+# HMAC-SHA256(PRK, b"key_a_<sector>\x01")[:6], which hkdf_sha256() computes for
+# length 6. The RSA signature check is skipped.
 SNAPMAKER_SALT_A = b"Snapmaker_qwertyuiop[,.;]"
 SNAPMAKER_SALT_B = b"Snapmaker_qwertyuiop[,.;]_1q2w3e"
 SNAPMAKER_MAIN_TYPE = {1: "PLA", 2: "PETG", 3: "ABS", 4: "TPU", 5: "PVA"}
-SNAPMAKER_SUB_TYPE = {1: "Basic", 2: "Matte", 3: "SnapSpeed", 4: "Silk",
-                      5: "Support", 6: "HF", 7: "95A", 8: "95A-HF"}
+SNAPMAKER_SUB_TYPE = {1: "Basic", 2: "Matte", 3: "SnapSpeed", 4: "Silk", 5: "Support", 6: "HF",
+                      7: "95A", 8: "95A-HF"}
 # Blocks holding the fields decode_snapmaker reads (vendor@16=blk1,
 # manufacturer@32=blk2, version/type/color-nums/alpha@64=blk4, RGB@80=blk5,
 # SKU@96=blk6, diameter/weight@128=blk8, temps@144=blk9, mfg-date@160=blk10).
@@ -992,8 +983,7 @@ def snapmaker_keys(uid: bytes) -> List[List[int]]:
     :param uid: 4-byte tag UID
     :return list: 16 six-byte keys
     """
-    return [list(hkdf_sha256(SNAPMAKER_SALT_A, uid,
-                             (f"key_a_{s}").encode(), 6)) for s in range(16)]
+    return [list(hkdf_sha256(SNAPMAKER_SALT_A, uid, f"key_a_{s}".encode(), 6)) for s in range(16)]
 
 
 def decode_snapmaker(d: bytes) -> Optional[dict]:
@@ -1028,18 +1018,16 @@ def decode_snapmaker(d: bytes) -> Optional[dict]:
     )
 
 
-# ── AES-128 (pure Python, dependency-free), for Creality CFS tags ─────
-# klippy-env has no working crypto lib, so bundle a small AES-128: Creality
+# AES-128 for Creality CFS tags: klippy-env has no working crypto lib, and Creality
 # derives the MIFARE key as AES(UID) and stores the payload as AES-128-CBC.
-_AES_SBOX = bytes.fromhex(
-    "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0"
-    "b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275"
-    "09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf"
-    "d0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2"
-    "cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb"
-    "e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08"
-    "ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e"
-    "e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16")
+_AES_SBOX = bytes.fromhex("637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0"
+                          "b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275"
+                          "09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf"
+                          "d0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2"
+                          "cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb"
+                          "e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08"
+                          "ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e"
+                          "e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16")
 _AES_INV_SBOX = bytes(_AES_SBOX.index(i) for i in range(256))
 _AES_RCON = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36)
 
@@ -1181,14 +1169,12 @@ def _aes_cbc_decrypt(data: bytes, key: bytes, iv: bytes = b"\x00" * 16) -> bytes
     return bytes(out)
 
 
-# ── Creality CFS (MIFARE Classic, UID-derived key + AES-CBC payload) ─────
-# The 48-byte CFS payload is
-# in sector 1 (blocks 4-6); the MIFARE Key A is AES(UID-repeated-to-16) with the
-# u_key; the payload is AES-128-CBC (zero IV) with the d_key. Both keys are set
-# in config (creality_key = u_key, creality_encryption_key = d_key).
+# Creality CFS: the 48-byte payload is in sector 1 (blocks 4-6). MIFARE Key A is
+# AES(UID repeated to 16) with the u_key; the payload is AES-128-CBC (zero IV) with
+# the d_key (config: creality_key = u_key, creality_encryption_key = d_key).
 CREALITY_READ_BLOCKS = (4, 5, 6)
-CREALITY_FILM_ID = {"101001": "PLA", "101002": "PETG", "101003": "ABS",
-                    "101004": "TPU", "101005": "PA", "E00003": "PLA"}
+CREALITY_FILM_ID = {"101001": "PLA", "101002": "PETG", "101003": "ABS", "101004": "TPU",
+                    "101005": "PA", "E00003": "PLA"}
 CREALITY_LENGTH_WEIGHT = {130: 250, 357: 500, 408: 600, 583: 750, 816: 1000}
 
 
@@ -1218,7 +1204,8 @@ def decode_creality(data48: bytes) -> Optional[dict]:
     vendor = s[5:9]
     film = s[11:17]
     material = CREALITY_FILM_ID.get(film, "")
-    if vendor != "0276" and not material:            # not a Creality payload
+    if (vendor != "0276"
+        and not material):            # not a Creality payload
         return None
     color = s[17:24]                                 # "0RRGGBB"
     argb = None
@@ -1240,10 +1227,9 @@ def decode_creality(data48: bytes) -> Optional[dict]:
     )
 
 
-# ── Elegoo (NTAG213, plain EPC-256, no auth), ELEGOO-3D/ELEGOO-RFID-Tag-Guide ─
-# User memory starts at NTAG page 4 (byte 16 of a page-0 read). Fields are packed
-# big-endian from there: header@16, mfr@17, code@21, material@23, subtype@27,
-# color@31, diameter@34, weight@36, date@38.
+# Elegoo (NTAG213, plain EPC-256, no auth), ELEGOO-3D/ELEGOO-RFID-Tag-Guide.
+# Big-endian from byte 16 of a page-0 read: header@16, mfr@17, code@21, material@23,
+# subtype@27, color@31, diameter@34, weight@36, date@38.
 ELEGOO_HEADER = 0x36
 ELEGOO_MFR = b"\xee\xee\xee\xee"
 
@@ -1255,7 +1241,9 @@ def decode_elegoo(d: bytes) -> Optional[dict]:
     :param d: tag image
     :return Optional[dict]: decoded fields, None without the Elegoo header
     """
-    if len(d) < 40 or d[16] != ELEGOO_HEADER or d[17:21] != ELEGOO_MFR:
+    if (len(d) < 40
+        or d[16] != ELEGOO_HEADER
+        or d[17:21] != ELEGOO_MFR):
         return None
     rgb = (d[31] << 16) | (d[32] << 8) | d[33]
     return dict(
@@ -1268,7 +1256,7 @@ def decode_elegoo(d: bytes) -> Optional[dict]:
     )
 
 
-# ── unified entry: read UID for ANY tag, decode brand when we can ──────
+# Unified entry: read the UID of any tag, decode the brand when we can
 SAK_CLASSIC_1K = 0x08
 SAK_ULTRALIGHT = 0x00
 # The exact blocks decode_bambu reads (type@32=blk2, detailed@64=blk4,
@@ -1295,11 +1283,11 @@ def _bambu_apply_multicolor(fil: dict, block16: Optional[bytes]) -> None:
     primary = fil.get("color_argb")
     colors = [primary] if primary is not None else []
     count = 1
-    if block16 and len(block16) >= 264:
+    if (block16
+        and len(block16) >= 264):
         count = _u16(block16, 258) or 1
         if count >= 2:
-            a2, b2, g2, r2 = (block16[260], block16[261],
-                              block16[262], block16[263])
+            a2, b2, g2, r2 = (block16[260], block16[261], block16[262], block16[263])
             if a2 | b2 | g2 | r2:                 # block 16 actually present
                 colors.append((a2 << 24) | (r2 << 16) | (g2 << 8) | b2)
             else:
@@ -1310,8 +1298,7 @@ def _bambu_apply_multicolor(fil: dict, block16: Optional[bytes]) -> None:
     fil["colors_argb"] = colors
 
 
-def _classic_bambu(mc: MifareClassic, uid: bytes, master_key: bytes,
-                   blocks: Any) -> Optional[dict]:
+def _classic_bambu(mc: MifareClassic, uid: bytes, master_key: bytes, blocks: Any) -> Optional[dict]:
     """
     Read and decode a Bambu Classic tag.
 
@@ -1348,8 +1335,7 @@ def _classic_snapmaker(mc: MifareClassic, uid: bytes) -> Optional[dict]:
     return decode_snapmaker(data) if data else None
 
 
-def _classic_creality(mc: MifareClassic, uid: bytes, u_key: bytes,
-                      d_key: bytes) -> Optional[dict]:
+def _classic_creality(mc: MifareClassic, uid: bytes, u_key: bytes, d_key: bytes) -> Optional[dict]:
     """
     Read and decode a Creality Classic tag.
 
@@ -1366,13 +1352,9 @@ def _classic_creality(mc: MifareClassic, uid: bytes, u_key: bytes,
     return decode_creality(_aes_cbc_decrypt(data[64:112], bytes(d_key)))
 
 
-# ── BigTreeTech MMS / ViViD "BQ Tech" (MIFARE Classic, default FF Key A) ──────
-# Port of bigtreetech/BIGTREETECH_MMS klippy/extras/mms/hardware/mfrc522.py:
-# MIFARE Classic 1K, tag_version 1000, every sector under the default key
-# FFFFFFFFFFFF. Fields are ASCII and little-endian u16 (BTT's nibble offsets
-# halved to bytes); color_code is a raw RRGGBB triple. tag_version==1000 is
-# the fingerprint, so trying this scheme cannot mis-decode other tags.
-# Shared by the ACE2 and ViViD readers.
+# BigTreeTech MMS / ViViD "BQ Tech", port of BIGTREETECH_MMS mfrc522.py: MIFARE
+# Classic 1K, every sector under the default key FFFFFFFFFFFF, ASCII and little-endian
+# u16 fields. tag_version 1000 is the fingerprint, so this cannot mis-decode other tags.
 BTT_DEFAULT_KEY = (0xFF,) * 6
 # Blocks decode_btt reads: version+manufacturer@blk1, mfg-date@blk2, material@blk4,
 # detailed@blk5, serial@blk6, colour@blk8, diameter/density@blk10, spool
@@ -1439,11 +1421,9 @@ def _classic_btt(mc: MifareClassic, uid: bytes) -> Optional[dict]:
     return decode_btt(data) if data else None
 
 
-# ── QIDI (MIFARE Classic, default key), port of OpenRFID ─────────────
-# Sector 1 holds three code bytes, material / colour / manufacturer, and
-# zeros after them; the codes index QIDI's tables (AFC_rfid_tables). The
-# default FF key is shared with BTT, which is tried first and identified by
-# its own fingerprint.
+# QIDI (MIFARE Classic, default key), port of OpenRFID. Sector 1 holds material,
+# colour and manufacturer codes into QIDI's tables (AFC_rfid_tables). BTT shares the
+# default key and is tried first.
 QIDI_READ_BLOCKS = (4, 5, 6)
 
 
@@ -1460,9 +1440,11 @@ def decode_qidi(d: bytes) -> Optional[dict]:
         return None
     sector = d[64:112]
     material, color, maker = sector[0], sector[1], sector[2]
-    if not (material and color and maker) or any(sector[3:]):
+    if (not (material and color and maker)
+        or any(sector[3:])):
         return None
-    if material not in QIDI_MATERIALS or color not in QIDI_COLORS:
+    if (material not in QIDI_MATERIALS
+        or color not in QIDI_COLORS):
         return None
     ftype, modifiers = QIDI_MATERIALS[material]
     return dict(manufacturer="QIDI", type=ftype, detailed=modifiers,
@@ -1481,9 +1463,8 @@ def _classic_qidi(mc: MifareClassic, uid: bytes) -> Optional[dict]:
     return decode_qidi(data) if data else None
 
 
-# ── TigerTag (NTAG, binary), port of OpenRFID ────────────────────────
-# A fixed big-endian layout from page 4. Brand and material are ids into the
-# TigerTag registry (AFC_rfid_tables). Dates count seconds from 2000-01-01.
+# TigerTag (NTAG, binary), port of OpenRFID: big-endian from page 4, brand and
+# material ids into the TigerTag registry, dates in seconds from 2000-01-01.
 TIGERTAG_IDS = (0x5BF59264, 0xBC0FCB97)          # TigerTag, TigerTag+
 _TIGERTAG_EPOCH = 946684800
 #: unit id -> grams per unit (g, kg, mg; anything else is read as grams)
@@ -1497,16 +1478,16 @@ def decode_tigertag(d: bytes) -> Optional[dict]:
     :param d: tag image from page 0, at least 52 bytes
     :return Optional[dict]: decoded fields, None without a TigerTag id
     """
-    from extras.AFC_rfid_tables import (
-        TIGERTAG_ASPECTS, TIGERTAG_BRANDS, TIGERTAG_DIAMETERS,
-        TIGERTAG_MATERIALS)
+    from extras.AFC_rfid_tables import (TIGERTAG_ASPECTS, TIGERTAG_BRANDS, TIGERTAG_DIAMETERS,
+                                        TIGERTAG_MATERIALS)
     u = d[16:]
-    if len(u) < 36 or struct.unpack_from(">I", u, 0)[0] not in TIGERTAG_IDS:
+    if (len(u) < 36
+        or struct.unpack_from(">I", u, 0)[0] not in TIGERTAG_IDS):
         return None
     material_id = struct.unpack_from(">H", u, 8)[0]
     brand_id = struct.unpack_from(">H", u, 14)[0]
-    ftype, name, density = TIGERTAG_MATERIALS.get(
-        material_id, (f"Unknown({material_id})", "", None))
+    ftype, name, density = TIGERTAG_MATERIALS.get(material_id,
+                                                  (f"Unknown({material_id})", "", None))
     aspects = [TIGERTAG_ASPECTS[a] for a in (u[10], u[11]) if a in TIGERTAG_ASPECTS]
     detailed = ([name] if name and name != ftype else []) + aspects
     r, g, b, a = u[16], u[17], u[18], u[19]
@@ -1516,8 +1497,8 @@ def decode_tigertag(d: bytes) -> Optional[dict]:
     production = ""
     if stamp:
         try:
-            production = datetime.fromtimestamp(
-                stamp + _TIGERTAG_EPOCH, tz=timezone.utc).strftime("%Y-%m-%d")
+            production = datetime.fromtimestamp(stamp + _TIGERTAG_EPOCH,
+                                                tz=timezone.utc).strftime("%Y-%m-%d")
         except (OSError, OverflowError, ValueError):
             production = ""
     td = struct.unpack_from(">H", u, 44)[0] / 10.0 if len(u) >= 46 else 0.0
@@ -1546,17 +1527,14 @@ def _u16be(d: bytes, p: int) -> int:
     return struct.unpack_from(">H", d, p)[0]
 
 
-# ── NDEF (NTAG): OpenSpool, OpenTag3D, SpoolEase ─────────────────────
-# These carry their data as an NDEF message from page 4: OpenSpool as JSON
-# (what PrintTag-Web, SpoolPainter and the U1 apps write), OpenTag3D as a
-# binary MIME record, SpoolEase as a URL. A message can run past AFC's
-# 128-byte first read, so ndef_bytes_needed says how much to read.
+# NDEF (NTAG): OpenSpool as JSON, OpenTag3D as a binary MIME record, SpoolEase as a
+# URL, each an NDEF message from page 4. ndef_bytes_needed says how much to read.
 #: Largest NTAG read for an NDEF message: NTAG216's 888 user bytes and the
 #: 16 bytes before them, whatever a damaged length field claims.
 NTAG_MAX_BYTES = 16 + 888
 #: NDEF URI prefix codes (NFC Forum RTD-URI), the ones a tag URL uses.
-_URI_PREFIXES = {0x00: "", 0x01: "http://www.", 0x02: "https://www.",
-                 0x03: "http://", 0x04: "https://"}
+_URI_PREFIXES = {0x00: "", 0x01: "http://www.", 0x02: "https://www.", 0x03: "http://",
+                 0x04: "https://"}
 
 
 def _ndef_tlv(d: bytes) -> Optional[Tuple[int, int]]:
@@ -1576,7 +1554,8 @@ def _ndef_tlv(d: bytes) -> Optional[Tuple[int, int]]:
         if t == 0x00:
             i += 1
             continue
-        if t == 0xFE or i + 1 >= len(d):
+        if (t == 0xFE
+            or i + 1 >= len(d)):
             return None
         length, head = d[i + 1], 2
         if length == 0xFF:
@@ -1676,13 +1655,15 @@ def decode_openspool(records: List[Tuple[int, str, bytes]]) -> Optional[dict]:
     :return Optional[dict]: decoded fields, None without an OpenSpool record
     """
     for tnf, rtype, payload in records:
-        if tnf != 0x02 or rtype != "application/json":
+        if (tnf != 0x02
+            or rtype != "application/json"):
             continue
         try:
             data = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             continue
-        if not isinstance(data, dict) or data.get("protocol") != "openspool":
+        if (not isinstance(data, dict)
+            or data.get("protocol") != "openspool"):
             continue
         alpha = data.get("alpha", "FF")
         try:
@@ -1721,8 +1702,7 @@ def decode_openspool(records: List[Tuple[int, str, bytes]]) -> Optional[dict]:
 
 
 #: SpoolEase material codes for AMS-only variants, as their base material.
-_SPOOLEASE_ALIASES = {"ABS-S": "ABS", "PA-S": "PA", "PLA-S": "PLA",
-                      "TPU-AMS": "TPU"}
+_SPOOLEASE_ALIASES = {"ABS-S": "ABS", "PA-S": "PA", "PLA-S": "PLA", "TPU-AMS": "TPU"}
 
 
 def decode_spoolease(records: List[Tuple[int, str, bytes]]) -> Optional[dict]:
@@ -1736,13 +1716,15 @@ def decode_spoolease(records: List[Tuple[int, str, bytes]]) -> Optional[dict]:
     """
     from urllib.parse import parse_qs, urlparse
     for tnf, rtype, payload in records:
-        if tnf != 0x01 or rtype != "U" or not payload:
+        if (tnf != 0x01
+            or rtype != "U"
+            or not payload):
             continue
         url = (_URI_PREFIXES.get(payload[0], "")
                + payload[1:].decode("utf-8", "ignore")).strip()
         parsed = urlparse(url)
         if (parsed.netloc.lower() != "tag.spoolease.io"
-                or not parsed.path.startswith("/S1")):
+            or not parsed.path.startswith("/S1")):
             continue
         q = {k: v[0] for k, v in parse_qs(parsed.query).items() if v}
         material = (q.get("M") or "PLA").upper()
@@ -1797,7 +1779,9 @@ def decode_opentag3d(records: List[Tuple[int, str, bytes]]) -> Optional[dict]:
     :return Optional[dict]: decoded fields, None without a v2 record
     """
     for tnf, rtype, payload in records:
-        if tnf != 0x02 or rtype != "application/opentag3d" or len(payload) < 2:
+        if (tnf != 0x02
+            or rtype != "application/opentag3d"
+            or len(payload) < 2):
             continue
         if struct.unpack_from(">H", payload, 0)[0] // 1000 != 2:
             continue                               # v1 is a different map
@@ -1815,7 +1799,8 @@ def decode_opentag3d(records: List[Tuple[int, str, bytes]]) -> Optional[dict]:
         colors = []
         for i, off in enumerate(_OT3D_COLORS):
             r, g, b, a = p[off:off + 4]
-            if i == 0 or (r | g | b | a):
+            if (i == 0
+                or (r | g | b | a)):
                 colors.append((a << 24) | (r << 16) | (g << 8) | b)
         fil = dict(
             manufacturer=v["manufacturer"], type=v["material"],
@@ -1864,7 +1849,8 @@ def _ntag_ndef(mc: MifareClassic, data: bytes) -> Tuple[Optional[dict], bytes]:
     :return tuple: (decoded fields or None, the image as far as it was read)
     """
     need = ndef_bytes_needed(data)
-    if need and need > len(data):
+    if (need
+        and need > len(data)):
         more = mc.read_ntag(need - len(data), start_page=len(data) // 4)
         if more is None:
             return None, data
@@ -1875,10 +1861,8 @@ def _ntag_ndef(mc: MifareClassic, data: bytes) -> Tuple[Optional[dict], bytes]:
 def read_tag(link: Any, bambu_master_key: Optional[bytes] = None,
              bambu_blocks: Any = BAMBU_READ_BLOCKS,
              is_excluded: Optional[Callable[[str], bool]] = None,
-             creality_key: Optional[bytes] = None,
-             creality_encryption_key: Optional[bytes] = None,
-             seen: Optional[List[Any]] = None,
-             dump_blocks: Any = None) -> Optional[dict]:
+             creality_key: Optional[bytes] = None, creality_encryption_key: Optional[bytes] = None,
+             seen: Optional[List[Any]] = None, dump_blocks: Any = None) -> Optional[dict]:
     """
     Activate an ISO14443-A tag and decode its filament when the layout is known.
 
@@ -1907,12 +1891,12 @@ def read_tag(link: Any, bambu_master_key: Optional[bytes] = None,
         res["tag_type"] = "MifareClassic1k"
         schemes = []
         if bambu_master_key:
-            schemes.append(lambda u: _classic_bambu(mc, u, bambu_master_key,
-                                                    bambu_blocks))
+            schemes.append(lambda u: _classic_bambu(mc, u, bambu_master_key, bambu_blocks))
         schemes.append(lambda u: _classic_snapmaker(mc, u))
-        if creality_key and creality_encryption_key:
-            schemes.append(lambda u: _classic_creality(
-                mc, u, creality_key, creality_encryption_key))
+        if (creality_key
+            and creality_encryption_key):
+            schemes.append(lambda u: _classic_creality(mc, u, creality_key,
+                                                       creality_encryption_key))
         # BTT "BQ Tech" needs no config key, so it is always tried, and its
         # tag_version fingerprint prevents mis-decoding other brands. QIDI
         # shares the default key and goes last: its check is the weaker one.
@@ -1937,8 +1921,7 @@ def read_tag(link: Any, bambu_master_key: Optional[bytes] = None,
             if i:
                 # Re-select without a SoftReset so the RF field stays up and a
                 # marginal at-rest tag is not unpowered between schemes.
-                u = mc.activate(is_excluded=_not_this_tag, seen=seen,
-                                reset=False)[0]
+                u = mc.activate(is_excluded=_not_this_tag, seen=seen, reset=False)[0]
                 if u is None:
                     break
                 res["uid"] = u.hex()
@@ -1948,15 +1931,14 @@ def read_tag(link: Any, bambu_master_key: Optional[bytes] = None,
                 break
         # Best-effort raw block dump for ACE_RFID_BLOCKS: re-select and attach
         # {block: hex} read with the Bambu keys.
-        if dump_blocks and bambu_master_key:
+        if (dump_blocks
+            and bambu_master_key):
             try:
                 u2 = mc.activate(reset=True)[0]
                 if u2 is not None:
-                    img = mc.read_blocks(u2, bambu_keys(u2, bambu_master_key),
-                                         dump_blocks)
+                    img = mc.read_blocks(u2, bambu_keys(u2, bambu_master_key), dump_blocks)
                     if img:
-                        res["raw_blocks"] = {
-                            b: img[b * 16:b * 16 + 16].hex() for b in dump_blocks}
+                        res["raw_blocks"] = {b: img[b * 16:b * 16 + 16].hex() for b in dump_blocks}
             except Exception:
                 pass
     else:                                            # Ultralight / NTAG
@@ -2004,10 +1986,8 @@ def _is_writable_classic_block(block: int) -> bool:
 CLASSIC_DEFAULT_KEY = b"\xff" * 6      # a blank / magic card ships with this
 
 
-def classic_write_block(link: Any, block: int, data16: bytes,
-                        key6: bytes = CLASSIC_DEFAULT_KEY,
-                        key_type: int = PICC_AUTH_KEY_A
-                        ) -> Tuple[Optional[str], Optional[str]]:
+def classic_write_block(link: Any, block: int, data16: bytes, key6: bytes = CLASSIC_DEFAULT_KEY,
+                        key_type: int = PICC_AUTH_KEY_A) -> Tuple[Optional[str], Optional[str]]:
     """
     Write one 16-byte data block of a MIFARE Classic tag and read it back.
 
@@ -2025,20 +2005,17 @@ def classic_write_block(link: Any, block: int, data16: bytes,
     if len(data16) != 16:
         return None, f"data is {len(data16)} bytes, must be 16"
     if not _is_writable_classic_block(block):
-        return None, (f"block {block} is a sector trailer or block 0; refusing "
-                      f"to write it")
+        return None, f"block {block} is a sector trailer or block 0; refusing to write it"
     mfrc = Mfrc522(link)
     mc = MifareClassic(mfrc)
     uid, sak = mc.activate()
     if uid is None:
         return None, "no tag in the reader's field"
     if not sak & SAK_CLASSIC_1K:
-        return uid.hex(), (f"that is not a MIFARE Classic tag "
-                           f"(sak 0x{sak:02X})")
+        return uid.hex(), f"that is not a MIFARE Classic tag (sak 0x{sak:02X})"
     if not mfrc.auth(key_type, (block // 4) * 4, bytes(key6), uid):
         mfrc.stop_crypto()
-        return uid.hex(), (f"key did not authenticate sector {block // 4} "
-                           f"(wrong key for this card?)")
+        return uid.hex(), f"key did not authenticate sector {block // 4} (wrong key for this card?)"
     ok = mfrc.write_classic_block(block, data16)
     back = mfrc.read_block(block)
     mfrc.stop_crypto()
@@ -2050,8 +2027,7 @@ def classic_write_block(link: Any, block: int, data16: bytes,
     return uid.hex(), None
 
 
-def bambu_classic_write_test(link: Any, master_key: bytes,
-                             block: int = 13) -> dict:
+def bambu_classic_write_test(link: Any, master_key: bytes, block: int = 13) -> dict:
     """
     Prove the MIFARE Classic write works on a genuine Bambu tag without
     permanently changing it.
@@ -2066,22 +2042,19 @@ def bambu_classic_write_test(link: Any, master_key: bytes,
     :return dict: {uid, block, wrote, changed, restored, orig, modified, ...}
     """
     if not _is_writable_classic_block(block):
-        return {"error": f"block {block} is a sector trailer or block 0; "
-                         f"refusing to write it"}
+        return {"error": f"block {block} is a sector trailer or block 0; refusing to write it"}
     mfrc = Mfrc522(link)
     mc = MifareClassic(mfrc)
     uid, sak = mc.activate()
     if uid is None:
         return {"error": "no tag in the field"}
     if not sak & SAK_CLASSIC_1K:
-        return {"error": f"not a MIFARE Classic tag (sak 0x{sak:02X})",
-                "uid": uid.hex()}
+        return {"error": f"not a MIFARE Classic tag (sak 0x{sak:02X})", "uid": uid.hex()}
     sector = block // 4
     key6 = bytes(bambu_keys(uid, master_key)[sector])
     if not mfrc.auth(PICC_AUTH_KEY_A, sector * 4, key6, uid):
         mfrc.stop_crypto()
-        return {"error": f"Key A did not authenticate sector {sector}",
-                "uid": uid.hex()}
+        return {"error": f"Key A did not authenticate sector {sector}", "uid": uid.hex()}
     orig = mfrc.read_block(block)
     if orig is None:
         mfrc.stop_crypto()
@@ -2091,8 +2064,8 @@ def bambu_classic_write_test(link: Any, master_key: bytes,
     trailer = mfrc.read_block(sector * 4 + 3)
     access = trailer[6:9].hex() if trailer is not None else None
     modified = bytes([orig[0] ^ 0xFF]) + orig[1:]
-    out = {"uid": uid.hex(), "block": block, "orig": orig.hex(),
-           "modified": modified.hex(), "access": access}
+    out = {"uid": uid.hex(), "block": block, "orig": orig.hex(), "modified": modified.hex(),
+           "access": access}
     # Write the flipped copy and confirm it landed.
     out["wrote"] = mfrc.write_classic_block(block, modified)
     back = mfrc.read_block(block)
@@ -2150,7 +2123,6 @@ def write_tag(link: Any, payload: bytes,
     if uid is None:
         return None, "no tag in the reader's field"
     if sak & SAK_CLASSIC_1K:
-        return uid.hex(), (
-            "that is a MIFARE Classic tag, not an NTAG; this writer only "
-            "programs blank NTAG stickers")
+        return uid.hex(), ("that is a MIFARE Classic tag, not an NTAG; this writer only "
+                           "programs blank NTAG stickers")
     return uid.hex(), mc.write_ntag(ANYCUBIC_FIRST_PAGE, payload)

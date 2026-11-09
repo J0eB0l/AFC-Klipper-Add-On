@@ -4,9 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
-# The Bambu AMS buffer. It subclasses upstream's AFCFPSBuffer and lives here,
-# not in AFC_buffer.py, so that file stays stock: AFC_BridgeBox constructs it
-# directly for a chain whose `buffer_type` is `bambu`.
+# The Bambu AMS buffer. AFC_BridgeBox builds it for a chain whose `buffer_type` is `bambu`.
 
 from __future__ import annotations
 
@@ -21,18 +19,15 @@ if TYPE_CHECKING:
 
 try: from extras.AFC_buffer import AFCFPSBuffer
 except:
-    error_str = (f"Error when trying to import AFC_buffer.AFCFPSBuffer\n"
-                 f"{traceback.format_exc()}")
+    error_str = f"Error when trying to import AFC_buffer.AFCFPSBuffer\n{traceback.format_exc()}"
     raise error(error_str)
 try: from extras.AFC_lane import AFCLaneState
 except:
-    error_str = (f"Error when trying to import AFC_lane.AFCLaneState\n"
-                 f"{traceback.format_exc()}")
+    error_str = f"Error when trying to import AFC_lane.AFCLaneState\n{traceback.format_exc()}"
     raise error(error_str)
 
-# ── Bambu AMS buffer ───────────────────────────────────────────────────────────
-# Load gate: buffer compressed AND the AMS odometer moved then stopped; either
-# alone misreads friction or a mid-feed stop. Windows are in seconds.
+# Load gate: buffer compressed AND the AMS odometer moved then stopped. Either one
+# alone misreads friction or a mid-feed stop.
 class AFCBambuBuffer(AFCFPSBuffer):
     """
     Bambu AMS buffer used as a toolhead load sensor.
@@ -55,45 +50,30 @@ class AFCBambuBuffer(AFCFPSBuffer):
         super().__init__(config)
         # A sample moving less than this is "still": feeding steps 70-80 mm,
         # the braking tail flickers at 1-2 mm.
-        self.odom_eps_mm: float = config.getfloat(
-            "odom_eps_mm", 3.0, minval=0.1)
-        # Seconds the odometer must hold still to count as stopped; 0.5 s is
-        # two 250 ms frames.
-        self.odom_still_seconds: float = config.getfloat(
-            "odom_still_seconds", 0.5, minval=0.0)
+        self.odom_eps_mm: float = config.getfloat("odom_eps_mm", 3.0, minval=0.1)
+        # 0.5 s is two 250 ms odometer frames.
+        self.odom_still_seconds: float = config.getfloat("odom_still_seconds", 0.5, minval=0.0)
         # With no odometer on any bound unit: True keeps the gate shut, False
         # falls back to buffer pressure alone.
         self.odom_required: bool = config.getboolean("odom_required", False)
         # Seconds at or below low_point before a latched load counts as run
         # out. The print sawtooth dips to ~0.13 and recovers within a second;
         # an empty buffer stays near 0.02.
-        self.unload_confirm_seconds: float = config.getfloat(
-            "unload_confirm_seconds", 2.0, minval=0.0)
-        # Seconds a movement stays evidence, so an idle unit cannot satisfy the
-        # gate on an old move.
-        self.odom_move_ttl_seconds: float = config.getfloat(
-            "odom_move_ttl_seconds", 5.0, minval=0.0)
+        self.unload_confirm_seconds: float = config.getfloat("unload_confirm_seconds",
+                                                             2.0, minval=0.0)
+        self.odom_move_ttl_seconds: float = config.getfloat("odom_move_ttl_seconds",
+                                                            5.0, minval=0.0)
 
-        # Seconds to wait at boot for the pool to bind a unit before treating
-        # the buffer as having none. The gate stays shut quietly meanwhile.
-        self.odom_bind_grace_seconds: float = config.getfloat(
-            "odom_bind_grace_seconds", 10.0, minval=0.0)
-        # Seconds a still, compressed buffer must rest before it counts as
-        # filament at the gears. Covers a restart with filament loaded, which
-        # the arrival detector cannot see.
-        self.resting_load_seconds: float = config.getfloat(
-            "resting_load_seconds", 3.0, minval=0.0)
-        # Seconds after the first sample that AFC's restored tool_loaded record
-        # is consulted (restart recovery only).
-        self.record_check_seconds: float = config.getfloat(
-            "record_check_seconds", 60.0, minval=0.0)
+        # The gate stays shut quietly while the pool binds a unit at boot.
+        self.odom_bind_grace_seconds: float = config.getfloat("odom_bind_grace_seconds",
+                                                              10.0, minval=0.0)
+        # Covers a restart with filament loaded, which the arrival detector cannot see.
+        self.resting_load_seconds: float = config.getfloat("resting_load_seconds", 3.0, minval=0.0)
+        self.record_check_seconds: float = config.getfloat("record_check_seconds", 60.0, minval=0.0)
 
-        self._odom_units: Optional[list] = None   # resolved lazily, see below
+        self._odom_units: Optional[list] = None
         self._odom_prev: dict = {}
-        # These are reactor times, not counters (see the module note above the
-        # class).
         self._first_sample_t: Optional[float] = None
-        # The first sample taken after AFC's PREP had run (see _bind_wait_start).
         self._prep_seen_t: Optional[float] = None
         self._last_move_t: Optional[float] = None
         self._now_t: float = 0.0
@@ -104,7 +84,6 @@ class AFCBambuBuffer(AFCFPSBuffer):
         self._gate_latched: bool = False
         self._odom_warned: bool = False
 
-    # ── Which units' odometers belong to this buffer ───────────────────────
     def _bound_units(self) -> list:
         """
         The AFC_BambuAMS units whose lanes name this buffer.
@@ -171,7 +150,8 @@ class AFCBambuBuffer(AFCFPSBuffer):
             key = getattr(unit, "name", id(unit))
             prev = self._odom_prev.get(key)
             self._odom_prev[key] = v
-            if prev is not None and abs(v - prev) >= self.odom_eps_mm:
+            if (prev is not None
+                and abs(v - prev) >= self.odom_eps_mm):
                 moved = True
         if not saw_any:
             return
@@ -181,13 +161,10 @@ class AFCBambuBuffer(AFCFPSBuffer):
             self._odom_moved = True
             self._last_move_t = self._now_t
         elif (self._last_move_t is not None
-              and self._now_t - self._last_move_t
-              > self.odom_move_ttl_seconds):
-            # Too old to be this feed's movement; let it lapse.
+              and self._now_t - self._last_move_t > self.odom_move_ttl_seconds):
             self._odom_moved = False
 
-    def _sample_time(self, read_time: Union[float, list],
-                     read_value: Optional[float]) -> float:
+    def _sample_time(self, read_time: Union[float, list], read_value: Optional[float]) -> float:
         """
         The reactor time a sample belongs to, however it was delivered.
 
@@ -239,18 +216,17 @@ class AFCBambuBuffer(AFCFPSBuffer):
         # No unit bound yet may just mean the pool has not claimed one, so
         # refuse quietly until the grace is spent.
         start = self._bind_wait_start()
-        if start is None or self._now_t - start < self.odom_bind_grace_seconds:
+        if (start is None
+            or self._now_t - start < self.odom_bind_grace_seconds):
             return False
-        # Genuinely no unit on this buffer has an odometer.
         if self.odom_required:
             return False
         if not self._odom_warned:
             self._odom_warned = True
-            self.logger.warning(
-                f"{self.name}: no Bambu unit on this buffer reports an "
-                f"odometer, so a load is being judged on buffer pressure "
-                f"alone. Bowden friction can read as filament that way. "
-                f"Set odom_required: True to refuse instead.")
+            self.logger.warning(f"{self.name}: no Bambu unit on this buffer reports an "
+                                f"odometer, so a load is being judged on buffer pressure "
+                                f"alone. Bowden friction can read as filament that way. "
+                                f"Set odom_required: True to refuse instead.")
         return True
 
     def _bind_wait_start(self) -> Optional[float]:
@@ -263,7 +239,8 @@ class AFCBambuBuffer(AFCFPSBuffer):
 
         :return float: that sample's time, or None while PREP has not run
         """
-        if self._first_sample_t is None or self._prep_seen_t is None:
+        if (self._first_sample_t is None
+            or self._prep_seen_t is None):
             return None
         return max(self._first_sample_t, self._prep_seen_t)
 
@@ -278,7 +255,6 @@ class AFCBambuBuffer(AFCFPSBuffer):
         self._tension_since = None
         self._compressed_since = None
 
-    # ── The gate itself ────────────────────────────────────────────────────
     def _adc_callback(self, read_time: Union[float, list],
                       read_value: Optional[float] = None) -> None:
         """
@@ -326,8 +302,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
             self._gate_latched = True
             self._log_detection(read_time, resting=True)
             return
-        # Pressure says yes, the odometer does not. Clear the FPS latch too,
-        # or the next tick re-latches off the pressure alone.
+        # Clear the FPS latch too, or the next tick re-latches off the pressure alone.
         self.advance_state = False
         self._advance_latched = False
 
@@ -348,10 +323,11 @@ class AFCBambuBuffer(AFCFPSBuffer):
 
         Answered once, within `record_check_seconds` of the first sample.
         """
-        if self._record_checked or self._gate_latched:
+        if (self._record_checked
+            or self._gate_latched):
             return
         if self._first_sample_t is None:
-            return                        # no clock yet
+            return
         lanes = getattr(self, "lanes", None) or {}
         loaded = [ln for ln in lanes.values()
                   if getattr(ln, "tool_loaded", False)]
@@ -364,20 +340,17 @@ class AFCBambuBuffer(AFCFPSBuffer):
             return
         self._record_checked = True
         names = ", ".join(getattr(ln, "name", "?") for ln in loaded)
-        # Check the raw reading too: the smoothed value may still be
-        # converging. Either one at max tension refuses.
+        # The smoothed value may still be converging, so the raw reading counts too.
         reading = min(self.fps_value, self.smoothed_fps)
         if reading <= self.low_point:
-            self.logger.warning(
-                f"{self.name}: AFC records {names} loaded to the toolhead, "
-                f"but the buffer is at max tension ({reading:.2f}), which is "
-                f"what an empty path reads like. Not adopting it -- the next "
-                f"load will settle this.")
+            self.logger.warning(f"{self.name}: AFC records {names} loaded to the toolhead, "
+                                f"but the buffer is at max tension ({reading:.2f}), which is "
+                                f"what an empty path reads like. Not adopting it -- the next "
+                                f"load will settle this.")
             return
         self._gate_latched = True
-        self.logger.debug(
-            f"{self.name}: adopting {names} as loaded at the toolhead from "
-            f"AFC's own record, buffer agreeing at {reading:.2f}")
+        self.logger.debug(f"{self.name}: adopting {names} as loaded at the toolhead from "
+                          f"AFC's own record, buffer agreeing at {reading:.2f}")
 
     def _resting_load(self) -> bool:
         """
@@ -400,7 +373,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
         if self._now_t - self._compressed_since < self.resting_load_seconds:
             return False
         if self._last_move_t is None:
-            return True                   # nothing has moved since boot
+            return True
         return (self._now_t - self._last_move_t
                 >= self.resting_load_seconds)
 
@@ -414,8 +387,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
         return any(getattr(ln, "status", None) == AFCLaneState.TOOL_UNLOADING
                    for ln in lanes.values())
 
-    def _log_detection(self, read_time: float,
-                       resting: bool = False) -> None:
+    def _log_detection(self, read_time: float, resting: bool = False) -> None:
         """
         Record the instant the gate called a load, with what decided it.
 
@@ -435,10 +407,9 @@ class AFCBambuBuffer(AFCFPSBuffer):
                    f"for {self._now_t - self._compressed_since:.1f}s)"
                    if resting and self._compressed_since is not None
                    else f"odometer still for {self._odom_still_for():.2f}s")
-            self.logger.debug(
-                f"{self.name}: load detected at {self._now_t:.2f} -- "
-                f"fps {self.fps_value:.2f} (smoothed {self.smoothed_fps:.2f}), "
-                f"{how} [{odoms}]")
+            self.logger.debug(f"{self.name}: load detected at {self._now_t:.2f} -- "
+                              f"fps {self.fps_value:.2f} (smoothed {self.smoothed_fps:.2f}), "
+                              f"{how} [{odoms}]")
         except Exception:
             pass               # a log line must never break the gate
 
@@ -462,12 +433,10 @@ class AFCBambuBuffer(AFCFPSBuffer):
         else:
             self._tension_since = None
         if (self._tension_since is not None
-            and self._now_t - self._tension_since
-            >= self.unload_confirm_seconds):
+            and self._now_t - self._tension_since >= self.unload_confirm_seconds):
             held = self._now_t - self._tension_since
-            self.logger.debug(
-                f"{self.name}: buffer has been at max tension for "
-                f"{held:.1f}s, releasing the load latch")
+            self.logger.debug(f"{self.name}: buffer has been at max tension for "
+                              f"{held:.1f}s, releasing the load latch")
             self._reset_gate()
             return
         self.advance_state = True
@@ -486,9 +455,7 @@ class AFCBambuBuffer(AFCFPSBuffer):
             return False
         return self._gate_latched or self._odom_confirms()
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────
-    # enable_buffer() is inherited: it runs right after arrival, so the gate is
-    # reset on unload (disable_buffer) instead.
+    # The gate resets on unload, since the inherited enable_buffer runs right after arrival.
     def disable_buffer(self) -> None:
         """
         Disable the buffer and reset the odometer gate.
