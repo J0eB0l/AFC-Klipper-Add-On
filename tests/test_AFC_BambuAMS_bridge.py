@@ -1755,6 +1755,17 @@ class TestBambuBridgeLastBuffRefill:
         assert bambu_bridge.last_buff_refill() == (0.31, 0.62, 18.0)
         assert bambu_bridge.logger.messages == []
 
+    def test_each_refill_is_counted_even_when_it_repeats(self, bambu_bridge):
+        # Two identical lines are two refills, so a caller can tell a new one
+        # from the last.
+        line = "[AMS_SWITCH]BUFF,pos:0.10->0.73,det:20mm"
+        assert bambu_bridge.buff_refill_seq() == 0
+        feed_amsdbg(bambu_bridge, line, addr=0x0700)
+        feed_amsdbg(bambu_bridge, line, addr=0x0700)
+        assert bambu_bridge.buff_refill_seq() == 2
+        feed_amsdbg(bambu_bridge, "[AMS_SWITCH]buff_pos:0.55", addr=0x0700)
+        assert bambu_bridge.buff_refill_seq() == 2
+
 
 class TestBambuBridgeNoteDryRefusal:
     LINE = "[AMS_CHMB]err, filament hub load!"

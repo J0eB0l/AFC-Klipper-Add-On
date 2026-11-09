@@ -27104,6 +27104,239 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit._lite_fault() is None
 
 
+class TestAfcBambuAMSBoxedGrip:
+    """After a boxed unit's load, the extruder must pull the buffer down."""
+
+    STOP = {"cmd": "stop"}
+    BACK = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 50.0, "mmps": 20.0}
+    #: The cause a push the buffer never felt reports.
+    UNFELT = ("The extruder did not take lane1: it pushed 72mm, but the AMS "
+              "buffer never dropped (it stayed near 0.92), so the filament "
+              "is not in the extruder gears.")
+    CHECK = ("\nCheck that the filament reaches the extruder gears and that "
+             f"they turn. {_P6_RETRY}.")
+
+    @staticmethod
+    def _frame(buff: int = 92, odom: float = 0.0) -> Dict[str, Any]:
+        """
+        :param buff: the bridge's buffer field (0..100, 100 compressed)
+        :param odom: the unit's odometer
+        :return dict: a status frame with a decoded buffer
+        """
+        frame = _p6_frame(odom=odom)
+        frame.update(buff=buff, buffn=5)
+        return frame
+
+    def _unit(self, monkeypatch: pytest.MonkeyPatch, *,
+              sensor: Any = (False, False, True),
+              pulls: Sequence[bool] = (),
+              **kwargs: Any) -> Tuple[afcBambuAMS, Any, FakeBridge]:
+        """
+        An AMS 2 on a 100mm bowden whose buffer sits compressed at 0.92.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param sensor: the toolhead sensor's script, or a runout helper
+        :param pulls: per advance, whether the extruder pulls the buffer
+          down to 0.70 half a second after the assist goes on (missing:
+          it does not)
+        :param kwargs: further _p6_unit arguments
+        :return tuple: (the unit, its lane1, its bridge)
+        """
+        opts = {"afc_bowden_length": 100.0, "load_retry_timeout": 1.0,
+                "load_retry_interval": 100.0, "arrival_assist_delay_s": 0.0}
+        script = sensor if isinstance(sensor, (list, tuple)) else None
+        unit = _p6_unit(monkeypatch, sensor=script, values=opts, **kwargs)
+        lane = unit.lanes["lane1"]
+        if script is None:
+            lane.extruder_obj.fila_tool_start.runout_helper = sensor
+        bridge = FakeBridge(status=self._frame())
+        unit._bridge = bridge
+        plan = list(pulls)
+
+        def on_send(br: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "assist" and frame.get("on"):
+                if plan and plan.pop(0):
+                    _p6_at(unit, unit.reactor.now + 0.5,
+                           lambda: setattr(br, "status", self._frame(70)))
+            elif frame["cmd"] == "retract":
+                br.status = self._frame(5, odom=-50.0)
+            elif frame["cmd"] == "feed":
+                br.status = self._frame(92)
+        bridge.on_send = on_send
+        unit._load_in_progress = True        # as unit_load_lane holds it
+        return unit, lane, bridge
+
+    # the check on its own
+
+    def test_a_drop_during_the_push_is_a_grip(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch)
+        _p6_at(unit, 100.5, lambda: setattr(bridge, "status",
+                                            self._frame(70)))
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 0)) is None
+        assert unit.reactor.now == pytest.approx(100.5, abs=0.06)
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: the extruder took lane1: the "
+                      "buffer dropped 0.22 from 0.92 0.5s into the push")]
+
+    def test_the_buffer_need_not_drain(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch)
+        _p6_at(unit, 101.0, lambda: setattr(bridge, "status",
+                                            self._frame(76)))
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 0)) is None
+
+    def test_the_drop_counts_from_the_highest_reading(self, monkeypatch):
+        # The unit's own push can compress it further after the arrival.
+        unit, lane, bridge = self._unit(monkeypatch)
+        bridge.status = self._frame(80)
+        _p6_at(unit, 100.3, lambda: setattr(bridge, "status",
+                                            self._frame(96)))
+        _p6_at(unit, 100.6, lambda: setattr(bridge, "status",
+                                            self._frame(79)))
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.80, 0)) is None
+        assert unit.reactor.now == pytest.approx(100.6, abs=0.06)
+
+    def test_a_refill_is_a_grip(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch)
+
+        def refill() -> None:
+            bridge.refill_seq = 4
+            bridge.refill = (0.10, 0.73, 49.0)
+        bridge.refill_seq = 3
+        _p6_at(unit, 100.4, refill)
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 3)) is None
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: the extruder took lane1: the "
+                      "AMS refilled its buffer (49mm) 0.4s into the push")]
+
+    def test_a_buffer_that_never_drops_fails(self, monkeypatch):
+        # A wobble is not a pull.
+        unit, lane, bridge = self._unit(monkeypatch)
+        _p6_at(unit, 101.0, lambda: setattr(bridge, "status",
+                                            self._frame(85)))
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 0)) == self.UNFELT
+        # 72mm at 25mm/s, plus GRIP_WAIT_S.
+        assert unit.reactor.now == pytest.approx(105.88, abs=0.06)
+        assert unit.logger.messages == []
+
+    def test_no_reading_at_the_arrival_is_not_judged(self, monkeypatch):
+        unit, lane, _ = self._unit(monkeypatch)
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (None, 0)) is None
+        assert unit.reactor.now == 100.0
+
+    def test_with_fault_detect_off_it_is_not_judged(self, monkeypatch):
+        unit, lane, _ = self._unit(monkeypatch)
+        unit.fault_detect = False
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 0)) is None
+        assert unit.reactor.now == 100.0
+
+    def test_a_short_advance_is_not_judged(self, monkeypatch):
+        unit, lane, _ = self._unit(monkeypatch)
+        lane.extruder_obj.tool_stn = 8.0
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 0)) is None
+
+    def test_a_dead_link_is_not_judged(self, monkeypatch):
+        # Its last frame is frozen, not a buffer that held still.
+        unit, lane, bridge = self._unit(monkeypatch)
+        bridge.connected = False
+        assert unit._boxed_grip_check(lane, lane.extruder_obj,
+                                      (0.92, 0)) is None
+        assert unit.logger.messages == [
+            ("debug", "AFC bambu Bambu_AMS_1: no grip check for lane1: the "
+                      "link to the bridge is down")]
+
+    # in the load
+
+    def test_a_load_the_extruder_takes_passes(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch, pulls=[True])
+        assert unit._unit_load_lane(lane) is True
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert self.BACK not in bridge.sent
+        assert unit.afc.error.calls == []
+
+    def test_a_load_the_extruder_did_not_take_is_fed_again(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch, pulls=[False, True])
+        assert unit._unit_load_lane(lane) is True
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        back = bridge.sent.index(self.BACK)
+        assert bridge.sent[back - 1] == {"cmd": "select", "unit": 0,
+                                         "slot": 0}
+        assert bridge.sent[back + 1] == self.STOP
+        assert bridge.sent.count(self.BACK) == 1
+        # The extruder reverses with the unit, so a tip whose edge the gears
+        # caught comes out too.
+        assert unit.afc.e_moves[1] == (-50.0, 25.0, "grip back off", False)
+        assert [m[2] for m in unit.afc.e_moves] == [
+            "tool stn", "grip back off", "tool stn"]
+        assert ("info", f"AFC bambu Bambu_AMS_1: {self.UNFELT} Backing it "
+                        f"off 50mm and feeding it again (1/1).") in (
+            unit.logger.messages)
+        assert unit.afc.error.calls == []
+        assert unit._load_full_path is False
+
+    def test_a_load_that_never_grips_fails_backed_off(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch, pulls=[False, False],
+                                        print_state="printing")
+        assert unit._unit_load_lane(lane) is False
+        # Backed off for the retry, and again so a reload starts clear.
+        assert bridge.sent.count(self.BACK) == 2
+        assert [m[2] for m in unit.afc.e_moves].count("grip back off") == 2
+        assert bridge.sent[-1] == self.STOP
+        assert lane.status == AFCLaneState.ERROR
+        assert unit._fault_lane is lane
+        assert unit._resume_needs_reload is True
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, f"{self.UNFELT} Backing it off and feeding it again did "
+                    f"not help, so it was left backed off 50mm.{self.CHECK}"),
+             {"pause": True})]
+
+    def test_without_retries_it_fails_backed_off(self, monkeypatch):
+        unit, lane, bridge = self._unit(monkeypatch)
+        monkeypatch.setattr(bambu_mod, "GRIP_RETRIES", 0)
+        assert unit._unit_load_lane(lane) is False
+        assert bridge.sent.count(self.BACK) == 1
+        assert unit._failed_load_lane is lane
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, f"{self.UNFELT} It was backed off 50mm.{self.CHECK}"),
+             {"pause": False})]
+
+    def test_a_refeed_that_never_reaches_the_sensor_fails(self, monkeypatch):
+        class _GoneAfterBackOff:
+            """Filament at the sensor until the unit backs it off."""
+
+            def __init__(self) -> None:
+                self.unit: Optional[afcBambuAMS] = None
+                self.reads = 0
+
+            @property
+            def filament_present(self) -> bool:
+                """:return bool: past the pre-feed guard, until backed off"""
+                self.reads += 1
+                sent = self.unit._bridge.sent if self.unit else []
+                return (self.reads > 1
+                        and not any(f["cmd"] == "retract" for f in sent))
+        helper = _GoneAfterBackOff()
+        unit, lane, bridge = self._unit(monkeypatch, sensor=helper)
+        helper.unit = unit
+        assert unit._unit_load_lane(lane) is False
+        assert bridge.sent.count(self.BACK) == 1
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, f"lane1 was backed off 50mm because the extruder did not "
+                    f"take it, and the feed did not bring it back to the "
+                    f"toolhead sensor within 7s.{self.CHECK}"),
+             {"pause": False})]
+
+
 class TestAfcBambuAMSPublishedSlots:
     """The bays a unit reports, trimmed on the way out to the bays it has."""
 

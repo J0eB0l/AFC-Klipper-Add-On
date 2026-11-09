@@ -2047,6 +2047,10 @@ class FakeBridge:
         self.finish = finish
         self.switch = switch
         self.assist = assist
+        #: buff_refill_seq() and last_buff_refill(): (sagged_to,
+        #: recovered_to, mm_fed), None until a refill
+        self.refill_seq = 0
+        self.refill: Optional[tuple] = None
         self.fault = fault
         self.fault_by_unit: Dict[int, Tuple[int, str, float]] = {}
         self.tray_release: Dict[Optional[int], Tuple[int, Optional[int]]] = {}
@@ -2274,6 +2278,14 @@ class FakeBridge:
     def last_assist_done(self) -> int:
         """:return int: the assist-finish sequence"""
         return self.assist
+
+    def buff_refill_seq(self) -> int:
+        """:return int: the buffer refill count"""
+        return self.refill_seq
+
+    def last_buff_refill(self) -> Optional[tuple]:
+        """:return Optional[tuple]: the last buffer refill"""
+        return self.refill
 
     def last_tray_release(self, unit: Optional[int] = None
                           ) -> Tuple[int, Optional[int]]:
