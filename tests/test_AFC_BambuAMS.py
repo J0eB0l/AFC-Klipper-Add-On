@@ -22247,23 +22247,30 @@ class TestAfcBambuAMSCheckLinkLoss:
 
     @staticmethod
     def _unit(monkeypatch: pytest.MonkeyPatch, *, quiet: Optional[float],
-              printing: bool = True, loaded: bool = True,
-              threshold: float = 5.0) -> afcBambuAMS:
+              printing: bool = True, loaded: bool = True, threshold: float = 5.0,
+              extruder: str = "extruder", recovery: bool = False) -> afcBambuAMS:
         """
+        A unit on a two-extruder printer whose toolhead is on "extruder".
+
         :param monkeypatch: pytest's monkeypatch fixture
         :param quiet: seconds since the bridge's last frame (None: never)
         :param printing: a print is running
-        :param loaded: lane28 is threaded to the toolhead
+        :param loaded: lane28 is threaded to its toolhead
         :param threshold: link_loss_pause_s
+        :param extruder: lane28's extruder
+        :param recovery: auto_error_recovery
         :return afcBambuAMS: the unit
         """
         bridge = FakeBridge()
         bridge.silent = quiet
-        return _bambu_p5_unit(
-            monkeypatch, bridge=bridge,
-            print_state="printing" if printing else "standby",
-            values={"link_loss_pause_s": threshold},
-            lanes=[LaneSpec("lane28", 0, tool_loaded=loaded)])
+        printer = make_printer(monkeypatch=monkeypatch,
+                               print_state="printing" if printing else "standby")
+        add_extruder(printer, "extruder1")
+        return make_bambu_unit(
+            printer=printer, bridge=bridge,
+            values={"link_loss_pause_s": threshold, "auto_error_recovery": recovery},
+            lanes=[LaneSpec("lane28", 0, tool_loaded=loaded,
+                            values={"extruder": extruder})])
 
     @staticmethod
     def _quiet(unit: afcBambuAMS) -> None:
@@ -22323,6 +22330,48 @@ class TestAfcBambuAMSCheckLinkLoss:
         unit._check_link_loss()
         assert unit._link_loss_paused is False
         self._quiet(unit)
+
+    def test_not_for_a_lane_parked_on_an_idle_toolhead(self, monkeypatch):
+        # A toolchanger keeps lanes loaded on docked heads; they pull nothing.
+        unit = self._unit(monkeypatch, quiet=60.0, extruder="extruder1")
+        assert unit.afc.function.get_current_extruder() == "extruder"
+        unit._check_link_loss()
+        assert unit._link_loss_paused is False
+        self._quiet(unit)
+
+    def test_not_while_no_toolhead_is_active(self, monkeypatch):
+        # Mid tool change on a U1 no head is on the carriage.
+        unit = self._unit(monkeypatch, quiet=60.0, extruder="extruder1")
+        for tool in unit.afc.tools.values():
+            monkeypatch.setattr(tool, "on_shuttle", lambda: False)
+        assert unit.afc.function.get_current_extruder() is None
+        unit._check_link_loss()
+        assert unit._link_loss_paused is False
+        self._quiet(unit)
+
+    def test_not_mid_tool_change_but_once_it_lands(self, monkeypatch):
+        unit = self._unit(monkeypatch, quiet=6.0)
+        unit.afc.in_toolchange = True
+        monkeypatch.setattr(afcBambuAMS, "_gcode_running", lambda self: True)
+        unit._check_link_loss()
+        assert unit._link_loss_paused is False
+        self._quiet(unit)
+        unit.afc.in_toolchange = False
+        unit._check_link_loss()
+        assert unit._link_loss_paused is True
+        assert unit.afc.error.messages == [("AFC_error", self.SILENT_6S)]
+        assert unit.logger.messages == []
+
+    def test_a_link_loss_never_starts_auto_recovery(self, monkeypatch):
+        # Unloading over a dead link fails, and moving filament cannot fix a link.
+        unit = self._unit(monkeypatch, quiet=6.0, recovery=True)
+        unit._check_link_loss()
+        assert unit.afc.error.messages == [("AFC_error", self.SILENT_6S)]
+        assert unit._resume_needs_reload is True
+        assert unit._auto_recover_armed is False
+        assert unit.reactor.callbacks == []
+        assert unit.gcode.scripts == []
+        assert unit.logger.messages == []
 
     def test_not_outside_a_print(self, monkeypatch):
         unit = self._unit(monkeypatch, quiet=60.0, printing=False)
@@ -22414,7 +22463,8 @@ class TestAfcBambuAMSMaybeAutoRecover:
              "unloading (cut, retract, unload) and reloading the same spool, "
              "then resuming the print if the reload takes. Disable with "
              "auto_error_recovery: False.")
-    RELOAD = "TOOL_UNLOAD LANE=lane15\nCHANGE_TOOL LANE=lane15"
+    UNLOAD = "TOOL_UNLOAD LANE=lane15"
+    LOAD = "CHANGE_TOOL LANE=lane15"
     RESUMED = ("AFC bambu Bambu_AMS_1: lane15 is reloaded and the print has "
                "been RESUMED automatically (1 of 1 this print). Disable with "
                "auto_error_recovery_limit: 0.")
@@ -22432,6 +22482,9 @@ class TestAfcBambuAMSMaybeAutoRecover:
     UNQUEUED = ("AFC bambu Bambu_AMS_1: auto error recovery for lane15 could "
                 "not run (gcode busy); the lane is still paused and held. "
                 "Recover it by hand.")
+    STUCK = ("AFC bambu Bambu_AMS_1: auto error recovery for lane15 stopped: the unload "
+             "did not take, so lane15 is still at the toolhead. The print stays PAUSED. "
+             "Check the lane and the toolhead, then resume.")
 
     @staticmethod
     def _capped(count: int, limit: int) -> str:
@@ -22449,9 +22502,10 @@ class TestAfcBambuAMSMaybeAutoRecover:
     @staticmethod
     def _unit(monkeypatch: pytest.MonkeyPatch, *, loaded: bool,
               paused: bool = True, declared: bool = False, limit: int = 1,
-              resumed: int = 0) -> afcBambuAMS:
+              resumed: int = 0, unloads: bool = True) -> afcBambuAMS:
         """
-        A unit with auto_error_recovery on, faulted on lane15 mid-print.
+        A unit with auto_error_recovery on, faulted on lane15 mid-print with
+        lane15 at the toolhead. TOOL_UNLOAD and CHANGE_TOOL move lane15.
 
         :param monkeypatch: pytest's monkeypatch fixture
         :param loaded: the reload brings lane15 back to the toolhead
@@ -22459,16 +22513,27 @@ class TestAfcBambuAMSMaybeAutoRecover:
         :param declared: the unit declared it gave up since the fault
         :param limit: auto_error_recovery_limit
         :param resumed: automatic resumes this print already
+        :param unloads: the unload takes lane15 off the toolhead
         :return afcBambuAMS: the unit
         """
         unit = _bambu_p5_unit(
             monkeypatch, print_state="paused" if paused else "printing",
             values={"auto_error_recovery": True,
                     "auto_error_recovery_limit": limit},
-            lanes=[LaneSpec("lane15", 0, tool_loaded=loaded)])
+            lanes=[LaneSpec("lane15", 0, tool_loaded=True)])
         unit._resume_needs_reload = True
         unit._declared_since_fault = declared
         unit._auto_resume_count = resumed
+        lane = unit.lanes["lane15"]
+
+        def _run_script(text: str) -> None:
+            unit.gcode.scripts.append(text)
+            if text == "TOOL_UNLOAD LANE=lane15":
+                lane.tool_loaded = not unloads
+            elif text == "CHANGE_TOOL LANE=lane15":
+                lane.tool_loaded = loaded
+
+        monkeypatch.setattr(unit.gcode, "run_script", _run_script)
         return unit
 
     @staticmethod
@@ -22484,11 +22549,13 @@ class TestAfcBambuAMSMaybeAutoRecover:
         :return list: every script run, refused ones included
         """
         scripts: List[str] = []
+        model = unit.gcode.run_script
 
         def _run_script(text: str) -> None:
             scripts.append(text)
             if script is None or text == script:
                 raise RuntimeError(why)
+            model(text)
 
         monkeypatch.setattr(unit.gcode, "run_script", _run_script)
         return scripts
@@ -22508,7 +22575,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
     def test_a_successful_reload_resumes(self, monkeypatch):
         unit = self._unit(monkeypatch, loaded=True)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD, "RESUME"]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD, "RESUME"]
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("info", self.RESUMED)]
 
@@ -22518,7 +22585,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         assert unit.gcode.scripts == []           # queued, never inline
         assert unit.logger.messages == [("info", self.ARMED)]
         unit.reactor.run_callbacks(until=unit.reactor.now + 1.0)
-        assert unit.gcode.scripts == [self.RELOAD, "RESUME"]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD, "RESUME"]
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("info", self.RESUMED)]
 
@@ -22535,7 +22602,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         # Resuming into an empty toolhead prints air.
         unit = self._unit(monkeypatch, loaded=False)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD]
         assert unit._resume_needs_reload is True
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("warning", self.HELD)]
@@ -22563,7 +22630,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
     def test_a_declared_unit_parks_without_resuming(self, monkeypatch):
         unit = self._unit(monkeypatch, loaded=False, declared=True)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD]
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("warning", self.DECLARED)]
 
@@ -22571,7 +22638,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
                                                            monkeypatch):
         unit = self._unit(monkeypatch, loaded=True, paused=False)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD]
         assert unit._auto_resume_count == 0
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("info", self.NOT_PAUSED)]
@@ -22582,7 +22649,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         # then it is a person's problem.
         unit = self._unit(monkeypatch, loaded=True, resumed=1)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD]      # no RESUME queued
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD]      # no RESUME queued
         assert unit._auto_resume_count == 1
         assert unit.logger.messages == [
             ("info", self.ARMED), ("warning", self._capped(1, 1))]
@@ -22590,7 +22657,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
     def test_the_filament_is_still_restored_past_the_cap(self, monkeypatch):
         unit = self._unit(monkeypatch, loaded=True, resumed=1)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD]
         assert unit._resume_needs_reload is False
         assert unit.logger.messages == [
             ("info", self.ARMED), ("warning", self._capped(1, 1))]
@@ -22599,7 +22666,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
             self, monkeypatch):
         unit = self._unit(monkeypatch, loaded=True, limit=0)
         self._attempt(unit)
-        assert unit.gcode.scripts == [self.RELOAD]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD]
         assert unit.logger.messages == [
             ("info", self.ARMED), ("warning", self._capped(0, 0))]
 
@@ -22626,7 +22693,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         scripts = self._refuse(monkeypatch, unit, "RESUME",
                                "pause_resume said no")
         self._attempt(unit)
-        assert scripts == [self.RELOAD, "RESUME"]
+        assert scripts == [self.UNLOAD, self.LOAD, "RESUME"]
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("warning", self.RESUME_FAILED)]
 
@@ -22635,7 +22702,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         unit = self._unit(monkeypatch, loaded=True)
         scripts = self._refuse(monkeypatch, unit, None, "gcode busy")
         self._attempt(unit)
-        assert scripts == [self.RELOAD]
+        assert scripts == [self.UNLOAD]
         assert unit._resume_needs_reload is True
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("warning", self.UNQUEUED)]
@@ -22652,6 +22719,19 @@ class TestAfcBambuAMSMaybeAutoRecover:
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("warning", self.HELD)]
 
+    def test_an_unload_that_did_not_take_stops_before_the_reload(self, monkeypatch):
+        # CHANGE_TOOL on a lane still loaded does nothing, so the resume would continue a print
+        # nothing was done for.
+        unit = self._unit(monkeypatch, loaded=True, unloads=False)
+        unit._maybe_auto_recover(unit.lanes["lane15"])
+        [(run, when)] = unit.reactor.callbacks
+        assert run(when) == unit.reactor.NEVER
+        assert unit.gcode.scripts == [self.UNLOAD]
+        assert unit._in_auto_recover is False
+        assert unit._resume_needs_reload is True
+        assert unit._auto_resume_count == 0
+        assert unit.logger.messages == [("info", self.ARMED), ("warning", self.STUCK)]
+
     def test_a_failed_reload_says_the_unit_is_held(self, monkeypatch):
         unit = self._unit(monkeypatch, loaded=False)
         self._attempt(unit)
@@ -22664,7 +22744,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         unit._maybe_auto_recover(unit.lanes["lane15"])
         [(run, when)] = unit.reactor.callbacks
         assert run(when) == unit.reactor.NEVER
-        assert unit.gcode.scripts == [self.RELOAD, "RESUME"]
+        assert unit.gcode.scripts == [self.UNLOAD, self.LOAD, "RESUME"]
         assert unit.logger.messages == [("info", self.ARMED),
                                         ("info", self.RESUMED)]
 

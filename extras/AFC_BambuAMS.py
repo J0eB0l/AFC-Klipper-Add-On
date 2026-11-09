@@ -10204,6 +10204,39 @@ class afcBambuAMS(afcUnit):
             return lane
         return None
 
+    def _printing_lane(self) -> Optional[Any]:
+        """
+        Return the lane of this unit that feeds the extruder printing now, or None.
+
+        Stricter than _tool_loaded_lane, which keeps a follower on through any
+        doubt: a lane parked on an idle toolhead is not printing, and while no
+        extruder is known to be active (a toolchanger mid tool change) no lane
+        is.
+
+        :return Optional[Any]: the slot-mapped lane in the active extruder, or None
+        """
+        try:
+            current = self.afc.function.get_current_extruder()
+            named = getattr(self.afc, "current", None)
+        except Exception:
+            return None
+        if not current:
+            return None
+        if named:
+            lane = self.lanes.get(named)
+            if (lane is None
+                or self._slot_of(lane) is None):
+                return None
+            return lane
+        for lane in self.lanes.values():
+            ext = getattr(lane, "extruder_obj", None)
+            name = getattr(ext, "th_extruder_name", None) or getattr(ext, "name", None)
+            if (getattr(lane, "tool_loaded", False)
+                and name == current
+                and self._slot_of(lane) is not None):
+                return lane
+        return None
+
     def _committed_lanes(self) -> list:
         """
         Lanes on this unit with filament in the feeder, or threaded to a
@@ -10332,13 +10365,13 @@ class afcBambuAMS(afcUnit):
         Pause the print when the bridge has gone silent.
 
         Routed through _raise_ams_fault rather than pausing directly, so a lost
-        link behaves exactly like a stall: the assist drops, the follower is
-        held off, and the pause only happens when a print is actually running
-        (see _raise_ams_fault).
+        link drops the assist and holds the follower off like a stall. Auto
+        error recovery stays out of it: moving filament cannot bring a link
+        back, and unloading over a dead link fails.
 
-        Only while a lane of this unit is threaded to the toolhead. A dead
-        bridge with nothing loaded here is a problem to report, not a reason to
-        stop the machine.
+        Only while a lane of this unit feeds the extruder that is printing, and
+        never mid tool change. A dead bridge whose lanes sit on idle toolheads
+        is a problem to report, not a reason to stop the machine.
         """
         if (not self.link_loss_pause_s
             or self._bridge is None):
@@ -10351,7 +10384,11 @@ class afcBambuAMS(afcUnit):
             return
         if self._link_loss_paused:
             return
-        lane = self._tool_loaded_lane()
+        # No toolhead is printing mid tool change; the next tick looks again once it lands.
+        if (getattr(self.afc, "in_toolchange", False)
+            and afcBambuAMS._gcode_running(self)):
+            return
+        lane = self._printing_lane()
         if lane is None:
             return
         try:
@@ -10363,7 +10400,7 @@ class afcBambuAMS(afcUnit):
         self._raise_ams_fault(lane, f"AFC bambu {self.name}: the bridge has sent nothing for "
                               f"{quiet:.0f}s while printing. Pausing: the extruder would go on "
                               f"pulling against an AMS that is no longer being driven. The link "
-                              f"reconnects by itself -- resume once it is back.")
+                              f"reconnects by itself -- resume once it is back.", recover=False)
 
     def _fault_quiet(self) -> bool:
         """
@@ -10440,7 +10477,7 @@ class afcBambuAMS(afcUnit):
                           f"a jam; the follower re-arms once the AMS recovers and the "
                           f"extruder pulls.")
 
-    def _raise_ams_fault(self, lane: Any, msg: str) -> None:
+    def _raise_ams_fault(self, lane: Any, msg: str, recover: bool = True) -> None:
         """
         Report a stall and, when configured to pause, hold the follower off.
 
@@ -10450,6 +10487,7 @@ class afcBambuAMS(afcUnit):
 
         :param lane: The lane that stalled
         :param msg: Operator-facing description of the fault
+        :param recover: Whether a mid-print pause may run auto error recovery
         """
         self._fault_quiet_until = time.monotonic() + self.FAULT_QUIET_S
         self._overfeed_lane = None
@@ -10483,7 +10521,8 @@ class afcBambuAMS(afcUnit):
         # RESUME alone would print air. Set here so reload-on-resume works without auto recovery.
         if printing:
             self._resume_needs_reload = True
-            self._maybe_auto_recover(lane)
+            if recover:
+                self._maybe_auto_recover(lane)
 
     def _maybe_auto_recover(self, lane: Any) -> None:
         """
@@ -10584,11 +10623,22 @@ class afcBambuAMS(afcUnit):
             # AFC's own macros own the cutter and the toolhead.
             try:
                 # UNSET_LANE_LOADED moves nothing and would leave the cut strand in the path.
-                self.gcode.run_script(f"TOOL_UNLOAD LANE={_n}\nCHANGE_TOOL LANE={_n}")
+                self.gcode.run_script(f"TOOL_UNLOAD LANE={_n}")
+                unloaded = not getattr(self.lanes.get(_n), "tool_loaded", False)
+                # CHANGE_TOOL on a lane still loaded does nothing, and the resume below would
+                # then continue a print nothing was done for.
+                if unloaded:
+                    self.gcode.run_script(f"CHANGE_TOOL LANE={_n}")
             except Exception as e:
                 self.logger.warning(f"AFC bambu {self.name}: auto error recovery for {_n} "
                                     f"could not run ({e}); the lane is still paused and held. "
                                     f"Recover it by hand.")
+                return _done(self.afc.reactor.NEVER)
+            if not unloaded:
+                self.logger.warning(f"AFC bambu {self.name}: auto error recovery for {_n} "
+                                    f"stopped: the unload did not take, so {_n} is still at the "
+                                    f"toolhead. The print stays PAUSED. Check the lane and the "
+                                    f"toolhead, then resume.")
                 return _done(self.afc.reactor.NEVER)
             # The AMS retries by itself, and unit_load_lane's reload already retries twice.
             if _declared():
