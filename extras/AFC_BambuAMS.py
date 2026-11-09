@@ -1067,6 +1067,17 @@ LITE_CLOG_GAP_S = 5.0
 #: buffer and the AMS refills it about every 20mm, swinging it ~0.6 each time.
 FEED_STOP_MM = 100.0
 FEED_STOP_SWING = 0.15
+#: The grip check after a boxed unit's load: once the extruder has pulled
+#: tool_stn, the AMS buffer must have dropped this far below its highest
+#: reading since the arrival, or the unit must have refilled it, by the end of
+#: the push plus GRIP_WAIT_S. It need not drain. A tip short of the gears
+#: leaves the buffer where the arrival compressed it.
+GRIP_DROP = 0.15
+GRIP_WAIT_S = 3.0
+#: A lane the extruder did not take is backed off this far and fed again,
+#: this many times, before the load fails.
+GRIP_BACK_MM = 50.0
+GRIP_RETRIES = 1
 #: The AMS Lite's own error bytes (reply [33:35]).
 _LITE_ERRORS = {(2, 1): "its feed stalled", (2, 2): "its retract stalled"}
 #: AMS Lite `mode`: combined runs its trays through one splitter into one
@@ -11699,6 +11710,145 @@ class afcBambuAMS(afcUnit):
                 f"not in the extruder gears.\nCheck that it reached the "
                 f"extruder and that the spool turns freely. {_RETRY_HINT}.")
 
+    def _grip_mark(self) -> Tuple[Optional[float], Optional[int]]:
+        """
+        Where the buffer sits before the advance, for _boxed_grip_check.
+
+        :return tuple: (buffer reading, refill count), each None if unknown
+        """
+        return (self.fps_buffer_value(), self._bridge_call("buff_refill_seq"))
+
+    def _boxed_grip_check(self, cur_lane: Any, cur_extruder: Any,
+                          mark: Tuple[Optional[float], Optional[int]]) -> Optional[str]:
+        """
+        Whether the extruder has hold of a boxed unit's filament.
+
+        The arrival leaves the buffer compressed. Filament the gears have is
+        pulled out of it by the tool_stn push, so the buffer drops and the AMS
+        refills it (an AMS 2 narrates "BUFF,pos:0.10->0.73,det:49mm" about 3s
+        after a 50mm push). A tip that stopped short of the gears leaves the
+        buffer where it was, because nothing pulls. The odometer cannot tell:
+        a boxed unit's counts only commanded feeds.
+
+        Called right after the push is queued, so the drop is watched while it
+        runs.
+
+        :param cur_lane: the lane just loaded
+        :param cur_extruder: its extruder, for tool_stn
+        :param mark: _grip_mark from before the advance
+        :return str: the failure, or None when it gripped or cannot be told
+        """
+        stn = float(getattr(cur_extruder, "tool_stn", 0) or 0)
+        fps0, seq0 = mark
+        if (not getattr(self, "fault_detect", False)
+            or fps0 is None
+            or stn < LITE_GRIP_MIN_STN_MM):
+            return None
+        speed = float(getattr(cur_extruder, "tool_load_speed", 0) or 0)
+        reactor = self.afc.reactor
+        t0 = reactor.monotonic()
+        deadline = t0 + (stn / speed if speed > 0 else 0.0) + GRIP_WAIT_S
+        peak = fps0
+        drop = 0.0
+        while True:
+            seq = self._bridge_call("buff_refill_seq")
+            if (seq0 is not None
+                and seq is not None
+                and seq != seq0):
+                refill = self._bridge_call("last_buff_refill") or ()
+                det = refill[2] if len(refill) > 2 else None
+                self.logger.debug(f"AFC bambu {self.name}: the extruder took "
+                                  f"{cur_lane.name}: the AMS refilled its buffer"
+                                  f"{'' if det is None else f' ({det:.0f}mm)'} "
+                                  f"{reactor.monotonic() - t0:.1f}s into the push")
+                return None
+            fps = self.fps_buffer_value()
+            if fps is not None:
+                peak = fps if peak is None else max(peak, fps)
+                drop = max(drop, peak - fps)
+                if drop >= GRIP_DROP:
+                    self.logger.debug(f"AFC bambu {self.name}: the extruder took "
+                                      f"{cur_lane.name}: the buffer dropped {drop:.2f} from "
+                                      f"{peak:.2f} {reactor.monotonic() - t0:.1f}s into the push")
+                    return None
+            now = reactor.monotonic()
+            if now >= deadline:
+                break
+            reactor.pause(min(now + 0.05, deadline))
+        try:
+            linked = self._bridge is not None and self._bridge.is_connected()
+        except Exception:
+            linked = False
+        if not linked:
+            self.logger.debug(f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
+                              f"the link to the bridge is down")
+            return None
+        return (f"The extruder did not take {cur_lane.name}: it pushed "
+                f"{stn:.0f}mm, but the AMS buffer never dropped (it stayed "
+                f"near {peak:.2f}), so the filament is not in the extruder gears.")
+
+    def _grip_back_off(self, cur_lane: Any, cur_extruder: Any) -> None:
+        """
+        Pull a lane the extruder did not take back by GRIP_BACK_MM.
+
+        The extruder reverses the same distance alongside the unit, as the
+        unload does, so a tip whose edge the gears did catch comes out with
+        it instead of holding the unit back. The odometer counts the unit's
+        commanded move, so it says when to stop. The buffer's arrival is
+        forgotten, so the next feed is judged as a new one.
+
+        :param cur_lane: the lane to back off
+        :param cur_extruder: its extruder
+        """
+        afc = self.afc
+        reactor = afc.reactor
+        cur_lane.disable_buffer()
+        self.set_feed_assist(cur_lane, False)
+        self.stop()
+        self._clear_latched_error(cur_lane, "the grip retry")
+        start = self._feed_odom_mm(cur_lane)
+        # Queued first so the two overlap.
+        speed = float(getattr(cur_extruder, "tool_unload_speed", 0) or 0)
+        afc.move_e_pos(-GRIP_BACK_MM, speed or NOMINAL_MMPS, "grip back off", wait_tool=False)
+        self.select_lane(cur_lane)
+        self.retract(cur_lane, GRIP_BACK_MM)
+        deadline = reactor.monotonic() + 2 * GRIP_BACK_MM / NOMINAL_MMPS
+        while True:
+            now = reactor.monotonic()
+            pos = self._feed_odom_mm(cur_lane)
+            if (now >= deadline
+                or (start is not None and pos is not None and abs(pos - start) >= GRIP_BACK_MM)):
+                break
+            reactor.pause(min(now + 0.05, deadline))
+        self.stop()
+        try:
+            afc.toolhead.wait_moves()
+        except Exception:
+            pass
+
+    def _grip_refeed(self, cur_lane: Any, cur_extruder: Any, feed_dist: float,
+                     timeout: float) -> Optional[Tuple[Optional[float], Optional[int]]]:
+        """
+        Back a lane off the gears and hand it to the extruder again.
+
+        :param cur_lane: the lane the extruder did not take
+        :param cur_extruder: its extruder
+        :param feed_dist: how far the feed may run
+        :param timeout: how long the feed may take to reach the sensor
+        :return tuple: the _grip_mark taken before the new advance, or None
+          when the feed never reached the toolhead sensor
+        """
+        self._grip_back_off(cur_lane, cur_extruder)
+        self._load_full_path = False
+        self.feed(cur_lane, feed_dist)
+        if not self._feed_until_sensor(cur_lane, timeout):
+            self.stop()
+            return None
+        self.bridge_finish(cur_lane)
+        mark = self._grip_mark()
+        self._advance_into_extruder(cur_lane, cur_extruder)
+        return mark
+
     # The printer's op-03 motion byte here faults the unit (TIMEOUT 2/3).
 
     def _ams_fault_seq(self) -> int:
@@ -12566,6 +12716,7 @@ class afcBambuAMS(afcUnit):
             afc.reactor.pause(afc.reactor.monotonic() + LITE_CLEAR_S)
             self.select_lane(cur_lane)
         grip0 = self._feed_odom_mm(cur_lane) if lite else None
+        mark = None if lite else self._grip_mark()
 
         # No re-select at arrival: a mode-09 select pulls the tray back and jams.
         try:
@@ -12601,7 +12752,35 @@ class afcBambuAMS(afcUnit):
                 self._failed_load_lane = cur_lane
             afc.error.handle_lane_failure(cur_lane, cause, pause=afc.function.in_print())
             return False
-        cause = self._lite_grip_check(cur_lane, cur_extruder, grip0) if lite else None
+        if lite:
+            cause = self._lite_grip_check(cur_lane, cur_extruder, grip0)
+        else:
+            cause = self._boxed_grip_check(cur_lane, cur_extruder, mark)
+            tries = 0
+            while (cause is not None
+                   and tries < GRIP_RETRIES):
+                tries += 1
+                self.logger.info(f"AFC bambu {self.name}: {cause} Backing it off "
+                                 f"{GRIP_BACK_MM:.0f}mm and feeding it again "
+                                 f"({tries}/{GRIP_RETRIES}).")
+                mark = self._grip_refeed(cur_lane, cur_extruder, feed_dist, timeout)
+                if mark is None:
+                    cause = (f"{cur_lane.name} was backed off "
+                             f"{GRIP_BACK_MM:.0f}mm because the extruder did "
+                             f"not take it, and the feed did not bring it "
+                             f"back to the toolhead sensor within {timeout:.0f}s.")
+                    break
+                cause = self._boxed_grip_check(cur_lane, cur_extruder, mark)
+            if cause is not None:
+                again = ""
+                if mark is not None:
+                    self._grip_back_off(cur_lane, cur_extruder)
+                    again = (" Backing it off and feeding it again did not "
+                             "help, so it was left backed off "
+                             f"{GRIP_BACK_MM:.0f}mm." if tries else
+                             f" It was backed off {GRIP_BACK_MM:.0f}mm.")
+                cause = (f"{cause}{again}\nCheck that the filament reaches "
+                         f"the extruder gears and that they turn. {_RETRY_HINT}.")
         if cause is not None:
             self.stop()
             if afc.function.in_print():

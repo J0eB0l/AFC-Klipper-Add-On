@@ -1581,6 +1581,8 @@ class BambuBridge:
         self._buff_pos: Optional[float] = None
         # (sagged_to, recovered_to, mm_fed); mm is None when the line omitted det.
         self._buff_refill: Optional[Tuple[float, float, Optional[float]]] = None
+        # Counts refills, so a caller can tell a new one from the last.
+        self._buff_refill_seq: int = 0
         self._reconnect_cbs: List[Callable[[], None]] = []
         #: Bridge uptime (ms) from the last `info`, and whether it went backwards (a reboot).
         #: None on firmware older than 1.88.
@@ -2002,6 +2004,18 @@ class BambuBridge:
         """
         with self._lock:
             return self._buff_refill
+
+    def buff_refill_seq(self) -> int:
+        """
+        How many buffer refills the unit has narrated.
+
+        Take one before a move; a higher count afterwards means the AMS
+        refilled its buffer since, so the extruder pulled filament out of it.
+
+        :return int: increments once per refill line
+        """
+        with self._lock:
+            return self._buff_refill_seq
 
     def _note_dry_refusal(self, text: Optional[str], addr: Optional[int],
                           unit: Optional[int] = None) -> None:
@@ -3097,6 +3111,7 @@ class BambuBridge:
                     with self._lock:
                         self._buff_pos = float(rf.group(2))
                         self._buff_refill = (float(rf.group(1)), float(rf.group(2)), det)
+                        self._buff_refill_seq += 1
                 low = raw.lower()
                 # One line can carry an assist and a finish.
                 if _ASSIST_DONE_RE.search(raw):
