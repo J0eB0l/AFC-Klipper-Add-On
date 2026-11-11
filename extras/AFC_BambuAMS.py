@@ -9434,11 +9434,13 @@ class afcBambuAMS(afcUnit):
         :param refused_now: The unit's refusal on record for this attempt, if any
         :param started: When this cycle was commanded (_mono clock), or None
         """
+        # An HT narrates no chamber lines while it heats, so its running countdown is its answer.
         if (not self._drying
             or refused_now
             or self.ams_model not in _HT_MODELS
             or started is None
             or getattr(self, "_dry_seen_live", False)
+            or getattr(self, "_dryrem_ticked_at", 0.0) > started
             or (_mono(self) - started) <= DRY_SILENT_GRACE):
             return
         self._drying = False
@@ -9535,7 +9537,17 @@ class afcBambuAMS(afcUnit):
         :return bool: True when the countdown counts as a running dry
         """
         prev = getattr(self, "_dryrem_seen", None)
-        self._dryrem_seen = (int(dr), _mono(self))
+        now = _mono(self)
+        self._dryrem_seen = (int(dr), now)
+        # Falling by at most elapsed plus DRYREM_TICK_SLACK_S; a frozen register or an HT's jump
+        # is no tick.
+        ticked = False
+        if prev is not None:
+            fell = int(prev[0]) - int(dr)
+            elapsed = max(0.0, now - float(prev[1]))
+            ticked = 0 < fell <= elapsed + DRYREM_TICK_SLACK_S
+        if ticked:
+            self._dryrem_ticked_at = now
         if self._drying:
             return True
         if _mono(self) < getattr(self, "_dry_adopt_after", 0.0):
@@ -9544,14 +9556,7 @@ class afcBambuAMS(afcUnit):
         if (stamped is not None
             and int(dr) == int(stamped)):
             return False
-        # From cold, adopt a dry only once the countdown ticks, falling by at most elapsed plus
-        # DRYREM_TICK_SLACK_S; a frozen register or an HT's jump must not latch _drying.
-        now = _mono(self)
-        ticked = False
-        if prev is not None:
-            fell = int(prev[0]) - int(dr)
-            elapsed = max(0.0, now - float(prev[1]))
-            ticked = 0 < fell <= elapsed + DRYREM_TICK_SLACK_S
+        # From cold, adopt a dry only once the countdown ticks.
         # Any number different from the stop's stamp means the stop did not take.
         unstopped = stamped is not None and int(stamped) != int(dr)
         if not (ticked or unstopped):
@@ -9559,6 +9564,8 @@ class afcBambuAMS(afcUnit):
         was = int(prev[0]) if prev is not None else int(stamped)
         self._drying = True
         self._dryrem_at_stop = None
+        # The unit is drying after all, so an earlier "never answered" no longer holds.
+        self._dry_host_refusal = ""
         # So a load refused for drying can be traced. Bare test objects may lack a logger.
         try:
             self.logger.info(f"AFC bambu {self.name}: adopting the unit's own dry cycle -- "
