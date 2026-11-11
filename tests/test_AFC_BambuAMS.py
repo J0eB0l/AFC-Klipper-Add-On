@@ -20260,6 +20260,47 @@ class TestAfcBambuAMSDropSilentDry:
         unit._drop_silent_dry(None, 100.0)
         self._untouched(unit, drying=False)
 
+    def test_a_countdown_ticking_since_the_command_is_an_answer(
+            self, monkeypatch):
+        # An HT heats without narrating chamber lines; its countdown runs.
+        unit = self._unit(monkeypatch)
+        unit._dryrem_ticked_at = 150.0
+        unit._drop_silent_dry(None, 100.0)
+        self._untouched(unit)
+
+    def test_a_tick_from_before_the_command_is_no_answer(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        unit._dryrem_ticked_at = 90.0
+        unit._drop_silent_dry(None, 100.0)
+        assert unit._drying is False
+        assert unit._dry_host_refusal == self.REFUSAL
+
+    def test_a_running_ht_countdown_holds_the_cycle(self, monkeypatch):
+        # Printer 3, 2026-11-10: each second the drop cleared the cycle and
+        # the countdown adopted it again, so a panel saw it flip.
+        unit = self._unit(monkeypatch)
+        unit._dry_started_at = 100.0
+        for now, dr in ((101.0, 43199), (102.0, 43198), (200.0, 43100),
+                        (201.0, 43099)):
+            unit.reactor.now = now
+            assert unit._dryrem_says_drying(dr) is True
+            unit._drop_silent_dry(None, 100.0)
+            assert unit._drying is True
+        assert unit._dry_host_refusal == ""
+        assert unit.logger.messages == []
+
+    def test_adopting_the_countdown_clears_a_stale_refusal(self,
+                                                           monkeypatch):
+        unit = self._unit(monkeypatch, drying=False)
+        unit._dry_host_refusal = self.REFUSAL
+        unit._dry_adopt_after = 0.0
+        unit._dryrem_says_drying(26881)
+        unit.reactor.now = 201.0
+        assert unit._dryrem_says_drying(26880) is True
+        assert unit._dry_host_refusal == ""
+        unit._drop_silent_dry(None, 100.0)
+        assert unit._drying is True
+
 
 class TestAfcBambuAMSFinishTimedDry:
     """
