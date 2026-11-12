@@ -1,10 +1,14 @@
+# AFCProject Automated Filament Changer
+#
+# Copyright (C) 2026 AFCProject
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+#
 # Bambu AMS temperature and humidity sensor
 #
 # Reports an AFC_BambuAMS unit's chamber temperature and humidity as a Klipper
 # temperature sensor, so Mainsail/Fluidd show them on the temperature card the
 # same way the OpenAMS and ACE units do.
-#
-# This file may be distributed under the terms of the GNU GPLv3 license.
 #
 # Configuration example:
 #
@@ -64,8 +68,7 @@ class TemperatureBambu:
         self._has_temp = False
         # Whether this unit reports a temperature at all (a regular AMS has no
         # dryer). Followed from the unit each sample; report_temperature pins it.
-        self._temp_capable: Optional[bool] = config.getboolean(
-            "report_temperature", None)
+        self._temp_capable: Optional[bool] = config.getboolean("report_temperature", None)
         self._temp_pinned = self._temp_capable is not None
         self._unit: Any = None
         self._callback: Optional[Callable[[float, float], None]] = None
@@ -73,14 +76,14 @@ class TemperatureBambu:
 
         # Register as "aht10 <name>" so Mainsail and Fluidd show humidity, same
         # as temperature_oams and temperature_ace.
-        self.simulate_aht = config.getboolean(
-            "simulate_supported_sensor_mainsail", True)
+        self.simulate_aht = config.getboolean("simulate_supported_sensor_mainsail", True)
         if self.simulate_aht:
             self.printer.add_object("aht10 " + self.name, self)
             # Also register under the configured sensor_type, since Fluidd looks
             # up e.g. "sht3x <name>" rather than aht10 for some aliases.
             stype = config.get("sensor_type", "").strip()
-            if stype and stype.lower() != "aht10":
+            if (stype
+                and stype.lower() != "aht10"):
                 try:
                     self.printer.add_object(stype + " " + self.name, self)
                 except Exception:
@@ -129,13 +132,12 @@ class TemperatureBambu:
 
         :return Any: The unit object, or None if it is not configured.
         """
-        unit = self.printer.lookup_object(
-            "AFC_BambuAMS " + self.unit_name, None)
-        if unit is None and not self._warned:
+        unit = self.printer.lookup_object("AFC_BambuAMS " + self.unit_name, None)
+        if (unit is None
+            and not self._warned):
             self._warned = True
-            _fallback_logger.warning(
-                "temperature_bambu %s: no AFC_BambuAMS unit '%s'",
-                self.name, self.unit_name)
+            _fallback_logger.warning("temperature_bambu %s: no AFC_BambuAMS unit '%s'", self.name,
+                                     self.unit_name)
         return unit
 
     def _sample(self, eventtime: float) -> float:
@@ -155,10 +157,8 @@ class TemperatureBambu:
                 self._unit = self._resolve_unit()
             if self._unit is not None:
                 if not self._temp_pinned:
-                    # has_heater decides whether a chamber temperature exists.
-                    # Re-read each sample since AFC_BridgeBox can add the dryer live.
-                    self._temp_capable = bool(
-                        getattr(self._unit, "has_heater", True))
+                    # Re-read each sample, since AFC_BridgeBox can add the dryer live.
+                    self._temp_capable = bool(getattr(self._unit, "has_heater", True))
                 st = self._unit.get_status(eventtime) or {}
                 h = st.get("humidity")
                 if h is not None:
@@ -167,15 +167,14 @@ class TemperatureBambu:
                 if t is not None:
                     self.temp = float(t)
                     self._has_temp = True
-                    # Range check only against a real reading.
-                    if self.temp < self.min_temp or self.temp > self.max_temp:
+                    if (self.temp < self.min_temp
+                        or self.temp > self.max_temp):
                         self.printer.invoke_shutdown(
                             "temperature_bambu %s: %.1f outside range %.1f:%.1f"
                             % (self.name, self.temp, self.min_temp,
                                self.max_temp))
         except Exception as e:
-            _fallback_logger.debug(
-                "temperature_bambu %s: sample failed: %s", self.name, e)
+            _fallback_logger.debug("temperature_bambu %s: sample failed: %s", self.name, e)
 
         measured_time = self.reactor.monotonic()
         if self._callback is not None:

@@ -4,22 +4,10 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
-# OpenAMS RFID integration for AFC.
-#
-# The OpenAMS mainboard has two RFID antenna boards (RFID A / RFID B), each an
-# FM17580 reader: a Fudan MFRC522-class chip (13.56 MHz, ISO14443A, MIFARE
-# Classic) on an 8-pin MFRC522 header. RFID A is on SPI1 and RFID B on SPI2, so
-# each reader section gets its own `spi_bus:` plus a `cs_pin`. A shared bus with
-# per-reader CS pins also works.
-#
-# The stock OpenAMS firmware is built without SPI, so this module only works once
-# the firmware is rebuilt with SPI on the RFID pins. Until then a reader section
-# fails to build its SPI at config time.
-#
-# This is transport and wiring only: each reader's MCU_SPI is adapted to the
-# reg_read/reg_write contract of the shared reader stack (read_tag) used by the
-# ACE2/ViViD, so every format it decodes (see AFC_rfid_readers) reads here and
-# syncs to Spoolman through AFC_RFID.
+# OpenAMS RFID. The mainboard's RFID A (SPI1) and RFID B (SPI2) are FM17580 readers,
+# register-compatible with the MFRC522, so each reader section gets its own `spi_bus:`
+# and `cs_pin`. The stock OpenAMS firmware is built without SPI, so a reader section
+# fails at config time until the firmware is rebuilt with SPI on the RFID pins.
 from __future__ import annotations
 import traceback
 from configparser import Error as error
@@ -30,8 +18,6 @@ except:
     error_str = f"Error when trying to import AFC_utils.ERROR_STR\n{traceback.format_exc()}"
     raise error(error_str)
 
-# The shared transport-agnostic MFRC522 + MIFARE + multi-manufacturer
-# decode stack. read_tag() only needs an object exposing reg_read/reg_write.
 from extras.AFC_rfid_readers import read_tag, Mfrc522, MifareClassic
 from extras.AFC_rfid_write import StageError, register_reader
 try: from extras.AFC_RFID import (AFCUnitRFID,
@@ -45,9 +31,8 @@ if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
 
-# MFRC522 SPI: mode 0. The address byte is (reg<<1); read sets the MSB (0x80).
-# The FM17580 is register-compatible with the MFRC522, so this framing is shared
-# with the ViViD/ACE2. 5 MHz is a safe default; the FM17580 SPI tops out at 10.
+# MFRC522 SPI mode 0: the address byte is (reg<<1) and a read sets the MSB (0x80).
+# 5 MHz is a safe default; the FM17580 SPI tops out at 10.
 _MFRC522_SPI_MODE = 0
 _MFRC522_SPI_SPEED = 5000000
 
@@ -122,26 +107,21 @@ class AFC_OpenAMS_rfid_reader:
         :param config: the [AFC_OpenAMS_rfid <name>] section
         """
         self.printer = config.get_printer()
-        # Section is "AFC_OpenAMS_rfid <name>"; keep the trailing name.
         self.name = config.get_name().split()[-1]
-        # Take AFC's logger at construction; load_object builds AFC if needed.
         self.logger = self.printer.load_object(config, "AFC").logger
-        # Build the SPI at config time. `bus` (klippy/bus.py) is imported here so
-        # the module still loads without it in unit tests.
+        # `bus` is imported here so the module still loads without it in unit tests.
         try:
-            from . import bus            # hardware: extras.bus
+            from . import bus
         except (ImportError, ValueError):
-            import bus                   # top-level import fallback (tests)
-        # transport: only "spi" (the stock firmware's native SPI). Still read
-        # so existing sections that spell it out keep loading.
+            import bus
+        # Only "spi" exists; still read so sections that spell it out keep loading.
         transport = config.get("transport", "spi").strip().lower()
         if transport != "spi":
             error_str = (f"AFC_OpenAMS_rfid {config.get_name().split()[-1]}: "
                          f"unknown transport {transport!r} (spi)")
             raise config.error(error_str)
-        self.spi = bus.MCU_SPI_from_config(
-            config, _MFRC522_SPI_MODE, pin_option="cs_pin",
-            default_speed=_MFRC522_SPI_SPEED, cs_active_high=False)
+        self.spi = bus.MCU_SPI_from_config(config, _MFRC522_SPI_MODE, pin_option="cs_pin",
+                                           default_speed=_MFRC522_SPI_SPEED, cs_active_high=False)
         self.link = _OamsSpiRegLink(self.spi)
         # Optional hardware reset / power-down line (MFRC522 NRSTPD). Held HIGH
         # to keep the chip enabled; the Mfrc522 class does a soft reset on read.
@@ -150,8 +130,7 @@ class AFC_OpenAMS_rfid_reader:
         if reset_pin:
             ppins = self.printer.lookup_object("pins")
             self._reset_pin = ppins.setup_pin("digital_out", reset_pin)
-            self._reset_pin.setup_start_value(1, 1)     # enabled at boot, stays high
-        # Physical slots this reader's antenna covers.
+            self._reset_pin.setup_start_value(1, 1)
         self.slots: List[int] = []
         for s in (config.get("slots", "") or "").split(","):
             s = s.strip()
@@ -186,15 +165,12 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object("gcode")
-        # Take AFC's logger at construction; load_object builds AFC if needed.
-        # self.afc stays None until klippy:connect: guards use it as the ready marker.
+        # self.afc stays None until klippy:connect; guards use it as the ready marker.
         self.logger = self.printer.load_object(config, "AFC").logger
         self.afc = None
-        self.log_prefix = "OpenAMS RFID"       # AFCUnitRFID.apply_to_lane / Spoolman
+        self.log_prefix = "OpenAMS RFID"
         self.auto_create = config.getboolean("auto_spoolman_create", False)
 
-        # Shared decode keys: a reader section may override, else fall back to the
-        # printer-wide [AFC_rfid_keys].
         bk = config.get("bambu_master_key", None)
         ck = config.get("creality_key", None)
         cek = config.get("creality_encryption_key", None)
@@ -207,9 +183,8 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         # Warn loudly: a missing key makes every Bambu tag uid-only, which looks
         # like an antenna/positioning problem.
         if self.bambu_master_key is None:
-            self.logger.warning(
-                "AFC_OpenAMS_rfid: no bambu_master_key resolved (section "
-                "option or [AFC_rfid_keys]). Bambu tags will not decode")
+            self.logger.warning("AFC_OpenAMS_rfid: no bambu_master_key resolved (section "
+                                "option or [AFC_rfid_keys]). Bambu tags will not decode")
 
         # lane -> physical slot (e.g. "lane4:0, lane5:1, ...").
         self._lane_slot: Dict[str, int] = {}
@@ -226,9 +201,7 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
                 raise config.error(error_str)
 
         self._slot_reader: Dict[int, AFC_OpenAMS_rfid_reader] = {}
-        self._last: Dict[int, dict] = {}       # slot -> last raw tag
-        # Slots already warned as having no reader, so a scan's rapid polling
-        # logs it once.
+        self._last: Dict[int, dict] = {}
         self._no_reader_warned: set[int] = set()
 
         self.gcode.register_command(
@@ -248,14 +221,11 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
                 and isinstance(obj, AFC_OpenAMS_rfid_reader)):
                 for slot in obj.slots:
                     if slot in self._slot_reader:
-                        self.logger.warning(
-                            f"AFC_OpenAMS_rfid: slot {slot} served by "
-                            f"more than one reader "
-                            f"({self._slot_reader[slot].name} and "
-                            f"{obj.name})")
+                        self.logger.warning(f"AFC_OpenAMS_rfid: slot {slot} served by "
+                                            f"more than one reader "
+                                            f"({self._slot_reader[slot].name} and {obj.name})")
                     self._slot_reader[slot] = obj
-        # Offer every reader to the shared tag writer (AFC_RFID_WRITE). The SPI
-        # link exists from config, so it is always available.
+        # Offer every reader to the shared tag writer (AFC_RFID_WRITE).
         for rdr in dict.fromkeys(self._slot_reader.values()):
             register_reader(
                 self.printer, f"oams:{rdr.name}",
@@ -266,12 +236,10 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
                     ln, r, body),
                 serves=lambda ln, r=rdr: self._lane_slot.get(ln) in r.slots)
         if not self._slot_reader:
-            self.logger.warning(
-                "AFC_OpenAMS_rfid: no [AFC_OpenAMS_rfid <name>] reader sections "
-                "found. RFID reads will no-op")
+            self.logger.warning("AFC_OpenAMS_rfid: no [AFC_OpenAMS_rfid <name>] reader sections "
+                                "found. RFID reads will no-op")
 
-    def _stage_write_around(self, lane_name: str, rdr: Any,
-                            body: Callable[..., Any]) -> None:
+    def _stage_write_around(self, lane_name: str, rdr: Any, body: Callable[..., Any]) -> None:
         """
         AFC_RFID_WRITE / AFC_RFID_ENROLL LANE= on an OpenAMS lane: run the
         unit's scan feed (AFC_OAMS_RFID_SCAN), write the tag where the scan
@@ -285,7 +253,8 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         lanes = getattr(self.afc, "lanes", None) or {}
         lane = lanes.get(lane_name)
         unit = getattr(lane, "unit_obj", None) if lane is not None else None
-        if lane is None or not hasattr(unit, "_do_rfid_scan"):
+        if (lane is None
+            or not hasattr(unit, "_do_rfid_scan")):
             error_str = f"{lane_name} is not an OpenAMS lane"
             raise StageError(error_str)
         rfid_slot = unit._rfid_scan_slot(self, lane)
@@ -296,15 +265,16 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
             error_str = f"{lane_name} is not on {rdr.name}{hint}"
             raise StageError(error_str)
         if unit._operation_active:
-            error_str = ("the OpenAMS is busy; try again once the current "
-                         "operation completes")
+            error_str = "the OpenAMS is busy; try again once the current operation completes"
             raise StageError(error_str)
         reason = unit._rfid_scan_blocked_reason(lane)
         if reason is not None:
             error_str = f"the scan feed is blocked: {reason}"
             raise StageError(error_str)
         slot = unit._spool_map.get(lane_name)
-        if slot is None or unit.oams is None or not unit.oams.is_bay_ready(slot):
+        if (slot is None
+            or unit.oams is None
+            or not unit.oams.is_bay_ready(slot)):
             error_str = (f"no filament inserted in {lane_name} (the write "
                          f"feeds the lane to turn the spool)")
             raise StageError(error_str)
@@ -352,10 +322,9 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
                 self._no_reader_warned.add(slot)
                 self.logger.warning(f"AFC_OpenAMS_rfid: no reader configured for slot {slot}")
             return None
-        tag = read_tag(
-            reader.link, bambu_master_key=self.bambu_master_key,
-            creality_key=self.creality_key,
-            creality_encryption_key=self.creality_encryption_key)
+        tag = read_tag(reader.link, bambu_master_key=self.bambu_master_key,
+                       creality_key=self.creality_key,
+                       creality_encryption_key=self.creality_encryption_key)
         if tag:
             self._last[slot] = tag
         return tag
@@ -377,8 +346,7 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
             return []
         seen: List[Any] = []
         try:
-            MifareClassic(Mfrc522(reader.link)).activate(
-                is_excluded=lambda h: True, seen=seen)
+            MifareClassic(Mfrc522(reader.link)).activate(is_excluded=lambda h: True, seen=seen)
         except Exception as e:
             self.logger.debug(f"scan_slot_uids failed on slot {slot}: {e}")
         return [u for (u, _sak, _ex) in seen]
@@ -418,11 +386,10 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         reader = self._slot_reader.get(slot)
         if reader is None:
             return None
-        tag = read_tag(
-            reader.link, bambu_master_key=self.bambu_master_key,
-            creality_key=self.creality_key,
-            creality_encryption_key=self.creality_encryption_key,
-            is_excluded=lambda h: h in exclude)
+        tag = read_tag(reader.link, bambu_master_key=self.bambu_master_key,
+                       creality_key=self.creality_key,
+                       creality_encryption_key=self.creality_encryption_key,
+                       is_excluded=lambda h: h in exclude)
         if tag:
             self._last[slot] = tag
         return tag
@@ -437,21 +404,21 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         """
         slot = self._get_slot(lane_name)
         if slot is None:
-            self.logger.warning(
-                f"AFC_OpenAMS_rfid: lane {lane_name!r} has no slot "
-                f"(set lane_slot_map)")
+            self.logger.warning(f"AFC_OpenAMS_rfid: lane {lane_name!r} has no slot "
+                                f"(set lane_slot_map)")
             return None
         tag = self.read_slot(slot)
-        if not tag or not tag.get("filament"):
+        if (not tag
+            or not tag.get("filament")):
             # A tag may still have been seen (e.g. missing decode key): record
             # its UID/type so get_status shows what was detected.
             if tag:
-                self.record_tag_read(lane_name, None, decoded=False,
-                                     uid=tag.get("uid", "") or "",
+                self.record_tag_read(lane_name, None, decoded=False, uid=tag.get("uid", "") or "",
                                      tag_type=tag.get("tag_type", "") or "")
             return None
         lane = None
-        if self.afc is not None and hasattr(self.afc, "lanes"):
+        if (self.afc is not None
+            and hasattr(self.afc, "lanes")):
             lane = self.afc.lanes.get(lane_name)
         if lane is None:
             slot_info = self._map(tag)
@@ -467,9 +434,6 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         :return dict: AFC slot_info (uid, brand, material, color_hex, ...).
         """
         return map_tag_to_slot_info(tag)
-
-    # apply_to_lane() is inherited from AFCUnitRFID (shared AFC_RFID path); it
-    # uses self._map, self.log_prefix ("OpenAMS RFID") and self.auto_create.
 
     def get_status(self, eventtime: Optional[float] = None) -> dict:
         """
@@ -502,23 +466,22 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         """
         lane_name = gcmd.get("LANE", None)
         slot = gcmd.get_int("SLOT", None)
-        if lane_name is None and slot is None:
+        if (lane_name is None
+            and slot is None):
             error_str = "OAMS_RFID_READ requires LANE= or SLOT="
             raise gcmd.error(error_str)
         if lane_name is not None:
             si = self.read_lane(lane_name)
             if si is None:
                 hint = self.undecoded_hint(lane_name)
-                gcmd.respond_info(
-                    f"OpenAMS RFID: no tag decoded on {lane_name}{hint}")
+                gcmd.respond_info(f"OpenAMS RFID: no tag decoded on {lane_name}{hint}")
             else:
                 gcmd.respond_info(
                     "OpenAMS RFID: %s -> %s %s" % (
                         lane_name, si.get("brand", ""), si.get("material", "")))
             return
         tag = self.read_slot(slot)
-        gcmd.respond_info(
-            "OpenAMS RFID: slot %d -> %s" % (slot, self._map(tag) if tag else None))
+        gcmd.respond_info("OpenAMS RFID: slot %d -> %s" % (slot, self._map(tag) if tag else None))
 
 
 def load_config(config: ConfigWrapper) -> AFC_OpenAMS_rfid:

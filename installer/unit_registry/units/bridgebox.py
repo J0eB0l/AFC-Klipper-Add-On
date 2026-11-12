@@ -19,7 +19,6 @@ from installer.unit_registry.base import BufferTarget, UnitType
 from installer.unit_registry.options import NameOption, UnitOption
 from installer.unit_registry.selection import UnitSelection
 
-# Where the USB serial ports named like a BridgeBox are listed from.
 SERIAL_BY_ID = Path("/dev/serial/by-id")
 _PORT_PATTERNS = (
     "usb-Espressif_USB_JTAG_serial_debug_unit_*-if00",
@@ -143,9 +142,8 @@ class PoolOption(UnitOption):
         """
         return f"{sel.bridgebox_pool_ams} AMS, {sel.bridgebox_pool_ht} AMS HT"
 
-    def activate(
-        self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
-    ) -> str:
+    def activate(self, ctx: Context, console: Console, prompter: Prompter,
+                 sel: UnitSelection) -> str:
         """
         Ask for both counts; an empty answer keeps a count, and at least one bay is needed.
 
@@ -170,9 +168,11 @@ class PoolOption(UnitOption):
             f"How many AMS HT units on this chain? (0-{MAX_HT}, Enter keeps "
             f"{sel.bridgebox_pool_ht}): ",
         ) or str(sel.bridgebox_pool_ht)
-        if not _count_ok(ams, MAX_AMS) or not _count_ok(ht, MAX_HT):
+        if (not _count_ok(ams, MAX_AMS)
+            or not _count_ok(ht, MAX_HT)):
             return f"{RED}Enter 0 to {MAX_AMS} AMS units and 0 to {MAX_HT} AMS HT units.{NC}"
-        if int(ams) == 0 and int(ht) == 0:
+        if (int(ams) == 0
+            and int(ht) == 0):
             return f"{RED}A chain needs at least one AMS or AMS HT.{NC}"
         sel.bridgebox_pool_ams = int(ams)
         sel.bridgebox_pool_ht = int(ht)
@@ -193,9 +193,8 @@ class ConnectionOption(UnitOption):
         """
         return connection_label(sel)
 
-    def activate(
-        self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
-    ) -> str:
+    def activate(self, ctx: Context, console: Console, prompter: Prompter,
+                 sel: UnitSelection) -> str:
         """
         Offer USB, USB then WiFi, and WiFi only; the last one asks for the address.
 
@@ -230,10 +229,8 @@ class ConnectionOption(UnitOption):
                 "The address the BridgeBox's setup page showed (for example 192.168.1.50): ",
             )
             if _ADDRESS.fullmatch(address) is None:
-                return (
-                    f"{RED}Enter the address the way the setup page shows it, like "
-                    f"192.168.1.50.{NC}"
-                )
+                return (f"{RED}Enter the address the way the setup page shows it, like "
+                        f"192.168.1.50.{NC}")
             sel.bridgebox_connection = "wifi"
             sel.bridgebox_address = address
         elif choice:
@@ -257,9 +254,8 @@ class SerialOption(UnitOption):
             return "none (WiFi only)"
         return sel.bridgebox_serial
 
-    def activate(
-        self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
-    ) -> str:
+    def activate(self, ctx: Context, console: Console, prompter: Prompter,
+                 sel: UnitSelection) -> str:
         """
         List the ports named like a BridgeBox and take ``A``, a number or a ``/dev`` path.
 
@@ -284,7 +280,8 @@ class SerialOption(UnitOption):
             sel.bridgebox_serial = "auto"
         elif _DEV_PATH.fullmatch(choice):
             sel.bridgebox_serial = choice
-        elif _NUMBER.fullmatch(choice) and 1 <= int(choice) <= len(ports):
+        elif (_NUMBER.fullmatch(choice)
+              and 1 <= int(choice) <= len(ports)):
             sel.bridgebox_serial = ports[int(choice) - 1]
         elif choice:
             return f"{RED}Enter A, a number from the list, or a /dev/serial/by-id path.{NC}"
@@ -315,9 +312,8 @@ class BridgeBox(UnitType):
         """
         return _FIRST_CHAIN
 
-    def copy_files(
-        self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
-    ) -> None:
+    def copy_files(self, ctx: Context, console: Console, prompter: Prompter,
+                   sel: UnitSelection) -> None:
         """
         Copy the hardware file and the chain file, then write the chain's choices into it.
 
@@ -333,9 +329,8 @@ class BridgeBox(UnitType):
         safe_copy(ctx, console, prompter, templates / _TEMPLATE, cfg / _TEMPLATE)
         _edit_lines(cfg / _TEMPLATE, _chain_edits(sel))
 
-    def install_additional(
-        self, ctx: Context, console: Console, prompter: Prompter, sel: UnitSelection
-    ) -> None:
+    def install_additional(self, ctx: Context, console: Console, prompter: Prompter,
+                           sel: UnitSelection) -> None:
         """
         Copy the chain file under the new chain's name and rename the section.
 

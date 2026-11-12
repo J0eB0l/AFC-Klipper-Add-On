@@ -4,13 +4,9 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
-# Bambu AMS <-> Spoolman integration: lookup/bind/sync, UID binding memos and
-# the measured remaining weight. The AMS reads its own tags, so AFC_BambuAMS
-# keeps scanning and tag application.
-#
-# Enabled by an [AFC_BambuAMS_rfid] section; without one the unit's Spoolman
-# shims no-op. A unit with no Spoolman delegate still gets a measurement-only
-# BambuSpoolman, so a capscan lands without Spoolman.
+# Bambu AMS <-> Spoolman: lookup, bind, sync, UID binding memos and the measured
+# remaining weight. Enabled by an [AFC_BambuAMS_rfid] section; a unit without one
+# still gets a measurement-only BambuSpoolman, so a capscan lands without Spoolman.
 from __future__ import annotations
 
 import chelper
@@ -21,8 +17,7 @@ from typing import Any, Callable, Dict, Optional, Set, TYPE_CHECKING
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
 
-# Imported from the unit module to keep one definition; that module imports
-# this one back lazily, so there is no import cycle.
+# That module imports this one back lazily, so there is no import cycle.
 from extras.AFC_BambuAMS import BAMBU_BRAND, _split_bambu_material
 
 try: from extras.AFC_utils import ERROR_STR
@@ -58,8 +53,6 @@ def _bambu_spoolman_client(afc: Any) -> Optional[Any]:
         or getattr(afc, "moonraker", None) is None):
         return None
     try:
-        # The shared per-afc cache (AFC_RFID._cached_spoolman_client), so the
-        # client's ensure-fields memos survive between calls here too.
         return _cached_spoolman_client(afc)
     except Exception:
         return None
@@ -121,8 +114,7 @@ class _QuietInfo:
         :param a: the log call's positional arguments
         :param k: the log call's keyword arguments
         """
-        # AFC's debug() has no console_only, and the TypeError would drop the
-        # line.
+        # AFC's debug() has no console_only.
         k.pop("console_only", None)
         try:
             self._inner.debug(*a, **k)
@@ -142,14 +134,10 @@ class BambuSpoolman:
     :param unit: the afcBambuAMS this instance serves
     """
 
-    #: ONE Spoolman worker thread for every unit, not one per unit: the jobs
-    #: are HTTP calls that must not run on the reactor, and they serialize
-    #: fine. Class-level so a second unit reuses the first one's thread.
+    #: One Spoolman worker thread for every unit, class-level so a second unit reuses it.
     _spool_q: Any = None
     _spool_t: Any = None
-    #: False on a measurement-only delegate: nothing reaches Spoolman. Class
-    #: default True, so an object built without __init__ is a Spoolman
-    #: delegate.
+    #: False on a measurement-only delegate: nothing reaches Spoolman.
     spoolman_on: bool = True
 
     def __init__(self, unit: Any, spoolman: bool = True) -> None:
@@ -167,9 +155,7 @@ class BambuSpoolman:
         #: slot -> the tag UID its Spoolman binding came from. A slot with no
         #: entry was bound some other way (manual, restored) and is left alone.
         self._bound_uid: Dict[int, str] = {}
-        #: slot -> the AMS's own measured remaining percentage. The
-        #: measurement's identity (see _adopt_measured_remain), not a figure
-        #: anything re-applies.
+        #: slot -> the AMS's own measured remaining percentage (see _adopt_measured_remain).
         self._measured_remain: Dict[int, Any] = {}
         #: slot -> (pct, nominal, spool_id, sent): a measurement owed to the
         #: spool this bay's pending bind will attach (see
@@ -179,12 +165,8 @@ class BambuSpoolman:
         #: grams because nothing named the bay's material yet, to be turned
         #: into grams through the density once something does.
         self._convert_owed: Dict[int, Any] = {}
-        #: UIDs with a Spoolman lookup in flight, so two scans of the same
-        #: bay do not both hit the server.
         self._spoolman_inflight: Set[str] = set()
-        #: Bays whose Spoolman binding has been asked for and has
-        #: not answered yet. Cleared by the completion callback,
-        #: never by a clock.
+        #: Bays whose Spoolman bind has not answered yet; cleared by the callback, not a clock.
         self._bind_pending: Set[int] = set()
         #: UIDs Spoolman has already said it does not know.
         self._spoolman_no_match: Set[str] = set()
@@ -278,7 +260,8 @@ class BambuSpoolman:
         :param uid: the tag UID actually present in the bay
         :return bool: True only if Spoolman positively contradicts the binding
         """
-        if not spool_id or not uid:
+        if (not spool_id
+            or not uid):
             return False
         memo = getattr(self, "_binding_check", None)
         if memo is None:
@@ -313,7 +296,8 @@ class BambuSpoolman:
         :param slot: 0-based AMS slot index, or None when unknown
         :param uid: the tag UID the binding was made from
         """
-        if slot is None or not uid:
+        if (slot is None
+            or not uid):
             return
         try:
             if getattr(self, "_bound_uid", None) is None:
@@ -322,8 +306,7 @@ class BambuSpoolman:
         except Exception:
             pass
 
-    #: Run Spoolman HTTP on a worker thread so blocking calls do not starve
-    #: clock sync; only the lane mutation returns via register_async_callback.
+    #: Run Spoolman HTTP on a worker thread so blocking calls do not starve clock sync.
     SPOOLMAN_BG = True
 
     def _spoolman_bg(self, job: Callable[[], None]) -> None:
@@ -359,15 +342,13 @@ class BambuSpoolman:
                     except Exception:
                         pass
 
-            t = threading.Thread(target=_drain, daemon=True,
-                                 name="afc_bambu_spool")
+            t = threading.Thread(target=_drain, daemon=True, name="afc_bambu_spool")
             BambuSpoolman._spool_t = t
             t.start()
         q.put(job)
 
-    def _bind_by_uid_bg(self, lane: Any, slot: Optional[int], uid: str,
-                        note: str, tray_uid: str = "",
-                        restored: bool = False) -> None:
+    def _bind_by_uid_bg(self, lane: Any, slot: Optional[int], uid: str, note: str,
+                        tray_uid: str = "", restored: bool = False) -> None:
         """
         Match this tag against Spoolman off-reactor; bind the lane on-reactor.
 
@@ -400,7 +381,6 @@ class BambuSpoolman:
         """
         if not uid:
             return
-        # Normalized once so the lookup, conflict check and log line agree.
         tray_uid = _norm_tray_uid(tray_uid)
         inflight = getattr(self, "_spoolman_inflight", None)
         if inflight is None:
@@ -430,15 +410,14 @@ class BambuSpoolman:
                 if client is None:
                     down = restored
                 if client is not None:
-                    # The shared matcher (also used by _spoolman_resolve), so
-                    # every reader resolves a tag to a spool the same way.
-                    spool, matched_by_tray, dupe_id = match_spool_for_tag(
-                        client, uid, tray_uid)
+                    spool, matched_by_tray, dupe_id = match_spool_for_tag(client, uid, tray_uid)
                     by_tray = spool if matched_by_tray else None
-                    if restored and spool is None:
+                    if (restored
+                        and spool is None):
                         reach = getattr(client, "reachable", None)
                         down = callable(reach) and not reach()
-                    if dupe_id is not None and spool is not None:
+                    if (dupe_id is not None
+                        and spool is not None):
                         # Spoolman holds this reel twice: fold the other record in.
                         merged = merge_duplicate_spool(client, spool, dupe_id, tray_uid,
                                                        self._u.logger,
@@ -447,38 +426,32 @@ class BambuSpoolman:
                             spool = merged
                             if by_tray is not None:
                                 by_tray = merged
-                if spool is not None and client is not None:
-                    # Teach the record the other half of its identity: union
-                    # the chip UID into card_uids, or stamp the tray UID only
-                    # when the record has none (a different one is logged, not
-                    # overwritten).
+                if (spool is not None
+                    and client is not None):
+                    # Union the chip UID into card_uids, or stamp the tray UID if none is saved.
                     try:
-                        if by_tray is None and tray_uid:
+                        if (by_tray is None
+                            and tray_uid):
                             have = _spool_tray_uid(spool)
                             if not have:
-                                client.write_tray_uid(spool.get("id"),
-                                                      tray_uid)
+                                client.write_tray_uid(spool.get("id"), tray_uid)
                             elif have != tray_uid:
-                                self._u.logger.debug(
-                                    f"AFC bambu {self._u.name}: spool "
-                                    f"{spool.get('id')} carries tray UID "
-                                    f"{have} but this tag says {tray_uid} -- "
-                                    f"left alone; one of them is on the wrong "
-                                    f"record")
+                                self._u.logger.debug(f"AFC bambu {self._u.name}: spool "
+                                                     f"{spool.get('id')} carries tray UID "
+                                                     f"{have} but this tag says {tray_uid} -- "
+                                                     f"left alone; one of them is on the wrong "
+                                                     f"record")
                     except Exception:
                         pass
-                    # Warm AFC's spool cache here so set_spoolID below need not
-                    # block on its own get_spool. Best-effort.
+                    # Warm AFC's spool cache so set_spoolID below need not block on get_spool.
                     try:
                         mr = getattr(afc, "moonraker", None)
-                        if mr is not None and hasattr(mr, "get_spool"):
-                            # get_spool is fire-and-forget; warming the cache
-                            # is the point.
+                        if (mr is not None
+                            and hasattr(mr, "get_spool")):
                             mr.get_spool(spool.get("id"), lambda _sp: None)
                     except Exception:
                         pass
-                    # Union this chip UID into the spool's card_uids while
-                    # off-reactor, so the next read matches directly.
+                    # Off-reactor, so the next read matches directly.
                     try:
                         client.write_spool_metadata(spool.get("id"), uid=uid)
                     except Exception:
@@ -486,8 +459,7 @@ class BambuSpoolman:
                 if not restored:
                     # A read of the bay, matched or not: tell Spoolman's
                     # paired browsers. A restored lane's lookup read nothing.
-                    report_tag_scan(client, getattr(lane, "name", ""), uid,
-                                    "bambu")
+                    report_tag_scan(client, getattr(lane, "name", ""), uid, "bambu")
             except Exception:
                 spool = None
                 down = restored
@@ -501,7 +473,6 @@ class BambuSpoolman:
                 landing = False
                 try:
                     if not down:
-                        # Answered: no retry of it is pending any more.
                         (getattr(self._u, "_lookup_retry", None)
                          or {}).pop(slot, None)
                     if down:
@@ -509,13 +480,11 @@ class BambuSpoolman:
                     elif (restored
                           and spool is not None
                           and not BambuSpoolman._spool_weighed(spool, afc)):
-                        BambuSpoolman._lookup_refuse(self, lane, slot, uid,
-                                                     spool.get("id"))
+                        BambuSpoolman._lookup_refuse(self, lane, slot, uid, spool.get("id"))
                     elif (spool is not None
                           and afc is not None
                           and getattr(afc, "spool", None) is not None
-                          and getattr(lane, "spool_id", None)
-                          in (None, "", 0)
+                          and getattr(lane, "spool_id", None) in (None, "", 0)
                           and not BambuSpoolman._tag_left(self, slot, uid)):
                         # AFC's set_spoolID binds when its fetch answers
                         # (on_done). Until then the bind stays pending
@@ -529,8 +498,6 @@ class BambuSpoolman:
                         else:
                             afc.spool.set_spoolID(lane, spool.get("id"))
                             self._remember_bound_uid(slot, uid)
-                        # DEBUG: the summary this callback goes on to speak
-                        # already ends with "updated Spoolman spool N".
                         self._u.logger.debug(
                             f"AFC bambu {self._u.name}: matched {lane.name} to "
                             f"Spoolman spool {spool.get('id')} by "
@@ -544,8 +511,7 @@ class BambuSpoolman:
                         miss.add(uid)
                         # No spool, so no bind: nothing is owed a measurement
                         # a later hand-bind should not inherit.
-                        (getattr(self, "_bind_owed", None) or {}).pop(
-                            slot, None)
+                        (getattr(self, "_bind_owed", None) or {}).pop(slot, None)
                 except Exception:
                     pass
                 finally:
@@ -593,8 +559,7 @@ class BambuSpoolman:
         except (TypeError, ValueError):
             return False
 
-    def _lookup_unanswered(self, lane: Any, slot: Optional[int],
-                           uid: str) -> None:
+    def _lookup_unanswered(self, lane: Any, slot: Optional[int], uid: str) -> None:
         """
         A restored lane's lookup that Spoolman did not answer: ask again later.
 
@@ -608,7 +573,8 @@ class BambuSpoolman:
         :param slot: 0-based AMS slot index
         :param uid: the tag UID that was looked up
         """
-        if slot is None or not BambuSpoolman._bay_carries(self, slot, uid):
+        if (slot is None
+            or not BambuSpoolman._bay_carries(self, slot, uid)):
             return
         u = self._u
         latch = getattr(u, "_spoolman_latched", None)
@@ -623,13 +589,11 @@ class BambuSpoolman:
         except Exception:
             now = 0.0
         retry[slot] = now + wait
-        u.logger.debug(
-            f"AFC bambu {u.name}: Spoolman did not answer the lookup of "
-            f"{str(uid).upper()} for {getattr(lane, 'name', lane)}; asking "
-            f"again in {wait:.0f} s")
+        u.logger.debug(f"AFC bambu {u.name}: Spoolman did not answer the lookup of "
+                       f"{str(uid).upper()} for {getattr(lane, 'name', lane)}; asking "
+                       f"again in {wait:.0f} s")
 
-    def _lookup_refuse(self, lane: Any, slot: Optional[int], uid: str,
-                       sid: Any) -> None:
+    def _lookup_refuse(self, lane: Any, slot: Optional[int], uid: str, sid: Any) -> None:
         """
         A restored lane's match that AFC would clear the lane for: not bound.
 
@@ -653,12 +617,11 @@ class BambuSpoolman:
         if slot is not None:
             refused[slot] = (str(uid), sid)
         name = getattr(lane, "name", lane)
-        u.logger.info(
-            f"AFC bambu {u.name}: {name} -- tag {str(uid).upper()} matches "
-            f"Spoolman spool {sid}, which has no remaining weight on record, "
-            f"so the lane was not linked to it (AFC clears a lane linked to a "
-            f"spool without one). Correct spool {sid}'s weight in Spoolman, "
-            f"then run AFC_BAMBU_SCAN LANE={name} to link it")
+        u.logger.info(f"AFC bambu {u.name}: {name} -- tag {str(uid).upper()} matches "
+                      f"Spoolman spool {sid}, which has no remaining weight on record, "
+                      f"so the lane was not linked to it (AFC clears a lane linked to a "
+                      f"spool without one). Correct spool {sid}'s weight in Spoolman, "
+                      f"then run AFC_BAMBU_SCAN LANE={name} to link it")
 
     def _bay_carries(self, slot: Optional[int], uid: str) -> bool:
         """
@@ -679,7 +642,8 @@ class BambuSpoolman:
         """
         try:
             slots = getattr(self._u, "_slots", None)
-            if not isinstance(slots, list) or not 0 <= slot < len(slots):
+            if (not isinstance(slots, list)
+                or not 0 <= slot < len(slots)):
                 return True
             rec = slots[slot] or {}
             return (bool(rec.get("present"))
@@ -713,7 +677,7 @@ class BambuSpoolman:
                 return False
             rec = slots[slot] or {}
             if not rec:
-                return False                 # nothing known about the bay
+                return False
             if not rec.get("present"):
                 return True
             ruid = str(rec.get("rfid_uid") or "").lower()
@@ -723,8 +687,7 @@ class BambuSpoolman:
         except Exception:
             return False
 
-    def _bind_landed(self, lane: Any, slot: Optional[int], uid: str,
-                     miss: bool = False) -> None:
+    def _bind_landed(self, lane: Any, slot: Optional[int], uid: str, miss: bool = False) -> None:
         """
         A bind this module sent has run its course: settle it, then say the
         summary that was waiting on it.
@@ -760,9 +723,8 @@ class BambuSpoolman:
                 if bound:
                     u = self._u
                     u._clear_lane_filament(lane)
-                    u._unbind_spool(
-                        lane, f"its Spoolman link for tag {str(uid).upper()} "
-                              f"landed after that spool left the bay")
+                    u._unbind_spool(lane, f"its Spoolman link for tag {str(uid).upper()} "
+                                    f"landed after that spool left the bay")
                     # A reel nothing has read goes back on lane defaults; one
                     # still settling (_defaults_due) gets them, and the line,
                     # once it has.
@@ -770,8 +732,7 @@ class BambuSpoolman:
                     dflt = getattr(u, "_defaults_until_read", None)
                     if (rec.get("present")
                         and callable(dflt)
-                        and slot not in (getattr(u, "_defaults_due", None)
-                                         or {})):
+                        and slot not in (getattr(u, "_defaults_due", None) or {})):
                         dflt(slot, rec, say=False)
                     u._save_lane_vars()
             elif bound:
@@ -832,16 +793,16 @@ class BambuSpoolman:
         :return bool: True while the bind is still to be dispatched
         """
         try:
-            # No Spoolman here, so no bind will ever be dispatched for it.
             if not getattr(self, "spoolman_on", True):
                 return False
-            if slot is None or not info.get("rfid_uid"):
+            if (slot is None
+                or not info.get("rfid_uid")):
                 return False
             afc = getattr(self._u, "afc", None)
-            if afc is None or getattr(afc, "spoolman", None) is None:
+            if (afc is None
+                or getattr(afc, "spoolman", None) is None):
                 return False
-            # getattr throughout: duck-typed stand-ins carry only what their
-            # case needs, and one without the unit's memos returns False.
+            # getattr throughout: duck-typed stand-ins carry only what their case needs.
             latch = getattr(self._u, "_spoolman_latched", None)
             if latch is None:
                 return False
@@ -875,10 +836,12 @@ class BambuSpoolman:
           sent
         """
         try:
-            if not getattr(self, "spoolman_on", True) or slot is None:
+            if (not getattr(self, "spoolman_on", True)
+                or slot is None):
                 return False
             afc = getattr(self._u, "afc", None)
-            if afc is None or getattr(afc, "spoolman", None) is None:
+            if (afc is None
+                or getattr(afc, "spoolman", None) is None):
                 return False
             if slot in (getattr(self, "_bind_pending", None) or ()):
                 return True
@@ -890,7 +853,8 @@ class BambuSpoolman:
                 if info.get("rfid_uid"):
                     return True
                 t0 = getattr(self._u, "_scan_t0", None) or []
-                if 0 <= slot < len(t0) and t0[slot] is not None:
+                if (0 <= slot < len(t0)
+                    and t0[slot] is not None):
                     return True
             coming = getattr(self._u, "_lookup_coming", None)
             return bool(coming(slot, info)) if callable(coming) else False
@@ -910,11 +874,11 @@ class BambuSpoolman:
         """
         owed = getattr(self, "_bind_owed", None)
         held = owed.get(slot) if owed and slot is not None else None
-        if held is not None and not held[3]:
+        if (held is not None
+            and not held[3]):
             owed[slot] = (held[0], held[1], held[2], True)
 
-    def _spoolman_sync(self, lane: Any, info: dict,
-                       restored: bool = False) -> None:
+    def _spoolman_sync(self, lane: Any, info: dict, restored: bool = False) -> None:
         """
         Bind this bay in Spoolman, then release the summary that was waiting.
 
@@ -937,28 +901,26 @@ class BambuSpoolman:
         slot = info.get("index")
         try:
             if restored:
-                BambuSpoolman._spoolman_sync_inner(self, lane, info,
-                                                   restored=True)
+                BambuSpoolman._spoolman_sync_inner(self, lane, info, restored=True)
             else:
                 BambuSpoolman._spoolman_sync_inner(self, lane, info)
         finally:
             try:
                 owed = getattr(self, "_bind_owed", None)
                 held = owed.get(slot) if owed and slot is not None else None
-                if held is not None and not held[3]:
+                if (held is not None
+                    and not held[3]):
                     owed.pop(slot, None)
             except Exception:
                 pass
             try:
                 if (slot is not None
-                    and slot not in (getattr(self, "_bind_pending", None)
-                                     or ())):
+                    and slot not in (getattr(self, "_bind_pending", None) or ())):
                     BambuSpoolman._drain_spool_summary(self, slot)
             except Exception:
                 pass
 
-    def _spoolman_sync_inner(self, lane: Any, info: dict,
-                             restored: bool = False) -> None:
+    def _spoolman_sync_inner(self, lane: Any, info: dict, restored: bool = False) -> None:
         """
         Bind this lane's spool to Spoolman by tag UID, creating it if allowed.
 
@@ -985,7 +947,8 @@ class BambuSpoolman:
           (afcBambuAMS._lookup_unbound), not a read of the bay
         """
         uid = info.get("rfid_uid")
-        if not uid or lane is None:
+        if (not uid
+            or lane is None):
             return
         # An empty bay has no tag to bind: the unit keeps a bay's UID in its
         # record after the spool leaves, and that leftover UID would re-bind the
@@ -997,27 +960,26 @@ class BambuSpoolman:
         if bound not in (None, "", 0):
             prev = (getattr(self, "_bound_uid", None) or {}).get(slot)
             if prev == uid:
-                return           # already bound BY THIS TAG: nothing to do
+                return
             if prev is None:
                 # The memo does not survive a restart but the binding does, so
                 # ask Spoolman whether the bound spool's UIDs exclude this tag.
                 # A spool with no recorded UID is left alone.
                 checker = getattr(self, "_binding_contradicted", None)
-                if checker is None or not checker(bound, uid):
+                if (checker is None
+                    or not checker(bound, uid)):
                     return
-            # A different tag is in the bay, so the binding names the previous
-            # spool. Unbind through the unit, which owns the lane. After a
-            # restart there is no remembered tag to name, so the reason says
-            # what proved it instead: Spoolman's UIDs for the spool.
+            # A different tag is in the bay, so the binding names the previous spool. After a
+            # restart there is no remembered tag, so the reason names Spoolman's UIDs instead.
             if prev is None:
                 why = (f"tag {str(uid).upper()} is in this bay now, and "
                        f"Spoolman does not list it on that spool")
             else:
-                why = (f"tag {str(uid).upper()} is in this bay now, not "
-                       f"{str(prev).upper()}")
+                why = f"tag {str(uid).upper()} is in this bay now, not {str(prev).upper()}"
             self._u._unbind_spool(lane, why)
         afc = getattr(self._u, "afc", None)
-        if afc is None or getattr(afc, "spoolman", None) is None:
+        if (afc is None
+            or getattr(afc, "spoolman", None) is None):
             return
         si = self._spoolman_slot_info(info)
         have_profile = bool(si.get("material"))
@@ -1031,14 +993,11 @@ class BambuSpoolman:
             if uid in miss:
                 return
         try:
-            allow = get_auto_spoolman_create(
-                lane, getattr(self._u, "auto_spoolman_create", False))
+            allow = get_auto_spoolman_create(lane, getattr(self._u, "auto_spoolman_create", False))
             if (have_profile
                 and allow
                 and not restored):
-                # Create needs the full shared-helper flow. Passing the reactor
-                # sends its HTTP off the reactor; the answer is read in
-                # _bind_landed.
+                # With the reactor, the create's HTTP runs off it; _bind_landed reads the answer.
                 pend_b = getattr(self, "_bind_pending", None)
                 if pend_b is None:
                     pend_b = self._bind_pending = set()
@@ -1051,17 +1010,15 @@ class BambuSpoolman:
                     on_done=lambda _s=slot: BambuSpoolman._bind_landed(
                         self, lane, _s, uid, miss=True))
             else:
-                # Match-only and off-reactor: find the spool by UID on the
-                # worker, then set_spoolID from the reactor callback. The
-                # in-flight set stops duplicate lookups.
-                BambuSpoolman._bind_by_uid_bg(
-                    self, lane, slot, uid,
-                    "" if have_profile else " (no tag profile decoded)",
-                    tray_uid=info.get("tray_uid") or "", restored=restored)
+                # Match-only and off-reactor; the in-flight set stops duplicate lookups.
+                BambuSpoolman._bind_by_uid_bg(self, lane, slot, uid,
+                                              "" if have_profile else " (no tag profile decoded)",
+                                              tray_uid=info.get("tray_uid") or "",
+                                              restored=restored)
         except Exception:
             try:
                 self._u.logger.debug("AFC bambu: spoolman sync failed",
-                                  traceback=traceback.format_exc())
+                                     traceback=traceback.format_exc())
             except Exception:
                 self._u.logger.debug("AFC bambu: spoolman sync failed")
 
@@ -1096,7 +1053,8 @@ class BambuSpoolman:
         idx = info.get("index")
         owed = getattr(self, "_bind_owed", None) or {}
         conv = getattr(self, "_convert_owed", None) or {}
-        if lane is None or (idx not in owed and idx not in conv):
+        if (lane is None
+            or (idx not in owed and idx not in conv)):
             return
         # Extrusion owns the weight from here, and a spool that has been fed
         # no longer holds what was measured.
@@ -1139,7 +1097,6 @@ class BambuSpoolman:
         pct, nominal, prior, sent = owed[idx]
         sid = getattr(lane, "spool_id", None)
         if sid in (None, "", 0):
-            # Still coming, unless nothing is left that could deliver it.
             afc = getattr(self._u, "afc", None)
             if (not getattr(self, "spoolman_on", True)
                 or afc is None
@@ -1161,16 +1118,16 @@ class BambuSpoolman:
         # with Spoolman's stored figure. Whether Spoolman does is the push's
         # own call (sync_measured_to_spoolman).
         lane.weight = grams
-        self._u.logger.debug(
-            f"AFC bambu {self._u.name}: {getattr(lane, 'name', '?')} bound "
-            f"to spool {sid} after its measurement; handing the measured "
-            f"{grams} g to it")
-        self._push_measured_to_spoolman(lane, grams, "physical AMS measurement",
-                                        pct=pct, nominal=nominal)
+        self._u.logger.debug(f"AFC bambu {self._u.name}: {getattr(lane, 'name', '?')} bound "
+                             f"to spool {sid} after its measurement; handing the measured "
+                             f"{grams} g to it")
+        self._push_measured_to_spoolman(lane, grams, "physical AMS measurement", pct=pct,
+                                        nominal=nominal)
         # Grams made without a density are still owed their material, against
         # the figure just written.
         conv = getattr(self, "_convert_owed", None)
-        if conv is not None and idx in conv:
+        if (conv is not None
+            and idx in conv):
             if BambuSpoolman._density_known(self, idx, lane):
                 conv.pop(idx, None)
             else:
@@ -1208,18 +1165,17 @@ class BambuSpoolman:
             conv.pop(idx, None)
             return
         if not BambuSpoolman._density_known(self, idx, lane):
-            return                      # still nothing names it
+            return
         conv.pop(idx, None)
         grams = BambuSpoolman._grams_now(self, idx, lane, pct, nominal)
         if grams == int(written):
             return
         lane.weight = grams
-        self._u.logger.debug(
-            f"AFC bambu {self._u.name}: {getattr(lane, 'name', '?')} -- "
-            f"{pct}% weighed at its material now it is known: {grams} g, not "
-            f"the {written} g written before the tag landed")
-        self._push_measured_to_spoolman(lane, grams, "physical AMS measurement",
-                                        pct=pct, nominal=nominal)
+        self._u.logger.debug(f"AFC bambu {self._u.name}: {getattr(lane, 'name', '?')} -- "
+                             f"{pct}% weighed at its material now it is known: {grams} g, not "
+                             f"the {written} g written before the tag landed")
+        self._push_measured_to_spoolman(lane, grams, "physical AMS measurement", pct=pct,
+                                        nominal=nominal)
         # A summary still held for the record quotes the grams it was queued
         # with; it has to say the ones the lane now has.
         pend = getattr(self, "_pending_summary", None) or {}
@@ -1261,8 +1217,7 @@ class BambuSpoolman:
         except Exception:
             return False
 
-    def _push_measured_to_spoolman(self, lane: Any, grams: int,
-                                   source: str = "", pct: int = 0,
+    def _push_measured_to_spoolman(self, lane: Any, grams: int, source: str = "", pct: int = 0,
                                    nominal: int = 0) -> None:
         """
         Write a remaining-weight figure back to the lane's Spoolman spool.
@@ -1304,14 +1259,14 @@ class BambuSpoolman:
         afc = getattr(self._u, "afc", None)
         client = _bambu_spoolman_client(afc)
         setter = getattr(client, "set_remaining_weight", None)
-        if client is None or not callable(setter):
+        if (client is None
+            or not callable(setter)):
             return
         # Off the reactor: set_remaining_weight is two blocking HTTP calls.
         src = source or "physical AMS measurement"
 
-        def _job(sid: Any = sid, grams: float = float(grams),
-                 source: str = src, pct: int = int(pct or 0),
-                 nominal: int = int(nominal or 0)) -> None:
+        def _job(sid: Any = sid, grams: float = float(grams), source: str = src,
+                 pct: int = int(pct or 0), nominal: int = int(nominal or 0)) -> None:
             """
             Worker-thread half: the one Spoolman weight write.
 
@@ -1329,17 +1284,14 @@ class BambuSpoolman:
                 _cap = (f" -- measured {pct}%, capped to the spool's "
                         f"{nominal} g nominal"
                         if pct > 100 and nominal else "")
-                self._u.logger.debug(
-                    f"AFC bambu {self._u.name}: wrote {grams} g remaining to "
-                    f"Spoolman spool {sid} ({source}){_cap}")
+                self._u.logger.debug(f"AFC bambu {self._u.name}: wrote {grams} g remaining to "
+                                     f"Spoolman spool {sid} ({source}){_cap}")
             except Exception as e:
-                self._u.logger.debug(
-                    f"AFC bambu {self._u.name}: Spoolman weight write failed: {e}")
+                self._u.logger.debug(f"AFC bambu {self._u.name}: Spoolman weight write failed: {e}")
         BambuSpoolman._spoolman_bg(self, _job)
         return
 
-    def _queue_spool_summary(self, slot: int, pct: int, grams: int,
-                             nominal: int) -> None:
+    def _queue_spool_summary(self, slot: int, pct: int, grams: int, nominal: int) -> None:
         """
         Hold the operator's summary until the bay's record can answer it.
 
@@ -1378,7 +1330,9 @@ class BambuSpoolman:
             miss0 = getattr(self, "_spoolman_no_match", None)
             latched0 = slot in (getattr(self._u, "_spoolman_latched", None)
                                 or ())
-            if uid0 and miss0 and not latched0:
+            if (uid0
+                and miss0
+                and not latched0):
                 for u0 in {u for u in miss0 if str(u).lower() == uid0}:
                     miss0.discard(u0)
         except Exception:
@@ -1405,39 +1359,37 @@ class BambuSpoolman:
         # Wait for the record or the backstop; this only covers the poll
         # catching up, since an untagged spool is never measured.
         ready = bool(info.get("material") or info.get("rfid_uid"))
-        # A UID is not an answer while the scan is still running: on an HT the
-        # UID arrives well before the profile. While _scan_verdict says
-        # "waiting", a bare UID settles nothing.
-        if ready and not info.get("material"):
+        # On an HT the UID arrives well before the profile, so a bare UID settles nothing
+        # while _scan_verdict says "waiting".
+        if (ready
+            and not info.get("material")):
             try:
                 if self._u._scan_verdict(slot) == "waiting":
                     ready = False
             except Exception:
                 pass
-        # A Spoolman lookup in flight (_spoolman_inflight, from the off-reactor
-        # _bind_by_uid_bg) is likewise unsettled; the backstop still bounds the
-        # hold.
+        # A Spoolman lookup in flight is unsettled too; the backstop still bounds the hold.
         if ready:
             try:
                 uid = str(info.get("rfid_uid") or "").lower()
                 inflight = getattr(self, "_spoolman_inflight", None) or set()
-                if uid and uid in {str(u).lower() for u in inflight}:
+                if (uid
+                    and uid in {str(u).lower() for u in inflight}):
                     ready = False
             except Exception:
                 pass
         # Wait for the bind's answer, not a clock. _bind_pending also holds the
         # summary for the shared AFC_RFID binder, which _spoolman_inflight
         # misses.
-        if ready and slot in (getattr(self, "_bind_pending", None) or ()):
+        if (ready
+            and slot in (getattr(self, "_bind_pending", None) or ())):
             ready = False
-        # And a bind not yet dispatched (see _sync_owed): the gap between the
-        # measurement landing and the bind going out. getattr because
-        # duck-typed stand-ins may lack the helper.
+        # And a bind not yet dispatched (see _sync_owed).
         _owed = getattr(self, "_sync_owed", None)
-        if ready and _owed is not None and _owed(slot, info):
+        if (ready
+            and _owed is not None
+            and _owed(slot, info)):
             ready = False
-        # Whether the record answered or the backstop expired; the summary
-        # words the two differently (see `settled`).
         settled = ready
         if not ready:
             try:
@@ -1460,8 +1412,7 @@ class BambuSpoolman:
             except Exception:
                 pass
         pend.pop(slot, None)
-        self._say_spool_summary(slot, lane, pct, grams, nominal,
-                                settled=settled)
+        self._say_spool_summary(slot, lane, pct, grams, nominal, settled=settled)
 
     def _lookup_open(self, slot: Optional[int], info: dict) -> bool:
         """
@@ -1482,14 +1433,16 @@ class BambuSpoolman:
             if slot in (getattr(self, "_bind_pending", None) or ()):
                 return True
             owed = getattr(self, "_sync_owed", None)
-            if callable(owed) and owed(slot, info):
+            if (callable(owed)
+                and owed(slot, info)):
                 return True
             # A retry counts only while the unit will still send it: a late
             # "no answer" can leave one behind for a bay the surface path has
             # since asked about and latched, and nothing will ask again.
             if slot in (getattr(self._u, "_lookup_retry", None) or {}):
                 coming = getattr(self._u, "_lookup_coming", None)
-                if not callable(coming) or coming(slot, info):
+                if (not callable(coming)
+                    or coming(slot, info)):
                     return True
             # A bind this module sent that has not bound the lane yet: a miss
             # or a refusal drops the claim, and the bind landing settles it.
@@ -1509,14 +1462,14 @@ class BambuSpoolman:
         """
         try:
             ref = (getattr(self._u, "_lookup_refused", None) or {}).get(slot)
-            if ref and str(ref[0]).lower() == str(uid or "").lower():
+            if (ref
+                and str(ref[0]).lower() == str(uid or "").lower()):
                 return ref[1]
         except Exception:
             pass
         return None
 
-    def _say_spool_summary(self, slot: int, lane: Any, pct: int,
-                           grams: int, nominal: int,
+    def _say_spool_summary(self, slot: int, lane: Any, pct: int, grams: int, nominal: int,
                            settled: bool = True) -> None:
         """
         One plain-English line for the operator when a spool is measured.
@@ -1548,29 +1501,29 @@ class BambuSpoolman:
             # from an earlier scan that this one merely kept. scan_res 1 is a
             # read, 2/3 mean no new read; absent means "tag read".
             _res = info.get("scan_res")
-            if _res is None or _res == 1:
+            if (_res is None
+                or _res == 1):
                 read = f"tag read: {what}"
             else:
                 read = f"tag on file: {what}"
             if uid:
                 read += f" [tag {str(uid).upper()}]"
-        elif uid and not settled:
+        elif (uid
+              and not settled):
             # The backstop fired before the profile arrived: that says nothing
             # about the tag, so it is not reported as a decode failure.
             read = (f"tag {str(uid).upper()} -- the profile had not arrived "
                     f"yet when this was reported, so the material is not in "
                     f"this line. It lands on the lane by itself a moment "
                     f"later; nothing needs doing")
-        elif uid and not _profile_landed(info):
-            # A tag without a decodable profile still has a UID the operator
-            # can bind in Spoolman.
+        elif (uid
+              and not _profile_landed(info)):
             read = (f"tag {str(uid).upper()} read but its profile could not be "
                     f"decoded (not a Bambu tag?)")
             # The advice only holds with the Spoolman module on: with it off
             # nothing matches a UID, and the same line goes on to say so.
             if getattr(self, "spoolman_on", True):
-                read += (" -- bind that UID to a spool in Spoolman and it will "
-                         "match from now on")
+                read += " -- bind that UID to a spool in Spoolman and it will match from now on"
         elif uid:
             # The profile decoded; the material string is just not in this
             # snapshot yet. Say what is known (the sku) and nothing more.
@@ -1597,9 +1550,7 @@ class BambuSpoolman:
                        f"little larger than a reference full spool)"))
             amount = f"full -- roughly {grams} g of a {nominal} g spool{why}"
         else:
-            amount = (f"about {pct}% left -- roughly {grams} g of a "
-                      f"{nominal} g spool" + held)
-        # Where the number went, including why Spoolman was not updated.
+            amount = (f"about {pct}% left -- roughly {grams} g of a {nominal} g spool" + held)
         sid = getattr(lane, "spool_id", None)
         if not getattr(self, "spoolman_on", True):
             # No claim about Spoolman: nothing here talked to it. A bound
@@ -1612,8 +1563,7 @@ class BambuSpoolman:
         elif not getattr(self._u, "sync_measured_to_spoolman", True):
             went = "Spoolman sync is off, so this is kept on the lane only"
         elif sid in (None, "", 0):
-            # Say why and the fix. The "not linked" prefix is a claim, so only
-            # branches that established it use it.
+            # The "not linked" prefix is a claim, so only branches that established it use it.
             unlinked = "not linked to a Spoolman spool, so this is kept on the "
             if not uid:
                 went = unlinked + "lane only"
@@ -1633,8 +1583,7 @@ class BambuSpoolman:
                     (getattr(self, "_spoolman_no_match", None) or ())}:
                 # Asked and answered: _spoolman_no_match is written only when
                 # a lookup came back empty.
-                went = unlinked + (f"lane only -- Spoolman has no spool "
-                                   f"carrying {str(uid).upper()}")
+                went = unlinked + f"lane only -- Spoolman has no spool carrying {str(uid).upper()}"
                 if not getattr(self._u, "auto_spoolman_create", False):
                     went += (f" and auto-create is off for this unit (add "
                              f"'auto_spoolman_create: True' to "
@@ -1644,11 +1593,10 @@ class BambuSpoolman:
                 # Asked, matched, and not bound: the spool has no remaining
                 # weight on record, and AFC clears a lane linked to it.
                 rsid = BambuSpoolman._lookup_refused_for(self, slot, uid)
-                went = unlinked + (
-                    f"lane only -- {str(uid).upper()} matches Spoolman spool "
-                    f"{rsid}, which has no remaining weight on record; "
-                    f"correct spool {rsid}'s weight in Spoolman, then run "
-                    f"AFC_BAMBU_SCAN LANE={where} to link it")
+                went = unlinked + (f"lane only -- {str(uid).upper()} matches Spoolman spool "
+                                   f"{rsid}, which has no remaining weight on record; "
+                                   f"correct spool {rsid}'s weight in Spoolman, then run "
+                                   f"AFC_BAMBU_SCAN LANE={where} to link it")
             elif slot in (getattr(self._u, "_spoolman_latched", None) or ()):
                 # The lookup went out on this connection and nothing it found
                 # is on the lane now (the link was cleared since, say).
@@ -1657,16 +1605,12 @@ class BambuSpoolman:
                         f"it, so the measurement stays on the lane only -- run "
                         f"AFC_BAMBU_SCAN LANE={where} to look it up again")
             else:
-                # Not asked: no lookup is pending, so claim nothing and say how
-                # to ask.
                 went = (f"no Spoolman lookup has been made for "
                         f"{str(uid).upper()}, so the measurement stays on the "
-                        f"lane only -- run AFC_BAMBU_SCAN LANE={where} to "
-                        f"link it")
+                        f"lane only -- run AFC_BAMBU_SCAN LANE={where} to link it")
         else:
             went = f"updated Spoolman spool {sid}"
-        self._u.logger.info(
-            f"{self._u.name} {where}: {read}. Measured {amount}; {went}.")
+        self._u.logger.info(f"{self._u.name} {where}: {read}. Measured {amount}; {went}.")
 
     #: Volume of filament at the unit's own 100% reference, in cm3. Derived
     #: from reels of known weight, not measured directly; _grams_for uses it
@@ -1727,7 +1671,8 @@ class BambuSpoolman:
                 break
         material = self._material_key(lane, info)
         density = getattr(lane, "density", None)
-        if not density and material:
+        if (not density
+            and material):
             density = density_for_material(material)
         return density or None
 
@@ -1774,11 +1719,14 @@ class BambuSpoolman:
                     else None
             except Exception:
                 rec = None
-            if rec and rec.get("pct_raw") == pct and rec.get("save_radius_m"):
+            if (rec
+                and rec.get("pct_raw") == pct
+                and rec.get("save_radius_m")):
                 r_mm = float(rec["save_radius_m"]) * 1000.0
                 hub2 = self.CAP_HUB_MM ** 2
                 span = self.CAP_FULL_MM ** 2 - hub2
-                if r_mm > self.CAP_HUB_MM and span > 0:
+                if (r_mm > self.CAP_HUB_MM
+                    and span > 0):
                     pct_eff = 100.0 * (r_mm ** 2 - hub2) / span
             grams = int(round(density * self.CAP_REF_VOLUME_CM3
                               * pct_eff / 100.0))
@@ -1787,8 +1735,7 @@ class BambuSpoolman:
             # Inventory must never depend on this arithmetic surviving.
             return tag_linear
 
-    def _pct_for(self, slot: Optional[int], lane: Any, grams: Any,
-                 nominal: Any) -> Optional[float]:
+    def _pct_for(self, slot: Optional[int], lane: Any, grams: Any, nominal: Any) -> Optional[float]:
         """
         The inverse of _grams_for: the percent a lane's grams stand for.
 
@@ -1815,7 +1762,8 @@ class BambuSpoolman:
             n = float(nominal or 0)
         except (TypeError, ValueError):
             return None
-        if g <= 0 or n <= 0:
+        if (g <= 0
+            or n <= 0):
             return None
         try:
             density = self._density_of(slot, lane)
@@ -1825,8 +1773,7 @@ class BambuSpoolman:
             return g * 100.0 / n
         return g * 100.0 / (float(density) * self.CAP_REF_VOLUME_CM3)
 
-    def _log_capacity_sample(self, slot: int, lane: Any, pct: int,
-                             grams: int, nominal: int,
+    def _log_capacity_sample(self, slot: int, lane: Any, pct: int, grams: int, nominal: int,
                              source: str = "") -> None:
         """
         Record one capacity measurement, raw, for fitting grams from radius.
@@ -1889,25 +1836,24 @@ class BambuSpoolman:
                     # A boxed unit can advance meas_seq while leaving meas_pct
                     # stale, so matching the percent keeps a stale radius out.
                     r_mm = info.get("meas_radius_mm")
-                    if r_mm and info.get("meas_pct") == pct:
+                    if (r_mm
+                        and info.get("meas_pct") == pct):
                         radius_m = r_mm / 1000.0
                         radius_src = "slotrec"
             except Exception:
                 pass
             modelled = None
-            if density and pct:
+            if (density
+                and pct):
                 modelled = density * self.CAP_REF_VOLUME_CM3 * (pct / 100.0)
-            self._u.logger.debug(
-                "capsample "
-                f"unit={self._u.name} slot={slot} "
-                f"lane={getattr(lane, 'name', '?')} "
-                f"spool={getattr(lane, 'spool_id', None)} "
-                f"material={material!r} density={density} "
-                f"pct_raw={pct} radius_m={radius_m} circ_m={circ_m} "
-                f"save_r_m={save_r} "
-                f"radius_src={radius_src} source={source!r} "
-                f"nominal={nominal} grams_written={grams} "
-                f"grams_modelled={f'{modelled:.0f}' if modelled else None}")
+            self._u.logger.debug(f"capsample unit={self._u.name} slot={slot} "
+                                 f"lane={getattr(lane, 'name', '?')} "
+                                 f"spool={getattr(lane, 'spool_id', None)} "
+                                 f"material={material!r} density={density} "
+                                 f"pct_raw={pct} radius_m={radius_m} circ_m={circ_m} "
+                                 f"save_r_m={save_r} radius_src={radius_src} source={source!r} "
+                                 f"nominal={nominal} grams_written={grams} "
+                                 f"grams_modelled={f'{modelled:.0f}' if modelled else None}")
         except Exception:
             # Instrumentation must never be able to break a measurement.
             pass
@@ -1966,13 +1912,13 @@ class BambuSpoolman:
                 floor = self._remain_floor = {}
             key = str(uid).lower()
             prev = floor.get(key)
-            if prev is None or int(pct) < int(prev):
+            if (prev is None
+                or int(pct) < int(prev)):
                 floor[key] = int(pct)
         except Exception:
             pass
 
-    def _adopt_measured_remain(self, slot: int, pct: int,
-                               source: str = "capscan",
+    def _adopt_measured_remain(self, slot: int, pct: int, source: str = "capscan",
                                seq: Optional[int] = None) -> bool:
         """
         Record a physical spool measurement: slot remain%, lane grams, Spoolman.
@@ -2006,7 +1952,7 @@ class BambuSpoolman:
             self._meas_seq_seen = {}
         if seq is not None:
             if self._meas_seq_seen.get(slot) == seq:
-                return True                      # same cycle, already adopted
+                return True
             self._meas_seq_seen[slot] = seq
             # Same number under a new sequence is the other path catching up,
             # not a new measurement.
@@ -2037,10 +1983,9 @@ class BambuSpoolman:
         if _record is not None:
             _record(uid, pct)
         if pct != pct_read:
-            self._u.logger.debug(
-                f"AFC bambu {self._u.name}: slot {slot} measured {pct_read}%, "
-                f"held at the {pct}% this reel measured before -- filament "
-                f"does not grow, and the odometer is worth about +/-3%")
+            self._u.logger.debug(f"AFC bambu {self._u.name}: slot {slot} measured {pct_read}%, "
+                                 f"held at the {pct}% this reel measured before -- filament "
+                                 f"does not grow, and the odometer is worth about +/-3%")
         lane = self._u._lane_for_slot(slot)
         # Grams are capped at the tag's nominal weight: over 100% is a full
         # spool proud of the reference geometry, not extra filament.
@@ -2048,9 +1993,7 @@ class BambuSpoolman:
             (getattr(self._u, "_fresh_insert", None) or {}).pop(slot, None)
         except Exception:
             pass
-        # Through _grams_now, whose tag-linear fallback is there for the same
-        # reason _log_capacity_sample below is called by getattr: duck-typed
-        # stand-ins reach this function without the rest of the class.
+        # Duck-typed stand-ins reach this function without the rest of the class.
         grams = BambuSpoolman._grams_now(self, slot, lane, pct, nominal)
         _sample = getattr(self, "_log_capacity_sample", None)
         if _sample is not None:
@@ -2067,9 +2010,8 @@ class BambuSpoolman:
         except Exception:
             pass
         self._queue_spool_summary(slot, pct, grams, nominal)
-        # Push the physical measurement to a bound Spoolman spool, correcting
-        # its remaining_weight to what the AMS measured. Covers a manually
-        # bound no-tag spool too. Gated by sync_measured_to_spoolman.
+        # Correct a bound Spoolman spool's remaining_weight to what the AMS measured,
+        # gated by sync_measured_to_spoolman.
         self._push_measured_to_spoolman(lane, grams, pct=pct, nominal=nominal)
         # Owed to a bind that has not landed: the spool it attaches gets this
         # figure once (see _settle_bind_owed). A bay with no bind coming is
@@ -2083,14 +2025,12 @@ class BambuSpoolman:
                 if (lane is not None
                     and BambuSpoolman._bind_coming(self, slot, info)):
                     sid = getattr(lane, "spool_id", None)
-                    owed[slot] = (
-                        pct, nominal, None if sid in (None, "", 0) else sid,
-                        slot in (getattr(self, "_bind_pending", None) or ()))
+                    owed[slot] = (pct, nominal, None if sid in (None, "", 0) else sid,
+                                  slot in (getattr(self, "_bind_pending", None) or ()))
             except Exception:
                 pass
-        # Owed its material. Grams made with no density to weigh them at are
-        # the tag-linear figure; the conversion is finished once something
-        # names the material (see _settle_convert_owed).
+        # Owed its material: tag-linear grams are converted once something names it
+        # (see _settle_convert_owed).
         conv = getattr(self, "_convert_owed", None)
         if conv is not None:
             conv.pop(slot, None)
@@ -2150,8 +2090,7 @@ class AFC_BambuAMS_RFID:
         :param eventtime: reactor time (unused)
         :return dict: enabled flag and the units currently delegating to us
         """
-        return {"enabled": bool(self.enabled),
-                "units": sorted(self._units)}
+        return {"enabled": bool(self.enabled), "units": sorted(self._units)}
 
     def for_unit(self, unit: Any) -> Optional[BambuSpoolman]:
         """

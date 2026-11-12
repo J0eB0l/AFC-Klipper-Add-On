@@ -4,50 +4,24 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
-# AFC AutoCal, per-spool flow calibration (K), read + apply + (optionally)
-# calibrate. One module, two modes, picked automatically by whether a
-# ``flow_calibrator`` object is present:
+# AFC AutoCal: per-spool pressure advance (K), keyed off a lane's spool_id and stored
+# in the Spoolman extra field 'flow_k', so a K calibrated on one printer is used by
+# every printer sharing that Spoolman.
 #
-#   U1 mode (flow_calibrator present), the printer that measures K:
-#     applies K through the flow_calibrator on the active toolhead and, when
-#     auto_calibrate is on, calibrates spools that have none and stores the
-#     result. The U1 handles its own slicer pressure-advance blocking, so this
-#     module does not wrap SET_PRESSURE_ADVANCE here.
+# With a `flow_calibrator` (U1), K is applied through it on the active toolhead, and
+# auto_calibrate measures spools that have none. Without one, K goes straight onto the
+# lane's extruder stepper and SET_PRESSURE_ADVANCE is guarded so a slicer cannot
+# override it. A lane with no stored K gets a default K on load: the U1 filament
+# table's, or the extruder's pressure_advance.
 #
-#   Consumer mode (no flow_calibrator), any other printer that consumes K:
-#     looks up a spool's stored K and applies it directly on that lane's
-#     extruder stepper, and wraps the per-extruder SET_PRESSURE_ADVANCE handler
-#     so a slicer's mid-print PA change can't clobber the calibrated value. It
-#     never calibrates (there's nothing to measure with).
-#
-# Decoupled from any RFID reader: it keys purely off a lane's spool_id, so it
-# works no matter how the spool was identified (RFID, scanner, or manual
-# SET_SPOOL_ID). K is persisted per-spool in a single 'flow_k' Spoolman extra
-# field (created lazily on first write) and read/written via the shared
-# SpoolmanClient, so a spool the U1 calibrates is found, unchanged, by every
-# consumer printer sharing that Spoolman.
-#
-# The same two toggles apply on every printer, U1 or consumer:
-#   apply_stored_k -> if the spool has a stored K, apply it (and re-apply after
-#                     homing / extruder activation).
-#   auto_calibrate -> U1 only (needs a flow_calibrator): if the spool has NO
-#                     stored K, run a calibration (``calibrate_gcode``, default
-#                     FLOW_CALIBRATE) and store it. A no-op in consumer mode.
-# Use apply_stored_k alone to apply saved K without ever auto-calibrating.
-#
-# A lane with no stored K gets a default K on load, so it never prints with the
-# K of the lane before it on that toolhead: on the U1 the K its own filament
-# table gives the lane's filament and nozzle, elsewhere the extruder's
-# configured pressure_advance.
-#
-# ── Configuration ───────────────────────────────────────────────────
 #   [AFC_autocal]
 #   apply_stored_k: True              # apply a spool's saved K on load
 #   auto_calibrate: False             # U1 only: calibrate + store when no K
 #   # enabled: True                   # back-compat master: turns both on
 #   calibrate_gcode: FLOW_CALIBRATE   # command run to measure K (default)
-# On a toolchanger this module is also auto-loaded (no section needed), but it
-# stays dormant until apply_stored_k is set, the same knob used on the U1.
+#
+# A toolchanger loads this module without a section; it stays dormant until
+# apply_stored_k is set.
 
 from __future__ import annotations
 import threading
@@ -78,24 +52,19 @@ class AFC_autocal:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
-        # load_object constructs AFC if needed, as AFC_lane/AFC_buffer do. self.afc
-        # stays None until klippy:ready on purpose; the guards use it as the ready marker.
+        # self.afc stays None until klippy:ready; the guards use it as the ready marker.
         self.logger = self.printer.load_object(config, 'AFC').logger
         self.afc: Optional[Any] = None
         self._lane_flow_k: Dict[str, Tuple[Optional[int], float]] = {}
-        self._k_fetch_inflight: Set[str] = set()   # lanes with a pending read
-        self._staged_handled: Dict[str, int] = {}   # lane_name -> staged spool_id
-        self._staged_pending: Set[str] = set()   # lanes with a retry awaiting idle
-        self._cal_pending: Set[str] = set()   # lanes with calibrate-when-idle
-        # Consumer mode (no flow_calibrator): extruders we've applied K to, and
-        # extruders whose SET_PRESSURE_ADVANCE handler we've wrapped.
+        self._k_fetch_inflight: Set[str] = set()
+        self._staged_handled: Dict[str, int] = {}
+        self._staged_pending: Set[str] = set()
+        self._cal_pending: Set[str] = set()
+        # Consumer mode only (no flow_calibrator).
         self._managed_extruders: Set[str] = set()
         self._wrapped_extruders: Set[str] = set()
 
-        # Two independent toggles. 'enabled' is a back-compat master that
-        # defaults both on when set.
-        #   apply_stored_k - apply a spool's saved K on load + re-apply on homing
-        #   auto_calibrate - if a loaded spool has NO saved K, calibrate & store
+        # 'enabled' is a back-compat master that defaults both on.
         master = config.getboolean('enabled', None)
         dflt = master if master is not None else False
         self.apply_stored_k = config.getboolean('apply_stored_k', dflt)
@@ -108,23 +77,16 @@ class AFC_autocal:
         self._ready_time: Optional[float] = None
 
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
-        self.printer.register_event_handler('afc:tool_loaded',
-                                            self._handle_tool_loaded)
-        self.printer.register_event_handler('afc:spool_assigned',
-                                            self._handle_spool_assigned)
-        self.printer.register_event_handler('homing:home_rails_end',
-                                            self._handle_home_rails_end)
+        self.printer.register_event_handler('afc:tool_loaded', self._handle_tool_loaded)
+        self.printer.register_event_handler('afc:spool_assigned', self._handle_spool_assigned)
+        self.printer.register_event_handler('homing:home_rails_end', self._handle_home_rails_end)
         self.printer.register_event_handler('extruder:activate_extruder',
                                             self._handle_activate_extruder)
 
-        self.gcode.register_command(
-            'AFC_APPLY_LANE_FLOW_K', self.cmd_APPLY_LANE_FLOW_K,
-            desc="Apply stored flow K for the current lane")
-        self.gcode.register_command(
-            'AFC_CALIBRATE_LANE_FLOW_K', self.cmd_CALIBRATE_LANE_FLOW_K,
-            desc="Run flow calibration on the current lane and store K")
-
-    # ── Lifecycle ───────────────────────────────────────────────────
+        self.gcode.register_command('AFC_APPLY_LANE_FLOW_K', self.cmd_APPLY_LANE_FLOW_K,
+                                    desc="Apply stored flow K for the current lane")
+        self.gcode.register_command('AFC_CALIBRATE_LANE_FLOW_K', self.cmd_CALIBRATE_LANE_FLOW_K,
+                                    desc="Run flow calibration on the current lane and store K")
 
     def _handle_ready(self) -> None:
         """
@@ -148,11 +110,10 @@ class AFC_autocal:
         :return Optional[SpoolmanClient]: the client, or None if unavailable
         """
         mr = getattr(self.afc, 'moonraker', None) if self.afc else None
-        if mr is None or getattr(self.afc, 'spoolman', None) is None:
+        if (mr is None
+            or getattr(self.afc, 'spoolman', None) is None):
             return None
         return SpoolmanClient(mr)
-
-    # ── Mode detection (U1 vs consumer) ─────────────────────────────
 
     def _flow_calibrator(self) -> Optional[Any]:
         """
@@ -188,8 +149,6 @@ class AFC_autocal:
             return True
         return self._lane_on_active_toolhead(lane)
 
-    # ── K cache (spool-validated) ───────────────────────────────────
-
     @staticmethod
     def _norm_spool_id(sid: Any) -> Optional[int]:
         """
@@ -212,8 +171,7 @@ class AFC_autocal:
         :param lane: The lane object to cache K for
         :param k: The flow K value to store
         """
-        self._lane_flow_k[lane.name] = (
-            self._norm_spool_id(getattr(lane, 'spool_id', None)), k)
+        self._lane_flow_k[lane.name] = (self._norm_spool_id(getattr(lane, 'spool_id', None)), k)
 
     def _get_lane_k(self, lane: Any) -> Optional[float]:
         """
@@ -244,12 +202,10 @@ class AFC_autocal:
         lane_k: Dict[str, float] = {}
         for name, (stored, k) in self._lane_flow_k.items():
             lane = lanes.get(name)
-            if lane is not None and stored == self._norm_spool_id(
-                    getattr(lane, 'spool_id', None)):
+            if (lane is not None
+                and stored == self._norm_spool_id(getattr(lane, 'spool_id', None))):
                 lane_k[name] = k
         return {"lane_k": lane_k}
-
-    # ── Spoolman read/write (via the shared client) ─────────────────
 
     def _read_k_from_spoolman(self, lane: Any) -> Optional[float]:
         """
@@ -277,8 +233,6 @@ class AFC_autocal:
         client = self._spoolman()
         if client is not None:
             client.write_flow_k(sid, k)
-
-    # ── Apply via flow_calibrator ───────────────────────────────────
 
     def _apply_lane_k(self, lane_name: str) -> Optional[str]:
         """
@@ -335,7 +289,8 @@ class AFC_autocal:
             return float(k) if isinstance(k, (int, float)) else None
         params = self.printer.lookup_object('filament_parameters', None)
         ext = self.printer.lookup_object('toolhead').get_extruder()
-        if params is None or ext is None:
+        if (params is None
+            or ext is None):
             return None
         k = params.get_flow_k(
             getattr(lane, 'spool_vendor', None) or "Generic",
@@ -354,7 +309,8 @@ class AFC_autocal:
         :param lane: The lane object that was just loaded
         :return Optional[str]: a status message, or None if nothing was applied
         """
-        if not self.apply_stored_k or not self._apply_gate_ok(lane):
+        if (not self.apply_stored_k
+            or not self._apply_gate_ok(lane)):
             return None
         try:
             k = self._default_k(lane)
@@ -388,18 +344,14 @@ class AFC_autocal:
             return None
         estepper = getattr(printer_ext, 'extruder_stepper', None)
         if estepper is None:
-            self.logger.warning(
-                f"AFC autocal: extruder {ext_name} has no extruder_stepper")
+            self.logger.warning(f"AFC autocal: extruder {ext_name} has no extruder_stepper")
             return None
-        smooth_time = getattr(estepper, 'config_smooth_time',
-                              estepper.pressure_advance_smooth_time)
+        smooth_time = getattr(estepper, 'config_smooth_time', estepper.pressure_advance_smooth_time)
         estepper._set_pressure_advance(k, smooth_time)
         self._managed_extruders.add(ext_name)
         msg = f"AFC autocal: applied {what}={k:.6f} for {lane_name} on {ext_name}"
         self.logger.info(msg)
         return msg
-
-    # ── Consumer-mode: block slicer PA overrides, startup preload ───
 
     def _wrap_pa_handlers(self) -> None:
         """
@@ -441,11 +393,9 @@ class AFC_autocal:
             if (target in self._managed_extruders
                 and self.afc is not None
                 and self._is_printing()):
-                self.logger.info(
-                    f"AFC autocal: slicer PA change ignored for {target} "
-                    f"(flow K managed)")
-                gcmd.respond_info(
-                    "AFC flow K active, slicer pressure advance ignored")
+                self.logger.info(f"AFC autocal: slicer PA change ignored for {target} "
+                                 f"(flow K managed)")
+                gcmd.respond_info("AFC flow K active, slicer pressure advance ignored")
                 return
             original(gcmd)
         return wrapper
@@ -458,7 +408,8 @@ class AFC_autocal:
         cache; the reapply-on-activate/home handlers then put the value on the
         extruder. No-op unless apply_stored_k is set.
         """
-        if not self.apply_stored_k or self.afc is None:
+        if (not self.apply_stored_k
+            or self.afc is None):
             return
         if getattr(self.afc, 'moonraker', None) is None:
             return
@@ -470,8 +421,7 @@ class AFC_autocal:
                 if k is not None:
                     self._set_lane_k(lane, k)
             except Exception as e:
-                self.logger.debug(
-                    f"AFC autocal: startup K load failed for {lane.name}: {e}")
+                self.logger.debug(f"AFC autocal: startup K load failed for {lane.name}: {e}")
 
     def _ensure_k_loaded(self, lane: Any) -> Optional[float]:
         """
@@ -508,24 +458,22 @@ class AFC_autocal:
             else:
                 self.logger.warning(msg)
             return None
-        # flow_calibrator keys _current_k by the Klipper toolhead extruder name,
-        # which differs from the AFC_extruder section name when the extruder is
-        # renamed (v1.1.22 'extruder_name'). Use the Klipper name.
+        # flow_calibrator keys _current_k by the Klipper extruder name, which differs from
+        # the AFC_extruder name when `extruder_name` renames it.
         ext_obj = cur_lane.extruder_obj
         ext_name = getattr(ext_obj, 'th_extruder_name', None) or ext_obj.name
         k_before = flow_cal._current_k.get(ext_name)
         run = runner if runner is not None else self.gcode.run_script_from_command
         run(self.calibrate_gcode)
         k_after = flow_cal._current_k.get(ext_name)
-        if k_after is None or k_after == k_before:
-            self.logger.info(
-                f"AFC autocal: calibration produced no new K for {cur_lane.name}")
+        if (k_after is None
+            or k_after == k_before):
+            self.logger.info(f"AFC autocal: calibration produced no new K for {cur_lane.name}")
             return None
         self._set_lane_k(cur_lane, k_after)
         self._apply_lane_k(cur_lane.name)
         self._write_k_to_spoolman(cur_lane, k_after)
-        self.logger.info(
-            f"AFC autocal: calibrated and stored K={k_after:.6f} for {cur_lane.name}")
+        self.logger.info(f"AFC autocal: calibrated and stored K={k_after:.6f} for {cur_lane.name}")
         return k_after
 
     def _current_lane(self) -> Optional[Any]:
@@ -541,8 +489,6 @@ class AFC_autocal:
         except Exception:
             return None
 
-    # ── Event handlers ──────────────────────────────────────────────
-
     def _handle_tool_loaded(self, cur_lane: Any) -> None:
         """
         Fired whenever a lane's tool is loaded. This runs mid-toolchange with the
@@ -550,14 +496,14 @@ class AFC_autocal:
 
         :param cur_lane: The lane object that was just loaded
         """
-        if self.afc is None or cur_lane is None:
+        if (self.afc is None
+            or cur_lane is None):
             return
         if not (self.apply_stored_k or self._can_calibrate()):
             return
         # The gcode mutex is held mid-toolchange, so defer to the reactor where
         # _do_tool_loaded can use run_script once the load releases it.
-        self.reactor.register_callback(
-            lambda et, lane=cur_lane: self._do_tool_loaded(lane))
+        self.reactor.register_callback(lambda et, lane=cur_lane: self._do_tool_loaded(lane))
 
     def _do_tool_loaded(self, cur_lane: Any) -> None:
         """
@@ -568,14 +514,16 @@ class AFC_autocal:
         :param cur_lane: The lane object that was just loaded
         """
         try:
-            if self.afc is None or cur_lane is None:
+            if (self.afc is None
+                or cur_lane is None):
                 return
             if not (self.apply_stored_k or self._can_calibrate()):
                 return
             # A cached K needs no I/O, so apply it now subject to the mode's apply
             # gate. An off-shuttle lane is re-applied when its tool activates.
             if self._get_lane_k(cur_lane) is not None:
-                if self.apply_stored_k and self._apply_gate_ok(cur_lane):
+                if (self.apply_stored_k
+                    and self._apply_gate_ok(cur_lane)):
                     self._apply_lane_k(cur_lane.name)
                 return
             # Uncached: the Spoolman read is blocking HTTP, so run it off the reactor
@@ -591,11 +539,12 @@ class AFC_autocal:
 
         :param cur_lane: The lane the spool was assigned to
         """
-        if self.afc is None or cur_lane is None or not self._can_calibrate():
+        if (self.afc is None
+            or cur_lane is None
+            or not self._can_calibrate()):
             return
         # set_spoolID may run with the gcode mutex held, defer to the reactor.
-        self.reactor.register_callback(
-            lambda et, lane=cur_lane: self._do_spool_assigned(lane))
+        self.reactor.register_callback(lambda et, lane=cur_lane: self._do_spool_assigned(lane))
 
     def _do_spool_assigned(self, cur_lane: Any, attempts: int = 0) -> None:
         """
@@ -611,25 +560,27 @@ class AFC_autocal:
         :param attempts: Retry counter for the bounded idle-wait chain
         """
         try:
-            if self.afc is None or cur_lane is None or not self._can_calibrate():
+            if (self.afc is None
+                or cur_lane is None
+                or not self._can_calibrate()):
                 return
             name = cur_lane.name
             sid = self._norm_spool_id(getattr(cur_lane, 'spool_id', None))
             if sid is None:
-                # Spool cleared/removed, allow a later re-insert to retry.
                 self._staged_handled.pop(name, None)
                 self._staged_pending.discard(name)
                 return
             if getattr(cur_lane, 'tool_loaded', False):
                 self._staged_pending.discard(name)
-                return  # in the toolhead, tool_loaded path handles it
+                return
             if not getattr(cur_lane, 'load_state', False):
                 self._staged_pending.discard(name)
-                return  # no filament present at the lane, nothing to load
+                return
             if self._staged_handled.get(name) == sid:
-                return  # already auto-loaded this spool from staging
-            if attempts == 0 and name in self._staged_pending:
-                return  # a retry chain is already waiting for this lane
+                return
+            if (attempts == 0
+                and name in self._staged_pending):
+                return
             # Don't auto-load spools already staged at boot: inside the startup
             # grace we neither act nor retry (genuine inserts happen later).
             now = self.reactor.monotonic()
@@ -651,7 +602,6 @@ class AFC_autocal:
                 return
             self._staged_pending.discard(name)
             self._staged_handled[name] = sid
-            # Only auto-load when it actually needs calibration (no stored K).
             # The K read is a blocking HTTP call, so do it off the reactor.
             self._check_staged_k_async(name, sid)
         except Exception as e:
@@ -686,11 +636,9 @@ class AFC_autocal:
                 self.reactor.register_async_callback(
                     lambda et: self._staged_k_ready(lane_name, sid, k, read_ok))
 
-        threading.Thread(target=worker, name="afc_autocal_stg",
-                         daemon=True).start()
+        threading.Thread(target=worker, name="afc_autocal_stg", daemon=True).start()
 
-    def _staged_k_ready(self, lane_name: str, sid: int, k: Optional[float],
-                        read_ok: bool) -> None:
+    def _staged_k_ready(self, lane_name: str, sid: int, k: Optional[float], read_ok: bool) -> None:
         """
         Runs on the reactor with the staged spool's K.
 
@@ -708,25 +656,22 @@ class AFC_autocal:
             if lane is None:
                 return
             if self._norm_spool_id(getattr(lane, 'spool_id', None)) != sid:
-                return  # spool changed since we kicked off the read
+                return
             if getattr(lane, 'tool_loaded', False):
-                return  # got loaded in the meantime
+                return
             if k is not None:
                 self._set_lane_k(lane, k)
-                self.logger.info(
-                    f"AFC autocal: {lane_name} spool {sid} already has "
-                    f"K={k:.6f}, not auto-loading")
-                return  # already calibrated, don't force a load
+                self.logger.info(f"AFC autocal: {lane_name} spool {sid} already has "
+                                 f"K={k:.6f}, not auto-loading")
+                return
             if not read_ok:
-                self.logger.info(
-                    f"AFC autocal: {lane_name} spool {sid} K unknown (Spoolman "
-                    f"read failed), not auto-loading")
+                self.logger.info(f"AFC autocal: {lane_name} spool {sid} K unknown (Spoolman "
+                                 f"read failed), not auto-loading")
                 return  # couldn't confirm there's no K, be conservative
             if not self._safe_to_calibrate():
                 return
-            self.logger.info(
-                f"AFC autocal: {lane_name} spool {sid} has no stored K, "
-                f"loading to calibrate")
+            self.logger.info(f"AFC autocal: {lane_name} spool {sid} has no stored K, "
+                             f"loading to calibrate")
             self.gcode.run_script(f"CHANGE_TOOL LANE={lane_name}")
         except Exception as e:
             self.logger.warning(f"AFC_autocal: staged load error: {e}")
@@ -744,7 +689,6 @@ class AFC_autocal:
             return
         sid = self._norm_spool_id(getattr(cur_lane, 'spool_id', None))
         if sid is None:
-            # No spool to look up: the default K, then calibrate if possible (U1).
             # _calibrate_when_loaded waits for idle and skips during a print.
             self._apply_default_k(cur_lane)
             if self._can_calibrate():
@@ -777,11 +721,9 @@ class AFC_autocal:
             finally:
                 # Hop back onto the reactor; in a finally so a worker crash can't
                 # leave the lane stuck in _k_fetch_inflight.
-                self.reactor.register_async_callback(
-                    lambda et: self._k_applied(lane_name, sid, k))
+                self.reactor.register_async_callback(lambda et: self._k_applied(lane_name, sid, k))
 
-        threading.Thread(target=worker, name="afc_autocal_k",
-                         daemon=True).start()
+        threading.Thread(target=worker, name="afc_autocal_k", daemon=True).start()
 
     def _k_applied(self, lane_name: str, sid: int, k: Optional[float]) -> None:
         """
@@ -799,12 +741,13 @@ class AFC_autocal:
             if lane is None:
                 return
             if self._norm_spool_id(getattr(lane, 'spool_id', None)) != sid:
-                return  # spool changed since we kicked off the read, stale
+                return
             if k is not None:
                 self._set_lane_k(lane, k)
                 # Cache it regardless, but only apply per the mode's gate (U1:
                 # lane's tool mounted; consumer: always, on the lane's extruder).
-                if self.apply_stored_k and self._apply_gate_ok(lane):
+                if (self.apply_stored_k
+                    and self._apply_gate_ok(lane)):
                     self._apply_lane_k(lane_name)
                 return
             # No stored K: the default K, then optionally calibrate (stores +
@@ -859,55 +802,47 @@ class AFC_autocal:
         name = lane.name
         if attempts == 0:
             if name in self._cal_pending:
-                return  # a calibrate chain is already running for this lane
+                return
             self._cal_pending.add(name)
         try:
             if self._is_printing():
-                self.logger.info(
-                    f"AFC autocal: {name} calibration skipped, printing")
+                self.logger.info(f"AFC autocal: {name} calibration skipped, printing")
                 self._cal_pending.discard(name)
                 return
             reason = self._cal_block_reason()
-            # Hard stops we don't wait out: boot prep / startup grace.
             if (reason == "prep not done"
-                or (reason is not None
-                    and reason.startswith("within startup"))):
-                self.logger.info(
-                    f"AFC autocal: {name} calibration skipped, {reason}")
+                or (reason is not None and reason.startswith("within startup"))):
+                self.logger.info(f"AFC autocal: {name} calibration skipped, {reason}")
                 self._cal_pending.discard(name)
                 return
-            # Transient: the tool change / load hasn't settled to idle yet, or an
-            # extruder load is still in flight. Wait for it (bounded ~4min).
-            if reason is not None or self._extruder_load_in_flight(lane):
+            # Wait (bounded, about 4 min) for the tool change or extruder load to settle.
+            if (reason is not None
+                or self._extruder_load_in_flight(lane)):
                 if attempts < 240:
                     self.reactor.register_callback(
                         lambda et, ln=lane, a=attempts + 1:
                             self._calibrate_when_loaded(ln, a),
                         self.reactor.monotonic() + 1.0)
                 else:
-                    self.logger.info(
-                        f"AFC autocal: {name} calibration gave up waiting to "
-                        f"settle ({reason or 'load in flight'})")
+                    self.logger.info(f"AFC autocal: {name} calibration gave up waiting to "
+                                     f"settle ({reason or 'load in flight'})")
                     self._cal_pending.discard(name)
                 return
             self._cal_pending.discard(name)
             if not getattr(lane, 'tool_loaded', False):
-                return  # lane was unloaded while we waited
+                return
             # FLOW_CALIBRATE only measures the active toolhead extruder, so only
             # calibrate when this lane's tool is the one mounted.
             if not self._lane_on_active_toolhead(lane):
                 try:
-                    active = self.printer.lookup_object(
-                        'toolhead').get_extruder().get_name()
+                    active = self.printer.lookup_object('toolhead').get_extruder().get_name()
                 except Exception:
                     active = '?'
-                self.logger.info(
-                    f"AFC autocal: {name} calibration skipped, its tool is not "
-                    f"on the toolhead (active extruder={active}); pick up/load "
-                    f"this lane's tool to calibrate it")
+                self.logger.info(f"AFC autocal: {name} calibration skipped, its tool is not "
+                                 f"on the toolhead (active extruder={active}); pick up/load "
+                                 f"this lane's tool to calibrate it")
                 return
-            self.logger.info(
-                f"AFC autocal: running flow calibration for {name}")
+            self.logger.info(f"AFC autocal: running flow calibration for {name}")
             self._calibrate(lane, runner=self.gcode.run_script)
         except Exception as e:
             self._cal_pending.discard(name)
@@ -944,12 +879,9 @@ class AFC_autocal:
             active = self.printer.lookup_object('toolhead').get_extruder()
             if active is None:
                 return False
-            # The toolhead reports the Klipper extruder name; an AFC_extruder
-            # section can be renamed (v1.1.22 'extruder_name'), so match either
-            # the section name or the Klipper name (th_extruder_name).
-            return active.get_name() in (
-                getattr(ext_obj, 'name', None),
-                getattr(ext_obj, 'th_extruder_name', None))
+            # An AFC_extruder section can be renamed (`extruder_name`), so match either name.
+            return active.get_name() in (getattr(ext_obj, 'name', None),
+                                         getattr(ext_obj, 'th_extruder_name', None))
         except Exception:
             return False
 
@@ -970,11 +902,11 @@ class AFC_autocal:
         if not getattr(self.afc, 'prep_done', False):
             return "prep not done"
         if (self._ready_time is not None
-            and ((self.reactor.monotonic() - self._ready_time)
-                 < self._startup_cal_grace)):
+            and ((self.reactor.monotonic() - self._ready_time) < self._startup_cal_grace)):
             return "within startup grace"
         state = getattr(self.afc, 'current_state', None)
-        if state is not None and str(state).split('.')[-1].lower() != 'idle':
+        if (state is not None
+            and str(state).split('.')[-1].lower() != 'idle'):
             return f"state={str(state).split('.')[-1]} (not idle)"
         return None
 
@@ -982,20 +914,19 @@ class AFC_autocal:
         """
         Re-apply the current lane's cached K on the active toolhead.
         """
-        # Re-applying only matters when we apply stored K.
-        if not self.apply_stored_k or self.afc is None:
+        if (not self.apply_stored_k
+            or self.afc is None):
             return
         if not getattr(self.afc, 'prep_done', False):
             return
         state = getattr(self.afc, 'current_state', None)
-        if state is not None and str(state).split('.')[-1].lower() != 'idle':
+        if (state is not None
+            and str(state).split('.')[-1].lower() != 'idle'):
             return
         cur_lane = self._current_lane()
         if cur_lane is None:
             return
-        # Re-apply only the already-cached K (no Spoolman read on this event
-        # path). The K was cached at load; if it wasn't, the load's async fetch
-        # applies it, no need to block here.
+        # Only the cached K: no Spoolman read on this event path.
         if self._get_lane_k(cur_lane) is not None:
             self._apply_lane_k(cur_lane.name)
 
@@ -1022,8 +953,6 @@ class AFC_autocal:
         except Exception as e:
             self.logger.warning(f"AFC_autocal: activate reapply error: {e}")
 
-    # ── GCode commands (manual overrides, work regardless of enabled) ─
-
     def cmd_APPLY_LANE_FLOW_K(self, gcmd: GCodeCommand) -> None:
         """
         Manual command that applies the stored flow K for the current lane, pulling
@@ -1046,9 +975,8 @@ class AFC_autocal:
         # U1 mode applies to the active extruder, so refuse when this lane's tool
         # is docked; consumer mode addresses the lane's own extruder by name.
         if not self._apply_gate_ok(cur_lane):
-            gcmd.respond_info(
-                f"AFC_autocal: {cur_lane.name}'s tool is not on the toolhead, "
-                f"pick up/load its tool first")
+            gcmd.respond_info(f"AFC_autocal: {cur_lane.name}'s tool is not on the toolhead, "
+                              f"pick up/load its tool first")
             return
         if self._ensure_k_loaded(cur_lane) is None:
             gcmd.respond_info(f"AFC_autocal: no stored K for {cur_lane.name}")
@@ -1057,8 +985,7 @@ class AFC_autocal:
         if msg is None:
             # The K is cached, so a None here means the lane's extruder could not
             # take it (missing, or no stepper); _apply_k_stepper logged which.
-            gcmd.respond_info(
-                f"AFC_autocal: K for {cur_lane.name} was not applied, see the log")
+            gcmd.respond_info(f"AFC_autocal: K for {cur_lane.name} was not applied, see the log")
             return
         gcmd.respond_info(msg)
 
@@ -1083,8 +1010,7 @@ class AFC_autocal:
             return
         k = self._calibrate(cur_lane, gcmd=gcmd)
         if k is not None:
-            gcmd.respond_info(
-                f"AFC_autocal: stored K={k:.6f} for {cur_lane.name}")
+            gcmd.respond_info(f"AFC_autocal: stored K={k:.6f} for {cur_lane.name}")
         else:
             gcmd.respond_info("AFC_autocal: calibration produced no new K")
 
