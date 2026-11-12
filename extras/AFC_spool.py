@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Optional, Union, Any, Callable, TYPE_CHECKING
 import copy
+import json
 import traceback
 import re
 
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
     from extras.AFC_lane import AFCLane
 
 class AFCSpool:
+    # Slicer filament ids: OrcaSlicer system ids (OF5CgdDq, GFL99) and user preset ids
+    FILAMENT_ID_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
+
     def __init__(self, config: ConfigWrapper) -> None:
         """
         Basic setup, actual initialization happens in handle_connect/register_commands
@@ -95,6 +99,7 @@ class AFCSpool:
         self.gcode.register_mux_command('SET_FILAMENT_INFO', "LANE", lane_obj.name,
                                         self.cmd_SET_FILAMENT_INFO,
                                         desc=self.cmd_SET_FILAMENT_INFO_help)
+        self.gcode.register_mux_command('SET_FILAMENT_ID',      "LANE", lane_obj.name, self.cmd_SET_FILAMENT_ID,        desc=self.cmd_SET_FILAMENT_ID_help)
         self.gcode.register_mux_command('SET_SPOOL_ID',         "LANE", lane_obj.name, self.cmd_SET_SPOOL_ID,           desc=self.cmd_SET_SPOOL_ID_help)
         self.gcode.register_mux_command('SET_RUNOUT',           "LANE", lane_obj.name, self.cmd_SET_RUNOUT,             desc=self.cmd_SET_RUNOUT_help)
         self.gcode.register_mux_command('SET_MAP',              "LANE", lane_obj.name, self.cmd_SET_MAP,                desc=self.cmd_SET_MAP_help)
@@ -559,7 +564,11 @@ class AFCSpool:
         cur_lane = self.afc.lanes[lane]
         density = gcmd.get_float('DENSITY', None)
 
-        cur_lane.material = gcmd.get('MATERIAL')
+        material = gcmd.get('MATERIAL')
+        if material != cur_lane.material:
+            # The slicer's filament id names one material, so a new material drops it
+            cur_lane.filament_id = ""
+        cur_lane.material = material
         cur_lane.filament_diameter = gcmd.get_float('DIAMETER', cur_lane.filament_diameter)
         cur_lane.empty_spool_weight = gcmd.get_float('EMPTY_SPOOL_WEIGHT', cur_lane.empty_spool_weight)
 
@@ -571,6 +580,47 @@ class AFCSpool:
         cur_lane.send_lane_data()
         self.afc.save_vars()
         self.set_snapmaker_filament_params(cur_lane)
+
+    cmd_SET_FILAMENT_ID_help = "Sets the slicer's filament id for a lane"
+    def cmd_SET_FILAMENT_ID(self, gcmd: GCodeCommand) -> None:
+        """
+        Sets the slicer's filament id for the spool in a lane, for example the id of the
+        OrcaSlicer preset picked for it. The id is sent to the slicer in the lane's lane_data so
+        it can pick the same preset again. It stays with the lane until the spool or its material
+        changes. A spool whose Spoolman filament has its own filament_id takes that one when the
+        spool is assigned. Leaving ID out, or passing it empty, clears it.
+
+        Values
+        ----
+        ID - Filament id, up to 64 letters, digits or `_ . + -`. eg. OF5CgdDq, GFL99
+
+        Usage
+        -----
+        `SET_FILAMENT_ID LANE=<lane> ID=<id>`
+
+        Example
+        -----
+        ```
+        SET_FILAMENT_ID LANE=lane1 ID=OF5CgdDq
+        ```
+        """
+        lane = gcmd.get('LANE', None)
+        if lane is None:
+            self.logger.info("No LANE Defined")
+            return
+        if lane not in self.afc.lanes:
+            self.logger.info(f"{lane} Unknown")
+            return
+        filament_id = gcmd.get('ID', '').strip()
+        if (filament_id
+            and not self.FILAMENT_ID_RE.match(filament_id)):
+            self.logger.info(f"Invalid filament id '{filament_id}': use up to 64 letters, digits "
+                             "or _ . + -")
+            return
+        cur_lane = self.afc.lanes[lane]
+        cur_lane.filament_id = filament_id
+        cur_lane.send_lane_data()
+        self.afc.save_vars()
 
     cmd_SET_FILAMENT_INFO_help = "Sets filament vendor and name for a lane"
     def cmd_SET_FILAMENT_INFO(self, gcmd: GCodeCommand) -> None:
@@ -700,6 +750,26 @@ class AFCSpool:
             value = filament[field]
         return value
 
+    @staticmethod
+    def _filament_id(filament: dict) -> str:
+        """
+        OrcaSlicer's filament_id for a Spoolman filament, from its filament_id extra field.
+
+        Spoolman stores extra values JSON-encoded; a bare string is taken as is. Only a text
+        id counts, as OrcaSlicer ignores a number in lane_data's filament_id.
+
+        :param filament: Spoolman filament dict
+        :return:         The id, or "" when the filament has none
+        """
+        raw = (filament.get("extra") or {}).get("filament_id")
+        if not raw:
+            return ""
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            value = raw
+        return value.strip() if isinstance(value, str) else ""
+
     def _set_values(self, cur_lane: AFCLane, on_done: Optional[Callable[[], None]] = None) -> None:
         """
         Helper function for setting lane spool values
@@ -743,6 +813,7 @@ class AFCSpool:
         cur_lane.clear_lane_data()
         cur_lane.spool_vendor = ""
         cur_lane.filament_name = ""
+        cur_lane.filament_id = ""
 
     def set_spoolID(self, cur_lane: AFCLane, SpoolID: Optional[Union[int, str]],
                     save_vars: bool = True, on_done: Optional[Callable[[], None]] = None) -> None:
@@ -810,6 +881,7 @@ class AFCSpool:
                 if result is None:
                     raise ValueError(f"No spool data returned for SpoolID {SpoolID}")
 
+                same_spool = str(cur_lane.spool_id) == str(SpoolID)
                 cur_lane.spool_id = SpoolID
                 cur_lane.auto_switch_triggered = False
 
@@ -824,6 +896,11 @@ class AFCSpool:
                 full_weight                 = self._get_filament_values(result, 'initial_weight', default=1000)
                 cur_lane.espooler.espooler_values.full_weight = full_weight
                 cur_lane.filament_name      = self._get_filament_values(result['filament'], 'name', default="")
+                # Spoolman's id wins; with none, the same spool keeps its SET_FILAMENT_ID one
+                filament_id = self._filament_id(result['filament'])
+                if (filament_id
+                    or not same_spool):
+                    cur_lane.filament_id = filament_id
 
                 vendor_result  = result["filament"].get("vendor", None)
                 cur_lane.spool_vendor       = ""

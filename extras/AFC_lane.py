@@ -130,6 +130,9 @@ class AFCLane:
         self.multi_color: list  = []
         self.spool_vendor: str  = ""
         self.filament_name: str = ""
+        # OrcaSlicer's id for the spool's filament product, from the Spoolman
+        # filament's filament_id extra field; "" when it has none.
+        self.filament_id: str   = ""
         self.weight: float      = 0.
         self.auto_switch_triggered: bool = False
         self._material: str     = None
@@ -2006,6 +2009,7 @@ class AFCLane:
                     "material"       : self.material,
                     "vendor_name"    : self.spool_vendor,
                     "name"           : self.filament_name,
+                    "filament_id"    : self.filament_id,
                     "bed_temp"       : self.bed_temp,
                     "nozzle_temp"    : self.extruder_temp,
                     "scan_time"      : scan_time,
@@ -2510,6 +2514,7 @@ class AFCLane:
         response["remember_spool"]= bool(self.remember_spool)
         response["spool_id"]= int(self.spool_id) if self.spool_id else None
         response["color"]=self.color
+        response["filament_id"] = self.filament_id
         response["filament_name"] = self.filament_name
         response["spool_vendor"] = self.spool_vendor
         if not save_to_file:

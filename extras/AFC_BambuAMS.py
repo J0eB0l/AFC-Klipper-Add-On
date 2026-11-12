@@ -8656,7 +8656,7 @@ class afcBambuAMS(afcUnit):
         :param lane: The AFC lane object
         """
         for attr, val in (("material", ""), ("color", ""), ("weight", 0), ("filament_name", ""),
-                          ("sub_type", ""), ("spool_vendor", "")):
+                          ("sub_type", ""), ("spool_vendor", ""), ("filament_id", "")):
             try:
                 setattr(lane, attr, val)
             except Exception:

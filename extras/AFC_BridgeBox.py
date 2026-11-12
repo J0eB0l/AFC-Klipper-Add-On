@@ -404,8 +404,9 @@ def deactivate_to_pool(lane: Any) -> None:
     lane.color = ""
     lane.weight = 0.
     for attr, blank in (("multi_color", []), ("sub_type", ""), ("spool_vendor", ""),
-                        ("filament_name", ""), ("extruder_temp", None), ("bed_temp", None),
-                        ("runout_lane", None), ("td1_data", {}), ("need_purge", False)):
+                        ("filament_name", ""), ("filament_id", ""), ("extruder_temp", None),
+                        ("bed_temp", None), ("runout_lane", None), ("td1_data", {}),
+                        ("need_purge", False)):
         try:
             setattr(lane, attr, blank)
         except Exception:
