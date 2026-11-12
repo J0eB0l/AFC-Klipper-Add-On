@@ -32,7 +32,8 @@ except:
 
 try: from extras.AFC_RFID import (sync_rfid_to_spoolman,
                                   get_auto_spoolman_create,
-                                  match_spool_for_tag, density_for_material,
+                                  match_spool_for_tag, merge_duplicate_spool,
+                                  density_for_material,
                                   _spool_uids, _norm_uid, _norm_tray_uid,
                                   _spool_tray_uid, _set_spoolid_takes_on_done,
                                   _cached_spoolman_client, report_tag_scan)
@@ -438,15 +439,14 @@ class BambuSpoolman:
                         reach = getattr(client, "reachable", None)
                         down = callable(reach) and not reach()
                     if dupe_id is not None and spool is not None:
-                        # Said while the reel is in the bay: Spoolman holds it
-                        # twice, and its usage splits between the records.
-                        self._u.logger.info(
-                            f"AFC bambu {self._u.name}: Spoolman spool "
-                            f"{dupe_id} is the SAME PHYSICAL REEL as "
-                            f"{spool.get('id')} -- this spool has a tag on "
-                            f"each side and was recorded twice. Merge them "
-                            f"(keep one, add the other's card_uids and their "
-                            f"two used weights) or its count stays split.")
+                        # Spoolman holds this reel twice: fold the other record in.
+                        merged = merge_duplicate_spool(client, spool, dupe_id, tray_uid,
+                                                       self._u.logger,
+                                                       f"AFC bambu {self._u.name}")
+                        if merged is not None:
+                            spool = merged
+                            if by_tray is not None:
+                                by_tray = merged
                 if spool is not None and client is not None:
                     # Teach the record the other half of its identity: union
                     # the chip UID into card_uids, or stamp the tray UID only

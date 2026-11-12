@@ -39,6 +39,7 @@ from extras.AFC_RFID import (
     make_tag_record,
     map_tag_to_slot_info,
     match_spool_for_tag,
+    merge_duplicate_spool,
     prompt_hold_spool,
     resolve_rfid_keys,
     report_tag_scan,
@@ -1490,6 +1491,91 @@ class TestMatchSpoolForTag:
         client.native_tags = False
         assert match_spool_for_tag(client, "AABBCCDD", "") == (roll, False, None)
         assert moonraker.calls == [("GET", "/v1/spool", None, False)]
+
+
+class TestMergeDuplicateSpool:
+    _KEEP = {"id": 10, "used_weight": 100, "filament": {"material": "PLA"},
+             "tags": [{"uid": "AA11"}],
+             "extra": {"tray_uid": '"cf34"', "card_uids": '"AA11"'}}
+    _DUPE = {"id": 20, "used_weight": 40, "filament": {"material": "pla"},
+             "tags": [{"uid": "BB22"}], "comment": "bought in May",
+             "extra": {"card_uids": '"BB22"'}}
+
+    def _merge(self, keep: Dict[str, Any], dupe: Dict[str, Any],
+               **routes: Any) -> Tuple[Any, RfidSpoolmanMoonraker]:
+        """
+        :param keep: the kept record
+        :param dupe: the duplicate record
+        :param routes: more routes, keyed "METHOD path"
+        :return tuple: (merge result, moonraker)
+        """
+        answers: Dict[Tuple[str, str], Any] = {
+            ("GET", "/v1/spool/10"): keep, ("GET", "/v1/spool/20"): dupe,
+            ("PATCH", "/v1/spool/10"): {**keep, "merged": True},
+            ("PATCH", "/v1/spool/20"): {"id": 20},
+            ("DELETE", "/v1/spool/20/tag/BB22"): {},
+            ("POST", "/v1/spool/10/tag"): {"uid": "BB22"}}
+        for key, value in routes.items():
+            method, path = key.split(" ", 1)
+            answers[(method, path)] = value
+        client, moonraker = rfid_spoolman_client(answers)
+        return merge_duplicate_spool(client, keep, 20, "cf34", moonraker.logger,
+                                     "TEST"), moonraker
+
+    def test_moves_the_tags_keeps_the_larger_used_weight_and_archives(self):
+        result, moonraker = self._merge(self._KEEP, self._DUPE)
+        assert result["merged"] is True
+        # The tag leaves the duplicate before the kept record takes it.
+        assert [(m, p) for m, p, _, _ in moonraker.calls if m != "GET"] == [
+            ("DELETE", "/v1/spool/20/tag/BB22"), ("PATCH", "/v1/spool/10"),
+            ("POST", "/v1/spool/10/tag"), ("PATCH", "/v1/spool/20")]
+        assert moonraker.sent("PATCH", "/v1/spool/10") == [
+            {"extra": {"tray_uid": '"cf34"', "card_uids": '"AA11,BB22"'}}]
+        assert moonraker.sent("PATCH", "/v1/spool/20") == [
+            {"archived": True,
+             "comment": "bought in May\nMerged into spool #10 by AFC: the same reel, "
+                        "a tag on each side."}]
+        assert moonraker.logger.messages == [
+            ("info", "TEST: spool #20 was the same physical reel as #10 (a tag on each "
+                     "side); merged it into #10 (kept #10's used weight, the larger of "
+                     "the two) and archived #20")]
+
+    def test_takes_the_duplicates_used_weight_when_larger(self):
+        _, moonraker = self._merge(self._KEEP, {**self._DUPE, "used_weight": 312.5})
+        assert moonraker.sent("PATCH", "/v1/spool/10")[0]["used_weight"] == 312.5
+
+    def test_an_archived_duplicate_is_left_alone(self):
+        result, moonraker = self._merge(self._KEEP, {**self._DUPE, "archived": True})
+        assert result is None
+        assert [m for m, _, _, _ in moonraker.calls] == ["GET"]
+
+    def test_a_duplicate_on_another_roll_is_reported_not_merged(self):
+        dupe = {**self._DUPE, "extra": {"card_uids": '"BB22"', "tray_uid": '"dd99"'}}
+        result, moonraker = self._merge(self._KEEP, dupe)
+        assert result is None
+        assert [m for m, _, _, _ in moonraker.calls] == ["GET", "GET"]
+        assert moonraker.logger.messages == [
+            ("warning", "TEST: spool #20 holds a tag of this reel but is recorded against "
+                        "roll dd99, not cf34; not merged into #10. One of its tags is on "
+                        "the wrong spool.")]
+
+    def test_a_duplicate_of_another_material_is_reported_not_merged(self):
+        result, moonraker = self._merge(self._KEEP,
+                                        {**self._DUPE, "filament": {"material": "PETG"}})
+        assert result is None
+        assert [m for m, _, _, _ in moonraker.calls] == ["GET", "GET"]
+        assert moonraker.logger.messages == [
+            ("warning", "TEST: spool #20 (petg) holds a tag of this reel but #10 is pla; "
+                        "not merged. One of them is on the wrong filament.")]
+
+    def test_a_failed_update_does_not_archive_the_duplicate(self):
+        result, moonraker = self._merge(self._KEEP, self._DUPE,
+                                        **{"PATCH /v1/spool/10": None})
+        assert result is None
+        assert moonraker.sent("PATCH", "/v1/spool/20") == []
+        assert moonraker.logger.messages[-1] == (
+            "warning", "TEST: merging spool #20 into #10 failed while updating #10; it is "
+                       "tried again on the next read of this reel")
 
 
 class TestScanReader:
@@ -3098,31 +3184,44 @@ class TestSyncRfidToSpoolman:
             ("info", "TEST: matched spool #300 by tag UID AABB"),
             ("error", "TEST Spoolman apply failed for lane9: kaboom")]
 
-    def test_a_reel_recorded_twice_is_named_where_it_is_actionable(self):
+    def test_a_reel_recorded_twice_is_merged_into_the_roll_match(self):
         # A spool with a tag on each side, one record per chip UID: the roll
-        # match picks the right record and the bind names the other one.
-        right = {"id": 124, "remaining_weight": 800,
+        # match picks the right record and the other one is folded into it.
+        right = {"id": 124, "remaining_weight": 800, "used_weight": 200,
+                 "first_used": "2026-10-02T10:00:00Z", "last_used": "2026-11-01T10:00:00Z",
                  "filament": {"id": 88, "name": "Bambu PLA Matte", "material": "PLA",
                               "density": 1.24, "diameter": 1.75, "color_hex": "757575",
                               "settings_bed_temp": 55},
                  "extra": {"tray_uid": '"cf34cf1d"', "card_uids": '"D34E4E39"'}}
-        duplicate = {"id": 132, "remaining_weight": 200, "filament": {"id": 88},
-                     "extra": {"card_uids": '"13F56D32"'}}
+        duplicate = {"id": 132, "remaining_weight": 650, "used_weight": 350,
+                     "first_used": "2026-09-20T10:00:00Z", "last_used": "2026-10-20T10:00:00Z",
+                     "location": "Shelf 2", "filament": {"id": 88, "material": "PLA"},
+                     "extra": {"card_uids": '"13F56D32"', "flow_k": "0.021"}}
+        merged = {**right, "used_weight": 350, "remaining_weight": 650,
+                  "extra": {"tray_uid": '"cf34cf1d"', "card_uids": '"13F56D32,D34E4E39"',
+                            "flow_k": "0.021"}}
         slot = {"uid": "13F56D32", "tray_uid": "cf34cf1d", "material": "PLA",
                 "color_hex": "757575", "diameter": 1.75}
-        afc, lane, logger = self._run(slot, self._routes([right, duplicate]),
-                                      lane=self._Lane("lane14"))
+        routes = self._routes([right, duplicate])
+        routes[("PATCH", "/v1/spool/124")] = merged
+        afc, lane, logger = self._run(slot, routes, lane=self._Lane("lane14"))
         assert lane.spool_id == 124
-        # The tag's chip UID is added to the record the roll matched.
-        assert afc.moonraker.sent("PATCH", "/v1/spool/124") == [
-            {"extra": {"tray_uid": '"cf34cf1d"', "card_uids": '"13F56D32,D34E4E39"'}}]
+        # The kept record takes the other's chip UID and extras, the larger
+        # used weight, the earlier first use and its missing location.
+        assert afc.moonraker.sent("PATCH", "/v1/spool/124")[0] == {
+            "extra": {"tray_uid": '"cf34cf1d"', "card_uids": '"13F56D32,D34E4E39"',
+                      "flow_k": "0.021"},
+            "used_weight": 350.0, "location": "Shelf 2",
+            "first_used": "2026-09-20T10:00:00Z"}
+        assert afc.moonraker.sent("PATCH", "/v1/spool/132") == [
+            {"archived": True,
+             "comment": "Merged into spool #124 by AFC: the same reel, a tag on each side."}]
         assert logger.messages == [
-            ("warning", "TEST: spool #132 is the SAME PHYSICAL REEL as #124: a spool with a "
-                        "tag on each side, recorded twice. Merge them in Spoolman (keep one, "
-                        "add the other's card_uids to it, add the two used weights together) "
-                        "or its filament count stays split between them."),
+            ("info", "TEST: spool #132 was the same physical reel as #124 (a tag on each "
+                     "side); merged it into #124 (used weight 350 g from #132, the larger "
+                     "of the two) and archived #132"),
             ("info", "TEST: matched spool #124 by tray UID cf34cf1d"),
-            ("info", "TEST: spool #124 ('Bambu PLA Matte', #757575, 800g left) assigned to "
+            ("info", "TEST: spool #124 ('Bambu PLA Matte', #757575, 650g left) assigned to "
                      "lane14")]
 
     def test_sync_refuses_incomplete_decode(self):

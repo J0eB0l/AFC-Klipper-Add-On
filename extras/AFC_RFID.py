@@ -1111,6 +1111,153 @@ def match_spool_for_tag(client: SpoolmanClient, uid: Any,
     return (by_uid[0] if by_uid else None), False, None
 
 
+#: Spool fields the kept record takes from the duplicate when it has none.
+_MERGE_FILL_FIELDS = ("initial_weight", "spool_weight", "price", "location", "lot_nr")
+
+_merge_lock = threading.Lock()
+
+
+def _spool_material(spool: dict) -> str:
+    """
+    :param spool: Spoolman spool dict
+    :return str: its filament's material, lowercase, or "" when unknown
+    """
+    return str((spool.get("filament") or {}).get("material") or "").strip().lower()
+
+
+def _merged_used_weight(keep: dict, dupe: dict) -> Optional[float]:
+    """
+    The used weight for the merged record: the larger of the two.
+
+    Each record only counted the prints made while its own tag faced the
+    reader, so the one that used the most is the closest to the truth.
+    Taking the larger also makes a repeated merge change nothing.
+
+    :param keep: the record that stays
+    :param dupe: the record being merged into it
+    :return Optional[float]: the used weight to write, None when it is already right
+    """
+    def used(spool: dict) -> float:
+        try:
+            return float(spool.get("used_weight") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if used(dupe) > used(keep):
+        return round(used(dupe), 2)
+    return None
+
+
+def merge_duplicate_spool(client: SpoolmanClient, keep: dict, dupe_id: Any,
+                          tray_uid: Any, logger: Any, prefix: str) -> Optional[dict]:
+    """
+    Merge a second Spoolman record of the same physical reel into the first.
+
+    A reel with a tag on each side can be recorded once per tag before its
+    roll id is known. Once the roll id ties the two together, the kept record
+    takes the other's tags, the larger used weight, the earlier first use, the
+    later last use, and any extra or detail it lacks. The duplicate is
+    archived, never deleted, with a comment naming the record it went into.
+
+    A duplicate recorded against a different roll, or of a different
+    material, is left alone and reported: that is a tag on the wrong record,
+    not a second record of this reel.
+
+    :param client: SpoolmanClient for the writes
+    :param keep: the record the roll id matched
+    :param dupe_id: id of the other record holding this reel's chip UID
+    :param tray_uid: the roll id read from the tag
+    :param logger: logger-shaped sink
+    :param prefix: log prefix, e.g. "ACE2 RFID"
+    :return Optional[dict]: the kept record after the merge, None when nothing
+        was merged
+    """
+    keep_id = keep.get("id")
+    with _merge_lock:
+        dupe = client.get_spool(dupe_id)
+        if (not isinstance(dupe, dict)
+            or dupe.get("archived")):
+            return None
+        keep = client.get_spool(keep_id) or keep
+        tray = _norm_tray_uid(tray_uid) or _spool_tray_uid(keep)
+        dupe_tray = _spool_tray_uid(dupe)
+        if (dupe_tray
+            and tray
+            and dupe_tray != tray):
+            logger.warning(f"{prefix}: spool #{dupe_id} holds a tag of this reel but is "
+                           f"recorded against roll {dupe_tray}, not {tray}; not merged "
+                           f"into #{keep_id}. One of its tags is on the wrong spool.")
+            return None
+        keep_mat = _spool_material(keep)
+        dupe_mat = _spool_material(dupe)
+        if (keep_mat
+            and dupe_mat
+            and keep_mat != dupe_mat):
+            logger.warning(f"{prefix}: spool #{dupe_id} ({dupe_mat}) holds a tag of this "
+                           f"reel but #{keep_id} is {keep_mat}; not merged. One of them "
+                           f"is on the wrong filament.")
+            return None
+
+        # Spoolman lets a tag belong to one spool only, so release the
+        # duplicate's native tags before the kept record takes them.
+        moved_tags = sorted(_spool_tag_uids(dupe) - _spool_tag_uids(keep))
+        for uid in moved_tags:
+            client._spoolman_proxy("DELETE", f"/v1/spool/{int(dupe_id)}/tag/{uid}")
+
+        body: Dict[str, Any] = {}
+        extra = dict(keep.get("extra") or {})
+        for key, value in (dupe.get("extra") or {}).items():
+            if extra.get(key) in (None, ""):
+                extra[key] = value
+        uids = _spool_uids(keep) | _spool_uids(dupe)
+        if uids:
+            extra[_CARD_UIDS_FIELD] = json.dumps(",".join(sorted(uids)))
+        if tray:
+            extra[_TRAY_UID_FIELD] = json.dumps(tray)
+        if extra != (keep.get("extra") or {}):
+            body["extra"] = extra
+        used = _merged_used_weight(keep, dupe)
+        if used is not None:
+            body["used_weight"] = used
+        for field in _MERGE_FILL_FIELDS:
+            if (keep.get(field) in (None, "")
+                and dupe.get(field) not in (None, "")):
+                body[field] = dupe[field]
+        first = [s.get("first_used") for s in (keep, dupe) if s.get("first_used")]
+        if (first
+            and min(first) != keep.get("first_used")):
+            body["first_used"] = min(first)
+        last = [s.get("last_used") for s in (keep, dupe) if s.get("last_used")]
+        if (last
+            and max(last) != keep.get("last_used")):
+            body["last_used"] = max(last)
+        merged = keep
+        if body:
+            merged = client._spoolman_proxy("PATCH", f"/v1/spool/{keep_id}", body=body)
+            if not isinstance(merged, dict):
+                logger.warning(f"{prefix}: merging spool #{dupe_id} into #{keep_id} failed "
+                               f"while updating #{keep_id}; it is tried again on the next "
+                               f"read of this reel")
+                return None
+        for uid in moved_tags:
+            client.link_spool_tag(keep_id, uid)
+
+        note = f"Merged into spool #{keep_id} by AFC: the same reel, a tag on each side."
+        old_comment = str(dupe.get("comment") or "").strip()
+        comment = f"{old_comment}\n{note}" if old_comment else note
+        archived = client._spoolman_proxy("PATCH", f"/v1/spool/{int(dupe_id)}",
+                                          body={"archived": True, "comment": comment})
+        if archived is None:
+            logger.warning(f"{prefix}: spool #{dupe_id} was merged into #{keep_id} but "
+                           f"archiving it failed; archive it in Spoolman")
+        used_note = (f"used weight {body['used_weight']:g} g from #{dupe_id}"
+                     if "used_weight" in body else f"kept #{keep_id}'s used weight")
+        logger.info(f"{prefix}: spool #{dupe_id} was the same physical reel as "
+                    f"#{keep_id} (a tag on each side); merged it into #{keep_id} "
+                    f"({used_note}, the larger of the two) and archived #{dupe_id}")
+        return merged
+
+
 #: The SpoolmanClient every reader shares (see _cached_spoolman_client).
 _spoolman_client: Optional[SpoolmanClient] = None
 
@@ -1987,14 +2134,11 @@ def _spoolman_resolve(afc: Any, prep: dict, slot_info: dict, logger: Any,
         spool, by_tray, dupe_id = match_spool_for_tag(
             moonraker, scanned_uid, scanned_tray)
         if dupe_id is not None and spool is not None:
-            # Report it now, while the reel is in a bay; merging is left to the
-            # user since it discards one record's history.
-            logger.warning(
-                f"{prefix}: spool #{dupe_id} is the SAME PHYSICAL REEL as "
-                f"#{spool.get('id')}: a spool with a tag on each side, "
-                f"recorded twice. Merge them in Spoolman (keep one, add the "
-                f"other's card_uids to it, add the two used weights together) "
-                f"or its filament count stays split between them.")
+            # One reel recorded twice, once per tag: fold the other record in.
+            merged = merge_duplicate_spool(moonraker, spool, dupe_id, scanned_tray,
+                                           logger, prefix)
+            if merged is not None:
+                spool = merged
         # Set once the roll id is settled on an existing record, so the create
         # path below cannot overwrite a refused conflict.
         tray_settled = False
