@@ -325,6 +325,52 @@ class SpoolmanClient:
             return resp[0]
         return self._spoolman_proxy("POST", "/v1/vendor", body=json.dumps({"name": name}))
 
+    def find_filament(self, vendor_id: Optional[int], name: str, material: Optional[str] = None,
+                      color_hex: Optional[str] = None,
+                      multi_color_hexes: Optional[Any] = None) -> Optional[dict]:
+        """
+        Return an existing filament of this vendor, name, material and colour,
+        so a new spool of a product and colour Spoolman knows joins it instead
+        of adding a copy.
+
+        :param vendor_id: Spoolman vendor id; None finds nothing
+        :param name: filament name, matched without case
+        :param material: material, matched without case when given
+        :param color_hex: single colour hex
+        :param multi_color_hexes: list/tuple or comma string of colour hexes
+        :return Optional[dict]: the filament, or None when none matches
+        """
+        if (vendor_id is None
+            or not name):
+            return None
+        path = f"/v1/filament?vendor.id={vendor_id}&name={quote(name)}"
+        if material:
+            path += f"&material={quote(material)}"
+        resp = self._spoolman_proxy("GET", path, print_error=False)
+        if not isinstance(resp, list):
+            return None
+
+        def hexes(*values: Any) -> list:
+            out = []
+            for value in values:
+                if isinstance(value, str):
+                    value = value.split(",")
+                out += [str(c).strip().lstrip("#").upper() for c in value or [] if str(c).strip()]
+            return out
+
+        def same(a: Any, b: Optional[str]) -> bool:
+            return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+        want = hexes(multi_color_hexes) or hexes(color_hex)
+        for f in resp:
+            if (not same(f.get("name"), name)
+                or (material and not same(f.get("material"), material))):
+                continue
+            have = hexes(f.get("multi_color_hexes")) or hexes(f.get("color_hex"))
+            if want and have == want:
+                return f
+        return None
+
     def create_filament(self, name: str, vendor_id: Optional[int] = None,
                         material: Optional[str] = None, density: Optional[float] = None,
                         diameter: Optional[float] = None, color_hex: Optional[str] = None,
@@ -1983,25 +2029,33 @@ def _spoolman_resolve(afc: Any, prep: dict, slot_info: dict, logger: Any, prefix
             filament_name = build_filament_name(brand, material, sub_type)
             if not filament_name:
                 filament_name = material or "Unknown"
-            filament = moonraker.create_filament(
-                name=filament_name,
-                vendor_id=vendor_id,
-                material=material or None,
-                density=density,
-                diameter=diameter,
+            filament = moonraker.find_filament(
+                vendor_id, filament_name, material or None,
                 color_hex=color_hex if not is_multi else None,
-                multi_color_hexes=scanned_colors if is_multi else None,
-                settings_extruder_temp=ext_temp,
-                settings_bed_temp=bed_temp,
-                weight=net_weight,
-                article_number=sku or None,
-            )
-            if filament is None:
-                logger.warning(f"{prefix}: Spoolman create_filament FAILED for "
-                               f"'{filament_name}', check Spoolman/moonraker")
-                return
-            log_new_filament(logger, prefix, filament, brand, material, color_hex, diameter,
-                             ext_temp, bed_temp, sku)
+                multi_color_hexes=scanned_colors if is_multi else None)
+            if filament is not None:
+                logger.info(f"{prefix}: new spool of filament #{filament.get('id')} "
+                            f"({filament_name}) in Spoolman")
+            else:
+                filament = moonraker.create_filament(
+                    name=filament_name,
+                    vendor_id=vendor_id,
+                    material=material or None,
+                    density=density,
+                    diameter=diameter,
+                    color_hex=color_hex if not is_multi else None,
+                    multi_color_hexes=scanned_colors if is_multi else None,
+                    settings_extruder_temp=ext_temp,
+                    settings_bed_temp=bed_temp,
+                    weight=net_weight,
+                    article_number=sku or None,
+                )
+                if filament is None:
+                    logger.warning(f"{prefix}: Spoolman create_filament FAILED for "
+                                   f"'{filament_name}', check Spoolman/moonraker")
+                    return
+                log_new_filament(logger, prefix, filament, brand, material, color_hex, diameter,
+                                 ext_temp, bed_temp, sku)
 
             filament_id = (filament or {}).get("id")
             if filament_id is None:
