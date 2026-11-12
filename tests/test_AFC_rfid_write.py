@@ -74,7 +74,7 @@ class RfidwSpoolman:
     def __init__(self, spool: Any = None, *, vendor: Any = None, filament: Any = None,
                  created: Any = None, read_error: Optional[Exception] = None,
                  bind_error: Optional[Exception] = None,
-                 create_error: Optional[Exception] = None) -> None:
+                 create_error: Optional[Exception] = None, existing: Any = None) -> None:
         """
         :param spool: what get_spool returns
         :param vendor: what get_or_create_vendor returns
@@ -83,6 +83,7 @@ class RfidwSpoolman:
         :param read_error: raised by get_spool when given
         :param bind_error: raised by write_spool_metadata when given
         :param create_error: raised by get_or_create_vendor when given
+        :param existing: what find_filament returns
         """
         self.spool = spool
         self.vendor = vendor
@@ -91,6 +92,8 @@ class RfidwSpoolman:
         self.read_error = read_error
         self.bind_error = bind_error
         self.create_error = create_error
+        self.existing = existing
+        self.finds: List[Tuple[Any, ...]] = []
         self.read: List[int] = []
         self.attempts: List[Tuple[int, Optional[str]]] = []
         self.bound: List[Tuple[int, Optional[str]]] = []
@@ -129,6 +132,17 @@ class RfidwSpoolman:
         if self.create_error is not None:
             raise self.create_error
         return self.vendor
+
+    def find_filament(self, vendor_id: Any, name: str, material: Any = None, **colors: Any) -> Any:
+        """
+        :param vendor_id: Spoolman vendor id
+        :param name: filament name
+        :param material: material
+        :param colors: color_hex / multi_color_hexes
+        :return Any: the configured existing filament
+        """
+        self.finds.append((vendor_id, name, material, colors))
+        return self.existing
 
     def create_filament(self, **kwargs: Any) -> Any:
         """
@@ -2627,6 +2641,15 @@ class TestCreateSpoolBlocking:
         assert client.calls == [("vendor", "Inland"),
                                 rfidw_filament_call("Inland PETG", 7, "PETG"),
                                 ("spool", 42, None)]
+
+    def test_a_known_product_and_color_reuses_its_filament(self):
+        client = RfidwSpoolman(vendor={"id": 7}, filament={"id": 42}, created={"id": 99},
+                               existing={"id": 5})
+        fields = {"manufacturer": "Inland", "ftype": "PETG", "color_argb": 0xFF0A0B0C}
+        assert rfid_write_mod._create_spool_blocking(rfidw_spoolman_unit(client),
+                                                     fields) == (99, None)
+        assert client.finds == [(7, "Inland PETG", "PETG", {"color_hex": "0A0B0C"})]
+        assert client.calls == [("vendor", "Inland"), ("spool", 5, None)]
 
     def test_a_filament_without_an_id_is_a_failure(self):
         client = RfidwSpoolman(vendor={"id": 7}, filament={"name": "x"},

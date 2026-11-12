@@ -2842,6 +2842,39 @@ class TestSyncRfidToSpoolman:
             ("info", "TEST: no Spoolman spool matches UID AABB and auto-create is OFF "
                      "(set 'auto_spoolman_create: True' to create one)")]
 
+    def test_a_new_spool_joins_the_filament_of_its_product_and_color(self):
+        slot = {"uid": "AABB", "brand": "Bambu", "material": "PLA", "color_hex": "00ff00",
+                "sub_type": "Basic"}
+        known = {"id": 42, "name": "Bambu PLA Basic", "material": "PLA", "color_hex": "00FF00",
+                 "density": 1.24, "diameter": 1.75, "settings_bed_temp": 60, "weight": 1000,
+                 "extra": {"variant": '"Basic"'}}
+        other = {**known, "id": 43, "color_hex": "FF0000"}
+        routes = self._routes([], **{
+            "GET /v1/vendor?name=Bambu": [{"id": 7, "name": "Bambu Lab"}],
+            "GET /v1/filament?vendor.id=7&name=Bambu%20PLA%20Basic&material=PLA": [other, known],
+            "POST /v1/spool": {"id": 500, "remaining_weight": 1000}})
+        afc, lane, logger = self._run(slot, routes, allow_create=True)
+        assert afc.moonraker.sent("POST", "/v1/filament") == []
+        assert afc.moonraker.sent("POST", "/v1/spool")[0]["filament_id"] == 42
+        assert lane.spool_id == 500
+        assert logger.messages[0] == (
+            "info", "TEST: new spool of filament #42 (Bambu PLA Basic) in Spoolman")
+
+    def test_find_filament_needs_the_same_name_material_and_colors(self):
+        listing = [{"id": 1, "name": "Bambu PLA Basic", "material": "PLA", "color_hex": "00FF00"},
+                   {"id": 2, "name": "Bambu PLA Basic", "material": "PLA",
+                    "multi_color_hexes": "E94B3C,FFFFFF"}]
+        path = "/v1/filament?vendor.id=7&name=Bambu%20PLA%20Basic&material=PLA"
+        client, moonraker = rfid_spoolman_client({("GET", path): listing})
+        assert client.find_filament(7, "Bambu PLA Basic", "PLA", color_hex="#00ff00")["id"] == 1
+        assert client.find_filament(7, "Bambu PLA Basic", "PLA",
+                                    multi_color_hexes=["e94b3c", "ffffff"])["id"] == 2
+        assert client.find_filament(7, "Bambu PLA Basic", "PLA", color_hex="0000FF") is None
+        assert client.find_filament(7, "Bambu PLA Basic", "PLA") is None
+        assert client.find_filament(None, "Bambu PLA Basic", "PLA", color_hex="00FF00") is None
+        assert moonraker.calls == [("GET", path, None, False)] * 4
+        assert moonraker.logger.messages == []
+
     def test_create_filament_failure_warns(self):
         slot = {"uid": "AABB", "brand": "Bambu", "material": "PLA", "color_hex": "00ff00",
                 "sub_type": "Basic"}
@@ -2902,6 +2935,7 @@ class TestSyncRfidToSpoolman:
             ("GET", "/v1/info", None, False),
             ("GET", "/v1/spool", None, False),
             ("GET", "/v1/vendor?name=Bambu", None, False),
+            ("GET", "/v1/filament?vendor.id=7&name=Bambu%20PLA%20Basic&material=PLA", None, False),
             ("POST", "/v1/filament",
              {"name": "Bambu PLA Basic", "vendor_id": 7, "material": "PLA", "density": 1.24,
               "diameter": 1.75, "color_hex": "00ff00", "settings_extruder_temp": 220,

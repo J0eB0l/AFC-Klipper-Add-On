@@ -1082,14 +1082,16 @@ def _create_spool_blocking(unit: Any,
     try:
         vendor = client.get_or_create_vendor(brand)
         vid = vendor.get("id") if isinstance(vendor, dict) else None
-        fil = client.create_filament(
-            name=sku or f"{brand} {ftype}", vendor_id=vid, material=ftype,
-            density=fields.get("density"), diameter=fields.get("diameter_mm"),
-            color_hex=color_hex,
-            settings_extruder_temp=fields.get("hotend_max_c") or None,
-            settings_bed_temp=fields.get("bed_temp_c") or None,
-            weight=weight, article_number=sku)
-        if not isinstance(fil, dict) or "id" not in fil:
+        name = sku or f"{brand} {ftype}"
+        fil = client.find_filament(vid, name, ftype, color_hex=color_hex) \
+            or client.create_filament(name=name, vendor_id=vid, material=ftype,
+                                      density=fields.get("density"),
+                                      diameter=fields.get("diameter_mm"), color_hex=color_hex,
+                                      settings_extruder_temp=fields.get("hotend_max_c") or None,
+                                      settings_bed_temp=fields.get("bed_temp_c") or None,
+                                      weight=weight, article_number=sku)
+        if (not isinstance(fil, dict)
+            or "id" not in fil):
             return 0, f"Spoolman filament create failed ({fil})"
         spool = client.create_spool(fil["id"], initial_weight=weight)
         if not isinstance(spool, dict) or "id" not in spool:
