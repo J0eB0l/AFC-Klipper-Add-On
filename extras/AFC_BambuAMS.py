@@ -1474,6 +1474,7 @@ class afcBambuAMS(afcUnit):
         # per empty id).
         self.rollcall_span_boxed = config.getint("rollcall_span_boxed", None, minval=0, maxval=4)
         self.rollcall_span_ht = config.getint("rollcall_span_ht", None, minval=0, maxval=8)
+        # Also pauses a print whose filament stops moving while the extruder pushes.
         self.fault_detect = config.getboolean("fault_detect", True)
         self.fault_pause = config.getboolean("fault_pause", True)
         # The bridge streams status many times a second, and an undriven AMS grinds.
@@ -10993,7 +10994,7 @@ class afcBambuAMS(afcUnit):
                 odom = self._odom_now_mm()
                 e = float(self.afc.toolhead.get_position()[3])
         except Exception:
-            fps = None               # cannot tell: start over next tick
+            fps = None
         base = getattr(self, "_feed_stop_base", None)
         if (fps is None
             or e is None
@@ -11008,8 +11009,7 @@ class afcBambuAMS(afcUnit):
         _lane, e0, lo, hi, odom0 = base
         lo, hi = min(lo, fps), max(hi, fps)
         if (hi - lo >= FEED_STOP_SWING
-            or (odom is not None and odom0 is not None
-                and abs(odom - odom0) >= LITE_ODOM_STEP_MM)):
+            or (odom is not None and odom0 is not None and abs(odom - odom0) >= LITE_ODOM_STEP_MM)):
             self._feed_stop_base = (lane, e, fps, fps, odom)
             return False
         self._feed_stop_base = (lane, e0, lo, hi, odom0)
@@ -11021,8 +11021,7 @@ class afcBambuAMS(afcUnit):
                f"extruder pushed {pushed:.0f}mm, but the AMS buffer never "
                f"moved (a printing extruder drains it every ~20mm). The "
                f"filament may not have reached the extruder gears, the gears "
-               f"may be slipping, or the nozzle may be clogged. Clear it, "
-               f"then resume.")
+               f"may be slipping, or the nozzle may be clogged. Clear it, then resume.")
         self._raise_ams_fault(lane, msg)
         return True
 

@@ -1583,7 +1583,6 @@ class BambuBridge:
         self._buff_pos: Optional[float] = None
         # (sagged_to, recovered_to, mm_fed); mm is None when the line omitted det.
         self._buff_refill: Optional[Tuple[float, float, Optional[float]]] = None
-        # Counts refills, so a caller can tell a new one from the last.
         self._buff_refill_seq: int = 0
         self._reconnect_cbs: List[Callable[[], None]] = []
         #: Bridge uptime (ms) from the last `info`, and whether it went backwards (a reboot).
