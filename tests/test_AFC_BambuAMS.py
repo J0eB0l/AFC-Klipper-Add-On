@@ -23220,7 +23220,7 @@ class TestAfcBambuAMSCheckAmsFault:
         unit._unload_in_progress = True
         unit._check_ams_fault(unit.lanes["lane22"])
         assert unit.afc.error.messages == []
-        assert unit._fault_seen == 0                # not even looked at
+        assert unit._fault_seen == 1
         assert unit.logger.messages == []
 
     def test_drying_does_not_raise(self, monkeypatch):
@@ -23228,7 +23228,21 @@ class TestAfcBambuAMSCheckAmsFault:
         unit._drying = True
         unit._check_ams_fault(unit.lanes["lane22"])
         assert unit.afc.error.messages == []
-        assert unit._fault_seen == 0
+        assert unit._fault_seen == 1
+        assert unit.logger.messages == []
+
+    def test_a_fault_from_a_dry_does_not_raise_after_it(self, monkeypatch):
+        # A bridge reboot mid-dry leaves "state:6"; the dry ending must not
+        # raise it against the next print.
+        said = ("[AMS_COMMON]state:6,tray_now:1,tray_exit:15  "
+                "[AMS_LINK]en:0,mode:7,idx:255,ref:0,seq:0")
+        unit = self._unit(monkeypatch, said)
+        unit._drying = True
+        unit._check_ams_fault(unit.lanes["lane22"])
+        unit._drying = False
+        unit._check_ams_fault(unit.lanes["lane22"])
+        assert unit.afc.error.messages == []
+        assert unit._fault_seen == 1
         assert unit.logger.messages == []
 
     def test_pause_disabled_warns_instead(self, monkeypatch):
