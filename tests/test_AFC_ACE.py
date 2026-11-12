@@ -3127,6 +3127,75 @@ class TestAfcACEFeedToHubProbing:
         assert [method for method, _ in wire.moves()] == ["feed_filament"]
         assert unit.logger.messages == []
 
+    STALL_LOG = ("warning", "ACE Ace_1: slot 3 reported feed_error")
+    NOT_STAGED = ("error", "ACE prep_post_load: lane3 not staged, slot 3 reported "
+                           "feed_error\nThe ACE reported a feed error: its encoder saw "
+                           "lane3's filament stop moving in the tube. Check for a kink, a "
+                           "damaged spot on the filament or a blockage, clear it, then load "
+                           "again.")
+
+    def test_scan_stopped_by_a_jam_stages_nothing_more(self):
+        unit, lane, wire = self._unit()
+
+        def begin(staged: Any, ctx: Dict[str, Any]) -> None:
+            """
+            A scan whose feed the unit gave up on; like the real scan, it
+            counts the whole window as fed once the slot stops.
+
+            :param staged: lane being staged
+            :param ctx: the stage context to fill in
+            """
+            unit._ace.feed_filament(3, 300.0, 50.0)
+            ctx.update(active=True, initial=100.0, fed=300.0)
+        unit.printer.register_event_handler("afc_ace:stage_probe_begin", begin)
+        wire.stall(True)
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is None
+        assert wire.moves() == [("feed_filament", {"index": 3, "length": 300.0,
+                                                   "speed": 50.0})]
+        assert [event for event, _ in unit.printer.events] == [
+            "afc_ace:stage_probe_begin", "afc_ace:stage_probe_end"]
+        assert unit.logger.messages == [self.STALL_LOG, self.NOT_STAGED]
+
+    @pytest.mark.parametrize("scan, feed", [
+        (None, 200.0),
+        ("tag read", 150.0)])
+    def test_jam_in_the_remainder_feed_stages_nothing_more(self, scan, feed):
+        begin = self._scan(fed=150.0, done=True) if scan else None
+        unit, lane, wire = self._unit(begin)
+        wire.stall(True)
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is None
+        assert wire.moves() == [self._feed(feed)]
+        assert unit.logger.messages == [self.STALL_LOG, self.NOT_STAGED]
+
+    def test_other_slot_error_after_the_scan_has_no_stall_hint(self):
+        unit, lane, wire = self._unit(self._scan(fed=300.0), slot_status="stuck_error")
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is None
+        assert wire.moves() == []
+        assert unit.logger.messages == [
+            ("warning", "ACE Ace_1: slot 3 reported stuck_error"),
+            ("error", "ACE prep_post_load: lane3 not staged, slot 3 reported stuck_error")]
+
+    def test_status_poll_failing_after_the_scan_stages_anyway(self):
+        unit, lane, wire = self._unit(self._scan(fed=300.0, done=True))
+        unit._ace.set_reply("get_status", RuntimeError("status down"))
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is True
+        # One poll for a pulled spool, one for a slot error; both gave up.
+        assert unit._ace.commands == [("get_status", {})] * 2
+        assert wire.moves() == []
+        assert unit.logger.messages == []
+
     def test_listener_errors_are_logged_and_the_stage_goes_on(self):
         unit, lane, wire = self._unit(Recorder(raises=RuntimeError("scan down")))
         unit.printer.register_event_handler(
@@ -3201,6 +3270,21 @@ class TestAfcACEPrepPostLoad:
         # prep_state started True (LaneSpec prep=True); the abort path clears it.
         assert lane.prep_state is False
         assert unit.afc.save_vars.call_count == 1
+        assert unit.logger.messages == []
+
+    def test_slot_error_leaves_lane_unstaged_without_retrying(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        unit._feed_to_hub_probing = Recorder(result=None)
+
+        unit.prep_post_load(lane)
+
+        assert unit._feed_to_hub_probing.call_count == 1
+        assert lane.loaded_to_hub is False
+        # Still prepped, so its next load feeds from the slot the whole way.
+        assert lane.prep_state is True
+        assert unit.afc.save_vars.call_count == 0
+        assert unit._operation_active is False
         assert unit.logger.messages == []
 
     def test_td1_capture_runs_after_staging_when_configured(self):

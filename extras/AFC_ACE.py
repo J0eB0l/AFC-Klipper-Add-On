@@ -1553,7 +1553,8 @@ class afcACE(afcUnit):
             self._operation_active = prev
             self._prev_states_stale = True
 
-    def _feed_to_hub_probing(self, lane: AFCLane, slot: int, dist_hub: float) -> bool:
+    def _feed_to_hub_probing(self, lane: AFCLane, slot: int,
+                             dist_hub: float) -> Optional[bool]:
         """
         Feed the filament into the unit and on to the hub, giving an RFID
         integration a chance to read the tag *during* the load.
@@ -1564,10 +1565,16 @@ class afcACE(afcUnit):
         dist_hub - fed`) is then staged in a single move at full feed speed. With
         no listener this is just one `initial + dist_hub` feed.
 
+        The scan ends when the slot stops, which is also how the unit ends a
+        feed it gave up on (a jam), so the slot is checked for an error after
+        the scan and after the remainder feed.
+
         :param lane: lane being staged
         :param slot: 0-based ACE slot index for the lane
         :param dist_hub: lane-to-hub distance in mm
-        :return bool: False when the spool was removed mid-stage, else True
+        :return Optional[bool]: False when the spool was removed mid-stage,
+            None when the unit stopped the stage with a slot error (logged),
+            else True
         """
         if self._ace is None:
             return False
@@ -1583,13 +1590,18 @@ class afcACE(afcUnit):
         total = initial + dist_hub
         fed = max(float(ctx.get("fed") or 0.0), 0.0)
         removed = bool(ctx.get("removed"))
+        err = None
         try:
             # Bail out if the spool was pulled back out mid-stage; feeding an empty
             # slot trips the ACE's stuck-spool error.
             if (not removed
                 and self._slot_reports_empty(slot)):
                 removed = True
-            if not removed:
+            if (not removed
+                and ctx.get("active")):
+                err = self._slot_error(slot)
+            if (not removed
+                and err is None):
                 # Stage the remainder in one move at full feed speed. The scan read
                 # pauses for seconds and can leave the unit "busy", so wait ready.
                 remaining = total - fed
@@ -1597,6 +1609,7 @@ class afcACE(afcUnit):
                     self._wait_for_ace_ready(timeout=self.prep_ready_timeout)
                     self._ace.feed_filament(slot, remaining, self.feed_speed)
                     self._wait_for_feed_complete(slot, remaining, self.feed_speed)
+                    err = self._last_move_error
                     fed += remaining
         finally:
             try:
@@ -1609,7 +1622,30 @@ class afcACE(afcUnit):
             self.logger.debug(f"ACE prep_post_load: {lane.name} filament removed during staging, "
                               f"aborting (fed {fed:.0f}/{total:.0f}mm)")
             return False
+        if err is not None:
+            # The unit gave up on the feed: the filament is not at the hub.
+            hint = self._stall_hint(lane) if err == "feed_error" else ""
+            self.logger.error(f"ACE prep_post_load: {lane.name} not staged, slot {slot} "
+                              f"reported {err}{hint}")
+            return None
         return True
+
+    def _slot_error(self, slot_index: int) -> Optional[str]:
+        """
+        Poll the slot once and record any error it reports as the last move's.
+
+        :param slot_index: 0-based ACE slot index
+        :return Optional[str]: the error (e.g. "feed_error"), or None when the
+            slot has none or the unit can't be asked
+        """
+        self._last_move_error = None
+        try:
+            hw_status = self._ace.get_status(timeout=2.0)
+        except Exception:
+            return None
+        if self._slot_in_error(hw_status, slot_index):
+            self._note_move_error(hw_status, slot_index)
+        return self._last_move_error
 
     def prep_post_load(self, lane: AFCLane) -> None:
         """
@@ -1617,7 +1653,8 @@ class afcACE(afcUnit):
 
         Feeds dist_hub from the slot when load_to_hub is enabled and the slot
         is prepped but not yet staged, marking the lane loaded_to_hub and
-        optionally capturing TD-1 data. Retries the feed up to three times.
+        optionally capturing TD-1 data. Retries the feed up to three times,
+        but not after the unit stopped it with a slot error (a jam).
 
         :param lane: Lane to stage to the hub.
         """
@@ -1642,7 +1679,13 @@ class afcACE(afcUnit):
                     # Wait out the unit's own insert cycle, or it rejects the
                     # staging feed with error_2.
                     self._wait_for_ace_ready(timeout=self.prep_ready_timeout)
-                    if self._feed_to_hub_probing(lane, slot, lane.dist_hub) is False:
+                    staged = self._feed_to_hub_probing(lane, slot, lane.dist_hub)
+                    if staged is None:
+                        # The unit stopped the stage on a slot error (logged).
+                        # Retrying a jam only grinds it; the lane stays prepped
+                        # and unstaged, so its next load feeds the whole way.
+                        return
+                    if staged is False:
                         # Spool pulled back out mid-stage, don't mark it staged
                         # and don't retry; reset prep so a fresh insert stages clean.
                         lane.loaded_to_hub = False
