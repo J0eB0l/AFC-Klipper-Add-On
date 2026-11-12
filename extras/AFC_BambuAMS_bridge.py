@@ -1543,6 +1543,8 @@ class BambuBridge:
         # None means it has never said, which is not the same as zero.
         self._err_code: Optional[int] = None
         self._err_code_t: float = 0.0
+        # Per unit, so one unit's code is not reported against another.
+        self._err_code_by_unit: Dict[int, Tuple[int, float]] = {}
         self._bldc_i: float = 0.0
         self._chain_uids: List[str] = []
         # So a reader can tell two reads of the same reply from a new one.
@@ -1810,7 +1812,8 @@ class BambuBridge:
             except Exception:
                 pass
 
-    def last_err_code(self) -> Tuple[Optional[int], float]:
+    def last_err_code(self, unit: Optional[int] = None
+                      ) -> Tuple[Optional[int], float]:
         """
         Return the unit's last reported error level and when it said it.
 
@@ -1823,10 +1826,13 @@ class BambuBridge:
         during healthy operation; the stall detector keys on the unit's words
         instead.
 
+        :param unit: the unit's chain index; None for the last one any unit stated
         :return tuple: (err_code or None, monotonic time it was reported)
         """
         with self._lock:
-            return (self._err_code, self._err_code_t)
+            if unit is None:
+                return (self._err_code, self._err_code_t)
+            return self._err_code_by_unit.get(int(unit), (None, 0.0))
 
     def last_scan_end(self) -> Optional[float]:
         """
@@ -3173,6 +3179,8 @@ class BambuBridge:
                         with self._lock:
                             self._err_code = val
                             self._err_code_t = now
+                            if _dbg_unit is not None:
+                                self._err_code_by_unit[int(_dbg_unit)] = (val, now)
                     except ValueError:
                         pass
                 # A run of identical lines re-emits once a minute with a count.

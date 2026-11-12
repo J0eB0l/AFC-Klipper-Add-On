@@ -10773,10 +10773,6 @@ class afcBambuAMS(afcUnit):
         if (not getattr(self, "fault_detect", False)
             or self._bridge is None):
             return
-        if getattr(self, "_unload_in_progress", False):
-            return
-        if getattr(self, "_drying", False):
-            return
         getf = getattr(self._bridge, "last_fault", None)
         if not callable(getf):
             return
@@ -10784,7 +10780,13 @@ class afcBambuAMS(afcUnit):
         seq, text, amps = getf(unit=getattr(self, "ams_index", None))
         if seq == getattr(self, "_fault_seen", 0):
             return
+        # Marked seen before the unload and drying skips, or a fault from then
+        # raises at the first check after (a bridge reboot's "state:6" mid-dry
+        # paused the next print once the dry ended).
         self._fault_seen = seq
+        if (getattr(self, "_unload_in_progress", False)
+            or getattr(self, "_drying", False)):
+            return
         if not text:
             return
         if self._fault_quiet():
@@ -10812,7 +10814,7 @@ class afcBambuAMS(afcUnit):
         try:
             getec = getattr(self._bridge, "last_err_code", None)
             if callable(getec):
-                code, _ = getec()
+                code, _ = getec(unit=getattr(self, "ams_index", None))
         except Exception:
             code = None
         err = f", err_code {code}" if code else ""

@@ -2301,7 +2301,8 @@ class FakeBridge:
             return self.fault_by_unit[unit]
         return self.fault
 
-    def last_err_code(self) -> Tuple[Optional[int], float]:
+    def last_err_code(self, unit: Optional[int] = None
+                      ) -> Tuple[Optional[int], float]:
         """:return tuple: (error level, when)"""
         return self.err_code
 

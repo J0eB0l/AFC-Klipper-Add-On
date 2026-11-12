@@ -1249,6 +1249,19 @@ class TestBambuBridgeLastErrCode:
             ams_echo("[AMS_LINK]err_code: 0 -> 23"),
             ams_echo("[AMS_LINK]err_code:0x16->0x00")]
 
+    def test_a_unit_reads_only_its_own_code(self, bambu_bridge):
+        # The HT's code is not the AMS 2's, nor one no unit was named for.
+        bambu_bridge.reactor.advance(5.0)
+        feed_amsdbg(bambu_bridge, "[AMS_LINK]err_code:0x00->0x80",
+                    addr=0x1800, unit=4)
+        feed_amsdbg(bambu_bridge, "[AMS_LINK]err_code: 0 -> 23", addr=0x0700)
+        assert bambu_bridge.last_err_code(unit=4) == (128, 105.0)
+        assert bambu_bridge.last_err_code(unit=0) == (None, 0.0)
+        assert bambu_bridge.last_err_code() == (23, 105.0)
+        assert bambu_bridge.logger.messages == [
+            ams_echo("[AMS_LINK]err_code:0x00->0x80"),
+            ams_echo("[AMS_LINK]err_code: 0 -> 23")]
+
 
 class TestBambuBridgeTryClaimBus:
     def test_first_claim_wins_and_records_owner(self, bambu_bridge):
