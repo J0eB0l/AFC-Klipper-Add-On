@@ -643,7 +643,7 @@ _UNSET = object()
 # Events the reader consumes or ignores on purpose; anything else is logged
 # (see handle_line). Command echoes are listed as uninteresting.
 _BRIDGE_EVENTS_KNOWN = frozenset((
-    "status", "reply", "error", "ack", "amsdbg", "sniff", "chain", "info",
+    "status", "mot", "reply", "error", "ack", "amsdbg", "sniff", "chain", "info",
     "sniff_mode", "slow",
     # command echoes
     "dry", "mon", "resync", "mcaddr", "armms", "arrivems", "hb",
@@ -2864,6 +2864,37 @@ class BambuBridge:
         end = self._rfid_stamp(self._rfid_end_t, self._rfid_end_by_addr, addr)
         return end is not None and since is not None and end >= since
 
+    def _merge_motion(self, obj: dict) -> None:
+        """
+        Fold a 100 ms motion report into the cached status frame.
+
+        Firmware 2.92 sends ``{"evt":"mot","u":..,"buff":..,"buffn":..,
+        "odom":..}`` while filament moves: the same readings the full frame
+        carries, only more often. Readers of ``latest_status()`` (the buffer
+        pin, the arrival check, the odometer) see them at once. No listener
+        runs, since a full frame costs a lane sync per unit and these carry
+        nothing a lane sync needs.
+
+        :param obj: The motion report
+        """
+        with self._lock:
+            latest = self._latest
+            if not isinstance(latest, dict):
+                return
+            merged = dict(latest)
+            for key in ("buff", "buffn"):
+                if key in obj:
+                    merged[key] = obj[key]
+            units = latest.get("units")
+            if ("odom" in obj
+                and isinstance(units, list)):
+                merged["units"] = [
+                    dict(u, odom=obj["odom"])
+                    if isinstance(u, dict) and u.get("n") == obj.get("u")
+                    else u
+                    for u in units]
+            self._latest = merged
+
     def handle_line(self, line: str) -> None:
         """
         Decode one bridge line and, for a status frame, cache + hop to reactor.
@@ -2888,6 +2919,8 @@ class BambuBridge:
             self._trace_fstate(obj)
             for cb in self._listeners:
                 self.reactor.register_async_callback(lambda et, o=obj, c=cb: c(o))
+        elif obj.get("evt") == "mot":
+            self._merge_motion(obj)
         elif obj.get("evt") in ("reply", "raw"):
             # Raw AMS frames, held for diagnostics.
             with self._lock:

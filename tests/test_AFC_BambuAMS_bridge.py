@@ -4343,6 +4343,28 @@ class TestBambuBridgeHandleLine:
         assert bridge_sent(bridge) == [{"cmd": "info"}]
         assert bridge.logger.messages == [REQUEST_INFO_LOG]
 
+    def test_motion_report_updates_the_cached_frame_only(self, monkeypatch):
+        seen: List[dict] = []
+        bridge = make_bambu_bridge(monkeypatch, listener=seen.append)
+        frame = {"evt": "status", "buff": 40, "buffn": 7,
+                 "units": [{"n": 0, "odom": 100}, {"n": 1, "odom": 5}]}
+        bridge.handle_line(json.dumps(frame))
+        bridge.reactor.run_callbacks()
+        bridge.handle_line('{"evt":"mot","u":1,"m":1,"ph":1,"buff":81,'
+                           '"buffn":9,"odom":1490}')
+        bridge.reactor.run_callbacks()
+        assert bridge.latest_status() == {
+            "evt": "status", "buff": 81, "buffn": 9,
+            "units": [{"n": 0, "odom": 100}, {"n": 1, "odom": 1490}]}
+        assert seen == [frame]                     # no lane sync for it
+        assert bridge.logger.messages == [REQUEST_INFO_LOG]
+
+    def test_motion_report_before_any_status_is_dropped(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.handle_line('{"evt":"mot","u":0,"buff":81,"odom":3}')
+        assert bridge.latest_status() is None
+        assert bridge.logger.messages == []
+
     def test_info_is_asked_once_per_connection(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"status","online":true}')
