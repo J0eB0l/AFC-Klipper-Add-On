@@ -1301,6 +1301,7 @@ class afcACE(afcUnit):
             self._refresh_slot_inventory(slot)
             slot_info = self._slot_inventory[slot]
             if apply_filament_defaults is not None:
+                self.afc.spool._set_values(lane)
                 apply_filament_defaults(
                     lane, slot_info,
                     color_converter=rgb_array_to_hex,
@@ -1316,6 +1317,9 @@ class afcACE(afcUnit):
             and (staged_spool_id is not None
                  or lane.remember_spool)):
             self.afc.spool.set_spoolID(lane, saved_spool_id)
+        else:
+            if not self._uses_firmware_rfid:
+                self.afc.spool._set_values(lane)
         self.lane_illuminate_spool(lane)
         self._hub_load_suppressed.discard(lane.name)
         self.afc.save_vars()
@@ -2271,10 +2275,10 @@ class afcACE(afcUnit):
             afc.save_vars()
             return True
         finally:
-            # An unload that stops before the unwind leaves the unload assist on
-            self._stop_feed_assist(self._get_slot(cur_lane.name))
-            self._operation_active = False
-            self._prev_states_stale = True
+            # finish_unload (also called by AFC.py for every unload_sequence exit,
+            # including custom_unload_cmd/heating-error paths that skip this method)
+            # repeats this; harmless, since both calls are idempotent.
+            self.finish_unload(cur_lane)
 
     def _ace_load_sequence(self, cur_lane: AFCLane, cur_extruder: Any) -> bool:
         """
@@ -2531,6 +2535,19 @@ class afcACE(afcUnit):
         :param slot: 0-based ACE slot index of the lane being unloaded.
         """
 
+    def finish_unload(self, lane: AFCLane) -> None:
+        """
+        Stop any unload assist left running and clear the operation-active guard,
+        even when custom_unload_cmd or a heating error skipped unit_unload_lane.
+        Without this, feed-assist reconciliation, the watchdog and slot sync stay
+        blocked by a guard that prepare_unload set but nothing ever cleared.
+
+        :param lane: Lane that finished (or aborted) an unload.
+        """
+        self._stop_feed_assist(self._get_slot(lane.name))
+        self._operation_active = False
+        self._prev_states_stale = True
+
     def _ace_unload_sequence(self, cur_lane: AFCLane, cur_extruder: Any) -> bool:
         """
         ACE unload transport, ACE serial unwind back to hub.
@@ -2555,6 +2572,7 @@ class afcACE(afcUnit):
         :param cur_lane: Lane being moved.
         :param slot: Its ACE slot.
         """
+        self._wait_for_ace_ready()
         self._ace.unwind_filament(slot, cur_lane.short_move_dis, self.retract_speed)
         self._wait_for_feed_complete(slot, cur_lane.short_move_dis, self.retract_speed)
 
@@ -2620,6 +2638,7 @@ class afcACE(afcUnit):
             if cur_extruder.tool_stn_unload > 0:
                 afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
                                "ACE STN unload", wait_tool=True)
+            self._wait_for_ace_ready()
             self._ace.unwind_filament(slot, retract_dist, self.retract_speed)
             self._wait_for_feed_complete(slot, retract_dist, self.retract_speed)
         return True
@@ -2670,6 +2689,7 @@ class afcACE(afcUnit):
                 self._log_delta('ACE unload: retracting tool_stn_unload (overlaps unwind)')
                 afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
                                "ACE STN unload", wait_tool=False)
+            self._wait_for_ace_ready()
             self._ace.unwind_filament(slot, retract_dist, self.retract_speed)
             self._wait_for_feed_complete(slot, retract_dist, self.retract_speed)
             if cur_extruder.tool_stn_unload > 0:

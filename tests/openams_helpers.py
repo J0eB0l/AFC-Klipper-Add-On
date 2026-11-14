@@ -203,5 +203,5 @@ class FakeOams:
         self.current_spool = current_spool
         self.fps_value = fps_value
         self.action_status = action_status
-        self.load_retry_failures = load_failures
-        self.unload_retry_failures = unload_failures
+        self._load_retry_failures = load_failures
+        self._unload_retry_failures = unload_failures

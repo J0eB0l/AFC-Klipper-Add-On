@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from gcode import GCodeDispatch, GCodeCommand
     from extras.gcode_move import GCodeMove
+    from extras.homing import PrinterHoming
     from extras.AFC_lane import AFCLane
     from extras.AFC_extruder import AFCExtruder
     from extras.AFC_functions import afcFunction
@@ -58,7 +59,7 @@ except: raise error(ERROR_STR.format(import_lib="AFC_utils", trace=traceback.for
 try: from extras.AFC_stats import AFCStats
 except: raise error(ERROR_STR.format(import_lib="AFC_stats", trace=traceback.format_exc()))
 
-AFC_VERSION="1.2.11"
+AFC_VERSION="1.2.12"
 
 # Class for holding different states so its clear what all valid states are
 class State(str, Enum):
@@ -319,6 +320,7 @@ class afc:
             config.getboolean("enable_multiple_mapping", False)
             or config.getboolean("afc_enable_multiple_mapping", False))
         self.manual_home_has_probe_pos_param: bool = False
+        self.manual_home_requires_gcmd: bool = False
 
         # Klippy debuginput start_args can only be passed in when doing tests, this way AFC
         # knows if its running on a printer or a klippy test. This way we can bypass some
@@ -469,14 +471,10 @@ class afc:
         self.idle       = self.printer.lookup_object('idle_timeout')
         self.gcode_move: GCodeMove = self.printer.lookup_object('gcode_move')
 
-        # Looking up to see if manual_home has probe_pos, this is to make AFC work with klipper
-        # starting with new homing update git hash(57c2e0c960f8e25f56a66ba3a1e90e124f207001)
-        phoming = self.printer.lookup_object('homing')
-        try:
-            phoming_sig = inspect.signature(phoming.manual_home)
-            self.manual_home_has_probe_pos_param = True if "probe_pos" in phoming_sig.parameters.keys() else False
-        except:
-            pass
+        # Inspect manual_home's signature to detect optional/required parameters added
+        # by different Klipper/Kalico forks, so AFC passes the right keyword arguments.
+        phoming: PrinterHoming = self.printer.lookup_object('homing')
+        self._detect_manual_home_signature(phoming)
 
         # Check if hardware bypass is configured, if not create a virtual bypass sensor
         try:
@@ -503,6 +501,24 @@ class afc:
         self._rename_macros()
 
         self.current_state = State.IDLE
+
+    def _detect_manual_home_signature(self, phoming: PrinterHoming) -> None:
+        """
+        Inspect `manual_home`'s signature to detect optional/required parameters
+        added by different Klipper/Kalico forks, so AFC passes the right keyword
+        arguments when calling it. `probe_pos` was added by upstream Klipper's
+        probing-context homing update (git hash 57c2e0c), while Kalico PR #1052
+        made `gcmd` a required parameter so nested gcode contexts can be tracked.
+
+        :param phoming: the printer's `homing` object.
+        """
+        try:
+            sig_params = inspect.signature(phoming.manual_home).parameters
+        except (TypeError, ValueError):
+            return
+        self.manual_home_has_probe_pos_param = "probe_pos" in sig_params
+        self.manual_home_requires_gcmd = ("gcmd" in sig_params
+                                          and sig_params["gcmd"].default is inspect.Parameter.empty)
 
     def handle_ready(self):
         """
@@ -1752,6 +1768,10 @@ class afc:
                     finally:
                         self._set_display_status('pushing', False)
                     if not success:
+                        # A failure that didn't pause (outside a print) would
+                        # otherwise leave AFC stuck in LOADING.
+                        if self.current_state == State.LOADING:
+                            self.current_state = State.IDLE
                         return success
 
                     # Activate the tool-loaded LED and handle filament operations if enabled.
@@ -2216,7 +2236,12 @@ class afc:
                     success = self.unload_sequence(cur_lane, cur_hub, cur_extruder)
                 finally:
                     self._set_display_status('retraction', False)
+                    cur_lane.unit_obj.finish_unload(cur_lane)
                 if not success:
+                    # A failure that didn't pause (outside a print) would
+                    # otherwise leave AFC stuck in UNLOADING.
+                    if self.current_state == State.UNLOADING:
+                        self.current_state = State.IDLE
                     return success
             finally:
                 if restore_temp: self.restore_toolhead_temp(temp_state)

@@ -2451,7 +2451,9 @@ class TestAfcACECheckRunout:
 
 
 class TestAfcACEOnFilamentInsert:
-    def test_restores_saved_spool_and_stages(self):
+    def test_restores_saved_spool_and_stages(self, monkeypatch):
+        # No tag to apply, so only the restore branch can call _set_values.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
         unit = ace_p1_unit(LaneSpec("lane0", prep=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = 5
@@ -2480,20 +2482,25 @@ class TestAfcACEOnFilamentInsert:
             ("debug", "ACE Ace_1: slot 0 get_filament_info -> {}"),
             ("info", "ACE prep_post_load: lane0 staged at hub (dist_hub=60mm)")]
 
-    def test_spool_not_restored_without_a_staged_id_or_remember_spool(self):
+    def test_spool_not_restored_without_a_staged_id_or_remember_spool(self, monkeypatch):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = 5
         lane.remember_spool = False
         unit.afc.spool.clear_values = Hook(lambda cleared: setattr(cleared, "spool_id", None))
+        # _set_values only fires for V1 alongside applying RFID tag defaults.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", Recorder())
 
         unit.on_filament_insert(lane)
 
         assert unit.afc.spool.set_spoolID.calls == []
+        assert unit.afc.spool._set_values.calls == [((lane,), {})]
         assert lane._afc_staged_spool_id is None
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
-    def test_a_staged_spool_is_restored_without_remember_spool(self):
+    def test_a_staged_spool_is_restored_without_remember_spool(self, monkeypatch):
+        # No tag to apply, so only the restore branch can call _set_values.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = 5
@@ -2509,51 +2516,40 @@ class TestAfcACEOnFilamentInsert:
         assert lane._afc_staged_spool_id is None
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
-    def test_spool_not_restored_when_lane_had_no_spool_id(self):
+    def test_spool_not_restored_when_lane_had_no_spool_id(self, monkeypatch):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = None
         lane.remember_spool = True
         lane._afc_staged_spool_id = 5
+        # _set_values only fires for V1 alongside applying RFID tag defaults.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", Recorder())
 
         unit.on_filament_insert(lane)
 
         assert unit.afc.spool.set_spoolID.calls == []
-        # The tag values apply instead of AFC's default values.
-        assert unit.afc.spool._set_values.calls == []
+        assert unit.afc.spool._set_values.calls == [((lane,), {})]
         assert lane._afc_staged_spool_id is None
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
-    def test_spool_not_restored_when_lane_keeps_its_spool_id(self):
+    def test_spool_not_restored_when_lane_keeps_its_spool_id(self, monkeypatch):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = 5
         lane.remember_spool = True
         lane._afc_staged_spool_id = 5
+        # _set_values only fires for V1 alongside applying RFID tag defaults.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", Recorder())
 
         unit.on_filament_insert(lane)
 
         # The default clear_values leaves spool_id set.
         assert unit.afc.spool.clear_values.calls == [((lane,), {})]
         assert unit.afc.spool.set_spoolID.calls == []
-        # The tag values apply instead of AFC's default values.
-        assert unit.afc.spool._set_values.calls == []
+        assert unit.afc.spool._set_values.calls == [((lane,), {})]
         assert lane.spool_id == 5
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
-    def test_applies_the_tag_material(self):
-        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
-        lane = unit.lanes["lane0"]
-        unit._ace.set_reply("get_filament_info", {"type": "PETG", "rfid": 2})
-
-        unit.on_filament_insert(lane)
-
-        assert unit._slot_inventory[0]["material"] == "PETG"
-        assert lane.material == "PETG"
-        assert unit.logger.messages == [
-            ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'type': 'PETG', 'rfid': 2}"),
-            ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='PETG' rfid=2 "
-                     "nozzle=None-NoneC")]
 
     def test_tag_not_applied_without_the_rfid_helper(self, monkeypatch):
         monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
@@ -5111,14 +5107,16 @@ class TestAfcACEAceUnloadInner:
             ((-30.0, 25.0, "ACE STN unload"), {"wait_tool": True}),
             ((-60.0, 25.0, "ACE STN unload"), {"wait_tool": False})]
         # The ready check and the assist stop come first, and both retracts are
-        # sent before the unwind, so the async one overlaps it. The last three
-        # get_status are the unwind's completion polls.
+        # sent before the unwind (preceded by its own readiness check), so the
+        # async one overlaps it. The last three get_status are the unwind's
+        # completion polls.
         assert unit.printer.timeline == [
             ("send_command", ("get_status", {})),
             ("send_command", ("get_status", {})),
             ("send_command", ("stop_feed_assist", {"index": 3})),
             ("move_e_pos", (-30.0, 25.0, "ACE STN unload", True)),
             ("move_e_pos", (-60.0, 25.0, "ACE STN unload", False)),
+            ("send_command", ("get_status", {})),
             ("send_command", self.UNWIND),
             ("send_command", ("get_status", {})),
             ("send_command", ("get_status", {})),
