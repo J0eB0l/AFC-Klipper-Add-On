@@ -966,6 +966,13 @@ MAX_MMPS = 30.0
 
 # Not configurable: the hub is virtual, and this only sizes a deadline.
 DIST_HUB_MM = 250.0
+#: The printer-style arrival: how far the bridge is told to keep driving (its window ends
+#: the drive after 1.25 s), and the least time before the follower is armed.
+ARRIVAL_DRIVE_MM = 50.0
+ARRIVAL_MIN_S = 1.5
+#: How close to its measured path the odometer must be before a full buffer counts as the
+#: arrival. Printer 3's lane14 read 0.83 with 290mm still to go (2026-11-12).
+ARRIVAL_PATH_MARGIN_MM = 100.0
 
 # Until the unit reports its own. Long on purpose: a short deadline would abort the
 # first load before the unit can measure its path.
@@ -1395,6 +1402,13 @@ class afcBambuAMS(afcUnit):
         self.tool_bite_mm = config.getfloat("tool_bite_mm", 0.0, minval=0.0)
         # Cap (s) on waiting for the unit to stop after the toolhead sensor trips.
         self.arrival_assist_delay_s = config.getfloat("arrival_assist_delay_s", 4.0, minval=0.0)
+        # printer (default): a buffer-sensed load arrives at arrival_buffer and keeps driving
+        # with the "arrived" byte, as a Bambu printer does, so the AMS ends its own feed at a
+        # low motor current. stop: halt at once.
+        self.arrival_handoff = config.getchoice("arrival_handoff",
+                                                {"stop": "stop", "printer": "printer"}, "printer")
+        self.arrival_buffer = config.getfloat("arrival_buffer", 0.8, minval=0.3, maxval=1.0)
+        self._arrival_driving = False
         self.eject_buffer = config.getfloat("eject_buffer", 200.0, minval=0.0)
         self.variant = config.getchoice("variant",
                                         {"auto": "auto", "ams": "ams", "lite": "lite"}, "auto")
@@ -1689,7 +1703,8 @@ class afcBambuAMS(afcUnit):
             "AFC_BAMBU_ARRIVAL", "UNIT", self.name, self.cmd_AFC_BAMBU_ARRIVAL,
             desc="Set the delay between the arrival and arming the hold; the "
                  "printer waits ~4s. Runtime only. "
-                 "AFC_BAMBU_ARRIVAL UNIT=<unit> [ASSIST=<seconds>]")
+                 "AFC_BAMBU_ARRIVAL UNIT=<unit> [ASSIST=<seconds>] "
+                 "[MODE=stop|printer] [BUFFER=<0.3-1.0>]")
         _register_lane_command(
             self, "AFC_BAMBU_RECOVER", self.cmd_AFC_BAMBU_RECOVER,
             desc="Recover a stuck/failed load: relink the AMS, stop motion, reel "
@@ -1946,10 +1961,23 @@ class afcBambuAMS(afcUnit):
         delay = gcmd.get_float("ASSIST", None, minval=0.0, maxval=30.0)
         if delay is not None:
             self.arrival_assist_delay_s = delay
-        note = "" if delay is None else "  (runtime only)"
+        mode = gcmd.get("MODE", None)
+        if mode is not None:
+            mode = mode.strip().lower()
+            if mode not in ("stop", "printer"):
+                raise gcmd.error(f"MODE={mode} is not stop or printer")
+            self.arrival_handoff = mode
+        buf = gcmd.get_float("BUFFER", None, minval=0.3, maxval=1.0)
+        if buf is not None:
+            self.arrival_buffer = buf
+        changed = (delay is not None
+                   or mode is not None
+                   or buf is not None)
+        note = "  (runtime only)" if changed else ""
         gcmd.respond_info(f"AFC_BAMBU_ARRIVAL {self.name}: "
                           f"assist-delay={self.arrival_assist_delay_s:.2f}s "
-                          f"(the printer waits ~4s){note}")
+                          f"(the printer waits ~4s), handoff={self.arrival_handoff}, "
+                          f"buffer={self.arrival_buffer:.2f}{note}")
 
     def cmd_AFC_BAMBU_RECOVER(self, gcmd: Any) -> None:
         """
@@ -11320,6 +11348,9 @@ class afcBambuAMS(afcUnit):
         if self._is_lite():
             # The AMS Lite's finish is the hold the sensor stop already left it in.
             return True
+        if getattr(self, "_arrival_driving", False):
+            # The bridge's own arrival window sends the printer's 09 -> 07 handoff.
+            return True
         for hexf in self._FINISH_FRAMES:
             self._bridge.send({"cmd": "raw", "hex": hexf})
         return True
@@ -12017,6 +12048,8 @@ class afcBambuAMS(afcUnit):
         """
         if timeout is None:
             timeout = self.load_retry_timeout
+        self._arrival_driving = False
+        self._arrival_short_said = False
         lite = self._is_lite()
         sensor = not lite or self._has_toolhead_sensor(cur_lane)
         self._lite_fault_err = None
@@ -12134,6 +12167,9 @@ class afcBambuAMS(afcUnit):
                 self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS "
                                   f"reported a fault during the load; still feeding, the "
                                   f"unit runs its own recovery while the request continues")
+            if (not lite
+                and self._printer_arrival(cur_lane, gate)):
+                return True
             if (sensor
                 and self._toolhead_sensor_triggered(cur_lane)):
                 self.stop()  # so the AMS can't retract it
@@ -12292,6 +12328,96 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 return now - t0
 
+    def _printer_arrival(self, cur_lane: Any, gate: Optional[dict]) -> bool:
+        """
+        Hand a buffer-sensed load over the way a Bambu printer does.
+
+        At its toolhead sensor the printer does not stop the AMS: it keeps the
+        drive going and flips the drive frame's last byte to 02 ("arrived").
+        The AMS then ends its own feed once its buffer compresses ("e_in",
+        "ok", 0.6-0.8 A), and the printer sends 09/A5 1.25 s later. The
+        bridge's arrival window does the same when told "arrived" and fed on.
+
+        Only with arrival_handoff printer, and only where the buffer stands in
+        for the toolhead sensor, once it reads arrival_buffer or more AND the
+        odometer is within ARRIVAL_PATH_MARGIN_MM of the path the unit
+        measured. A unit with no measured path keeps the plain stop.
+
+        :param cur_lane: the lane being loaded
+        :param gate: this poll's _buffer_gate_reading, or None
+        :return bool: True once the arrival was handed over
+        """
+        if (self.arrival_handoff != "printer"
+            or gate is None
+            or self._bridge is None):
+            return False
+        if gate["fps"] < self.arrival_buffer:
+            return False
+        path = self.afc_bowden_length
+        if path >= DEFAULT_BOWDEN_MM:
+            return False
+        pos = self._feed_odom_mm(cur_lane)
+        if (pos is None
+            or pos < path - ARRIVAL_PATH_MARGIN_MM):
+            if not getattr(self, "_arrival_short_said", False):
+                self._arrival_short_said = True
+                where = "unknown" if pos is None else f"{pos:.0f}mm"
+                self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} buffer at "
+                                  f"{gate['fps']:.2f} with the odometer at {where} of a "
+                                  f"{path:.0f}mm path; not the arrival yet")
+            return False
+        slot = self._slot_of(cur_lane)
+        if slot is None:
+            return False
+        try:
+            self._arrival_mark = self._bridge.last_finish()[0]
+        except Exception:
+            self._arrival_mark = None
+        self._arrival_t = self.afc.reactor.monotonic()
+        self._bridge.send({"cmd": "arrived", "unit": self.ams_index, "slot": slot})
+        self.feed(cur_lane, ARRIVAL_DRIVE_MM)
+        self._arrival_driving = True
+        self._load_odom_at_sensor = self._feed_odom_mm(cur_lane)
+        self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} arrived, buffer at "
+                          f"{gate['fps']:.2f} (handoff at {self.arrival_buffer:.2f}); "
+                          f"still driving with the arrived flag so the AMS ends its own feed")
+        return True
+
+    def _wait_printer_arrival(self) -> float:
+        """
+        Wait out the arrival window after _printer_arrival.
+
+        Ends on the unit's own "feed finish" once the bridge has ended the
+        drive (ARRIVAL_MIN_S), or at the cap. Logs the unit's finish line,
+        which carries its buffer position and motor current.
+
+        :return float: seconds since the arrival
+        """
+        reactor = self.afc.reactor
+        t0 = getattr(self, "_arrival_t", None) or reactor.monotonic()
+        mark = getattr(self, "_arrival_mark", None)
+        cap = max(self.arrival_assist_delay_s, ARRIVAL_MIN_S)
+        said = ""
+        while True:
+            now = reactor.monotonic()
+            if now - t0 >= cap:
+                break
+            try:
+                seq, _ok, text = self._bridge.last_finish()
+            except Exception:
+                seq, text = None, ""
+            if (mark is not None
+                and seq is not None
+                and seq != mark):
+                said = text
+                if now - t0 >= ARRIVAL_MIN_S:
+                    break
+            reactor.pause(now + 0.05)
+        waited = reactor.monotonic() - t0
+        self.logger.debug(f"AFC bambu {self.name}: arrival handoff took {waited:.2f}s; "
+                          f"AMS said: {said.strip() or 'nothing'}")
+        return waited
+
     def _advance_into_extruder(self, cur_lane: Any, cur_extruder: Any) -> None:
         """
         Hand the filament to the extruder without fighting the AMS for it.
@@ -12321,7 +12447,16 @@ class afcBambuAMS(afcUnit):
         if bite > 0:
             afc.move_e_pos(bite, speed, "tool bite")
             self._log_delta("Bambu: tool bite")
-        waited = self._wait_arrival_settle()
+        if self._arrival_driving:
+            waited = self._wait_printer_arrival()
+            self._arrival_driving = False
+            # The handoff fires short of the gears; the path ends where the unit ended its own
+            # feed, before the advance moves it on.
+            pos = self._feed_odom_mm(cur_lane)
+            if pos is not None:
+                self._load_odom_at_sensor = pos
+        else:
+            waited = self._wait_arrival_settle()
         self._log_delta(f"Bambu: unit settled ({waited:.2f}s of "
                         f"{self.arrival_assist_delay_s:.2f}s)")
         self.set_feed_assist(cur_lane, True)  # hold mode:4 via AP2 sync
@@ -13810,9 +13945,11 @@ class afcBambuAMS(afcUnit):
         climbing afterwards as the toolhead consumes filament through tool_stn
         and the purge.
 
-        A delta, not the raw reading: the odometer is a position, zero only if
-        the previous unload finished cleanly, and a lane staged at the hub
-        starts partway along.
+        A boxed unit zeroes its odometer when each feed starts, so its reading
+        at the sensor is the path. The start read before the feed is left from
+        the last move (an unload stops it at about 190mm), so it is not
+        subtracted. An AMS Lite's odometer is the selected tray's position, so
+        its path is a delta from the start.
 
         Not taken from the unload: that trace runs 0 -> -0.999 and resets to 0
         without spanning the tube.
@@ -13829,9 +13966,10 @@ class afcBambuAMS(afcUnit):
         if (a is None
             or b is None):
             return None
-        span = b - a
+        lite = self._is_lite()
+        span = b - a if lite else b
         low = self.ODOM_PATH_MIN_MM
-        if self._is_lite():
+        if lite:
             low += self.unload_past_sensor
         if not (low <= span <= self.ODOM_PATH_MAX_MM):
             return None

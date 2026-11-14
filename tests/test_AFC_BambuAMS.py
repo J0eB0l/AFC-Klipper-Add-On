@@ -7147,7 +7147,7 @@ class TestAfcBambuAMSApplyLearned:
             self, monkeypatch):
         unit = self._unit(monkeypatch)
         unit._load_odom_start, unit._load_odom_at_sensor = 10.0, 3610.0
-        assert unit._measure_path_from_odom() == 3600.0
+        assert unit._measure_path_from_odom() == 3610.0
         unit.apply_learned({})
         assert (unit._load_odom_start, unit._load_odom_at_sensor) == (
             None, None)
@@ -25739,6 +25739,26 @@ class TestAfcBambuAMSAdvanceIntoExtruder:
             ("debug", "Bambu: tool_stn queued (38mm @ 7mm/s)")]
         assert unit.logger.messages == []
 
+    @pytest.mark.parametrize("pos, kept", [(1547.0, 1547.0), (None, 1400.0)])
+    def test_a_printer_style_arrival_measures_where_the_unit_ended_its_feed(
+            self, monkeypatch, pos, kept):
+        # The handoff fires short of the gears; the unit then feeds on to its own stop, and the
+        # path is the odometer there. No reading keeps the one taken at the handoff.
+        unit, lane, _ = self._rig(monkeypatch)
+        unit._arrival_driving = True
+        unit._load_odom_at_sensor = 1400.0
+        monkeypatch.setattr(unit, "_wait_printer_arrival", lambda: 0.3)
+        monkeypatch.setattr(unit, "_feed_odom_mm", lambda _lane: pos)
+        unit._advance_into_extruder(lane, lane.extruder_obj)
+        assert unit._arrival_driving is False
+        assert unit._load_odom_at_sensor == kept
+        assert unit.afc.e_moves == [(2.0, 7.0, "tool bite", False),
+                                    (38.0, 7.0, "tool stn", False)]
+        assert unit.afc.afcDeltaTime.messages == [
+            ("debug", "Bambu: tool bite"), self._settled("0.30", "0.00"),
+            ("debug", "Bambu: tool_stn queued (38mm @ 7mm/s)")]
+        assert unit.logger.messages == []
+
     def test_a_load_with_no_delta_timer_still_advances(self, monkeypatch):
         # A load reached outside a TOOL_LOAD can find no stage timer: the
         # markers are skipped, the moves are not.
@@ -29300,7 +29320,7 @@ class TestAfcBambuAMSPathMeasurement:
 
 
 class TestAfcBambuAMSMeasurePathFromOdom:
-    """The odometer at the sensor trip, less the odometer at the start."""
+    """A boxed unit's odometer at the sensor trip; an AMS Lite's, less its start."""
 
     def _rig(self, monkeypatch: pytest.MonkeyPatch, start: Optional[float],
              at_sensor: Optional[float]) -> afcBambuAMS:
@@ -29320,9 +29340,18 @@ class TestAfcBambuAMSMeasurePathFromOdom:
         assert unit._measure_path_from_odom() == 3346.0
         assert unit.logger.messages == []
 
-    def test_it_is_a_delta_not_the_raw_reading(self, monkeypatch):
-        # A lane staged at the hub starts partway along.
+    def test_a_boxed_units_start_left_from_the_unload_is_not_subtracted(self, monkeypatch):
+        # The unload stops the odometer near 190mm; the AMS zeroes it when the feed starts, so
+        # the reading at the sensor is the whole path.
+        unit = self._rig(monkeypatch, 188.0, 1547.0)
+        assert unit._measure_path_from_odom() == 1547.0
+        assert unit.logger.messages == []
+
+    def test_an_ams_lite_path_is_a_delta_from_its_start(self, monkeypatch):
+        # The Lite's odometer is the tray's position, so a lane staged at the hub starts
+        # partway along.
         unit = self._rig(monkeypatch, 800.0, 4146.0)
+        monkeypatch.setattr(unit, "_is_lite", lambda: True)
         assert unit._measure_path_from_odom() == 3346.0
         assert unit.logger.messages == []
 
