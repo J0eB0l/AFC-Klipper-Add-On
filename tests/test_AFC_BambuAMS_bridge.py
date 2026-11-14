@@ -7449,3 +7449,66 @@ class TestBambuBridgeHandleLineWifi:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line(json.dumps(frame))
         assert bridge.logger.messages == [("debug", said)]
+
+
+class TestBambuBridgeQuietWithDebugOff:
+    """With AFC's debug off, raw AMS lines are not logged and routine steps stay off the console."""
+
+    @staticmethod
+    def _quiet(monkeypatch, **kwargs) -> BambuBridge:
+        """:return BambuBridge: a bridge whose logger has AFC's debug off"""
+        bridge = make_bambu_bridge(monkeypatch, **kwargs)
+        bridge.logger.print_debug_console = False
+        return bridge
+
+    def test_routine_info_is_a_console_line_with_debug_on(self):
+        logger = BambuLogger()
+        bridge_mod.routine_info(logger, "step")
+        assert logger.messages == [("info", "step")]
+
+    def test_routine_info_goes_to_afc_log_with_debug_off(self):
+        logger = BambuLogger()
+        logger.print_debug_console = False
+        bridge_mod.routine_info(logger, "step")
+        assert logger.messages == [("debug", "step")]
+
+    def test_a_raw_ams_line_is_not_logged(self, monkeypatch):
+        bridge = self._quiet(monkeypatch, narration=True)
+        feed_amsdbg(bridge, "[AMS_PMSM]mode:0->2", addr=0x0700, unit=1)
+        assert bridge.logger.messages == []
+        assert bridge._nar_lg.messages == []
+
+    def test_a_raw_ams_line_is_logged_with_debug_on(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch, narration=True)
+        feed_amsdbg(bridge, "[AMS_PMSM]mode:0->2", addr=0x0700, unit=1)
+        assert bridge._nar_lg.messages == [("debug", "0x0700 u1 [AMS_PMSM]mode:0->2")]
+
+    def test_a_routine_ack_is_not_logged(self, monkeypatch):
+        bridge = self._quiet(monkeypatch)
+        bridge.handle_line(json.dumps({"evt": "ack", "cmd": "assist", "slot": 0}))
+        assert bridge.logger.messages == []
+
+    def test_a_feed_ack_is_still_logged(self, monkeypatch):
+        bridge = self._quiet(monkeypatch)
+        bridge.handle_line(json.dumps({"evt": "ack", "cmd": "feed", "slot": 0}))
+        assert bridge.logger.messages == [("debug", "AFC bambu: bridge ack feed (slot 0)")]
+
+    def test_an_error_code_edge_stays_off_the_console(self, monkeypatch):
+        bridge = self._quiet(monkeypatch)
+        feed_amsdbg(bridge, "[AMS_LINK]err_code:0x00->0x23", addr=0x0700)
+        assert [m for m in bridge.logger.messages if m[0] == "info"] == []
+
+    def test_a_stall_still_reaches_the_console(self, monkeypatch):
+        bridge = self._quiet(monkeypatch)
+        feed_amsdbg(bridge, "feed finish -1, stall, len_det:0.40 m, tube_len:1.20 m",
+                    addr=0x0700)
+        assert [m for m in bridge.logger.messages if m[0] == "info"] == [
+            ("info", "AFC bambu bridge: AMS: the filament STALLED after 0.40 m of a "
+                     "1.20 m path -- check for a jam between the bay and the toolhead")]
+
+    def test_a_sniff_capture_is_still_written(self, monkeypatch):
+        bridge = self._quiet(monkeypatch, narration=True)
+        bridge.handle_line(json.dumps({"evt": "tx", "dir": "tx", "us": 5, "n": 2,
+                                       "hex": "3D00"}))
+        assert bridge._nar_lg.messages == [
+            ("debug", '0x---- u? {"evt":"tx","dir":"tx","us":5,"n":2,"hex":"3D00"}')]

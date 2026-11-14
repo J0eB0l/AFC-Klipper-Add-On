@@ -107,12 +107,26 @@ def parse_bridge_line(line: str) -> Optional[dict]:
         return None
     return obj if isinstance(obj, dict) else None
 
+def routine_info(logger: Any, message: str) -> None:
+    """
+    Log a routine step: on the console while AFC's debug is on, AFC.log only when it is off.
+
+    :param logger: AFC's logger
+    :param message: the line
+    """
+    if getattr(logger, "print_debug_console", False):
+        logger.info(message)
+    else:
+        logger.debug(message)
+
+
 # "bldc_i:0.319A": the AMS's motor current, from feed/switch narration.
 _BLDC_I_RE = re.compile(r"bldc_i:([0-9.]+)A")
 
 
 # Narration table (_AMS_HUMAN): only matched entries reach the console; everything
-# goes to AFC.log verbatim. An entry is (pattern, render) or (pattern, render, log_only).
+# goes to AFC.log verbatim while AFC's debug is on. An entry is (pattern, render) or
+# (pattern, render, flag): flag True logs it only, "routine" shows it only with debug on.
 #
 # Drying telemetry, every ~10 s while a cycle runs (both separators occur):
 #   [AMS_CHMB]s:2|rf:55,0|vt:44.0|ap:35.3|hts:34,31,00|pw:100|ad:2|...
@@ -385,9 +399,11 @@ _AMS_HUMAN = (
     (re.compile(r"err_code:0x00\s*->\s*0x80\b"), None),
     (re.compile(r"err_code:0x80\s*->\s*0x0+\b"), None),
     (re.compile(r"err_code:0x00\s*->\s*0x([0-9A-Fa-f]+)"),
-     lambda m: f"AMS raised error 0x{m.group(1).upper()}"),
+     lambda m: f"AMS raised error 0x{m.group(1).upper()}",
+     "routine"),
     (re.compile(r"err_code:0x[0-9A-Fa-f]+\s*->\s*0x0+\b"),
-     lambda m: "AMS cleared its error"),
+     lambda m: "AMS cleared its error",
+     "routine"),
     (re.compile(r"tray\s+(\d+)\s+out\s*,\s*clear\s+magic_num"),
      lambda m: f"AMS: bay {int(m.group(1)) + 1} is now empty",
      True),
@@ -1121,7 +1137,8 @@ class WifiLink:
         self._said = None
         self._creds_sent = False
 
-    def _say(self, state: str, message: str, warning: bool = False, console: bool = True) -> None:
+    def _say(self, state: str, message: str, warning: bool = False, console: bool = True,
+             routine: bool = False) -> None:
         """
         Tell the console about a link state, once each time it changes.
 
@@ -1129,6 +1146,7 @@ class WifiLink:
         :param message: the line, after the chain's label
         :param warning: log it as a warning
         :param console: False to write it to AFC.log only
+        :param routine: True for a step that is on the console only while AFC's debug is on
         """
         if (state == self._said
             or self._bridge is None):
@@ -1136,6 +1154,9 @@ class WifiLink:
         self._said = state
         if not console:
             self._bridge.logger.debug(f"{self.label}: {message}")
+            return
+        if routine:
+            routine_info(self._bridge.logger, f"{self.label}: {message}")
             return
         log = self._bridge.logger.warning if warning \
             else self._bridge.logger.info
@@ -1163,7 +1184,7 @@ class WifiLink:
             else:
                 self.on_wifi = True
                 self._failed_addr = None
-                self._say("wifi", f"BridgeBox connected over WiFi at {self.addr}")
+                self._say("wifi", f"BridgeBox connected over WiFi at {self.addr}", routine=True)
                 return link
         elif (not self.addr
               and not usb_in
@@ -1403,7 +1424,7 @@ class BambuBridge:
     # AFC.log only, so a retry storm cannot stall the reactor.
     NARRATION_CONSOLE_MAX_PER_S = 12
     #: Whether raw AMS narration also goes to the console. Off: the console gets the
-    #: _AMS_HUMAN sentences, and AFC.log and the narration file keep every raw line.
+    #: _AMS_HUMAN sentences; with AFC's debug on, AFC.log and the narration file keep every raw line.
     RAW_NARRATION_CONSOLE = False
     #: A link that comes back sooner than this is logged to AFC.log only.
     RECONNECT_SAY_S = 10.0
@@ -1726,8 +1747,8 @@ class BambuBridge:
                 raise
             self._serial = None
             # A bridge still booting or coming over WiFi is normal at start.
-            self.logger.info(f"AFC bambu: bridge not reachable yet ({e}); the reader will "
-                             f"keep trying")
+            routine_info(self.logger, f"AFC bambu: bridge not reachable yet ({e}); the reader will "
+                                      f"keep trying")
         self._run = True
         self._thread = threading.Thread(target=self._reader, name="afc_bambu_read", daemon=True)
         self._thread.start()
@@ -1922,9 +1943,9 @@ class BambuBridge:
         """
         Send the AMS's own narration to its own file.
 
-        Narration gets its own file and handler: always written, never on the
-        console, and independent of AFC's `debug` flag, so every STEP, finish,
-        stall and measured length stays on record even with debug off.
+        Narration gets its own file and handler, never on the console. It is
+        written while AFC's `debug` is on; with it off only sniff captures
+        reach it.
         Rotates at 10 MB keeping one backup, so on disk it tops out at ~20 MB
         (the live file plus one rolled copy) and the previous chunk survives a
         rollover rather than being wiped.
@@ -1957,7 +1978,8 @@ class BambuBridge:
         self._nar_lg = lg
         return True
 
-    def _narrate_to_file(self, text: str, addr: Optional[int], unit: Optional[int] = None) -> None:
+    def _narrate_to_file(self, text: str, addr: Optional[int], unit: Optional[int] = None,
+                         always: bool = False) -> None:
         """
         Record one narration line verbatim.
 
@@ -1973,16 +1995,26 @@ class BambuBridge:
         :param text: the raw narration line
         :param addr: device address that produced it, if known
         :param unit: chain index the firmware attributed it to, if it could
+        :param always: True to write it even with AFC's debug off
         """
         lg = self._nar_lg
         if (lg is None
-            or not text):
+            or not text
+            or not (always or self._verbose())):
             return
         try:
             lg.debug(f'{((f"0x{int(addr):04X}") if addr else "0x----")}'
                      f'{(f" u{int(unit)}" if unit is not None else " u?")} {text}')
         except Exception:
             pass          # a log must never take the reader thread down
+
+    def _verbose(self) -> bool:
+        """
+        Whether AFC's debug is on; with it off, raw AMS lines are not logged.
+
+        :return bool: True to log everything
+        """
+        return bool(getattr(self.logger, "print_debug_console", False))
 
     def last_buff_pos(self) -> Optional[float]:
         """
@@ -2339,7 +2371,8 @@ class BambuBridge:
 
         :param obj: a decoded status event
         """
-        if self._nar_lg is None:
+        if (self._nar_lg is None
+            or not self._verbose()):
             return
         try:
             v = obj.get("fstate")
@@ -2618,7 +2651,7 @@ class BambuBridge:
         """
         Surface the AMS's own words on the console, in English.
 
-        Everything the unit says already reaches AFC.log verbatim; this picks
+        With AFC's debug on, everything the unit says reaches AFC.log verbatim; this picks
         the handful an operator wants to see and renders them plainly. A
         refused dry is the case that matters: the AMS answers
         "[AMS_CHMB]ignore dry_mode:1, ams_state:2" and AFC_BAMBU_HEATER_START
@@ -2634,7 +2667,11 @@ class BambuBridge:
         """
         for entry in _AMS_HUMAN:
             pattern, render = entry[0], entry[1]
-            log_only = len(entry) > 2 and entry[2]
+            log_only = len(entry) > 2 and entry[2] is True
+            if (len(entry) > 2
+                and entry[2] == "routine"
+                and not self._verbose()):
+                log_only = True
             m = pattern.search(text)
             if not m:
                 continue
@@ -2644,7 +2681,8 @@ class BambuBridge:
             msg = f"AFC bambu {self._speaker(unit)}: {render(m)}"
             if log_only:
                 # Log-only lines skip the console dedupe and rate limit but reach the parsing below.
-                self.logger.debug(msg, only_debug=True)
+                if self._verbose():
+                    self.logger.debug(msg, only_debug=True)
                 continue
             if msg == getattr(self, "_last_human", None):
                 continue
@@ -2996,8 +3034,8 @@ class BambuBridge:
                                  "next power-up will enroll from announce order until prep "
                                  "writes a fresh record")
             elif state == "written":
-                self.logger.info(f"AFC bambu: bridge stored {n} unit identities -- the next "
-                                 f"restart will enroll from them")
+                routine_info(self.logger, f"AFC bambu: bridge stored {n} unit identities -- the next "
+                                          f"restart will enroll from them")
             elif state == "failed":
                 self.logger.warning("AFC bambu: bridge could NOT store the unit identities; "
                                     "the chain will keep enrolling from announce order")
@@ -3006,8 +3044,10 @@ class BambuBridge:
         elif obj.get("evt") == "ack":
             # Routine acks are log-only; feed and retract stay on the console.
             _ack_cmd = str(obj.get("cmd") or "")
-            self.logger.debug(f"AFC bambu: bridge ack {_ack_cmd} (slot {obj.get('slot')})",
-                              only_debug=_ack_cmd in _ACK_ROUTINE)
+            if (_ack_cmd not in _ACK_ROUTINE
+                or self._verbose()):
+                self.logger.debug(f"AFC bambu: bridge ack {_ack_cmd} (slot {obj.get('slot')})",
+                                  only_debug=_ack_cmd in _ACK_ROUTINE)
         elif obj.get("evt") == "amsdbg":
             # Repeats are deduplicated, not suppressed: a repeating line is how a stuck loop shows.
             text = obj.get("text")
@@ -3021,7 +3061,8 @@ class BambuBridge:
             self._narrate_to_file(text, obj.get("addr"), _dbg_unit)
             if (isinstance(text, str)
                 and _FW_DIAG_RE.match(text)):
-                self.logger.debug(f"AFC bambu: bridge diag {text}", only_debug=True)
+                if self._verbose():
+                    self.logger.debug(f"AFC bambu: bridge diag {text}", only_debug=True)
                 return
             self._note_dry_refusal(text, obj.get("addr"), _dbg_unit)
             self._note_dry_cfg(text, obj.get("addr"), _dbg_unit)
@@ -3060,8 +3101,8 @@ class BambuBridge:
                 and _addr
                 and _AMS_GAVE_UP_RE.search(text)):
                 self._gave_up_by_addr[_addr] = now
-                self.logger.info(f"AFC bambu bridge: the AMS reported it has STOPPED "
-                                 f"retrying ({text.strip()[:90]})")
+                routine_info(self.logger, f"AFC bambu bridge: the AMS reported it has STOPPED "
+                                          f"retrying ({text.strip()[:90]})")
             # The unit rejecting moves because it has no bay selected.
             if (text
                 and _addr
@@ -3238,7 +3279,8 @@ class BambuBridge:
                                                   "than the console can take "
                                                   f"(>{self.NARRATION_CONSOLE_MAX_PER_S}/s); "
                                                   "the rest of this burst is in AFC.log")
-                    self.logger.debug(f"AMS: {text}", only_debug=_quiet)
+                    if self._verbose():
+                        self.logger.debug(f"AMS: {text}", only_debug=_quiet)
         elif obj.get("evt") == "linkkey":
             # The key itself is never echoed.
             saved = obj.get("saved")
@@ -3284,6 +3326,8 @@ class BambuBridge:
             # One bus pass held the bridge's main loop and USB went unread:
             # rr_* is time in the reply reader, capped the reads cut short,
             # capscan the blocking scans. AFC.log only.
+            if not self._verbose():
+                return
             try:
                 self.logger.debug(f"AFC bambu: bridge loop held {int(obj.get('ms', 0))} ms "
                                   f"(bus reads {int(obj.get('rr_ms', 0))} ms over "
@@ -3305,7 +3349,7 @@ class BambuBridge:
                     f'"us":{int(obj.get("us", 0))},'
                     f'"n":{int(obj.get("n", 0))},'
                     + (f'"s":"{obj.get("s")}",' if obj.get("s") else "")
-                    + f'"hex":"{obj.get("hex", "")}"}}', None)
+                    + f'"hex":"{obj.get("hex", "")}"}}', None, always=True)
             except Exception:
                 pass
         elif obj.get("evt") == "sniff":

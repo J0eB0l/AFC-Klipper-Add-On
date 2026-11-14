@@ -2167,6 +2167,22 @@ class TestBambuSpoolmanSaySpoolSummary:
                      "73% left -- roughly 730 g of a 1000 g spool; updated "
                      "Spoolman spool 87.")]
 
+    def test_with_debug_off_the_console_gets_one_short_line(self, monkeypatch):
+        unit = self._basic(monkeypatch)
+        unit.logger.print_debug_console = False
+        self._said(unit, "lane20", 2, 73, 730)
+        assert unit.logger.messages == [
+            ("debug", "BambuAMS_2 lane20: tag read: Bambu PLA Basic (0080FF). "
+                      "Measured about 73% left -- roughly 730 g of a 1000 g "
+                      "spool; updated Spoolman spool 87."),
+            ("info", "BambuAMS_2 lane20: Bambu PLA Basic (0080FF), about 73% left (730 g)")]
+
+    def test_with_debug_off_a_spool_with_no_tag_says_no_tag(self, monkeypatch):
+        unit = self._basic(monkeypatch, material=None, color=None)
+        unit.logger.print_debug_console = False
+        self._said(unit, "lane20", 2, 104, 1000)
+        assert unit.logger.messages[-1] == ("info", "BambuAMS_2 lane20: no tag, full (1000 g)")
+
     def test_an_unbound_spool_explains_where_the_number_went_instead(
             self, monkeypatch):
         unit = self._basic(monkeypatch, spool_id=None)
