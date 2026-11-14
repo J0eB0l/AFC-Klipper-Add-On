@@ -497,6 +497,7 @@ def _p2_registers(index: int, *, units: bool = True, status: bool = False,
         frames.append({"cmd": "units", "n": index + 1})
     frames += [{"cmd": "htunit", "unit": index, "on": 0},
                {"cmd": "capen", "unit": index, "on": 0},
+               {"cmd": "pathload", "unit": index, "on": 0},
                {"cmd": "model", "unit": index, "m": model},
                {"cmd": "mcaddr", "unit": index, "addr": 0x0700, "pay": index}]
     if status:
@@ -743,7 +744,7 @@ def _p2_flap_reconnect_cmds(ht: bool = False) -> List[str]:
     """
     ht0f = ["ht0fhold"] if ht else []
     return (["info", "info", "units", "htunit"] + ht0f
-            + ["capen", "model", "mcaddr", "armms", "status"])
+            + ["capen", "pathload", "model", "mcaddr", "armms", "status"])
 
 
 def _p2_engage(slot: int) -> List[Dict[str, Any]]:
@@ -7782,6 +7783,7 @@ class TestAfcBambuAMSAdoptIndex:
             {"cmd": "htunit", "unit": 5, "on": 1},
             {"cmd": "ht0fhold", "on": 1},
             {"cmd": "capen", "unit": 5, "on": 0},
+            {"cmd": "pathload", "unit": 5, "on": 0},
             {"cmd": "model", "unit": 5, "m": 2},
             {"cmd": "mcaddr", "unit": 5, "addr": 0x1800, "pay": 0x81},
             {"cmd": "status"}]
@@ -7920,6 +7922,7 @@ class TestAfcBambuAMSAnnounceUnit:
     ANNOUNCE0 = [{"cmd": "units", "n": 1},
                  {"cmd": "htunit", "unit": 0, "on": 0},
                  {"cmd": "capen", "unit": 0, "on": 0},
+                 {"cmd": "pathload", "unit": 0, "on": 0},
                  {"cmd": "model", "unit": 0, "m": 1},
                  {"cmd": "mcaddr", "unit": 0, "addr": 0x0700, "pay": 0},
                  {"cmd": "armms", "ms": 600000}]
@@ -8015,6 +8018,7 @@ class TestAfcBambuAMSAnnounceUnit:
             {"cmd": "units", "n": 3},                  # index 2 -> 3 units
             {"cmd": "htunit", "unit": 2, "on": 0},
             {"cmd": "capen", "unit": 2, "on": 0},
+            {"cmd": "pathload", "unit": 2, "on": 0},
             {"cmd": "model", "unit": 2, "m": 1},
             {"cmd": "mcaddr", "unit": 2, "addr": 0x0700, "pay": 2},
             {"cmd": "armms", "ms": 600000}]
@@ -8028,6 +8032,7 @@ class TestAfcBambuAMSAnnounceUnit:
             {"cmd": "htunit", "unit": 4, "on": 1},
             {"cmd": "ht0fhold", "on": 1},
             {"cmd": "capen", "unit": 4, "on": 0},
+            {"cmd": "pathload", "unit": 4, "on": 0},
             {"cmd": "model", "unit": 4, "m": 2},
             {"cmd": "mcaddr", "unit": 4, "addr": 0x1800, "pay": 0x80},
             {"cmd": "armms", "ms": 600000}]
@@ -8070,6 +8075,7 @@ class TestAfcBambuAMSAnnounceUnit:
             {"cmd": "units", "n": 2},
             {"cmd": "htunit", "unit": 1, "on": 0},
             {"cmd": "capen", "unit": 1, "on": 0},
+            {"cmd": "pathload", "unit": 1, "on": 0},
             {"cmd": "model", "unit": 1, "m": 1},
             {"cmd": "mcaddr", "unit": 1, "addr": 0x0700, "pay": 1},
             {"cmd": "armms", "ms": 600000}]
@@ -8080,7 +8086,7 @@ class TestAfcBambuAMSAnnounceUnit:
         unit = self._unit(monkeypatch, refuse=["units", "htunit", "model",
                                                "mcaddr", "armms"])
         unit._announce_unit()
-        assert unit._bridge.sent == [self.ANNOUNCE0[2]]     # capen
+        assert unit._bridge.sent == self.ANNOUNCE0[2:4]     # capen, pathload
         assert unit.logger.messages == [
             self._failed("units"),
             ("debug", "AMS: connect announce could not send htunit "
@@ -8130,6 +8136,7 @@ class TestAfcBambuAMSOnBridgeReconnect:
     SETTLED = [{"cmd": "info"}, {"cmd": "units", "n": 1},
                {"cmd": "htunit", "unit": 0, "on": 0},
                {"cmd": "capen", "unit": 0, "on": 0},
+               {"cmd": "pathload", "unit": 0, "on": 0},
                {"cmd": "model", "unit": 0, "m": 1},
                {"cmd": "mcaddr", "unit": 0, "addr": 0x0700, "pay": 0},
                {"cmd": "armms", "ms": 600000}, {"cmd": "status"}]
@@ -8239,7 +8246,7 @@ class TestAfcBambuAMSOnBridgeReconnect:
         assert {"cmd": "reset"} not in unit._bridge.sent
         # The settle re-resolves the configured UID too.
         assert [o["cmd"] for o in unit._bridge.sent] == [
-            "info", "info", "units", "htunit", "capen", "model", "mcaddr",
+            "info", "info", "units", "htunit", "capen", "pathload", "model", "mcaddr",
             "armms", "chain", "status"]
         assert unit.logger.messages == []
 
@@ -8293,6 +8300,7 @@ class TestAfcBambuAMSAnnounceAfterSettle:
     ANNOUNCED = [{"cmd": "info"}, {"cmd": "units", "n": 1},
                  {"cmd": "htunit", "unit": 0, "on": 0},
                  {"cmd": "capen", "unit": 0, "on": 0},
+                 {"cmd": "pathload", "unit": 0, "on": 0},
                  {"cmd": "model", "unit": 0, "m": 1},
                  {"cmd": "mcaddr", "unit": 0, "addr": 0x0700, "pay": 0},
                  {"cmd": "armms", "ms": 600000}]
@@ -8316,7 +8324,8 @@ class TestAfcBambuAMSAnnounceAfterSettle:
         assert unit.logger.messages == [
             (failed[0], failed[1].format("units")),
             ("debug", "AMS: connect announce could not send htunit "
-                      "(RuntimeError('gone')), capen (RuntimeError('gone'))"),
+                      "(RuntimeError('gone')), capen (RuntimeError('gone')), "
+                      "pathload (RuntimeError('gone'))"),
             (failed[0], failed[1].format("arm cadence"))]
         # The loaded-lane restore is still scheduled.
         assert [at for _cb, at in unit.reactor.callbacks] == [101.0]
@@ -8519,6 +8528,7 @@ class TestAfcBambuAMSRelinkAfterReboot:
             {"cmd": "info"}, {"cmd": "info"}, {"cmd": "units", "n": 1},
             {"cmd": "htunit", "unit": 0, "on": 0},
             {"cmd": "capen", "unit": 0, "on": 0},
+            {"cmd": "pathload", "unit": 0, "on": 0},
             {"cmd": "model", "unit": 0, "m": 1},
             {"cmd": "mcaddr", "unit": 0, "addr": 0x0700, "pay": 0},
             {"cmd": "armms", "ms": 600000}, {"cmd": "status"}]
@@ -17085,7 +17095,8 @@ class TestAfcBambuAMSSendHtFlag:
         unit._send_ht_flag(unit._bridge)
         assert unit._bridge.sent == [
             {"cmd": "htunit", "unit": 2, "on": 0},
-            {"cmd": "capen", "unit": 2, "on": 1}]
+            {"cmd": "capen", "unit": 2, "on": 1},
+            {"cmd": "pathload", "unit": 2, "on": 0}]
         assert unit.logger.messages == []
 
     def test_off_pushes_capen_0(self, monkeypatch):
@@ -17093,7 +17104,8 @@ class TestAfcBambuAMSSendHtFlag:
         unit._send_ht_flag(unit._bridge)
         assert unit._bridge.sent == [
             {"cmd": "htunit", "unit": 2, "on": 0},
-            {"cmd": "capen", "unit": 2, "on": 0}]
+            {"cmd": "capen", "unit": 2, "on": 0},
+            {"cmd": "pathload", "unit": 2, "on": 0}]
         assert unit.logger.messages == []
 
     def test_an_ht_gets_the_flag_too(self, monkeypatch):
@@ -17103,7 +17115,8 @@ class TestAfcBambuAMSSendHtFlag:
         assert unit._bridge.sent == [
             {"cmd": "htunit", "unit": 2, "on": 1},
             {"cmd": "ht0fhold", "on": 1},
-            {"cmd": "capen", "unit": 2, "on": 0}]
+            {"cmd": "capen", "unit": 2, "on": 0},
+            {"cmd": "pathload", "unit": 2, "on": 0}]
         assert unit.logger.messages == []
 
     def test_a_unit_with_no_setting_measures_nothing(self, monkeypatch):
@@ -17113,7 +17126,8 @@ class TestAfcBambuAMSSendHtFlag:
         unit._send_ht_flag(unit._bridge)
         assert unit._bridge.sent == [
             {"cmd": "htunit", "unit": 2, "on": 0},
-            {"cmd": "capen", "unit": 2, "on": 0}]
+            {"cmd": "capen", "unit": 2, "on": 0},
+            {"cmd": "pathload", "unit": 2, "on": 0}]
         assert unit.logger.messages == []
         # With the attribute gone the getattr default answers: a True start
         # shows it is not the config that produced the 0.
@@ -17122,7 +17136,8 @@ class TestAfcBambuAMSSendHtFlag:
         unit._send_ht_flag(unit._bridge)
         assert unit._bridge.sent == [
             {"cmd": "htunit", "unit": 2, "on": 0},
-            {"cmd": "capen", "unit": 2, "on": 0}]
+            {"cmd": "capen", "unit": 2, "on": 0},
+            {"cmd": "pathload", "unit": 2, "on": 0}]
         assert unit.logger.messages == []
 
     def test_an_ht_without_the_0f_hold_and_with_identity(self, monkeypatch):
@@ -17134,6 +17149,7 @@ class TestAfcBambuAMSSendHtFlag:
         assert unit._bridge.sent == [
             {"cmd": "htunit", "unit": 2, "on": 1},
             {"cmd": "capen", "unit": 2, "on": 0},
+            {"cmd": "pathload", "unit": 2, "on": 0},
             {"cmd": "htuid", "uid": "0123456789ABCDEF01234567"},
             {"cmd": "serial", "s": "01P00A123456789"},
             {"cmd": "bind", "uid": "0123456789ABCDEF01234567", "idx": 0,
@@ -17157,6 +17173,7 @@ class TestAfcBambuAMSSendHtFlag:
         assert unit.logger.messages == [
             ("debug", "Bambu_AMS_1: connect announce could not send "
                       "htunit (RuntimeError('port closed')), capen "
+                      "(RuntimeError('port closed')), pathload "
                       "(RuntimeError('port closed'))")]
 
 
@@ -18297,6 +18314,115 @@ class TestAfcBambuAMSMaybeAutoScan:
             self._inserted(1),
             ("debug", "Bambu_AMS_1: new spool detected in slot 1, "
                       "scanning tag")]
+
+
+class TestAfcBambuAMSChainPathGate:
+    """
+    An insert is not scanned while another unit on the chain has a lane in a toolhead: the scan
+    feeds into that lane's path. The bay goes on lane defaults, and each unit tells the bridge
+    when its lanes go in or out.
+    """
+
+    SKIPPED = ("info", "Bambu_AMS_1: lane1 was not scanned or measured, because lane13 is in a "
+                       "toolhead on this chain and the scan would feed into its path. lane1 is "
+                       "on lane defaults; run AFC_BAMBU_SCAN LANE=lane1 once lane13 is unloaded")
+
+    @staticmethod
+    def _other(unit: afcBambuAMS, *, bridge: Any = None, tool_loaded: bool = False,
+               status: Any = None) -> SimpleNamespace:
+        """
+        :param unit: the unit under test
+        :param bridge: the other unit's bridge; unit's own when None
+        :param tool_loaded: its lane13 is loaded to a toolhead
+        :param status: its lane13's status
+        :return SimpleNamespace: a second unit
+        """
+        lane = SimpleNamespace(name="lane13", tool_loaded=tool_loaded, status=status)
+        return SimpleNamespace(_bridge=bridge if bridge is not None else unit._bridge,
+                               lanes={"lane13": lane})
+
+    @staticmethod
+    def _chain(monkeypatch: pytest.MonkeyPatch, unit: afcBambuAMS, *others: Any) -> None:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param unit: the unit under test
+        :param others: the chain's other units
+        """
+        objs = [("AFC_BambuAMS Bambu_AMS_1", unit)] + [
+            (f"AFC_BambuAMS other{i}", o) for i, o in enumerate(others)]
+        monkeypatch.setattr(unit.printer, "lookup_objects", lambda name: objs)
+
+    @pytest.mark.parametrize("loaded, status", [
+        (True, None),
+        (False, AFCLaneState.TOOL_LOADING),
+        (False, AFCLaneState.TOOL_UNLOADING)])
+    def test_an_insert_is_not_scanned_while_the_chain_has_a_lane_in_a_toolhead(
+            self, monkeypatch, loaded, status):
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+        self._chain(monkeypatch, unit, self._other(unit, tool_loaded=loaded, status=status))
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert unit._bridge.sent == []
+        assert unit._auto_scanned[0] is True
+        assert unit._defaults_due == {0: 100.0 + afcBambuAMS.DEFAULTS_SETTLE_S}
+        assert 0 in unit._defaults_quiet
+        assert unit.logger.messages == [
+            TestAfcBambuAMSMaybeAutoScan._inserted(), self.SKIPPED]
+
+    def test_a_lane_in_a_toolhead_on_another_chain_does_not_hold_the_scan(self, monkeypatch):
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+        self._chain(monkeypatch, unit, self._other(unit, bridge=object(), tool_loaded=True))
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert unit._bridge.sent == [TestAfcBambuAMSMaybeAutoScan.CAPSCAN]
+
+    def test_a_loaded_lane_out_of_its_toolhead_does_not_hold_the_scan(self, monkeypatch):
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+        self._chain(monkeypatch, unit,
+                    self._other(unit, status=AFCLaneState.LOADED))
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert unit._bridge.sent == [TestAfcBambuAMSMaybeAutoScan.CAPSCAN]
+
+    def test_a_unit_list_that_cannot_be_read_does_not_hold_the_scan(self, monkeypatch):
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+
+        def _gone(name: str) -> Any:
+            raise RuntimeError("objects being rebuilt")
+        monkeypatch.setattr(unit.printer, "lookup_objects", _gone)
+        unit._maybe_auto_scan(0, True, slot_info(0))
+        assert unit._bridge.sent == [TestAfcBambuAMSMaybeAutoScan.CAPSCAN]
+
+    def test_pathload_is_sent_on_change_only(self, monkeypatch):
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+        lane = next(iter(unit.lanes.values()))
+        unit._pathload_sent = 0
+        afcBambuAMS._sync_pathload(unit)
+        assert unit._bridge.sent == []
+        lane.tool_loaded = True
+        afcBambuAMS._sync_pathload(unit)
+        afcBambuAMS._sync_pathload(unit)
+        assert unit._bridge.sent == [{"cmd": "pathload", "unit": 0, "on": 1}]
+        lane.tool_loaded = False
+        afcBambuAMS._sync_pathload(unit)
+        assert unit._bridge.sent[-1] == {"cmd": "pathload", "unit": 0, "on": 0}
+        assert len(unit._bridge.sent) == 2
+
+    def test_pathload_waits_for_the_bindings(self, monkeypatch):
+        # Before the connect bindings carry it, nothing is known to be sent.
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+        next(iter(unit.lanes.values())).tool_loaded = True
+        afcBambuAMS._sync_pathload(unit)
+        assert unit._bridge.sent == []
+
+    def test_a_failed_pathload_send_is_retried(self, monkeypatch):
+        unit = TestAfcBambuAMSMaybeAutoScan._unit(monkeypatch)
+        next(iter(unit.lanes.values())).tool_loaded = True
+        unit._pathload_sent = 0
+        unit._bridge.raising["send"] = RuntimeError("port closed")
+        afcBambuAMS._sync_pathload(unit)
+        assert unit._pathload_sent == 0
+        del unit._bridge.raising["send"]
+        afcBambuAMS._sync_pathload(unit)
+        assert unit._bridge.sent == [{"cmd": "pathload", "unit": 0, "on": 1}]
+        assert unit._pathload_sent == 1
 
 
 class TestAfcBambuAMSStartTagScan:
@@ -30547,6 +30673,7 @@ class TestFollowArmMs:
             {"cmd": "units", "n": 1},
             {"cmd": "htunit", "unit": 0, "on": 0},
             {"cmd": "capen", "unit": 0, "on": 0},
+            {"cmd": "pathload", "unit": 0, "on": 0},
             {"cmd": "model", "unit": 0, "m": 1},
             {"cmd": "mcaddr", "unit": 0, "addr": 0x0700, "pay": 0},
             {"cmd": "armms", "ms": 600000}]

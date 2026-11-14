@@ -730,6 +730,25 @@ def _unit_tool_loaded(unit: Any) -> bool:
     return False
 
 
+def _lane_in_toolhead(unit: Any) -> Any:
+    """
+    A lane of this unit that is in a toolhead: loaded, loading or unloading.
+
+    :param unit: the AMS unit
+    :return: the first such lane, or None
+    """
+    try:
+        for lane in getattr(unit, "lanes", {}).values():
+            if (getattr(lane, "tool_loaded", False)
+                or getattr(lane, "status", None) in (AFCLaneState.TOOL_LOADED,
+                                                     AFCLaneState.TOOL_LOADING,
+                                                     AFCLaneState.TOOL_UNLOADING)):
+                return lane
+    except Exception:
+        return None
+    return None
+
+
 def _mono(obj: Any) -> float:
     """
     Reactor monotonic time for a unit, or 0.0 where there is no reactor.
@@ -6384,6 +6403,49 @@ class afcBambuAMS(afcUnit):
     _ACTIVE_STATES = (AFCLaneState.TOOL_LOADED, AFCLaneState.TOOL_LOADING,
                       AFCLaneState.TOOL_UNLOADING, AFCLaneState.EJECTING, AFCLaneState.ERROR)
 
+    def _sync_pathload(self) -> None:
+        """
+        Tell the bridge when a lane of this unit goes into or leaves a toolhead.
+
+        The bridge skips every insert scan on its chain while any unit has one.
+        Sent on change only; the bindings carry it at connect.
+        """
+        bridge = getattr(self, "_bridge", None)
+        sent = getattr(self, "_pathload_sent", None)
+        if (bridge is None
+            or sent is None):
+            return
+        want = 1 if _lane_in_toolhead(self) is not None else 0
+        if want == sent:
+            return
+        try:
+            bridge.send({"cmd": "pathload", "unit": self.ams_index, "on": want})
+        except Exception:
+            return
+        self._pathload_sent = want
+
+    def _chain_lane_in_toolhead(self) -> Any:
+        """
+        A lane in a toolhead on another unit of this unit's chain.
+
+        :return: the first such lane, or None
+        """
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            return None
+        try:
+            units = self.printer.lookup_objects("AFC_BambuAMS")
+        except Exception:
+            return None
+        for _, unit in units:
+            if (unit is self
+                or getattr(unit, "_bridge", None) is not bridge):
+                continue
+            lane = _lane_in_toolhead(unit)
+            if lane is not None:
+                return lane
+        return None
+
     def _sync_lanes(self) -> None:
         """
         Push cached slot state onto each mapped lane (OpenAMS-style).
@@ -6403,6 +6465,7 @@ class afcBambuAMS(afcUnit):
         has no hub of its own to read, so its ``_load_state`` is the bay's
         presence.
         """
+        afcBambuAMS._sync_pathload(self)
         for name, slot in self._slot_map.items():
             lane = self.lanes.get(name)
             if lane is None:
@@ -7892,6 +7955,11 @@ class afcBambuAMS(afcUnit):
         # The firmware holds measure_on_insert, so it is re-sent at connect.
         steps.append(("capen", lambda: bridge.send(
             {"cmd": "capen", "unit": self.ams_index, "on": capen})))
+        # And whether a lane is in a toolhead, which holds every insert scan on the chain.
+        pathload = 1 if _lane_in_toolhead(self) is not None else 0
+        self._pathload_sent = pathload
+        steps.append(("pathload", lambda: bridge.send(
+            {"cmd": "pathload", "unit": self.ams_index, "on": pathload})))
         # The firmware places HTs at 0x80-0x87 and boxed units at 0x00-0x03; a known HT's UID only
         # saves the probe cycle after a cold start.
         if (is_ht
@@ -8416,6 +8484,28 @@ class afcBambuAMS(afcUnit):
             return
         if (not self.auto_scan
             or self._bridge is None):
+            return
+        # The scan feeds the new spool out of its bay, into the path of a lane another unit on this
+        # chain has in a toolhead; the bridge skips it too. Scanned by hand once that lane is out.
+        busy = afcBambuAMS._chain_lane_in_toolhead(self)
+        if busy is not None:
+            self._auto_scanned[slot] = True
+            self._finalize_scan(slot, scanned=False)
+            due = getattr(self, "_defaults_due", None)
+            if due is None:
+                due = self._defaults_due = {}
+            due[slot] = _mono(afc) + getattr(self, "DEFAULTS_SETTLE_S",
+                                             afcBambuAMS.DEFAULTS_SETTLE_S)
+            quiet = getattr(self, "_defaults_quiet", None)
+            if quiet is None:
+                quiet = self._defaults_quiet = set()
+            quiet.add(slot)
+            _ln = self._lane_for_slot(slot)
+            _ln = getattr(_ln, "name", None) or "<lane>"
+            self.logger.info(f"{self.name}: {_ln} was not scanned or measured, because "
+                             f"{busy.name} is in a toolhead on this chain and the scan would "
+                             f"feed into its path. {_ln} is on lane defaults; run "
+                             f"AFC_BAMBU_SCAN LANE={_ln} once {busy.name} is unloaded")
             return
         # A tag read pulses the unit's follower, so a loaded lane holds the scan; the HT is exempt.
         if (not self._is_ht()

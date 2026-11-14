@@ -1152,7 +1152,7 @@ class TestBambuSpoolmanBindLanded:
         # The reconnect's info requests, announce and status request; no
         # scan and no capscan.
         assert [f["cmd"] for f in unit._bridge.sent] == [
-            "info", "info", "units", "htunit", "capen", "model", "mcaddr",
+            "info", "info", "units", "htunit", "capen", "pathload", "model", "mcaddr",
             "armms", "status"]
 
     @pytest.mark.parametrize("miss", [True, False])
