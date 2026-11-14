@@ -173,7 +173,81 @@ def _make_afc():
     obj.disable_print_temp_check = False
     obj.enable_multiple_mapping = False
     obj.active_led_effects = []
+    obj.manual_home_has_probe_pos_param = False
+    obj.manual_home_requires_gcmd = False
     return obj
+
+
+# ── _detect_manual_home_signature ───────────────────────────────────────────────
+
+class TestDetectManualHomeSignature:
+    def test_legacy_signature_sets_both_flags_false(self):
+        """Neither probe_pos nor gcmd exist: both flags stay False."""
+        class FakePhoming:
+            def manual_home(self, toolhead, endstops, pos, speed, triggered, check_triggered):
+                pass
+
+        obj = _make_afc()
+        obj._detect_manual_home_signature(FakePhoming())
+        assert obj.manual_home_has_probe_pos_param is False
+        assert obj.manual_home_requires_gcmd is False
+
+    def test_probe_pos_param_sets_only_that_flag(self):
+        """Upstream Klipper's probe_pos addition, without Kalico's gcmd."""
+        class FakePhoming:
+            def manual_home(self, toolhead, endstops, pos, speed, triggered,
+                            check_triggered, probe_pos=False):
+                pass
+
+        obj = _make_afc()
+        obj._detect_manual_home_signature(FakePhoming())
+        assert obj.manual_home_has_probe_pos_param is True
+        assert obj.manual_home_requires_gcmd is False
+
+    def test_required_gcmd_param_sets_only_that_flag(self):
+        """Kalico PR #1052: gcmd is required (no default), probe_pos absent."""
+        class FakePhoming:
+            def manual_home(self, toolhead, endstops, pos, speed, triggered,
+                            check_triggered, gcmd):
+                pass
+
+        obj = _make_afc()
+        obj._detect_manual_home_signature(FakePhoming())
+        assert obj.manual_home_has_probe_pos_param is False
+        assert obj.manual_home_requires_gcmd is True
+
+    def test_gcmd_param_with_default_does_not_set_requires_flag(self):
+        """A gcmd parameter with a default is optional, not required."""
+        class FakePhoming:
+            def manual_home(self, toolhead, endstops, pos, speed, triggered,
+                            check_triggered, gcmd=None):
+                pass
+
+        obj = _make_afc()
+        obj._detect_manual_home_signature(FakePhoming())
+        assert obj.manual_home_requires_gcmd is False
+
+    def test_both_probe_pos_and_required_gcmd_set_both_flags(self):
+        """Both flags are independent: both can be True at once."""
+        class FakePhoming:
+            def manual_home(self, toolhead, endstops, pos, speed, triggered,
+                            check_triggered, probe_pos, gcmd):
+                pass
+
+        obj = _make_afc()
+        obj._detect_manual_home_signature(FakePhoming())
+        assert obj.manual_home_has_probe_pos_param is True
+        assert obj.manual_home_requires_gcmd is True
+
+    def test_uninspectable_manual_home_leaves_flags_unset(self):
+        """If manual_home isn't inspectable, both flags keep their defaults."""
+        class FakePhoming:
+            manual_home = object()
+
+        obj = _make_afc()
+        obj._detect_manual_home_signature(FakePhoming())
+        assert obj.manual_home_has_probe_pos_param is False
+        assert obj.manual_home_requires_gcmd is False
 
 
 # ── _remove_after_last ────────────────────────────────────────────────────────
@@ -4734,6 +4808,82 @@ class TestToolUnloadDisplayStatusLifecycle:
         assert afc.TOOL_UNLOAD(lane, force_unload=True, restore_temp=False)
 
         afc.restore_toolhead_temp.assert_not_called()
+
+
+class TestToolLoadFailureState:
+    """TOOL_LOAD leaves LOADING when load_sequence fails without pausing."""
+
+    def _make(self):
+        return TestToolLoadDisplayStatusLifecycle()._make()
+
+    def test_unpaused_failure_returns_state_to_idle(self):
+        afc, lane, _ = self._make()
+        afc.load_sequence = MagicMock(return_value=False)
+
+        assert not afc.TOOL_LOAD(lane)
+
+        assert afc.current_state == State.IDLE
+
+    def test_paused_failure_keeps_error_state(self):
+        afc, lane, _ = self._make()
+
+        def fail_with_pause(*args):
+            afc.current_state = State.ERROR
+            return False
+        afc.load_sequence = MagicMock(side_effect=fail_with_pause)
+
+        assert not afc.TOOL_LOAD(lane)
+
+        assert afc.current_state == State.ERROR
+
+    def test_state_is_loading_while_load_sequence_runs(self):
+        afc, lane, _ = self._make()
+        seen = []
+        afc.load_sequence = MagicMock(
+            side_effect=lambda *args: seen.append(afc.current_state) or False)
+
+        assert not afc.TOOL_LOAD(lane)
+
+        assert seen == [State.LOADING]
+        assert afc.current_state == State.IDLE
+
+
+class TestToolUnloadFailureState:
+    """TOOL_UNLOAD leaves UNLOADING when unload_sequence fails without pausing."""
+
+    def _make(self):
+        return TestToolUnloadDisplayStatusLifecycle()._make()
+
+    def test_unpaused_failure_returns_state_to_idle(self):
+        afc, lane, _ = self._make()
+        afc.unload_sequence = MagicMock(return_value=False)
+
+        assert not afc.TOOL_UNLOAD(lane, force_unload=True)
+
+        assert afc.current_state == State.IDLE
+
+    def test_paused_failure_keeps_error_state(self):
+        afc, lane, _ = self._make()
+
+        def fail_with_pause(*args):
+            afc.current_state = State.ERROR
+            return False
+        afc.unload_sequence = MagicMock(side_effect=fail_with_pause)
+
+        assert not afc.TOOL_UNLOAD(lane, force_unload=True)
+
+        assert afc.current_state == State.ERROR
+
+    def test_state_is_unloading_while_unload_sequence_runs(self):
+        afc, lane, _ = self._make()
+        seen = []
+        afc.unload_sequence = MagicMock(
+            side_effect=lambda *args: seen.append(afc.current_state) or False)
+
+        assert not afc.TOOL_UNLOAD(lane, force_unload=True)
+
+        assert seen == [State.UNLOADING]
+        assert afc.current_state == State.IDLE
 
 
 class TestBypassUnloadDisplayStatus:
