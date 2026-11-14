@@ -267,7 +267,7 @@ class AFC_autocal:
         flow_cal._set_pressure_advance(ext, k)
         flow_cal._current_k[ext_name] = k
         msg = f"AFC autocal: applied {what}={k:.6f} for {lane_name} on {ext_name}"
-        self.logger.info(msg)
+        self.logger.debug(msg)
         return msg
 
     def _default_k(self, lane: Any) -> Optional[float]:
@@ -350,7 +350,7 @@ class AFC_autocal:
         estepper._set_pressure_advance(k, smooth_time)
         self._managed_extruders.add(ext_name)
         msg = f"AFC autocal: applied {what}={k:.6f} for {lane_name} on {ext_name}"
-        self.logger.info(msg)
+        self.logger.debug(msg)
         return msg
 
     def _wrap_pa_handlers(self) -> None:
@@ -393,7 +393,7 @@ class AFC_autocal:
             if (target in self._managed_extruders
                 and self.afc is not None
                 and self._is_printing()):
-                self.logger.info(f"AFC autocal: slicer PA change ignored for {target} "
+                self.logger.debug(f"AFC autocal: slicer PA change ignored for {target} "
                                  f"(flow K managed)")
                 gcmd.respond_info("AFC flow K active, slicer pressure advance ignored")
                 return
@@ -468,12 +468,12 @@ class AFC_autocal:
         k_after = flow_cal._current_k.get(ext_name)
         if (k_after is None
             or k_after == k_before):
-            self.logger.info(f"AFC autocal: calibration produced no new K for {cur_lane.name}")
+            self.logger.info(f"{cur_lane.name}: flow calibration gave no new K")
             return None
         self._set_lane_k(cur_lane, k_after)
         self._apply_lane_k(cur_lane.name)
         self._write_k_to_spoolman(cur_lane, k_after)
-        self.logger.info(f"AFC autocal: calibrated and stored K={k_after:.6f} for {cur_lane.name}")
+        self.logger.info(f"{cur_lane.name}: flow K {k_after:.4f} stored")
         return k_after
 
     def _current_lane(self) -> Optional[Any]:
@@ -661,17 +661,16 @@ class AFC_autocal:
                 return
             if k is not None:
                 self._set_lane_k(lane, k)
-                self.logger.info(f"AFC autocal: {lane_name} spool {sid} already has "
+                self.logger.debug(f"AFC autocal: {lane_name} spool {sid} already has "
                                  f"K={k:.6f}, not auto-loading")
                 return
             if not read_ok:
-                self.logger.info(f"AFC autocal: {lane_name} spool {sid} K unknown (Spoolman "
+                self.logger.debug(f"AFC autocal: {lane_name} spool {sid} K unknown (Spoolman "
                                  f"read failed), not auto-loading")
                 return  # couldn't confirm there's no K, be conservative
             if not self._safe_to_calibrate():
                 return
-            self.logger.info(f"AFC autocal: {lane_name} spool {sid} has no stored K, "
-                             f"loading to calibrate")
+            self.logger.info(f"{lane_name}: no flow K for this spool, loading it to measure one")
             self.gcode.run_script(f"CHANGE_TOOL LANE={lane_name}")
         except Exception as e:
             self.logger.warning(f"AFC_autocal: staged load error: {e}")
@@ -806,13 +805,13 @@ class AFC_autocal:
             self._cal_pending.add(name)
         try:
             if self._is_printing():
-                self.logger.info(f"AFC autocal: {name} calibration skipped, printing")
+                self.logger.debug(f"AFC autocal: {name} calibration skipped, printing")
                 self._cal_pending.discard(name)
                 return
             reason = self._cal_block_reason()
             if (reason == "prep not done"
                 or (reason is not None and reason.startswith("within startup"))):
-                self.logger.info(f"AFC autocal: {name} calibration skipped, {reason}")
+                self.logger.debug(f"AFC autocal: {name} calibration skipped, {reason}")
                 self._cal_pending.discard(name)
                 return
             # Wait (bounded, about 4 min) for the tool change or extruder load to settle.
@@ -824,7 +823,7 @@ class AFC_autocal:
                             self._calibrate_when_loaded(ln, a),
                         self.reactor.monotonic() + 1.0)
                 else:
-                    self.logger.info(f"AFC autocal: {name} calibration gave up waiting to "
+                    self.logger.debug(f"AFC autocal: {name} calibration gave up waiting to "
                                      f"settle ({reason or 'load in flight'})")
                     self._cal_pending.discard(name)
                 return
@@ -838,11 +837,11 @@ class AFC_autocal:
                     active = self.printer.lookup_object('toolhead').get_extruder().get_name()
                 except Exception:
                     active = '?'
-                self.logger.info(f"AFC autocal: {name} calibration skipped, its tool is not "
+                self.logger.debug(f"AFC autocal: {name} calibration skipped, its tool is not "
                                  f"on the toolhead (active extruder={active}); pick up/load "
                                  f"this lane's tool to calibrate it")
                 return
-            self.logger.info(f"AFC autocal: running flow calibration for {name}")
+            self.logger.info(f"{name}: measuring flow K")
             self._calibrate(lane, runner=self.gcode.run_script)
         except Exception as e:
             self._cal_pending.discard(name)
