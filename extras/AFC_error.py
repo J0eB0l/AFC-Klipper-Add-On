@@ -498,10 +498,16 @@ class afcError:
                 self.afc.move_z_pos(move_z_pos, "AFC_PAUSE")
             else:
                 self.logger.debug(f"AFC_PAUSE: not moving in z cur_pos:{self.afc.gcode_move.last_position} move_z_pos:{move_z_pos}")
-            # Call users PAUSE
-            self.afc.gcode.run_script_from_command(
-                f"{self.AFC_RENAME_PAUSE_NAME} {gcmd.get_raw_command_parameters()}"
-            )
+            # Call users PAUSE. Some printers (a Snapmaker U1) refuse PAUSE outside a
+            # print; the error is already reported, so that refusal is only logged.
+            try:
+                self.afc.gcode.run_script_from_command(
+                    f"{self.AFC_RENAME_PAUSE_NAME} {gcmd.get_raw_command_parameters()}"
+                )
+            except self.afc.gcode.error as e:
+                if self.afc.function.in_print():
+                    raise
+                self.logger.debug(f"AFC_PAUSE: the printer refused PAUSE outside a print: {e}")
 
             timeout_to_use = max(self.error_timeout, self.idle_timeout_val)
             self.afc.gcode.run_script_from_command(f"SET_IDLE_TIMEOUT TIMEOUT={timeout_to_use}")

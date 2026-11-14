@@ -1275,6 +1275,37 @@ class TestCmdAfcPause:
         calls = [c[0][0] for c in afc.gcode.run_script_from_command.call_args_list]
         assert any(err.AFC_RENAME_PAUSE_NAME in c for c in calls)
 
+    def _refusing_pause(self, in_print):
+        from tests.conftest import CommandError
+        err, afc = _make_afc_error()
+        afc.function.is_paused.return_value = False
+        afc.function.in_print.return_value = in_print
+        afc.save_pos = MagicMock()
+        afc.move_z_pos = MagicMock()
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.gcode_move.last_position = [0.0, 0.0, 0.0]
+        afc.gcode.error = CommandError
+
+        def run(script):
+            if script.startswith(err.AFC_RENAME_PAUSE_NAME):
+                raise CommandError("!! Cannot pause while not printing: standby")
+        afc.gcode.run_script_from_command.side_effect = run
+        return err, afc
+
+    def test_a_pause_refused_outside_a_print_is_only_logged(self):
+        # A Snapmaker U1 refuses PAUSE outside a print; the failure that asked
+        # for the pause is already reported
+        err, afc = self._refusing_pause(in_print=False)
+        err.cmd_AFC_PAUSE(MagicMock())
+        assert ("debug", "AFC_PAUSE: the printer refused PAUSE outside a print: "
+                         "!! Cannot pause while not printing: standby") in err.logger.messages
+
+    def test_a_pause_refused_during_a_print_still_raises(self):
+        from tests.conftest import CommandError
+        err, afc = self._refusing_pause(in_print=True)
+        with pytest.raises(CommandError):
+            err.cmd_AFC_PAUSE(MagicMock())
+
     def test_already_paused_logs_not_pausing(self):
         err, afc = _make_afc_error()
         afc.function.is_paused.return_value = True
