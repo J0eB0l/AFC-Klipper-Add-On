@@ -26,6 +26,7 @@ except:
     raise error(error_str)
 
 from extras.AFC_rfid_readers import read_tag, Mfrc522, MifareClassic
+from extras.AFC_ACE import ACETimeoutError
 from extras.AFC_rfid_write import StageError, register_reader
 try: from extras.AFC_RFID import (sync_rfid_to_spoolman, apply_filament_defaults,
                                   build_filament_name, prompt_hold_spool,
@@ -245,7 +246,7 @@ class _Ace2RegLink:
         :return int: register value
         """
         arg = (self.slot << 16) | (reg & 0xFF)
-        res = self._conn().send_command("mfrc522_reg_read", {"arg": arg}, timeout=self._reg_timeout)
+        res = self._send("mfrc522_reg_read", arg)
         return int((res or {}).get("val", 0)) & 0xFF
 
     def reg_write(self, reg: int, val: int) -> None:
@@ -256,7 +257,23 @@ class _Ace2RegLink:
         :param val: value to write
         """
         arg = (self.slot << 16) | ((reg & 0xFF) << 8) | (val & 0xFF)
-        self._conn().send_command("mfrc522_reg_write", {"arg": arg}, timeout=self._reg_timeout)
+        self._send("mfrc522_reg_write", arg)
+
+    def _send(self, method: str, arg: int) -> Any:
+        """
+        Send one register command, sending it again once if its reply is lost.
+
+        The ACE now and then drops a reply when its status poll lands in the
+        middle of a read; the command itself is safe to repeat.
+
+        :param method: mfrc522_reg_read or mfrc522_reg_write
+        :param arg: the packed argument
+        :return Any: the command's result
+        """
+        try:
+            return self._conn().send_command(method, {"arg": arg}, timeout=self._reg_timeout)
+        except ACETimeoutError:
+            return self._conn().send_command(method, {"arg": arg}, timeout=self._reg_timeout)
 
     def reader_power(self, on: bool) -> None:
         """
@@ -1250,7 +1267,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     ace2._stop_feed_assist(s)
                 elif conn is not None:
                     conn.stop_feed_assist_sync(s)
-                self.logger.info(f"ACE2 RFID: feed assist stopped on slot {s}")
+                self.logger.debug(f"ACE2 RFID: feed assist stopped on slot {s}")
             except Exception:
                 self.logger.error(f"ACE2 RFID: failed to stop feed assist on slot {s}",
                                   traceback=traceback.format_exc())
@@ -1270,7 +1287,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             try:
                 if isinstance(sup, set):
                     sup.discard(s)
-                self.logger.info(f"ACE2 RFID: feed assist restored on slot {s}")
+                self.logger.debug(f"ACE2 RFID: feed assist restored on slot {s}")
             except Exception:
                 self.logger.error(f"ACE2 RFID: failed to restore feed assist on slot {s}",
                                   traceback=traceback.format_exc())
@@ -1444,7 +1461,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                         lane = self.afc.lanes.get(getattr(lane, "name", None), lane)
                     self.apply_to_lane(lane, tag)
                     f = tag.get("filament") or {}
-                    self.logger.info(
+                    self.logger.debug(
                         f"ACE2 RFID: read {getattr(lane, 'name', '?')} during staging, uid="
                         f"{tag.get('uid', '')} type={tag.get('tag_type', '')} {f.get('type', '')}")
                 except Exception:
@@ -1506,7 +1523,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             try:
                 t = self._read_tag(link, is_excluded=excluder)
             except Exception:
-                self.logger.error("ACE2 RFID: parked read error", traceback=traceback.format_exc())
+                self.logger.debug("ACE2 RFID: parked read error", traceback=traceback.format_exc())
                 return None
             return t if (t and t.get("filament")) else None
 
@@ -1530,7 +1547,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             self._dwell(0.15)
             tag = _try()
             if tag:
-                self.logger.info(f"ACE2 RFID: re-centered tag after {retracted:.0f}mm retract")
+                self.logger.debug(f"ACE2 RFID: re-centered tag after {retracted:.0f}mm retract")
                 return tag, retracted
         return None, retracted
 
@@ -1704,24 +1721,24 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if self.probe_settle:
             self._dwell(self.probe_settle)
         if self.probe_power_off:
-            self.logger.info("ACE2 RFID teardown: reader_power(off)...")
+            self.logger.debug("ACE2 RFID teardown: reader_power(off)...")
             try:
                 link.reader_power(False)
-                self.logger.info("ACE2 RFID teardown: reader_power(off) done")
+                self.logger.debug("ACE2 RFID teardown: reader_power(off) done")
             except Exception:
                 self.logger.error("ACE2 RFID: probe power-off failed",
                                   traceback=traceback.format_exc())
         if self.probe_restore_identify:
             for s in shared:
-                self.logger.info(f"ACE2 RFID teardown: set_rfid_enable({s},on)...")
+                self.logger.debug(f"ACE2 RFID teardown: set_rfid_enable({s},on)...")
                 try:
                     link.set_rfid_enable(s, True)
-                    self.logger.info(f"ACE2 RFID teardown: set_rfid_enable({s},on) done")
+                    self.logger.debug(f"ACE2 RFID teardown: set_rfid_enable({s},on) done")
                 except Exception:
                     self.logger.error("ACE2 RFID: probe re-enable identify failed",
                                       traceback=traceback.format_exc())
         else:
-            self.logger.info("ACE2 RFID teardown: identify NOT restored (config)")
+            self.logger.debug("ACE2 RFID teardown: identify NOT restored (config)")
 
     def cmd_ACE_RFID_READ(self, gcmd: "GCodeCommand") -> None:
         """

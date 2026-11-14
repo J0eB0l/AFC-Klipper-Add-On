@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Un
 
 import pytest
 
+from extras.AFC_ACE import ACETimeoutError
 from extras.AFC_ACE2 import afcACE2
 from extras.AFC_ACE2_rfid import AFC_ACE2_RFID, load_config
 import extras.AFC_ACE2_rfid as ace2_rfid_module
@@ -25,6 +26,7 @@ from tests.ace_helpers import (
     make_fake_ace_connection,
     make_gcmd,
     Recorder,
+    TIMEOUT,
 )
 from tests.ace2_rfid_helpers import (
     FakeTransport,
@@ -284,9 +286,9 @@ def ace2_rfid_sent(unit: afcACE2) -> List[Tuple[str, Dict[str, Any]]]:
 
 
 #: The log lines of a host-decode probe teardown that keeps identify off.
-ACE2_RFID_TEARDOWN = [("info", "ACE2 RFID teardown: reader_power(off)..."),
-                      ("info", "ACE2 RFID teardown: reader_power(off) done"),
-                      ("info", "ACE2 RFID teardown: identify NOT restored (config)")]
+ACE2_RFID_TEARDOWN = [("debug", "ACE2 RFID teardown: reader_power(off)..."),
+                      ("debug", "ACE2 RFID teardown: reader_power(off) done"),
+                      ("debug", "ACE2 RFID teardown: identify NOT restored (config)")]
 
 
 def ace2_rfid_read_out(lane: str, uid: str) -> Tuple[str, str]:
@@ -304,7 +306,7 @@ def ace2_rfid_assist_off(*slots: int) -> List[Tuple[str, str]]:
     :param slots: the slots whose feed assist a stage read stops
     :return list: the log lines it writes
     """
-    return [("info", f"ACE2 RFID: feed assist stopped on slot {s}") for s in slots]
+    return [("debug", f"ACE2 RFID: feed assist stopped on slot {s}") for s in slots]
 
 
 def ace2_rfid_sister_rig(values: Optional[Dict[str, Any]] = None,
@@ -406,8 +408,8 @@ def ace2_rfid_rescan_logs(*steps: str) -> List[Tuple[str, str]]:
     """
     return (ace2_rfid_assist_off(0, 1)
             + [("info", f"ACE2 RFID rescan lane1: {step}") for step in steps]
-            + [("info", "ACE2 RFID: feed assist restored on slot 0"),
-               ("info", "ACE2 RFID: feed assist restored on slot 1")])
+            + [("debug", "ACE2 RFID: feed assist restored on slot 0"),
+               ("debug", "ACE2 RFID: feed assist restored on slot 1")])
 
 
 class TestAce2LinkBuildFrame:
@@ -491,6 +493,27 @@ class TestAce2RegLinkRegRead:
         unit = make_ace2_unit(connection=None)
         with pytest.raises(IOError, match="^ACE2 serial not connected$"):
             make_ace2_reg_link(0, ace2=unit).reg_read(0x01)
+
+
+class TestAce2RegLinkLostReply:
+    def test_a_lost_read_reply_is_asked_again_once(self):
+        unit = make_ace2_unit()
+        unit._ace.set_reply("mfrc522_reg_read", TIMEOUT, {"val": 7})
+        assert make_ace2_reg_link(1, ace2=unit).reg_read(0x0D) == 7
+        assert unit._ace.commands == [("mfrc522_reg_read", {"arg": 0x1000D})] * 2
+
+    def test_a_lost_write_reply_is_sent_again_once(self):
+        unit = make_ace2_unit()
+        unit._ace.set_reply("mfrc522_reg_write", TIMEOUT, {})
+        make_ace2_reg_link(2, ace2=unit).reg_write(0x0A, 0x99)
+        assert unit._ace.commands == [("mfrc522_reg_write", {"arg": 0x20A99})] * 2
+
+    def test_two_lost_replies_in_a_row_still_raise(self):
+        unit = make_ace2_unit()
+        unit._ace.set_reply("mfrc522_reg_read", TIMEOUT)
+        with pytest.raises(ACETimeoutError):
+            make_ace2_reg_link(0, ace2=unit).reg_read(0x01)
+        assert len(unit._ace.commands) == 2
 
 
 class TestAce2RegLinkRegWrite:
@@ -1519,7 +1542,7 @@ class TestAFCACE2RFIDStageProbeBegin:
             ("stop_feed_filament", {"index": 0}),        # stopped on detect
             ("mfrc522_reader_power", {"arg": 0})]
         assert unit.printer.logger.messages == ace2_rfid_assist_off(0, 1) + ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: read lane1 during staging, uid=beef type=MifareClassic1k PLA")]
+            ("debug", "ACE2 RFID: read lane1 during staging, uid=beef type=MifareClassic1k PLA")]
         assert unit.printer.gcode.messages == [ace2_rfid_read_out("lane1", "beef")]
 
     def test_stage_begin_disables_identify_with_barrier(self):
@@ -1605,8 +1628,8 @@ class TestAFCACE2RFIDStageProbeBegin:
         assert unit._assist_suppressed == set()
         assert reader._assist_slots is None
         assert unit.printer.logger.messages == ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: feed assist restored on slot 0"),
-            ("info", "ACE2 RFID: feed assist restored on slot 1")]
+            ("debug", "ACE2 RFID: feed assist restored on slot 0"),
+            ("debug", "ACE2 RFID: feed assist restored on slot 1")]
 
     def test_stage_scan_dedups_sibling_then_reads_own(self, monkeypatch):
         reader, unit = ace2_rfid_rig(
@@ -1624,7 +1647,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         assert unit.printer.logger.messages == ace2_rfid_assist_off(2, 3) + [
             ("info", "ACE2 RFID: stage scan slot 2, tag cafe parked on the shared reader "
                      "(sibling slot 3); clearing it before the read")] + ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: read lane3 during staging, uid=beef type=MifareClassic1k PLA")]
+            ("debug", "ACE2 RFID: read lane3 during staging, uid=beef type=MifareClassic1k PLA")]
         assert unit.printer.gcode.messages == [ace2_rfid_read_out("lane3", "beef")]
 
     def test_stage_scan_aborts_on_removal(self, monkeypatch):
@@ -1654,8 +1677,8 @@ class TestAFCACE2RFIDStageProbeBegin:
             ("unwind_filament", {"index": 0, "length": 3.0, "speed": 100.0, "mode": "normal"}),
             ("mfrc522_reader_power", {"arg": 0})]
         assert unit.printer.logger.messages == ace2_rfid_assist_off(0, 1) + [
-            ("info", "ACE2 RFID: re-centered tag after 3mm retract")] + ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: read lane1 during staging, uid=beef type=MifareClassic1k PLA")]
+            ("debug", "ACE2 RFID: re-centered tag after 3mm retract")] + ACE2_RFID_TEARDOWN + [
+            ("debug", "ACE2 RFID: read lane1 during staging, uid=beef type=MifareClassic1k PLA")]
         assert unit.printer.gcode.messages == [ace2_rfid_read_out("lane1", "beef")]
 
     def test_stage_scan_uid_only_not_accepted(self, monkeypatch):
@@ -1707,7 +1730,7 @@ class TestAFCACE2RFIDStageProbeBegin:
                      "(sibling slot 3); clearing it before the read"),
             ("info", "ACE2 RFID: retracted sister slot 3 by 75mm to clear its tag off the "
                      "shared antenna")] + ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: read lane2 during staging, uid=beef type=MifareClassic1k PLA")]
+            ("debug", "ACE2 RFID: read lane2 during staging, uid=beef type=MifareClassic1k PLA")]
         assert unit.printer.gcode.messages == [ace2_rfid_read_out("lane2", "beef")]
         unit.printer.logger.clear()
         reader._stage_probe_end(lane2, ctx)              # the sibling is fed back
@@ -1717,8 +1740,8 @@ class TestAFCACE2RFIDStageProbeBegin:
             "feed_filament", {"index": 3, "length": 75.0, "speed": 100.0})
         assert unit.printer.logger.messages == [
             ("info", "ACE2 RFID: restored sister slot 3 (+75mm) after stage read"),
-            ("info", "ACE2 RFID: feed assist restored on slot 2"),
-            ("info", "ACE2 RFID: feed assist restored on slot 3")]
+            ("debug", "ACE2 RFID: feed assist restored on slot 2"),
+            ("debug", "ACE2 RFID: feed assist restored on slot 3")]
 
     def test_sister_retract_only_moves_once_per_stage(self, monkeypatch):
         reader, unit, motion = self._sister_rig()
@@ -1820,7 +1843,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         assert unit.printer.logger.messages == ace2_rfid_assist_off(2, 3) + [
             ("info", "ACE2 RFID: stage scan slot 2, tag cafe parked on the shared reader "
                      "(sibling slot 3); clearing it before the read")] + ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: read lane2 during staging, uid=beef type=MifareClassic1k PLA")]
+            ("debug", "ACE2 RFID: read lane2 during staging, uid=beef type=MifareClassic1k PLA")]
 
     def test_stage_scan_without_afc_applies_to_the_staged_lane(self, monkeypatch):
         reader, unit, motion = self._rig()
@@ -1834,7 +1857,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         assert lane.material == "PLA"
         assert unit.printer.gcode.messages == [ace2_rfid_read_out("lane1", "beef")]
         assert unit.printer.logger.messages == ace2_rfid_assist_off(0, 1) + ACE2_RFID_TEARDOWN + [
-            ("info", "ACE2 RFID: read lane1 during staging, uid=beef type=MifareClassic1k PLA")]
+            ("debug", "ACE2 RFID: read lane1 during staging, uid=beef type=MifareClassic1k PLA")]
 
     def test_a_feed_assist_that_will_not_stop_is_logged(self):
         reader, unit, motion = self._rig({"stage_scan_dist": 0.0})
@@ -1845,7 +1868,7 @@ class TestAFCACE2RFIDStageProbeBegin:
         assert unit._assist_suppressed == {0, 1}         # held off on both all the same
         assert reader._assist_slots == (0, 1)
         logger = unit.printer.logger
-        assert logger.messages == [("info", "ACE2 RFID: feed assist stopped on slot 0"),
+        assert logger.messages == [("debug", "ACE2 RFID: feed assist stopped on slot 0"),
                                    ("error", "ACE2 RFID: failed to stop feed assist on slot 1")]
         assert logger.calls[1][2]["traceback"].splitlines()[-1] == (
             "RuntimeError: assist wedged")
@@ -2045,12 +2068,12 @@ class TestAFCACE2RFIDSafeProbeTeardown:
                                       ("set_rfid_enable", {"index": 0, "enable": True}),
                                       ("set_rfid_enable", {"index": 1, "enable": True})]
         assert unit.printer.logger.messages == [
-            ("info", "ACE2 RFID teardown: reader_power(off)..."),
-            ("info", "ACE2 RFID teardown: reader_power(off) done"),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(0,on)..."),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(0,on) done"),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(1,on)..."),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(1,on) done")]
+            ("debug", "ACE2 RFID teardown: reader_power(off)..."),
+            ("debug", "ACE2 RFID teardown: reader_power(off) done"),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(0,on)..."),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(0,on) done"),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(1,on)..."),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(1,on) done")]
 
     def test_noop_without_probe(self):
         reader, unit = ace2_rfid_rig()
@@ -2070,12 +2093,12 @@ class TestAFCACE2RFIDSafeProbeTeardown:
                                       ("set_rfid_enable", {"index": 2, "enable": True}),
                                       ("set_rfid_enable", {"index": 3, "enable": True})]
         assert unit.printer.logger.messages == [
-            ("info", "ACE2 RFID teardown: reader_power(off)..."),
-            ("info", "ACE2 RFID teardown: reader_power(off) done"),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(2,on)..."),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(2,on) done"),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(3,on)..."),
-            ("info", "ACE2 RFID teardown: set_rfid_enable(3,on) done")]
+            ("debug", "ACE2 RFID teardown: reader_power(off)..."),
+            ("debug", "ACE2 RFID teardown: reader_power(off) done"),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(2,on)..."),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(2,on) done"),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(3,on)..."),
+            ("debug", "ACE2 RFID teardown: set_rfid_enable(3,on) done")]
 
     def test_power_off_error_and_identify_not_restored(self):
         reader, unit = ace2_rfid_rig({"probe_settle": 0.0, "restore_identify": False,
@@ -2086,9 +2109,9 @@ class TestAFCACE2RFIDSafeProbeTeardown:
         assert reader._probe is None
         logger = unit.printer.logger
         assert logger.messages == [
-            ("info", "ACE2 RFID teardown: reader_power(off)..."),
+            ("debug", "ACE2 RFID teardown: reader_power(off)..."),
             ("error", "ACE2 RFID: probe power-off failed"),
-            ("info", "ACE2 RFID teardown: identify NOT restored (config)")]
+            ("debug", "ACE2 RFID teardown: identify NOT restored (config)")]
         assert logger.calls[1][2]["traceback"].splitlines()[-1] == "RuntimeError: wedge"
         assert unit._ace.commands == [("mfrc522_reader_power", {"arg": 0})]
 
