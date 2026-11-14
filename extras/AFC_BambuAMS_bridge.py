@@ -1707,9 +1707,9 @@ class BambuBridge:
         """
         try:
             self.send({"cmd": "info"})
-            self.logger.debug("AFC bambu: request_info -> sent {\"cmd\":\"info\"}")
+            self.logger.debug("BridgeBox: request_info -> sent {\"cmd\":\"info\"}")
         except Exception:
-            self.logger.warning("AFC bambu: request_info FAILED to send",
+            self.logger.warning("BridgeBox: request_info FAILED to send",
                                 traceback=traceback.format_exc())
 
     def use_wifi(self, link: WifiLink) -> None:
@@ -1747,7 +1747,7 @@ class BambuBridge:
                 raise
             self._serial = None
             # A bridge still booting or coming over WiFi is normal at start.
-            routine_info(self.logger, f"AFC bambu: bridge not reachable yet ({e}); the reader will "
+            routine_info(self.logger, f"BridgeBox: bridge not reachable yet ({e}); the reader will "
                                       f"keep trying")
         self._run = True
         self._thread = threading.Thread(target=self._reader, name="afc_bambu_read", daemon=True)
@@ -1791,11 +1791,11 @@ class BambuBridge:
                 except Exception:
                     _after = ""
                 # AFC.log only: the write nearly always lands late and its ack follows.
-                self.logger.debug(f"AFC bambu: bridge busy, write of "
+                self.logger.debug(f"BridgeBox: bridge busy, write of "
                                   f"'{_queued_cmd_name(data)}' timed out{_after} "
                                   f"(may still be delivered)", only_debug=True)
             except Exception as e:
-                self.logger.warning(f"AFC bambu: bridge write failed: {e}; reconnecting")
+                self.logger.warning(f"BridgeBox: bridge write failed: {e}; reconnecting")
                 self._drop_port()
             # Never during a firmware transfer, which drains the queue against a deadline.
             if (not self._fw_raw
@@ -1970,7 +1970,7 @@ class BambuBridge:
                 fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
                 lg.addHandler(fh)
             except Exception as e:
-                self.logger.warning(f"AFC bambu: could not open AFC_BambuAMS{suffix}.log: {e}")
+                self.logger.warning(f"BridgeBox: could not open AFC_BambuAMS{suffix}.log: {e}")
                 return False
         lg.setLevel(logging.DEBUG)
         # Never propagate, or every narration line floods AFC.log.
@@ -2577,7 +2577,7 @@ class BambuBridge:
             return False
         # fwbegin went through send() and may still be queued; the image must not overtake it.
         if not self._drain_writes():
-            self.logger.warning("AFC bambu: queued writes did not drain; not starting the image")
+            self.logger.warning("BridgeBox: queued writes did not drain; not starting the image")
             return False
         # A chunk waits on flash writes; restored in the finally so later commands fail fast.
         _tmo_attr = ("_write_timeout" if hasattr(s, "_write_timeout")
@@ -2600,10 +2600,10 @@ class BambuBridge:
             return True
         except _SerialTimeout as e:
             # Fatal to this transfer only: the bridge discards its partial image, the link is fine.
-            self.logger.warning(f"AFC bambu: bridge busy mid-transfer: {e}")
+            self.logger.warning(f"BridgeBox: bridge busy mid-transfer: {e}")
             return False
         except Exception as e:
-            self.logger.warning(f"AFC bambu: bridge raw write failed: {e}; reconnecting")
+            self.logger.warning(f"BridgeBox: bridge raw write failed: {e}; reconnecting")
             self._drop_port()
             return False
         finally:
@@ -2627,13 +2627,13 @@ class BambuBridge:
                 # Before the first connection this is the start, not an outage.
                 log = self.logger.info if self._down_epoch == 0 \
                     else self.logger.warning
-                log(f"AFC bambu: link is down -- dropped "
+                log(f"BridgeBox: link is down -- dropped "
                     f"{obj.get('cmd', '?')}, and anything else sent until it is back")
             return
         # A raw firmware transfer owns the port; a timer poll here would corrupt the image.
         if (self._fw_raw
             and not str(obj.get("cmd", "")).startswith("fw")):
-            self.logger.debug(f"AFC bambu: dropped {obj.get('cmd')} during a firmware transfer")
+            self.logger.debug(f"BridgeBox: dropped {obj.get('cmd')} during a firmware transfer")
             return
         # A reset can take the port down before this call even returns.
         if obj.get("cmd") in ("reset", "bootsel"):
@@ -2644,7 +2644,7 @@ class BambuBridge:
             return
         except queue.Full:
             # Everything here is a poll or re-arm the next tick resends.
-            self.logger.warning(f"AFC bambu: write queue full, dropped {obj.get('cmd')}")
+            self.logger.warning(f"BridgeBox: write queue full, dropped {obj.get('cmd')}")
 
     def _narrate_human(self, text: str, now: float, addr: Optional[int] = None,
                        unit: Optional[int] = None) -> None:
@@ -2678,7 +2678,7 @@ class BambuBridge:
             # render None = matched deliberately to say nothing; stop before a more general pattern.
             if render is None:
                 return
-            msg = f"AFC bambu {self._speaker(unit)}: {render(m)}"
+            msg = f"{self._speaker(unit)}: {render(m)}"
             if log_only:
                 # Log-only lines skip the console dedupe and rate limit but reach the parsing below.
                 if self._verbose():
@@ -2711,7 +2711,7 @@ class BambuBridge:
                 if self._active_unit is not None:
                     self._tube_by_unit[int(self._active_unit)] = mm
             if prev is None:
-                self.logger.debug(f"AFC bambu {self.name}: AMS 0x{int(addr):04X} reports its "
+                self.logger.debug(f"{self.name}: AMS 0x{int(addr):04X} reports its "
                                   f"measured filament path as {mm:.0f}mm -- using it to size "
                                   f"move timeouts instead of the configured estimate")
 
@@ -2733,7 +2733,7 @@ class BambuBridge:
         #   PTC[0] ok! i_0:1, res:9174
         if ("[AMS_CHMB]" in text
             and ("res:" in text or "i_avr:" in text or " i:" in text)):
-            self.logger.debug(f"AFC bambu {self.name}: selfcheck | "
+            self.logger.debug(f"{self.name}: selfcheck | "
                              + text.split("[AMS_CHMB]", 1)[-1].strip()[:150])
         m = _CHMB_STATE_RE.search(text)
         if m:
@@ -2766,7 +2766,7 @@ class BambuBridge:
             if ma:
                 ad = (f", ad {ma.group(1)}"
                       + (f"/{ma.group(2)}" if ma.group(2) else ""))
-            self.logger.debug(f"AFC bambu {self.name}: drying -- chamber {m.group(3)}C{ad}"
+            self.logger.debug(f"{self.name}: drying -- chamber {m.group(3)}C{ad}"
                               f"{hum}, target {m.group(2)}C")
 
     def _rfid_stamp(self, wide: Optional[float], by_addr: Dict[int, float],
@@ -2990,11 +2990,11 @@ class BambuBridge:
             if (obj.get("msg") == "unknown command"
                 and since is not None
                 and since < self.STALE_ERROR_S):
-                self.logger.debug(f"AFC bambu: bridge error {since:.2f}s after connect, "
+                self.logger.debug(f"BridgeBox: bridge error {since:.2f}s after connect, "
                                   f"from a line sent before it (ignored): {obj.get('msg')}",
                                   only_debug=True)
             else:
-                self.logger.warning(f"AFC bambu: bridge error: {obj.get('msg')}")
+                self.logger.warning(f"BridgeBox: bridge error: {obj.get('msg')}")
         elif obj.get("evt") == "uartdiag":
             self._note_uartdiag(obj)
         elif obj.get("evt") == "fw":
@@ -3014,14 +3014,14 @@ class BambuBridge:
             with self._lock:
                 self._last_fw = (state, str(detail or ""))
             if state in ("crc_bad", "stalled", "refused", "busy"):
-                self.logger.warning(f"AFC bambu: firmware transfer {state}: {detail}")
+                self.logger.warning(f"BridgeBox: firmware transfer {state}: {detail}")
             elif state == "applying":
                 # The last thing the Pico says before it comes back on the new image.
                 self._expect_reset = True
-                self.logger.info("AFC bambu: bridge is writing its own flash and will "
+                self.logger.info("BridgeBox: bridge is writing its own flash and will "
                                  "reboot; the link drops for a few seconds")
             else:
-                self.logger.debug(f"AFC bambu: firmware transfer {state}: {detail}")
+                self.logger.debug(f"BridgeBox: firmware transfer {state}: {detail}")
         elif obj.get("evt") == "idsave":
             # "match" is every ordinary boot; "written" should appear once after a change.
             state = obj.get("state")
@@ -3030,23 +3030,23 @@ class BambuBridge:
             with self._lock:
                 self._last_idsave = (str(state or ""), n)
             if state == "wiped":
-                self.logger.info("AFC bambu: bridge ERASED its stored unit identities; the "
+                self.logger.info("BridgeBox: bridge ERASED its stored unit identities; the "
                                  "next power-up will enroll from announce order until prep "
                                  "writes a fresh record")
             elif state == "written":
-                routine_info(self.logger, f"AFC bambu: bridge stored {n} unit identities -- the next "
+                routine_info(self.logger, f"BridgeBox: bridge stored {n} unit identities -- the next "
                                           f"restart will enroll from them")
             elif state == "failed":
-                self.logger.warning("AFC bambu: bridge could NOT store the unit identities; "
+                self.logger.warning("BridgeBox: bridge could NOT store the unit identities; "
                                     "the chain will keep enrolling from announce order")
             else:
-                self.logger.debug(f"AFC bambu: bridge identities already stored ({n} units)")
+                self.logger.debug(f"BridgeBox: bridge identities already stored ({n} units)")
         elif obj.get("evt") == "ack":
             # Routine acks are log-only; feed and retract stay on the console.
             _ack_cmd = str(obj.get("cmd") or "")
             if (_ack_cmd not in _ACK_ROUTINE
                 or self._verbose()):
-                self.logger.debug(f"AFC bambu: bridge ack {_ack_cmd} (slot {obj.get('slot')})",
+                self.logger.debug(f"BridgeBox: bridge ack {_ack_cmd} (slot {obj.get('slot')})",
                                   only_debug=_ack_cmd in _ACK_ROUTINE)
         elif obj.get("evt") == "amsdbg":
             # Repeats are deduplicated, not suppressed: a repeating line is how a stuck loop shows.
@@ -3062,7 +3062,7 @@ class BambuBridge:
             if (isinstance(text, str)
                 and _FW_DIAG_RE.match(text)):
                 if self._verbose():
-                    self.logger.debug(f"AFC bambu: bridge diag {text}", only_debug=True)
+                    self.logger.debug(f"BridgeBox: bridge diag {text}", only_debug=True)
                 return
             self._note_dry_refusal(text, obj.get("addr"), _dbg_unit)
             self._note_dry_cfg(text, obj.get("addr"), _dbg_unit)
@@ -3101,7 +3101,7 @@ class BambuBridge:
                 and _addr
                 and _AMS_GAVE_UP_RE.search(text)):
                 self._gave_up_by_addr[_addr] = now
-                routine_info(self.logger, f"AFC bambu bridge: the AMS reported it has STOPPED "
+                routine_info(self.logger, f"BridgeBox: the AMS reported it has STOPPED "
                                           f"retrying ({text.strip()[:90]})")
             # The unit rejecting moves because it has no bay selected.
             if (text
@@ -3275,7 +3275,7 @@ class BambuBridge:
                             _quiet = True
                             if not getattr(self, "_narr_said", False):
                                 self._narr_said = True
-                                self.logger.debug("AFC bambu: the AMS is narrating faster "
+                                self.logger.debug("BridgeBox: the AMS is narrating faster "
                                                   "than the console can take "
                                                   f"(>{self.NARRATION_CONSOLE_MAX_PER_S}/s); "
                                                   "the rest of this burst is in AFC.log")
@@ -3285,13 +3285,13 @@ class BambuBridge:
             # The key itself is never echoed.
             saved = obj.get("saved")
             if saved == 1:
-                self.logger.debug("AFC bambu: link key stored on the bridge; it is asked "
+                self.logger.debug("BridgeBox: link key stored on the bridge; it is asked "
                                   "for from the next connection")
             elif saved == 0:
-                self.logger.debug("AFC bambu: link key already stored on the bridge",
+                self.logger.debug("BridgeBox: link key already stored on the bridge",
                                   only_debug=True)
             else:
-                self.logger.warning(f"AFC bambu: the bridge did not store the link key {obj}")
+                self.logger.warning(f"BridgeBox: the bridge did not store the link key {obj}")
         elif obj.get("evt") == "mcaddr":
             # Zero means it did not take and the log drain falls back to 0x0700.
             try:
@@ -3302,7 +3302,7 @@ class BambuBridge:
                 pass
         elif obj.get("evt") not in _BRIDGE_EVENTS_KNOWN:
             # So a lost command and a lost reply are distinguishable.
-            self.logger.debug(f"AFC bambu: unhandled bridge event {obj}", only_debug=True)
+            self.logger.debug(f"BridgeBox: unhandled bridge event {obj}", only_debug=True)
         elif obj.get("evt") == "txecho":
             # Echo lines the firmware dropped because USB was behind; shown on
             # the console so the capture can be re-taken.
@@ -3311,7 +3311,7 @@ class BambuBridge:
             except Exception:
                 self._txecho_drops = 0
             if self._txecho_drops:
-                self.logger.info(f"AFC bambu bridge: TX echo dropped "
+                self.logger.info(f"BridgeBox: TX echo dropped "
                                  f"{self._txecho_drops} frame(s) -- the USB link fell "
                                  f"behind the bus. Frames MISSING from this capture were "
                                  f"still transmitted; do not read a gap as a frame we never sent.")
@@ -3329,7 +3329,7 @@ class BambuBridge:
             if not self._verbose():
                 return
             try:
-                self.logger.debug(f"AFC bambu: bridge loop held {int(obj.get('ms', 0))} ms "
+                self.logger.debug(f"BridgeBox: bridge loop held {int(obj.get('ms', 0))} ms "
                                   f"(bus reads {int(obj.get('rr_ms', 0))} ms over "
                                   f"{int(obj.get('rr_n', 0))}, longest "
                                   f"{int(obj.get('rr_max_us', 0))} us, capped "
@@ -3405,12 +3405,12 @@ class BambuBridge:
                         f"image")
             mode_str = ("ON -- listen-only, this bridge is NOT driving the bus"
                         if on else "OFF -- bus master again")
-            self.logger.info(f"AFC bambu {self.name}: bridge sniff mode {mode_str}{verdict}")
+            self.logger.info(f"{self.name}: bridge sniff mode {mode_str}{verdict}")
         elif obj.get("evt") == "info":
             # `chip` decides whether a firmware image is even loadable on this board.
             with self._lock:
                 self._info = dict(obj)
-            self.logger.debug(f"AFC bambu: info REPLY chip={obj.get('chip')} "
+            self.logger.debug(f"BridgeBox: info REPLY chip={obj.get('chip')} "
                               f"fw={obj.get('fw')} up={obj.get('up')}")
             # Uptime going backwards is a reboot (every AMS is left parked); a WiFi blip leaves
             # them working. Here because `chain` has "fw" but not "up".
@@ -3424,19 +3424,19 @@ class BambuBridge:
                 if (prev is not None
                     and up < prev):
                     self._fw_rebooted = True
-                    self.logger.debug(f"AFC bambu: bridge REBOOTED (uptime {prev} -> {up} "
+                    self.logger.debug(f"BridgeBox: bridge REBOOTED (uptime {prev} -> {up} "
                                       f"ms); units on the wire lost their master")
-                    self.logger.info("AFC bambu: the BridgeBox restarted; "
+                    self.logger.info("BridgeBox: the BridgeBox restarted; "
                                      "reconnecting its AMS units")
                 self._fw_up_ms = up
         elif obj.get("evt") == "wifi":
             # Tells a wrong password from a board that never booted.
             try:
                 if "cleared" in obj:
-                    msg = (f"AFC bambu {self.name}: bridge WiFi wiped, "
+                    msg = (f"{self.name}: bridge WiFi wiped, "
                            f"cleared={obj.get('cleared')} by={obj.get('by', 'command')}")
                 else:
-                    msg = (f"AFC bambu {self.name}: pico wifi "
+                    msg = (f"{self.name}: pico wifi "
                            f"link={obj.get('link')} ip={obj.get('ip')} "
                            f"assoc={obj.get('assoc')} tries={obj.get('tries')}")
                 self.logger.debug(msg)
@@ -3448,7 +3448,7 @@ class BambuBridge:
                 _extra = " ".join(f"{k}={v}" for k, v in obj.items()
                                   if k not in ("evt", "unit", "slot"))
                 self.logger.debug(
-                    f"AFC bambu: bridge answered cali "
+                    f"BridgeBox: bridge answered cali "
                     f"(unit {obj.get('unit')}, slot {obj.get('slot')})"
                     + (f" {_extra}" if _extra else ""),
                     only_debug=True)
@@ -3632,7 +3632,7 @@ class BambuBridge:
             and (now - last) < self.QUIET_REPEAT_S):
             return
         self._silence_logged_t = now
-        self.logger.warning(f"AFC bambu: bridge has been {what} for {quiet_for:.0f}s"
+        self.logger.warning(f"BridgeBox: bridge has been {what} for {quiet_for:.0f}s"
                             f"{'; commands are being dropped' if self._serial is None else ''}")
 
     def _note_uartdiag(self, obj: dict) -> None:
@@ -3649,14 +3649,14 @@ class BambuBridge:
 
         :param obj: the {"evt":"uartdiag",...} report
         """
-        self.logger.debug(f"AFC bambu: bridge uartdiag {obj}", only_debug=True)
+        self.logger.debug(f"BridgeBox: bridge uartdiag {obj}", only_debug=True)
         why = str(obj.get("why") or "")
         try:
             now = (why, int(obj.get("edges")), int(obj.get("frames")))
         except (TypeError, ValueError):
             return
         prev, self._diag_prev = self._diag_prev, now
-        label = self.wifi.label if self.wifi is not None else "AFC bambu"
+        label = self.wifi.label if self.wifi is not None else "BridgeBox"
         if why == "frames":
             if self._bus_said is not None:
                 self._bus_said = None
@@ -3739,12 +3739,12 @@ class BambuBridge:
             and isinstance(self._serial, TcpPort)
             and quiet_for >= self.RESET_QUIET_S):
             self._expect_reset = False
-            self.logger.info("AFC bambu: bridge resetting as asked; reconnecting")
+            self.logger.info("BridgeBox: bridge resetting as asked; reconnecting")
             self._drop_port()
             return True
         if quiet_for < self.QUIET_DROP_S:
             return False
-        self.logger.warning(f"AFC bambu: bridge silent for {self.QUIET_DROP_S:.0f}s on an open "
+        self.logger.warning(f"BridgeBox: bridge silent for {self.QUIET_DROP_S:.0f}s on an open "
                             f"link -- dropping it to force a reconnect")
         self._drop_port()
         return True
@@ -3806,7 +3806,7 @@ class BambuBridge:
         gap = now - prev
         if gap <= SILENCE_LOG_S:
             return
-        self.logger.debug(f"AFC bambu: bridge was silent {gap:.1f} s; {n} write(s) timed "
+        self.logger.debug(f"BridgeBox: bridge was silent {gap:.1f} s; {n} write(s) timed "
                           f"out meanwhile", only_debug=True)
 
     def down_since(self) -> Optional[float]:
@@ -3868,11 +3868,11 @@ class BambuBridge:
                     self._mark_connected()
                     # A short drop is routine; the console hears only about a real outage.
                     if down_for >= self.RECONNECT_SAY_S:
-                        self.logger.info(f"AFC bambu: the BridgeBox link is back "
+                        self.logger.info(f"BridgeBox: the BridgeBox link is back "
                                          f"after {down_for:.0f}s")
                     else:
                         self.logger.debug(
-                            f"AFC bambu: bridge reconnected"
+                            f"BridgeBox: bridge reconnected"
                             f"{f' after {down_for:.0f}s down' if down_for >= 1 else ''}")
                     buf = b""
                     backoff = 0.5
@@ -3895,9 +3895,9 @@ class BambuBridge:
                 if self._expect_reset:
                     # A requested reset drops the USB CDC endpoint, so the failing read is expected.
                     self._expect_reset = False
-                    self.logger.info("AFC bambu: bridge resetting as asked; reconnecting")
+                    self.logger.info("BridgeBox: bridge resetting as asked; reconnecting")
                 else:
-                    self.logger.warning(f"AFC bambu: bridge read failed: {e}; reconnecting")
+                    self.logger.warning(f"BridgeBox: bridge read failed: {e}; reconnecting")
                 self._drop_port()
                 continue
             if not chunk:

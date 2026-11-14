@@ -421,7 +421,7 @@ class BambuSpoolman:
                         # Spoolman holds this reel twice: fold the other record in.
                         merged = merge_duplicate_spool(client, spool, dupe_id, tray_uid,
                                                        self._u.logger,
-                                                       f"AFC bambu {self._u.name}")
+                                                       f"{self._u.name}")
                         if merged is not None:
                             spool = merged
                             if by_tray is not None:
@@ -436,7 +436,7 @@ class BambuSpoolman:
                             if not have:
                                 client.write_tray_uid(spool.get("id"), tray_uid)
                             elif have != tray_uid:
-                                self._u.logger.debug(f"AFC bambu {self._u.name}: spool "
+                                self._u.logger.debug(f"{self._u.name}: spool "
                                                      f"{spool.get('id')} carries tray UID "
                                                      f"{have} but this tag says {tray_uid} -- "
                                                      f"left alone; one of them is on the wrong "
@@ -499,7 +499,7 @@ class BambuSpoolman:
                             afc.spool.set_spoolID(lane, spool.get("id"))
                             self._remember_bound_uid(slot, uid)
                         self._u.logger.debug(
-                            f"AFC bambu {self._u.name}: matched {lane.name} to "
+                            f"{self._u.name}: matched {lane.name} to "
                             f"Spoolman spool {spool.get('id')} by "
                             + ("tray UID " + tray_uid
                                if by_tray is not None else "UID " + str(uid))
@@ -589,7 +589,7 @@ class BambuSpoolman:
         except Exception:
             now = 0.0
         retry[slot] = now + wait
-        u.logger.debug(f"AFC bambu {u.name}: Spoolman did not answer the lookup of "
+        u.logger.debug(f"{u.name}: Spoolman did not answer the lookup of "
                        f"{str(uid).upper()} for {getattr(lane, 'name', lane)}; asking "
                        f"again in {wait:.0f} s")
 
@@ -617,7 +617,7 @@ class BambuSpoolman:
         if slot is not None:
             refused[slot] = (str(uid), sid)
         name = getattr(lane, "name", lane)
-        u.logger.info(f"AFC bambu {u.name}: {name} -- tag {str(uid).upper()} matches "
+        u.logger.info(f"{u.name}: {name} -- tag {str(uid).upper()} matches "
                       f"Spoolman spool {sid}, which has no remaining weight on record, "
                       f"so the lane was not linked to it (AFC clears a lane linked to a "
                       f"spool without one). Correct spool {sid}'s weight in Spoolman, "
@@ -1017,10 +1017,10 @@ class BambuSpoolman:
                                               restored=restored)
         except Exception:
             try:
-                self._u.logger.debug("AFC bambu: spoolman sync failed",
+                self._u.logger.debug("BridgeBox: spoolman sync failed",
                                      traceback=traceback.format_exc())
             except Exception:
-                self._u.logger.debug("AFC bambu: spoolman sync failed")
+                self._u.logger.debug("BridgeBox: spoolman sync failed")
 
     def _apply_remain_weight(self, lane: Any, info: dict) -> None:
         """
@@ -1118,7 +1118,7 @@ class BambuSpoolman:
         # with Spoolman's stored figure. Whether Spoolman does is the push's
         # own call (sync_measured_to_spoolman).
         lane.weight = grams
-        self._u.logger.debug(f"AFC bambu {self._u.name}: {getattr(lane, 'name', '?')} bound "
+        self._u.logger.debug(f"{self._u.name}: {getattr(lane, 'name', '?')} bound "
                              f"to spool {sid} after its measurement; handing the measured "
                              f"{grams} g to it")
         self._push_measured_to_spoolman(lane, grams, "physical AMS measurement", pct=pct,
@@ -1171,7 +1171,7 @@ class BambuSpoolman:
         if grams == int(written):
             return
         lane.weight = grams
-        self._u.logger.debug(f"AFC bambu {self._u.name}: {getattr(lane, 'name', '?')} -- "
+        self._u.logger.debug(f"{self._u.name}: {getattr(lane, 'name', '?')} -- "
                              f"{pct}% weighed at its material now it is known: {grams} g, not "
                              f"the {written} g written before the tag landed")
         self._push_measured_to_spoolman(lane, grams, "physical AMS measurement", pct=pct,
@@ -1284,10 +1284,10 @@ class BambuSpoolman:
                 _cap = (f" -- measured {pct}%, capped to the spool's "
                         f"{nominal} g nominal"
                         if pct > 100 and nominal else "")
-                self._u.logger.debug(f"AFC bambu {self._u.name}: wrote {grams} g remaining to "
+                self._u.logger.debug(f"{self._u.name}: wrote {grams} g remaining to "
                                      f"Spoolman spool {sid} ({source}){_cap}")
             except Exception as e:
-                self._u.logger.debug(f"AFC bambu {self._u.name}: Spoolman weight write failed: {e}")
+                self._u.logger.debug(f"{self._u.name}: Spoolman weight write failed: {e}")
         BambuSpoolman._spoolman_bg(self, _job)
         return
 
@@ -1990,7 +1990,7 @@ class BambuSpoolman:
         if _record is not None:
             _record(uid, pct)
         if pct != pct_read:
-            self._u.logger.debug(f"AFC bambu {self._u.name}: slot {slot} measured {pct_read}%, "
+            self._u.logger.debug(f"{self._u.name}: slot {slot} measured {pct_read}%, "
                                  f"held at the {pct}% this reel measured before -- filament "
                                  f"does not grow, and the odometer is worth about +/-3%")
         lane = self._u._lane_for_slot(slot)

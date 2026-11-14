@@ -1662,7 +1662,7 @@ class afcBambuAMS(afcUnit):
         try:
             _register_bambu_buffer_chip(self)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: buffer pin unavailable: {e}")
+            self.logger.warning(f"{self.name}: buffer pin unavailable: {e}")
         self.gcode = self.printer.lookup_object('gcode')
         self._register_gcode_commands()
 
@@ -2472,7 +2472,7 @@ class afcBambuAMS(afcUnit):
         except self.printer.command_error:
             raise
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: reload-after-fault check failed "
+            self.logger.warning(f"{self.name}: reload-after-fault check failed "
                                 f"({e}); resuming anyway. If the toolhead is empty, pause and "
                                 f"load the lane by hand.")
 
@@ -3042,7 +3042,7 @@ class afcBambuAMS(afcUnit):
                 lane = self._lane_for_slot(s)
                 where = (f"{lane.name} (slot {s})" if lane is not None
                          else f"slot {s}")
-                msg = (f"AFC bambu {self.name}: {where} capscan ended without "
+                msg = (f"{self.name}: {where} capscan ended without "
                        f"a measurement (no reading within "
                        f"{self._PENDING_MAX_S:.0f} s); it is no longer waiting for one")
                 if loud:
@@ -3176,7 +3176,7 @@ class afcBambuAMS(afcUnit):
                 who = self._bridge.bus_owner()
                 # Retries come every 5 s for up to 2 minutes, so only the first defer logs at INFO.
                 retrying = getattr(self, "_scan_claim_tries", {}).get(slot, 0)
-                msg = (f"AFC bambu {self.name}: deferring the scan of slot "
+                msg = (f"{self.name}: deferring the scan of slot "
                        f"{slot} -- {who} has a spool operation running on this "
                        f"bus. It will be retried; nothing is lost.")
                 if retrying:
@@ -3320,7 +3320,7 @@ class afcBambuAMS(afcUnit):
             if self._spool is not None:
                 return
             name = getattr(lane, "name", "?")
-            self.logger.warning(f"AFC bambu {self.name}: {name} is bound to Spoolman spool "
+            self.logger.warning(f"{self.name}: {name} is bound to Spoolman spool "
                                 f"{sid}, and with the Spoolman module ([AFC_BambuAMS_rfid]) "
                                 f"off this measurement stays on the lane and is not written "
                                 f"to that spool. AFC reloads a bound lane's weight from "
@@ -3808,7 +3808,7 @@ class afcBambuAMS(afcUnit):
         try:
             self.eject_lane(lane)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: recover reel-back for "
+            self.logger.warning(f"{self.name}: recover reel-back for "
                                 f"{getattr(lane, 'name', '?')} did not complete: {e}")
         # A reeled-back spool stays in the bay, so a present bay is LOADED.
         try:
@@ -3961,7 +3961,7 @@ class afcBambuAMS(afcUnit):
             or afcBambuAMS._rereads_owed(self)):
             if not getattr(self, "_prime_waiting", False):
                 self._prime_waiting = True
-                self.logger.debug(f"AFC bambu {self.name}: scan priming waits until the "
+                self.logger.debug(f"{self.name}: scan priming waits until the "
                                   f"bridge has polled this unit and re-read its bays")
             return
         self._prime_waiting = False
@@ -4096,7 +4096,7 @@ class afcBambuAMS(afcUnit):
                         kw["on_done"] = lambda: afcBambuAMS._link_landed(self, lane, spool_id)
                     fetch(lane, spool_id, **kw)
                 except Exception as e:
-                    self.logger.debug(f"AFC bambu {self.name}: could not re-fetch spool "
+                    self.logger.debug(f"{self.name}: could not re-fetch spool "
                                       f"{spool_id} for {getattr(lane, 'name', lane)}: {e}")
             return True
         return saved.get("material") not in (None, "")
@@ -4128,7 +4128,7 @@ class afcBambuAMS(afcUnit):
             try:
                 afcBambuAMS._restore_claimed_lane_vars(self, lane, rec)
             except Exception as e:
-                self.logger.debug(f"AFC bambu {self.name}: claim restore {name}: {e}")
+                self.logger.debug(f"{self.name}: claim restore {name}: {e}")
         afcBambuAMS._restore_toolhead_lane(self)
 
     def _toolhead_record_is_mine(self, lane_name: str) -> bool:
@@ -4195,7 +4195,7 @@ class afcBambuAMS(afcUnit):
             why = (f"no saved record of {lane_name} is attributed to this "
                    f"unit ({uid}), so AFC cannot tell which unit the "
                    f"filament in {ext_name} is from, and")
-        return (f"AFC bambu {self.name}: {ext_name} records {lane_name} as "
+        return (f"{self.name}: {ext_name} records {lane_name} as "
                 f"loaded, but {why} {lane_name} is left unloaded. Unload "
                 f"that filament by hand and run {hint} to clear the record.")
 
@@ -4243,7 +4243,7 @@ class afcBambuAMS(afcUnit):
                 try:
                     params(lane)
                 except Exception as e:
-                    self.logger.debug(f"AFC bambu {self.name}: print task config for {name}: {e}")
+                    self.logger.debug(f"{self.name}: print task config for {name}: {e}")
 
     def _lane_on_defaults(self, lane: Any) -> bool:
         """
@@ -4438,14 +4438,14 @@ class afcBambuAMS(afcUnit):
         bay = f"bay {slot + 1}" if isinstance(slot, int) else "its bay"
         sid = getattr(lane, "spool_id", None)
         if defaults:
-            routine_info(self.logger, f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
+            routine_info(self.logger, f"{self.name}: {lane.name} -- the tag in {bay} "
                                       f"replaces the AFC defaults saved for this lane")
         else:
             was = " ".join(str(v) for v in (
                 getattr(lane, "material", ""), getattr(lane, "color", ""))
                 if v)
             routine_info(self.logger,
-                f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
+                f"{self.name}: {lane.name} -- the tag in {bay} "
                 f"({info.get('material')}"
                 + (f" #{_colour_key(info.get('color'))}"
                    if info.get("color") else "")
@@ -4530,7 +4530,7 @@ class afcBambuAMS(afcUnit):
             or str(getattr(lane, "spool_id", "")) != str(spool_id)):
             return
         del dropped[name]
-        self.logger.debug(f"AFC bambu {self.name}: spool {spool_id}'s Spoolman data landed "
+        self.logger.debug(f"{self.name}: spool {spool_id}'s Spoolman data landed "
                           f"on {name} after its saved record was dropped -- clearing it again")
         self._clear_lane_filament(lane)
         self._unbind_spool(lane, "its saved record was dropped")
@@ -4807,7 +4807,7 @@ class afcBambuAMS(afcUnit):
                     self._surface_slot_info(lane, info)
                     continue
                 afcBambuAMS._keep_held_record(self, lane, info)
-                self.logger.debug(f"AFC bambu {self.name}: {lane.name} keeps its saved "
+                self.logger.debug(f"{self.name}: {lane.name} keeps its saved "
                                   f"record: the tag in bay {slot + 1} ({tag}) is the same spool")
                 continue
             if afcBambuAMS._lane_on_defaults(self, lane):
@@ -4838,7 +4838,7 @@ class afcBambuAMS(afcUnit):
                 f"{'it' if one else 'them'}, or run AFC_BAMBU_SCAN LANE="
                 + (stock[0] if one else "<lane>"))
         if parts:
-            routine_info(self.logger, f"AFC bambu {self.name}: " + "; ".join(parts))
+            routine_info(self.logger, f"{self.name}: " + "; ".join(parts))
 
     def _settle_restored_bay(self, lane: Any, info: dict) -> None:
         """
@@ -4935,7 +4935,7 @@ class afcBambuAMS(afcUnit):
                 self.logger.info(f"{lane.name} tool cmd: {_map_txt} {msg}")
             self.logger.raw(self.logo if ok else self.logo_error)
         except Exception as e:
-            self.logger.debug(f"AFC bambu {self.name}: claimed-unit PREP printout failed: {e}")
+            self.logger.debug(f"{self.name}: claimed-unit PREP printout failed: {e}")
 
     def _handle_ready(self) -> None:
         """
@@ -4958,7 +4958,7 @@ class afcBambuAMS(afcUnit):
             if self._is_virtual_hub(lane):
                 lane._load_state = False
         if not self.serial_port:
-            self.logger.info(f"AFC bambu {self.name}: no serial_port configured -- unit "
+            self.logger.info(f"{self.name}: no serial_port configured -- unit "
                              f"stays offline. (A section with no serial_port is usually a "
                              f"leftover in AFC_auto_vars.cfg for a renamed or removed "
                              f"unit; it is safe to delete that section.)")
@@ -4979,7 +4979,7 @@ class afcBambuAMS(afcUnit):
                     bridge.set_narration_log(os.path.dirname(log_file),
                                              _bridge_log_tag(self.serial_port))
             except Exception as e:
-                self.logger.warning(f"AFC bambu {self.name}: no narration log ({e})")
+                self.logger.warning(f"{self.name}: no narration log ({e})")
             _bridge_mod._BRIDGES[self.serial_port] = bridge
         self._bridge = bridge
         bridge.add_listener(self._on_status)
@@ -4992,11 +4992,11 @@ class afcBambuAMS(afcUnit):
                     if self.variant != "auto":
                         bridge.send({"cmd": "variant", "set": self.variant})
                     bridge.send({"cmd": "status"})
-                    self.logger.debug(f"AFC bambu {self.name}: brought the bridge up as the "
+                    self.logger.debug(f"{self.name}: brought the bridge up as the "
                                       f"pool owner on {self.serial_port} (variant="
                                       f"{self.variant}); units claim onto it live.")
                 except Exception as e:
-                    self.logger.warning(f"AFC bambu {self.name}: pool-owner bridge init "
+                    self.logger.warning(f"{self.name}: pool-owner bridge init "
                                         f"failed: {e}")
             return
         # A tool-loaded lane needs the mode-07 signal, or a blind feed at idle stall-retracts.
@@ -5031,7 +5031,7 @@ class afcBambuAMS(afcUnit):
             if self.unit_uid:
                 self._resolve_uid_blocking()
             self._announce_unit()
-            self.logger.debug(f"AFC bambu {self.name}: sharing bridge on {self.serial_port} "
+            self.logger.debug(f"{self.name}: sharing bridge on {self.serial_port} "
                               f"(ams_index={self.ams_index})")
             return
         try:
@@ -5044,7 +5044,7 @@ class afcBambuAMS(afcUnit):
             self._announce_unit()
             # So the lanes show real presence before the first periodic poll.
             bridge.send({"cmd": "status"})
-            self.logger.debug(f"AFC bambu {self.name}: bridge connected on {self.serial_port} "
+            self.logger.debug(f"{self.name}: bridge connected on {self.serial_port} "
                               f"(variant={self.variant}, ams_index={self.ams_index})")
             # Bambu's bus limits: up to 4 four-slot AMS, 8 HT, 12 total.
             try:
@@ -5055,12 +5055,12 @@ class afcBambuAMS(afcUnit):
                         models.append(m)
                 warn = check_ams_limits(models)
                 if warn:
-                    self.logger.warning(f"AFC bambu: AMS bus over Bambu limits -- {warn}. Extra "
+                    self.logger.warning(f"BridgeBox: AMS bus over Bambu limits -- {warn}. Extra "
                                         f"units past the limit may not enroll.")
             except Exception:
                 pass
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: bridge connect failed: {e}")
+            self.logger.warning(f"{self.name}: bridge connect failed: {e}")
 
     def set_master(self, master: Any) -> None:
         """
@@ -5138,13 +5138,13 @@ class afcBambuAMS(afcUnit):
         # no heat commands go to hardware without a heater.
         _spec = _AMS_MODELS.get(model)
         if _spec is None:
-            self.logger.warning(f"AFC bambu {self.name}: claimed unknown model {model!r}; "
+            self.logger.warning(f"{self.name}: claimed unknown model {model!r}; "
                                 f"assuming NO heater. Known: {', '.join(sorted(_AMS_MODELS))}")
         self.has_heater = (_spec or _AMS_MODELS["ams1"])[0]
         if getattr(self, "_bridge", None) is None:
             bridge = _bridge_mod._BRIDGES.get(self.serial_port)
             if bridge is None:
-                self.logger.warning(f"AFC bambu {self.name}: claim found no live bridge on "
+                self.logger.warning(f"{self.name}: claim found no live bridge on "
                                     f"{self.serial_port}; unit stays offline until restart.")
                 return False
             self._bridge = bridge
@@ -5176,19 +5176,19 @@ class afcBambuAMS(afcUnit):
         try:
             self._slot_map = build_slot_map(self.lanes, self.SLOTS_PER_UNIT)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: claim slot map: {e}")
+            self.logger.warning(f"{self.name}: claim slot map: {e}")
         # As PREP does at boot; scan priming settles them.
         self._afc_owned = set()
         try:
             afcBambuAMS._apply_held_lanes(self)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: claim could not restore the saved "
+            self.logger.warning(f"{self.name}: claim could not restore the saved "
                                 f"lane records: {e}")
         # Once resolved, this re-seeds the lanes and replays _announce_unit at the real index.
         try:
             self._resolve_uid_index(0)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: claim resolve: {e}")
+            self.logger.warning(f"{self.name}: claim resolve: {e}")
         try:
             self._announce_unit()
         except Exception:
@@ -5220,7 +5220,7 @@ class afcBambuAMS(afcUnit):
                                                self.afc.reactor.monotonic() + 8.0)
         except Exception:
             pass
-        self.logger.debug(f"AFC bambu {self.name}: claimed UID {self.unit_uid} as {model} "
+        self.logger.debug(f"{self.name}: claimed UID {self.unit_uid} as {model} "
                           f"and brought online live (ams_index={self.ams_index}).")
         return True
 
@@ -5309,7 +5309,7 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
         else:
-            self.logger.warning(f"AFC bambu {self.name}: unit_uid {self.unit_uid} never appeared "
+            self.logger.warning(f"{self.name}: unit_uid {self.unit_uid} never appeared "
                                 f"on the chain ({uids}); check the unit_uid value against "
                                 f"AFC_BAMBU_UIDS. Holding chain index {self.ams_index}.")
 
@@ -5339,7 +5339,7 @@ class afcBambuAMS(afcUnit):
         if idx == old:
             # Re-confirmed on every resolve and reconnect; only a changed pin logs at info.
             try:
-                self.logger.debug(f"AFC bambu {self.name}: UID {self.unit_uid} confirmed at "
+                self.logger.debug(f"{self.name}: UID {self.unit_uid} confirmed at "
                                   f"ams_index {idx}")
             except Exception:
                 pass
@@ -5369,7 +5369,7 @@ class afcBambuAMS(afcUnit):
             self._bridge.send({"cmd": "status"})
         except Exception:
             pass
-        self.logger.debug(f"AFC bambu {self.name}: pinned to UID {self.unit_uid} at "
+        self.logger.debug(f"{self.name}: pinned to UID {self.unit_uid} at "
                           f"chain index {idx} (was ams_index {old})")
         if self._announce_deferred:
             self._announce_deferred = False
@@ -5418,7 +5418,7 @@ class afcBambuAMS(afcUnit):
             seen = []
         # A slow chain at startup is expected; the 40-retry give-up warns.
         try:
-            self.logger.debug(f"AFC bambu {self.name}: unit_uid {self.unit_uid} not on the "
+            self.logger.debug(f"{self.name}: unit_uid {self.unit_uid} not on the "
                               f"chain after {timeout:.0f}s (chain so far: {seen or 'empty'}); "
                               f"holding chain index {self.ams_index} until it appears "
                               f"(background retry)")
@@ -5456,7 +5456,7 @@ class afcBambuAMS(afcUnit):
                     self._announce_defer_t0 = 0.0
             why = (f"UID {self.unit_uid}" if self.unit_uid
                    else "unclaimed pool slot, no UID yet")
-            self.logger.debug(f"AFC bambu {self.name}: chain index not resolved yet ({why}); "
+            self.logger.debug(f"{self.name}: chain index not resolved yet ({why}); "
                               f"holding this unit's registrations until the chain map arrives")
             return
         # One try per send: without _send_mc_addr the log drain never asks an HT for its moves.
@@ -5479,7 +5479,7 @@ class afcBambuAMS(afcUnit):
                 fn()
             except Exception as e:
                 # A silent failure looks like a unit that polls but never narrates.
-                self.logger.warning(f"AFC bambu {self.name}: could not announce {what} to the "
+                self.logger.warning(f"{self.name}: could not announce {what} to the "
                                     f"bridge ({e}); narration or addressing may be wrong")
 
     def _on_bridge_reconnect(self) -> None:
@@ -5568,19 +5568,19 @@ class afcBambuAMS(afcUnit):
             return
         try:
             if self.afc.function.in_print():
-                self.logger.info(f"AFC bambu {self.name}: bridge rebooted, but a print is "
+                self.logger.info(f"{self.name}: bridge rebooted, but a print is "
                                  f"running -- not relinking. Units may show a fault until "
                                  f"the print ends; AFC_BAMBU_RELINK UNIT={self.name} clears "
                                  f"it by hand.")
                 return
         except Exception:
             return
-        self.logger.debug(f"AFC bambu {self.name}: bridge rebooted -- relinking the chain so "
+        self.logger.debug(f"{self.name}: bridge rebooted -- relinking the chain so "
                           f"the units drop their park (they lost their master mid-frame)")
         try:
             bridge.send({"cmd": "relink"})
         except Exception:
-            self.logger.debug(f"AFC bambu {self.name}: post-reboot relink failed",
+            self.logger.debug(f"{self.name}: post-reboot relink failed",
                               traceback=traceback.format_exc())
             return
         # The relink deregisters every unit; consume_reboot() already fired, so this cannot loop.
@@ -5622,7 +5622,7 @@ class afcBambuAMS(afcUnit):
             if self.unit_uid in uids:
                 idx = uids.index(self.unit_uid)
                 if idx != self.ams_index:
-                    self.logger.warning(f"AFC bambu {self.name}: chain moved mid-session -- UID "
+                    self.logger.warning(f"{self.name}: chain moved mid-session -- UID "
                                         f"{self.unit_uid} now at index {idx} (was "
                                         f"{self.ams_index}); re-pinning")
                     self._adopt_index(idx)
@@ -5652,12 +5652,12 @@ class afcBambuAMS(afcUnit):
                 if not self._ready_to_follow(lane):
                     # Steppers come up de-energized, so engaging now would pulse the AMS with
                     # nothing gripping.
-                    self.logger.debug(f"AFC bambu {self.name}: {lane.name} loaded at "
+                    self.logger.debug(f"{self.name}: {lane.name} loaded at "
                                       f"startup on an unhomed machine with a de-energised "
                                       f"extruder; leaving the follower for the poll loop to "
                                       f"arm once either changes")
                     continue
-                self.logger.debug(f"AFC bambu {self.name}: {lane.name} loaded at startup, "
+                self.logger.debug(f"{self.name}: {lane.name} loaded at startup, "
                                   f"re-asserting AMS loaded state + follower")
                 self._engage_follower(lane)
 
@@ -5731,9 +5731,9 @@ class afcBambuAMS(afcUnit):
         try:
             self._startup_restore_loaded()  # engages the tray (mode:4) once
         except Exception as ex:
-            self.logger.warning(f"AFC bambu {self.name}: loaded-follower restore failed: {ex}")
+            self.logger.warning(f"{self.name}: loaded-follower restore failed: {ex}")
             return False
-        self.logger.debug(f"AFC bambu {self.name}: restored the follower for "
+        self.logger.debug(f"{self.name}: restored the follower for "
                           f"{', '.join(lane.name for lane in mine)} (AFC records it loaded to "
                           f"the toolhead) -- mode:4, one-shot.")
         return True
@@ -5830,7 +5830,7 @@ class afcBambuAMS(afcUnit):
             _say = self.logger.info if not getattr(self, "_tcp_said", False) \
                 else self.logger.debug
             self._tcp_said = True
-            _say(f"AFC bambu {self.name}: bridge over TCP at tcp://{host}:{port}"
+            _say(f"{self.name}: bridge over TCP at tcp://{host}:{port}"
                  f" (opt-in transport -- USB-CDC is the supported one)")
             # Every send() runs on a reactor timer, so a far end that stops reading must time out.
             return TcpPort(host, port, timeout=0.1, write_timeout=0.5, key=self.tcp_key)
@@ -5917,7 +5917,7 @@ class afcBambuAMS(afcUnit):
                 from extras.AFC_BridgeBox import assign_pool_tcmd
                 assign_pool_tcmd(cur_lane, self.afc)
             except Exception as e:
-                self.logger.warning(f"AFC bambu: TcmdAssign failed: {e}")
+                self.logger.warning(f"BridgeBox: TcmdAssign failed: {e}")
         try:
             cur_lane.send_lane_data()
         except Exception:
@@ -5932,7 +5932,7 @@ class afcBambuAMS(afcUnit):
         try:
             cur_lane.set_afc_prep_done()
         except Exception as e:
-            self.logger.warning(f"AFC bambu: set_afc_prep_done failed: {e}")
+            self.logger.warning(f"BridgeBox: set_afc_prep_done failed: {e}")
         return succeeded
 
     # Status mirroring
@@ -5973,7 +5973,7 @@ class afcBambuAMS(afcUnit):
                         and self.unit_uid in uids):
                         live = uids.index(self.unit_uid)
                         if live != self.ams_index:
-                            self.logger.warning(f"AFC bambu {self.name}: chain re-enrolled -- "
+                            self.logger.warning(f"{self.name}: chain re-enrolled -- "
                                                 f"UID {self.unit_uid} moved from index "
                                                 f"{self.ams_index} to {live}; re-adopting")
                             self._adopt_index(live)
@@ -5986,7 +5986,7 @@ class afcBambuAMS(afcUnit):
                 self._booted_under_us = True
                 if not getattr(self, "_presence_wait_said", False):
                     self._presence_wait_said = True
-                    self.logger.debug(f"AFC bambu {self.name}: the bridge has not polled "
+                    self.logger.debug(f"{self.name}: the bridge has not polled "
                                       f"this unit's bays yet; keeping the lanes as they are")
                 return
             self._presence_ok = True
@@ -6028,7 +6028,7 @@ class afcBambuAMS(afcUnit):
             if getattr(self, "_prime_waiting", False):
                 afcBambuAMS._prime_scan_baseline(self)
         except Exception as e:
-            msg = f"AFC bambu {self.name}: status apply error: {e}"
+            msg = f"{self.name}: status apply error: {e}"
             if msg != self._status_err_last:
                 self._status_err_last = msg
                 self.logger.warning(msg)
@@ -6081,7 +6081,7 @@ class afcBambuAMS(afcUnit):
                 mt[slot] = None
             lane = self._lane_for_slot(slot)
             name = getattr(lane, "name", None) or f"bay {slot + 1}"
-            self.logger.info(f"AFC bambu {self.name}: the bridge restarted during the tag "
+            self.logger.info(f"{self.name}: the bridge restarted during the tag "
                              f"scan of {name}, which ended the scan; {name} is left as it "
                              f"is. Run AFC_BAMBU_SCAN LANE={name} to scan it again")
 
@@ -6337,7 +6337,7 @@ class afcBambuAMS(afcUnit):
             return False
         if self._take_overfeed(lane):
             return False
-        msg = (f"AFC bambu {self.name}: the AMS reports it has STALLED "
+        msg = (f"{self.name}: the AMS reports it has STALLED "
                f"(state {state}) on {lane.name} -- the spool is likely tangled "
                f"or the path jammed. Clear the snag, then resume.")
         try:
@@ -6468,7 +6468,7 @@ class afcBambuAMS(afcUnit):
                     tr = self._trace_verdict = {}
                 if tr.get(slot) != verdict:
                     tr[slot] = verdict
-                    self.logger.debug(f"AFC bambu {self.name}: slot {slot} scan verdict -> "
+                    self.logger.debug(f"{self.name}: slot {slot} scan verdict -> "
                                       f"{verdict} (fw seq={info.get('scan_seq')} "
                                       f"res={info.get('scan_res')} | record: "
                                       f"mat={info.get('material') or '-'} "
@@ -6516,7 +6516,7 @@ class afcBambuAMS(afcUnit):
                         and not _capped):
                         if fi.get(slot) == 1:
                             fi[slot] = 2
-                            self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- "
+                            self.logger.debug(f"{self.name}: {lane.name} -- "
                                               f"fresh insert re-read its own tag; the "
                                               f"measurement is still coming, holding "
                                               f"the lane for the unit's answer")
@@ -6524,7 +6524,7 @@ class afcBambuAMS(afcUnit):
                     # So a late result can be told from an absent one.
                     if (_capped
                         and not ended):
-                        self.logger.warning(f"AFC bambu {self.name}: {lane.name} -- "
+                        self.logger.warning(f"{self.name}: {lane.name} -- "
                                             f"gave up waiting after {_cap_s:.0f}s "
                                             f"(SCAN_FALLBACK_CAP); the unit had NOT "
                                             f"ended its cycle, so anything below is our "
@@ -6533,7 +6533,7 @@ class afcBambuAMS(afcUnit):
                     fi.pop(slot, None)
                     held = afcBambuAMS._held_measurements(self).get(slot)
                     if held:
-                        self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- "
+                        self.logger.debug(f"{self.name}: {lane.name} -- "
                                           f"cycle ended with no new read; already "
                                           f"measured this session ({held}% held), spool unchanged")
                         self._release_scan_hold(slot)
@@ -6549,7 +6549,7 @@ class afcBambuAMS(afcUnit):
                             break
                     same = (info.get("rfid_uid") == _bound)
                     # A late tag wins over defaults.
-                    self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- the unit ran "
+                    self.logger.debug(f"{self.name}: {lane.name} -- the unit ran "
                                       f"its scan and measure and reported no NEW read"
                                       f"{' (same spool as last time)' if same else ''}; "
                                       f"keeping the tag already on this bay ({info.get('material')}"
@@ -6597,7 +6597,7 @@ class afcBambuAMS(afcUnit):
                         if _blg is None:
                             _blg = self._meas_baselined = set()
                         _blg.add(slot)
-                        self.logger.debug(f"AFC bambu {self.name}: slot {slot} carries "
+                        self.logger.debug(f"{self.name}: slot {slot} carries "
                                           f"measurement {mpct}% (seq {mseq}) from before its "
                                           f"spool came out; recorded, not applied")
                         _prev = seen[slot]
@@ -6716,7 +6716,7 @@ class afcBambuAMS(afcUnit):
         bl.add(slot)
         if (prev is None
             or prev[1] != mpct):
-            self.logger.debug(f"AFC bambu {self.name}: slot {slot} carries measurement "
+            self.logger.debug(f"{self.name}: slot {slot} carries measurement "
                               f"{mpct}% (seq {mseq}) from before this connection; recorded, "
                               f"not applied -- the lane keeps what it had")
 
@@ -6771,7 +6771,7 @@ class afcBambuAMS(afcUnit):
             held.add(slot)
             name = next((n for n, s in (getattr(self, "_slot_map", None)
                                         or {}).items() if s == slot), None)
-            self.logger.debug(f"AFC bambu {self.name}: {name or f'slot {slot}'} read its "
+            self.logger.debug(f"{self.name}: {name or f'slot {slot}'} read its "
                               f"tag; holding the lane until the unit finishes measuring "
                               f"the spool -- this model stops calibrating if we write mid-cycle")
         return False
@@ -6840,7 +6840,7 @@ class afcBambuAMS(afcUnit):
                 filled.append("name")
         if not filled:
             return
-        self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- filling in "
+        self.logger.debug(f"{self.name}: {lane.name} -- filling in "
                           f"{' and '.join(filled)} from the bay's record ({tag_material})")
         try:
             lane.send_lane_data()
@@ -6979,7 +6979,7 @@ class afcBambuAMS(afcUnit):
                 ra[slot] = True
                 self._prev_present[slot] = False
                 self._auto_scanned[slot] = False
-                self.logger.debug(f"AFC bambu {self.name}: slot {slot} came up with a spool "
+                self.logger.debug(f"{self.name}: slot {slot} came up with a spool "
                                   f"and no record of it -- scanning it as a fresh insert")
 
     def _release_scan_hold(self, slot: int) -> None:
@@ -7340,7 +7340,7 @@ class afcBambuAMS(afcUnit):
             if quiet:
                 return False
             raw = slots[slot].get("hub_raw")
-            self.logger.warning(f"AFC bambu {self.name}: {lane.name} unloaded but bay "
+            self.logger.warning(f"{self.name}: {lane.name} unloaded but bay "
                                 f"{slot + 1}'s hub sensor still reads filament (0x{raw:02X}); "
                                 f"the hub shows occupied until it clears")
             return False
@@ -7409,7 +7409,7 @@ class afcBambuAMS(afcUnit):
                 self.set_feed_assist(lane, False)
             except Exception:
                 pass
-            self.logger.info(f"AFC bambu {self.name}: {lane.name} ran out and its hub "
+            self.logger.info(f"{self.name}: {lane.name} ran out and its hub "
                              f"sensor reads clear (0x{raw:02X}): stopped the follower. "
                              f"AFC still records {lane.name} at the toolhead: unload it, "
                              f"or run UNSET_LANE_LOADED if the toolhead is empty too.")
@@ -7451,7 +7451,7 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
         try:
-            routine_info(self.logger, f"AFC bambu {self.name}: stopped pushing {lane.name}'s "
+            routine_info(self.logger, f"{self.name}: stopped pushing {lane.name}'s "
                                       f"leftover: {why}")
         except Exception:
             pass
@@ -7512,7 +7512,7 @@ class afcBambuAMS(afcUnit):
             and getattr(target, "extruder_obj", None) is not None
             and target.extruder_obj is not getattr(lane, "extruder_obj", None)):
             self._runout_empty.add(lane.name)
-            self.logger.info(f"AFC bambu {self.name}: {lane.name} ran out, switching to "
+            self.logger.info(f"{self.name}: {lane.name} ran out, switching to "
                              f"its runout lane {target_name} on another extruder (the AMS "
                              f"retract is skipped)")
             return False
@@ -7566,7 +7566,7 @@ class afcBambuAMS(afcUnit):
         wait = getattr(self, "RUNOUT_CONFIRM_S", afcBambuAMS.RUNOUT_CONFIRM_S)
         what = ("the AMS says its inlet switch cleared" if inlet
                 else "went empty")
-        self.logger.debug(f"AFC bambu {self.name}: AMS bay {slot + 1} {what} under "
+        self.logger.debug(f"{self.name}: AMS bay {slot + 1} {what} under "
                           f"{lane.name} while printing; runout if it stays empty for {wait:.1f}s")
         reactor = getattr(getattr(self, "afc", None), "reactor", None)
         register = getattr(reactor, "register_callback", None)
@@ -7616,7 +7616,7 @@ class afcBambuAMS(afcUnit):
         if (bridge is None
             or not afcBambuAMS._unit_online(self, latest)
             or not afcBambuAMS._presence_known(self, latest or {})):
-            self.logger.warning(f"AFC bambu {self.name}: AMS bay {slot + 1} read empty "
+            self.logger.warning(f"{self.name}: AMS bay {slot + 1} read empty "
                                 f"mid-print, but the bridge cannot vouch for presence right "
                                 f"now; not treating it as a runout")
             return
@@ -7624,7 +7624,7 @@ class afcBambuAMS(afcUnit):
         if (lane is None
             or not afcBambuAMS.check_runout(self, lane)):
             return
-        self.logger.info(f"AFC bambu {self.name}: RUNOUT on {lane.name}: AMS bay "
+        self.logger.info(f"{self.name}: RUNOUT on {lane.name}: AMS bay "
                          f"{slot + 1} stayed empty while printing")
         afc = self.afc
         try:
@@ -7634,7 +7634,7 @@ class afcBambuAMS(afcUnit):
                 else:
                     lane._perform_pause_runout()
         except Exception as e:
-            self.logger.error(f"AFC bambu {self.name}: runout handling for {lane.name} failed: {e}")
+            self.logger.error(f"{self.name}: runout handling for {lane.name} failed: {e}")
             try:
                 afc.error.AFC_error(f"Runout on {lane.name} (AMS bay {slot + 1}) could not be "
                                     f"handled: {e}", pause=True)
@@ -7909,7 +7909,7 @@ class afcBambuAMS(afcUnit):
             except Exception as e:
                 failed.append(f"{what} ({e!r})")
         if failed:
-            self.logger.debug(f"AFC bambu {self.name}: connect announce could not send "
+            self.logger.debug(f"{self.name}: connect announce could not send "
                               f"{', '.join(failed)}")
 
     def _may_save_ids(self) -> bool:
@@ -8073,7 +8073,7 @@ class afcBambuAMS(afcUnit):
                     continue
                 if (getattr(lane, "material", None)
                     or getattr(lane, "spool_id", None) not in (None, "", 0)):
-                    self.logger.debug(f"AFC bambu {self.name}: bay {slot + 1} is empty but "
+                    self.logger.debug(f"{self.name}: bay {slot + 1} is empty but "
                                       f"{lane.name} still held filament data -- clearing it")
                     sid = getattr(lane, "spool_id", None)
                     self._clear_lane_filament(lane)
@@ -8088,7 +8088,7 @@ class afcBambuAMS(afcUnit):
                 # A different spool, or one since added to Spoolman, gets a fresh lookup.
                 self._forget_spoolman_miss(slot)
         except Exception as e:
-            self.logger.debug(f"AFC bambu {self.name}: empty-bay reconcile skipped: {e}")
+            self.logger.debug(f"{self.name}: empty-bay reconcile skipped: {e}")
         if cleared:
             self._save_lane_vars()
 
@@ -8231,7 +8231,7 @@ class afcBambuAMS(afcUnit):
             return
         if (present
             and not was_present):
-            self.logger.debug(f"AFC bambu {self.name}: spool INSERTED in slot {slot} "
+            self.logger.debug(f"{self.name}: spool INSERTED in slot {slot} "
                               f"(AMS bay {slot + 1})")
             # Switch narration from before this spool is about the last one.
             ins = getattr(self, "_inserted_at", None)
@@ -8259,7 +8259,7 @@ class afcBambuAMS(afcUnit):
                 self._auto_cali_slot = None
         elif (was_present
               and not present):
-            self.logger.debug(f"AFC bambu {self.name}: spool REMOVED from slot {slot} "
+            self.logger.debug(f"{self.name}: spool REMOVED from slot {slot} "
                               f"(AMS bay {slot + 1})")
             # The spool's tail has passed the feeder's sensor.
             afcBambuAMS._arm_presence_runout(self, slot)
@@ -8389,7 +8389,7 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
             defer[slot] = False
-            self.logger.debug(f"AFC bambu {self.name}: unit is free -- scanning the spool in "
+            self.logger.debug(f"{self.name}: unit is free -- scanning the spool in "
                               f"slot {slot} that was held back")
             afcBambuAMS._start_tag_scan(self, slot, info)
             return
@@ -8438,7 +8438,7 @@ class afcBambuAMS(afcUnit):
             quiet.add(slot)
             _ln = self._lane_for_slot(slot)
             _ln = getattr(_ln, "name", None) or "<lane>"
-            routine_info(self.logger, f"AFC bambu {self.name}: spool in slot {slot} -- {_ln} goes on "
+            routine_info(self.logger, f"{self.name}: spool in slot {slot} -- {_ln} goes on "
                                       f"lane defaults until it is read, and the SCAN is held: a lane "
                                       f"on this unit is loaded to the toolhead and a scan would move "
                                       f"filament on it. It scans itself when that lane comes out, or "
@@ -8454,7 +8454,7 @@ class afcBambuAMS(afcUnit):
             if (defer is not None
                 and 0 <= slot < len(defer)):
                 defer[slot] = True
-            self.logger.debug(f"AFC bambu {self.name}: spool in slot {slot} will be scanned "
+            self.logger.debug(f"{self.name}: spool in slot {slot} will be scanned "
                               f"when AFC is idle -- a lane is loading or unloading and a "
                               f"scan now would take the bus out from under it")
             return
@@ -8540,7 +8540,7 @@ class afcBambuAMS(afcUnit):
             self._pullin_until = 0.0
         r.register_callback(_reengage, now + 6.0)
 
-        routine_info(self.logger, f"AFC bambu {self.name}: slot {slot} inserted while a lane is loaded "
+        routine_info(self.logger, f"{self.name}: slot {slot} inserted while a lane is loaded "
                                   f"and idle -- dropping the follower, priming the bay in (motion only, "
                                   f"no scan/measure), then re-engaging the loaded lane. Scan deferred.")
 
@@ -8573,10 +8573,10 @@ class afcBambuAMS(afcUnit):
         if self._is_ht():
             # An unmarked measurement is discarded.
             afcBambuAMS._cap_open_pending(self, slot)
-            self.logger.debug(f"AFC bambu {self.name}: new spool in slot {slot}; HT scans and "
+            self.logger.debug(f"{self.name}: new spool in slot {slot}; HT scans and "
                               f"measures it on insert (firmware-driven at 0x1800)")
         else:
-            self.logger.debug(f"AFC bambu {self.name}: new spool detected in slot {slot}, "
+            self.logger.debug(f"{self.name}: new spool detected in slot {slot}, "
                               f"scanning tag")
             # The measurement rides the insert's preload, gated by measure_on_insert.
             _cal = bool(getattr(self, "calibrate_on_insert", False))
@@ -8614,7 +8614,7 @@ class afcBambuAMS(afcUnit):
                 lambda et, s=slot, i=dict(info):
                     afcBambuAMS._retry_claimed_scan(self, s, i),
                 self.afc.reactor.monotonic() + 5.0)
-            self.logger.debug(f"AFC bambu {self.name}: {why}, deferring slot {slot} "
+            self.logger.debug(f"{self.name}: {why}, deferring slot {slot} "
                               f"tag scan (try {n})")
             return True
         except Exception:
@@ -8640,7 +8640,7 @@ class afcBambuAMS(afcUnit):
                 return
             afcBambuAMS._start_tag_scan(self, slot, info)
         except Exception as e:
-            self.logger.debug(f"AFC bambu {self.name}: deferred scan retry failed: {e}")
+            self.logger.debug(f"{self.name}: deferred scan retry failed: {e}")
 
     def _clear_lane_filament(self, lane: Any) -> None:
         """
@@ -8723,7 +8723,7 @@ class afcBambuAMS(afcUnit):
             if _keep_w:
                 try:
                     lane.weight = _keep_w
-                    self.logger.debug(f"AFC bambu {self.name}: {lane.name} -- kept the "
+                    self.logger.debug(f"{self.name}: {lane.name} -- kept the "
                                       f"measured {_keep_w} g through a no-tag scan "
                                       f"({_held}% held, no removal since)")
                 except Exception:
@@ -8775,7 +8775,7 @@ class afcBambuAMS(afcUnit):
                         "attempted, so this says nothing about the reader or "
                         f"the spool; reseat it, or run AFC_BAMBU_SCAN LANE={lane.name}")
             routine_info(self.logger,
-                f"AFC bambu {self.name}: "
+                f"{self.name}: "
                 + (f"no readable tag profile in slot {slot}" if scanned
                    else f"no tag on record for slot {slot}")
                 + f"; applied lane defaults to {lane.name}" + _why)
@@ -8783,7 +8783,7 @@ class afcBambuAMS(afcUnit):
             if scanned:
                 self._save_lane_vars()
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: default apply for slot {slot} failed: {e}")
+            self.logger.warning(f"{self.name}: default apply for slot {slot} failed: {e}")
 
     def _apply_lane_defaults(self, lane: Any, info: dict) -> None:
         """
@@ -8967,7 +8967,7 @@ class afcBambuAMS(afcUnit):
                 rtxt = "no measurement yet"
             # _say_spool_summary is the operator's line; this keeps the extras in AFC.log.
             self.logger.debug(
-                f"AFC bambu {self.name}: {lane.name} tag -- {mat}"
+                f"{self.name}: {lane.name} tag -- {mat}"
                 f"{(' ' + str(info.get('sku'))) if info.get('sku') else ''}"
                 f" | color {colour}"
                 f" | uid {str(info.get('rfid_uid') or '?').upper()}"
@@ -9152,14 +9152,14 @@ class afcBambuAMS(afcUnit):
                 latch = self._spoolman_latched = set()
             latch.add(slot)
             (getattr(self, "_lookup_retry", None) or {}).pop(slot, None)
-            self.logger.debug(f"AFC bambu {self.name}: {lane.name} has no Spoolman spool and "
+            self.logger.debug(f"{self.name}: {lane.name} has no Spoolman spool and "
                               f"its bay's tag {str(info.get('rfid_uid')).upper()} "
                               f"({info.get('material')}) matches the lane -- looking the "
                               f"tag up in Spoolman; the lane is left as AFC restored it")
             self._spoolman_sync(lane, info, restored=True)
         except Exception:
             try:
-                self.logger.debug(f"AFC bambu {self.name}: lookup for an unbound lane failed",
+                self.logger.debug(f"{self.name}: lookup for an unbound lane failed",
                                   traceback=traceback.format_exc())
             except Exception:
                 pass
@@ -9259,7 +9259,7 @@ class afcBambuAMS(afcUnit):
             afcBambuAMS._apply_lane_defaults(self, lane, info)
             if not say:
                 return
-            routine_info(self.logger, f"AFC bambu {self.name}: spool INSERTED in slot {slot} during "
+            routine_info(self.logger, f"{self.name}: spool INSERTED in slot {slot} during "
                                       f"a print, and nothing has read it -- {lane.name} is on lane "
                                       f"defaults and linked to no spool until it is read. The unit "
                                       f"may read it on its own; to read it yourself, run "
@@ -9270,7 +9270,7 @@ class afcBambuAMS(afcUnit):
                 pass
         except Exception:
             try:
-                self.logger.debug(f"AFC bambu {self.name}: lane defaults for the slot {slot} "
+                self.logger.debug(f"{self.name}: lane defaults for the slot {slot} "
                                   f"insert failed", traceback=traceback.format_exc())
             except Exception:
                 pass
@@ -9366,7 +9366,7 @@ class afcBambuAMS(afcUnit):
                 lane.weight = w
             if changed:
                 routine_info(self.logger,
-                    f"AFC bambu {self.name}: applied tag to {lane.name}: "
+                    f"{self.name}: applied tag to {lane.name}: "
                     f"{getattr(lane, 'filament_name', '') or tag_material} "
                     f"{color_hex or ''}".rstrip())
                 # Change-only. Saved so the lane does not depend on the AMS at the next boot.
@@ -9477,7 +9477,7 @@ class afcBambuAMS(afcUnit):
                                   f"reply and no chamber telemetry followed. An AMS HT that is "
                                   f"mid-task (scanning or feeding) ignores the command silently; "
                                   f"let it finish and start again.")
-        self.logger.info(f"AFC bambu {self.name}: not drying -- the unit never answered "
+        self.logger.info(f"{self.name}: not drying -- the unit never answered "
                          f"the dry command (silent for {int(DRY_SILENT_GRACE)}s)")
 
     def _finish_timed_dry(self, started: Any, minutes: int, live: bool) -> None:
@@ -9516,7 +9516,7 @@ class afcBambuAMS(afcUnit):
                 self._dryrem_at_stop = int(u["dryrem"])
         except Exception:
             pass
-        self.logger.info(f"AFC bambu {self.name}: drying finished (the {minutes} min cycle "
+        self.logger.info(f"{self.name}: drying finished (the {minutes} min cycle "
                          f"ran out)")
 
     def _follow_arm_acked(self, latest: Any) -> Any:
@@ -9597,7 +9597,7 @@ class afcBambuAMS(afcUnit):
         self._dry_host_refusal = ""
         # So a load refused for drying can be traced. Bare test objects may lack a logger.
         try:
-            routine_info(self.logger, f"AFC bambu {self.name}: adopting the unit's own dry cycle -- "
+            routine_info(self.logger, f"{self.name}: adopting the unit's own dry cycle -- "
                                       f"its countdown moved {was}s -> {int(dr)}s, so a cycle this "
                                       f"host did not start is running ({int(dr)}s left)")
         except Exception:
@@ -9764,7 +9764,7 @@ class afcBambuAMS(afcUnit):
             # Silent past the staleness window: the cycle finished or was stopped at the unit.
             self._drying = False
             self._dry_seen_live = False
-            self.logger.info(f"AFC bambu {self.name}: drying finished (the unit stopped "
+            self.logger.info(f"{self.name}: drying finished (the unit stopped "
                              f"reporting chamber telemetry)")
         # An "[AMS_CHMB]err" for this attempt clears _drying unless the unit already reported live.
         started = getattr(self, "_dry_started_at", None)
@@ -9781,7 +9781,7 @@ class afcBambuAMS(afcUnit):
             # Kept: a late start re-adopts, and dry_rotate needs the command (echo says rotate:0).
             if not getattr(self, "_dry_refusal_logged", False):
                 self._dry_refusal_logged = True
-                self.logger.info(f"AFC bambu {self.name}: not drying -- the unit refused: "
+                self.logger.info(f"{self.name}: not drying -- the unit refused: "
                                  f"{refused_now}")
         elif not refused_now:
             self._dry_refusal_logged = False
@@ -9919,7 +9919,7 @@ class afcBambuAMS(afcUnit):
                     and _m.get("t") != getattr(self, "_cap_adopted_t", None)
                     and _m.get("t") != getattr(self, "_cap_orphan_t", None)):
                     self._cap_orphan_t = _m.get("t")
-                    self.logger.debug(f"AFC bambu {self.name}: unclaimed {_m.get('pct_raw')}% "
+                    self.logger.debug(f"{self.name}: unclaimed {_m.get('pct_raw')}% "
                                       f"reading (t={_m.get('t')}, restored={_m.get('restored')}"
                                       f", pend={pend}, t0={getattr(self, '_cap_pending_t0', 0.0)}"
                                       f", adopted_t={getattr(self, '_cap_adopted_t', None)})")
@@ -9975,13 +9975,13 @@ class afcBambuAMS(afcUnit):
                                 why = afcBambuAMS._run_calibrate(self, lane, pend)
                                 if why is None:
                                     retried = True
-                                    self.logger.debug(f"AFC bambu {self.name}: slot {pend} "
+                                    self.logger.debug(f"{self.name}: slot {pend} "
                                                       f"one-edged its insert measurement "
                                                       f"(rst:0, no percent narrated) -- "
                                                       f"measure_on_insert is retrying it once")
                                 else:
                                     said = True
-                                    self.logger.debug(f"AFC bambu {self.name}: slot {pend} "
+                                    self.logger.debug(f"{self.name}: slot {pend} "
                                                       f"one-edged its insert measurement "
                                                       f"and the retry could not start "
                                                       f"({why}) -- AFC_BAMBU_CAPSCAN "
@@ -9996,7 +9996,7 @@ class afcBambuAMS(afcUnit):
                                   and getattr(self, "_auto_cali_slot", None) == pend):
                                 said = True
                                 routine_info(self.logger,
-                                    f"AFC bambu {self.name}: slot {pend} "
+                                    f"{self.name}: slot {pend} "
                                     f"one-edged again on the retry -- giving "
                                     f"up for this insert. AFC_BAMBU_CAPSCAN "
                                     f"UNIT={self.name}"
@@ -10004,7 +10004,7 @@ class afcBambuAMS(afcUnit):
                                        if lane is not None else "")
                                     + " runs it by hand")
                             if not said:
-                                self.logger.debug(f"AFC bambu {self.name}: slot {pend} "
+                                self.logger.debug(f"{self.name}: slot {pend} "
                                                   f"finished its cycle but "
                                                   f"never narrated a percent (rst:0) -- it "
                                                   f"took only ONE pull, so there was no "
@@ -10016,7 +10016,7 @@ class afcBambuAMS(afcUnit):
                                                   f"short. Running it again often lands it.")
                         else:
                             self.logger.debug(
-                                f"AFC bambu {self.name}: slot {pend} calibration "
+                                f"{self.name}: slot {pend} calibration "
                                 + ({0: "completed (rst:0) -- re-reading the bay "
                                        "to collect the measured percent",
                                     1: "refused (rst:1) -- capacity not enabled "
@@ -10055,7 +10055,7 @@ class afcBambuAMS(afcUnit):
                             _what = f"tray {_tray}'s {_pct}% reading is"
                         else:
                             _what = f"the last {_pct}% reading (no tray named) is"
-                        self.logger.debug(f"AFC bambu {self.name}: {_what} not newer than "
+                        self.logger.debug(f"{self.name}: {_what} not newer than "
                                           f"this capscan (meas t={meas.get('t')}, "
                                           f"window t0={own_t0}) -- not adopted")
                 if (meas
@@ -10065,7 +10065,7 @@ class afcBambuAMS(afcUnit):
                     if meas.get("restored"):
                         if getattr(self, "_cap_restore_t", None) != meas.get("t"):
                             self._cap_restore_t = meas.get("t")
-                            self.logger.debug(f"AFC bambu {self.name}: slot {pend} reported a "
+                            self.logger.debug(f"{self.name}: slot {pend} reported a "
                                               f"flash-restored {meas.get('pct_raw')}% -- that "
                                               f"is the previous spool's figure for this bay, "
                                               f"not this spool's; waiting for the live measurement")
@@ -10075,7 +10075,7 @@ class afcBambuAMS(afcUnit):
                         if getattr(self, "_cap_unattr_t", None) != meas.get("t"):
                             self._cap_unattr_t = meas.get("t")
                             _p = sorted(afcBambuAMS._cap_live_pending(self))
-                            self.logger.debug(f"AFC bambu {self.name}: a "
+                            self.logger.debug(f"{self.name}: a "
                                               f"{meas.get('pct_raw')}% reading names tray "
                                               f"{meas.get('save_tray')} and the bays waiting "
                                               f"are {_p} -- not attributing it by narration; "
@@ -10107,7 +10107,7 @@ class afcBambuAMS(afcUnit):
                 elif idx in held_pct:
                     sl["remain_pct"] = afcBambuAMS._shown_remain_pct(self, idx, held_pct[idx])
         except Exception as e:
-            self.logger.debug(f"AFC bambu {self.name}: capscan/calibrate/follower status: {e}")
+            self.logger.debug(f"{self.name}: capscan/calibrate/follower status: {e}")
     def _slot_of(self, lane: Any) -> Optional[int]:
         """
         Return the 0-based AMS slot for a lane, or None if unmapped.
@@ -10406,7 +10406,7 @@ class afcBambuAMS(afcUnit):
         except Exception:
             return
         self._link_loss_paused = True
-        self._raise_ams_fault(lane, f"AFC bambu {self.name}: the bridge has sent nothing for "
+        self._raise_ams_fault(lane, f"{self.name}: the bridge has sent nothing for "
                               f"{quiet:.0f}s while printing. Pausing: the extruder would go on "
                               f"pulling against an AMS that is no longer being driven. The link "
                               f"reconnects by itself -- resume once it is back.", recover=False)
@@ -10481,7 +10481,7 @@ class afcBambuAMS(afcUnit):
         self._fault_quiet_until = now + self.FAULT_QUIET_S
         self._overfeed_lane = lane
         self._overfeed_until = now + self.ASSIST_TIMEOUT_LATCH_S
-        self.logger.debug(f"AFC bambu {self.name}: {lane.name}: the AMS's assist timed out "
+        self.logger.debug(f"{self.name}: {lane.name}: the AMS's assist timed out "
                           f"before the buffer filled (buffer {start:.2f} -> {end:.2f}). Not "
                           f"a jam; the follower re-arms once the AMS recovers and the "
                           f"extruder pulls.")
@@ -10515,7 +10515,7 @@ class afcBambuAMS(afcUnit):
         try:
             self.set_feed_assist(lane, False)
         except Exception as e:
-            self.logger.debug(f"AFC bambu {self.name}: could not drop assist on stall: {e}")
+            self.logger.debug(f"{self.name}: could not drop assist on stall: {e}")
         # PAUSE moves Z, which raises outside a print or unhomed, and an escape from the follower
         # timer shuts Klipper down.
         try:
@@ -10525,7 +10525,7 @@ class afcBambuAMS(afcUnit):
         try:
             self.afc.error.AFC_error(msg, pause=printing)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: stall fault reported but the pause "
+            self.logger.warning(f"{self.name}: stall fault reported but the pause "
                                 f"could not run ({e}); left the follower held. Original: {msg}")
         # RESUME alone would print air. Set here so reload-on-resume works without auto recovery.
         if printing:
@@ -10576,7 +10576,7 @@ class afcBambuAMS(afcUnit):
             self._in_auto_recover = False
             self._auto_recover_armed = False
             return
-        self.logger.info(f"AFC bambu {self.name}: auto error recovery for {name} -- "
+        self.logger.info(f"{self.name}: auto error recovery for {name} -- "
                          f"unloading (cut, retract, unload) and reloading the same spool, "
                          f"then resuming the print if the reload takes. "
                          f"Disable with auto_error_recovery: False.")
@@ -10639,12 +10639,12 @@ class afcBambuAMS(afcUnit):
                 if unloaded:
                     self.gcode.run_script(f"CHANGE_TOOL LANE={_n}")
             except Exception as e:
-                self.logger.warning(f"AFC bambu {self.name}: auto error recovery for {_n} "
+                self.logger.warning(f"{self.name}: auto error recovery for {_n} "
                                     f"could not run ({e}); the lane is still paused and held. "
                                     f"Recover it by hand.")
                 return _done(self.afc.reactor.NEVER)
             if not unloaded:
-                self.logger.warning(f"AFC bambu {self.name}: auto error recovery for {_n} "
+                self.logger.warning(f"{self.name}: auto error recovery for {_n} "
                                     f"stopped: the unload did not take, so {_n} is still at the "
                                     f"toolhead. The print stays PAUSED. Check the lane and the "
                                     f"toolhead, then resume.")
@@ -10652,7 +10652,7 @@ class afcBambuAMS(afcUnit):
             # The AMS retries by itself, and unit_load_lane's reload already retries twice.
             if _declared():
                 self.logger.warning(
-                    f"AFC bambu {self.name}: {_n} -- the unit has given up "
+                    f"{self.name}: {_n} -- the unit has given up "
                     f"(state 7). Parked; the print stays PAUSED. Clear the jam "
                     f"and resume. {self._jam_location()}".rstrip())
                 return _done(self.afc.reactor.NEVER)
@@ -10662,7 +10662,7 @@ class afcBambuAMS(afcUnit):
             if not loaded:
                 # The unit already retried and is held in error.
                 self.logger.warning(
-                    f"AFC bambu {self.name}: {_n} did NOT reload -- the AMS is "
+                    f"{self.name}: {_n} did NOT reload -- the AMS is "
                     f"HELD IN ERROR and will not try again on its own. Clear "
                     f"the jam, then press resume: that is what tells it to load."
                     + (f" {self._jam_location()}" if self._jam_location() else "")
@@ -10674,13 +10674,13 @@ class afcBambuAMS(afcUnit):
             self._resume_needs_reload = False
             self._auto_recover_armed = False
             if not _paused():
-                self.logger.info(f"AFC bambu {self.name}: {_n} is reloaded and ready; the "
+                self.logger.info(f"{self.name}: {_n} is reloaded and ready; the "
                                  f"print was not paused, so there is nothing to resume.")
                 return _done(self.afc.reactor.NEVER)
             limit = getattr(self, "auto_error_recovery_limit", 0)
             resumed = getattr(self, "_auto_resume_count", 0)
             if resumed >= limit:
-                self.logger.warning(f"AFC bambu {self.name}: {_n} is reloaded and ready, but "
+                self.logger.warning(f"{self.name}: {_n} is reloaded and ready, but "
                                     f"this print has already been resumed automatically "
                                     f"{resumed} time(s) "
                                     f"(auto_error_recovery_limit: {limit}). THE PRINT IS STILL "
@@ -10692,11 +10692,11 @@ class afcBambuAMS(afcUnit):
                 # Queued, never inline from the follower's timer; the fed lane makes it return.
                 self.gcode.run_script("RESUME")
             except Exception as e:
-                self.logger.warning(f"AFC bambu {self.name}: {_n} is reloaded but the resume "
+                self.logger.warning(f"{self.name}: {_n} is reloaded but the resume "
                                     f"failed ({e}); the print stays PAUSED. Press resume when "
                                     f"you are ready.")
                 return _done(self.afc.reactor.NEVER)
-            self.logger.info(f"AFC bambu {self.name}: {_n} is reloaded and the print has "
+            self.logger.info(f"{self.name}: {_n} is reloaded and the print has "
                              f"been RESUMED automatically "
                              f"({self._auto_resume_count} of {limit} this print). Disable "
                              f"with auto_error_recovery_limit: 0.")
@@ -10733,7 +10733,7 @@ class afcBambuAMS(afcUnit):
         if getattr(self, "_announce_defer_warned", False):
             return
         self._announce_defer_warned = True
-        self.logger.warning(f"AFC bambu {self.name}: UID {self.unit_uid} still has no chain "
+        self.logger.warning(f"{self.name}: UID {self.unit_uid} still has no chain "
                             f"index after {self.CHAIN_RESOLVE_WARN_S:.0f}s -- this unit is not "
                             f"answering the bus, so its registrations have not been sent. "
                             f"Check it is powered and chained; AFC_BAMBU_UIDS shows the map.")
@@ -10776,7 +10776,7 @@ class afcBambuAMS(afcUnit):
             self._auto_recover_armed = False
         self._follow_fault_saw_pause = False
         self.logger.debug(
-            f"AFC bambu {self.name}: "
+            f"{self.name}: "
             + ("print resumed, re-arming the follower."
                if was_printing else
                "no print to resume, releasing the follower hold."))
@@ -10828,7 +10828,7 @@ class afcBambuAMS(afcUnit):
         if (self._overfeed_active()
             and not _STALL_WORDS_RE.search(low)):
             # The unit is still parked from the assist timeout, not reporting a new jam.
-            self.logger.debug(f"AFC bambu {self.name}: {lane.name}: still parked from the "
+            self.logger.debug(f"{self.name}: {lane.name}: still parked from the "
                               f"assist timeout, not a new stall: {_fault_reason(text)}")
             return
         # The scan's pull-in finishing, not a failure.
@@ -10847,7 +10847,7 @@ class afcBambuAMS(afcUnit):
         except Exception:
             code = None
         err = f", err_code {code}" if code else ""
-        msg = (f"AFC bambu {self.name}: AMS reported a stall on {lane.name}"
+        msg = (f"{self.name}: AMS reported a stall on {lane.name}"
                f"{current}{err} -- the spool is likely tangled or the path "
                f"jammed. Clear the snag, then resume.\nAMS said: {_fault_reason(text)}")
         # The unit cannot leave its error until the filament moves; resuming into a jam fires again.
@@ -10951,7 +10951,7 @@ class afcBambuAMS(afcUnit):
         if pushed < LITE_CLOG_MM:
             return False
         self._clog_base = None
-        msg = (f"AFC bambu {self.name}: {lane.name} has stopped moving: the "
+        msg = (f"{self.name}: {lane.name} has stopped moving: the "
                f"extruder pushed {pushed:.0f}mm, but the AMS Lite's odometer "
                f"saw no filament leave the tray. The nozzle may be clogged, "
                f"the extruder gears slipping, or the spool snagged. Clear it, then resume.")
@@ -11018,7 +11018,7 @@ class afcBambuAMS(afcUnit):
         if pushed < FEED_STOP_MM:
             return False
         self._feed_stop_base = None
-        msg = (f"AFC bambu {self.name}: {lane.name} is not feeding: the "
+        msg = (f"{self.name}: {lane.name} is not feeding: the "
                f"extruder pushed {pushed:.0f}mm, but the AMS buffer never "
                f"moved (a printing extruder drains it every ~20mm). The "
                f"filament may not have reached the extruder gears, the gears "
@@ -11111,7 +11111,7 @@ class afcBambuAMS(afcUnit):
                         cur_ext = self.afc.function.get_current_extruder()
                     except Exception:
                         cur_ext = "?"
-                    self.logger.debug(f"AFC bambu {self.name}: standing the follower down "
+                    self.logger.debug(f"{self.name}: standing the follower down "
                                       f"for {getattr(lane, 'name', '?')} -- no tool-loaded "
                                       f"lane on this unit (afc.current="
                                       f"{getattr(self.afc, 'current', None)}, active "
@@ -11141,7 +11141,7 @@ class afcBambuAMS(afcUnit):
         try:
             self._check_link_loss()
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: link-loss check raised {e!r}; "
+            self.logger.warning(f"{self.name}: link-loss check raised {e!r}; "
                                 f"detector tick continuing.")
         # It also releases the hold on resume.
         try:
@@ -11151,7 +11151,7 @@ class afcBambuAMS(afcUnit):
             else:
                 self._fault_hold_active()
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: follower auto-arm raised {e!r}; "
+            self.logger.warning(f"{self.name}: follower auto-arm raised {e!r}; "
                                 f"detector tick continuing.")
         try:
             watch = self._tool_loaded_lane()
@@ -11159,7 +11159,7 @@ class afcBambuAMS(afcUnit):
                 and self._bridge is not None):
                 self._run_stall_checks(watch)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: fault check raised {e!r}; "
+            self.logger.warning(f"{self.name}: fault check raised {e!r}; "
                                 f"detector tick continuing.")
         return eventtime + self.follow_poll_interval
 
@@ -11187,7 +11187,7 @@ class afcBambuAMS(afcUnit):
         except Exception as e:
             log = getattr(self, "logger", None)
             if log:
-                log.warning(f"AFC bambu {self.name}: fault auto-reset raised {e!r}; "
+                log.warning(f"{self.name}: fault auto-reset raised {e!r}; "
                             f"follower tick continuing.")
         # With frames stopped, the extruder pulls against an undriven AMS and grinds the filament.
         try:
@@ -11195,7 +11195,7 @@ class afcBambuAMS(afcUnit):
         except Exception as e:
             log = getattr(self, "logger", None)
             if log:
-                log.warning(f"AFC bambu {self.name}: link-loss check raised {e!r}; "
+                log.warning(f"{self.name}: link-loss check raised {e!r}; "
                             f"follower tick continuing.")
         lane = self._auto_arm(eventtime, lane)
         # ENABLE=0 clears _following_lane, and running without assist is when the buffer starves.
@@ -11210,7 +11210,7 @@ class afcBambuAMS(afcUnit):
             try:
                 self._run_stall_checks(watch)
             except Exception as e:
-                self.logger.warning(f"AFC bambu {self.name}: fault check raised {e!r}; "
+                self.logger.warning(f"{self.name}: fault check raised {e!r}; "
                                     f"follower tick continuing.")
         if (lane is not None
             and self._bridge is not None):
@@ -11225,7 +11225,7 @@ class afcBambuAMS(afcUnit):
                     if vals != getattr(self, "_follow_last_dbg", None):
                         self._follow_last_log = eventtime
                         self._follow_last_dbg = vals
-                        self.logger.debug(f"AFC bambu {self.name}: follow {lane.name} "
+                        self.logger.debug(f"{self.name}: follow {lane.name} "
                                           f"buff={vals[0]} fstate={vals[1]} online={vals[2]}")
             # No keep-alive: the assist arm sustains the op-04 hold until an explicit assist-off.
         return eventtime + self.follow_poll_interval
@@ -11469,14 +11469,14 @@ class afcBambuAMS(afcUnit):
                     seq, ok, _text = bridge.last_finish()
                     if seq != start_seq:
                         # Which signal ended the wait; they differ per model.
-                        _say(f"AFC bambu {nm}: move ended on NARRATION "
+                        _say(f"{nm}: move ended on NARRATION "
                              f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
                              f"(ok={ok}): {str(_text)[:70]}")
                         return ok
                     # A latched unit reports no completion, so this ends the wait.
                     if (fault_mark is not None
                         and self._ams_fault_since(fault_mark, consume=False)):
-                        _say(f"AFC bambu {nm}: move ended on a FAULT "
+                        _say(f"{nm}: move ended on a FAULT "
                              f"after {reactor.monotonic() - (end - deadline_s):.1f}s")
                         return False
                 if (accept_switch_finish
@@ -11486,7 +11486,7 @@ class afcBambuAMS(afcUnit):
                     except (AttributeError, TypeError):
                         sw_seq, sw_text = start_switch, ""
                     if sw_seq > start_switch:
-                        _say(f"AFC bambu {nm}: move ended on the STATE SWITCH "
+                        _say(f"{nm}: move ended on the STATE SWITCH "
                              f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
                              f"-- {sw_text.strip()[:80]}")
                         return True
@@ -11500,14 +11500,14 @@ class afcBambuAMS(afcUnit):
                     # A release of another tray is the operator, not this reel.
                     if (tr_seq > start_tray
                         and tr_from == accept_tray_release):
-                        _say(f"AFC bambu {nm}: move ended on the TRAY RELEASE "
+                        _say(f"{nm}: move ended on the TRAY RELEASE "
                              f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
                              f"-- tray {tr_from} -> none")
                         return True
                 reactor.pause(reactor.monotonic() + 0.1)
         except Exception:
             pass
-        _say(f"AFC bambu {nm}: move ended on the DEADLINE ({deadline_s:.0f}s) -- no signal arrived")
+        _say(f"{nm}: move ended on the DEADLINE ({deadline_s:.0f}s) -- no signal arrived")
         return False
 
     def _toolhead_sensor_triggered(self, cur_lane: Any) -> bool:
@@ -11760,7 +11760,7 @@ class afcBambuAMS(afcUnit):
                 break
             reactor.pause(now + 0.05)
         if moved is None:
-            self.logger.debug(f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
+            self.logger.debug(f"{self.name}: no grip check for {cur_lane.name}: "
                               f"the AMS Lite's odometer stopped reporting")
             return None
         return (f"The extruder did not take {cur_lane.name}: it pulled "
@@ -11816,7 +11816,7 @@ class afcBambuAMS(afcUnit):
                 and seq != seq0):
                 refill = self._bridge_call("last_buff_refill") or ()
                 det = refill[2] if len(refill) > 2 else None
-                self.logger.debug(f"AFC bambu {self.name}: the extruder took "
+                self.logger.debug(f"{self.name}: the extruder took "
                                   f"{cur_lane.name}: the AMS refilled its buffer"
                                   f"{'' if det is None else f' ({det:.0f}mm)'} "
                                   f"{reactor.monotonic() - t0:.1f}s into the push")
@@ -11826,7 +11826,7 @@ class afcBambuAMS(afcUnit):
                 peak = fps if peak is None else max(peak, fps)
                 drop = max(drop, peak - fps)
                 if drop >= GRIP_DROP:
-                    self.logger.debug(f"AFC bambu {self.name}: the extruder took "
+                    self.logger.debug(f"{self.name}: the extruder took "
                                       f"{cur_lane.name}: the buffer dropped {drop:.2f} from "
                                       f"{peak:.2f} {reactor.monotonic() - t0:.1f}s into the push")
                     return None
@@ -11839,7 +11839,7 @@ class afcBambuAMS(afcUnit):
         except Exception:
             linked = False
         if not linked:
-            self.logger.debug(f"AFC bambu {self.name}: no grip check for {cur_lane.name}: "
+            self.logger.debug(f"{self.name}: no grip check for {cur_lane.name}: "
                               f"the link to the bridge is down")
             return None
         return (f"The extruder did not take {cur_lane.name}: it pushed "
@@ -12082,7 +12082,7 @@ class afcBambuAMS(afcUnit):
             self.stop()
             self._load_odom_at_sensor = pos
             self._lite_stall_mm = fed
-            self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} stopped "
+            self.logger.debug(f"{self.name}: {cur_lane.name} stopped "
                               f"{fed or 0.0:.0f}mm in by the AMS Lite's odometer; taking it "
                               f"as at the extruder gears")
             return True
@@ -12095,7 +12095,7 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 _down = False
             if _down:
-                self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the printer "
+                self.logger.warning(f"{self.name}: {cur_lane.name} -- the printer "
                                     f"has shut down, so this load stops feeding. Nothing can "
                                     f"reach the toolhead until Klipper is restarted.")
                 break
@@ -12108,7 +12108,7 @@ class afcBambuAMS(afcUnit):
             if _link_down_t is not None:
                 _for = time.monotonic() - _link_down_t
                 if _for > LINK_DOWN_GRACE_S:
-                    self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the link "
+                    self.logger.warning(f"{self.name}: {cur_lane.name} -- the link "
                                         f"to the bridge has been down {_for:.0f}s, so every "
                                         f"command this load sends is being dropped. Stopping "
                                         f"rather than feeding a bus we cannot reach. "
@@ -12125,7 +12125,7 @@ class afcBambuAMS(afcUnit):
                 last_kick = now
                 gate_s = (f"; {self._describe_gate(gate, gate_peak)}"
                           if gate is not None else "")
-                self.logger.debug(f"AFC bambu {self.name}: feeding {cur_lane.name} to sensor "
+                self.logger.debug(f"{self.name}: feeding {cur_lane.name} to sensor "
                                   f"(kick {kicks}); letting the AMS run its own retry{gate_s}")
                 self.feed(cur_lane, self.load_retry_pulse)
             # The AMS recovers under a continued request, except "state_switch finish, fail,
@@ -12138,7 +12138,7 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 _gave_up = False
             if _gave_up:
-                self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS says "
+                self.logger.warning(f"{self.name}: {cur_lane.name} -- the AMS says "
                                     f"it has STOPPED retrying, so this load stops asking. "
                                     f"Clear the path at the unit. {_RETRY_HINT}.")
                 break
@@ -12154,7 +12154,7 @@ class afcBambuAMS(afcUnit):
                 if latched_since is None:
                     latched_since = now
                 elif now - latched_since >= _hold:
-                    self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} -- the unit "
+                    self.logger.warning(f"{self.name}: {cur_lane.name} -- the unit "
                                         f"has reported STALLED for {_hold:.0f}s without "
                                         f"clearing, so this attempt stops feeding and hands "
                                         f"over to the recovery re-home.")
@@ -12165,7 +12165,7 @@ class afcBambuAMS(afcUnit):
                 and not getattr(self, "_fault_said_this_load", False)):
                 self._fault_said_this_load = True
                 # The unit recovers itself and the load carries on.
-                self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS "
+                self.logger.debug(f"{self.name}: {cur_lane.name} -- the AMS "
                                   f"reported a fault during the load; still feeding, the "
                                   f"unit runs its own recovery while the request continues")
             if (not lite
@@ -12180,10 +12180,10 @@ class afcBambuAMS(afcUnit):
                           if gate is not None else "")
                 # AFC's load path narrates a clean load.
                 if kicks:
-                    self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} reached the "
+                    self.logger.debug(f"{self.name}: {cur_lane.name} reached the "
                                       f"toolhead sensor after {kicks} feed kick(s){gate_s}")
                 else:
-                    self.logger.debug(f"AFC bambu {self.name}: sensor triggered for "
+                    self.logger.debug(f"{self.name}: sensor triggered for "
                                       f"{cur_lane.name}, AMS stopped{gate_s}")
                 return True
             if limit_mm is not None:
@@ -12230,7 +12230,7 @@ class afcBambuAMS(afcUnit):
         self.stop()
         gate = self._buffer_gate_reading(cur_lane)
         if gate is not None:
-            self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} feed ended without "
+            self.logger.debug(f"{self.name}: {cur_lane.name} feed ended without "
                               f"the buffer calling the load; "
                               f"{self._describe_gate(gate, gate_peak)}")
         return False
@@ -12363,7 +12363,7 @@ class afcBambuAMS(afcUnit):
             if not getattr(self, "_arrival_short_said", False):
                 self._arrival_short_said = True
                 where = "unknown" if pos is None else f"{pos:.0f}mm"
-                self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} buffer at "
+                self.logger.debug(f"{self.name}: {cur_lane.name} buffer at "
                                   f"{gate['fps']:.2f} with the odometer at {where} of a "
                                   f"{path:.0f}mm path; not the arrival yet")
             return False
@@ -12379,7 +12379,7 @@ class afcBambuAMS(afcUnit):
         self.feed(cur_lane, ARRIVAL_DRIVE_MM)
         self._arrival_driving = True
         self._load_odom_at_sensor = self._feed_odom_mm(cur_lane)
-        self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} arrived, buffer at "
+        self.logger.debug(f"{self.name}: {cur_lane.name} arrived, buffer at "
                           f"{gate['fps']:.2f} (handoff at {self.arrival_buffer:.2f}); "
                           f"still driving with the arrived flag so the AMS ends its own feed")
         return True
@@ -12415,7 +12415,7 @@ class afcBambuAMS(afcUnit):
                     break
             reactor.pause(now + 0.05)
         waited = reactor.monotonic() - t0
-        self.logger.debug(f"AFC bambu {self.name}: arrival handoff took {waited:.2f}s; "
+        self.logger.debug(f"{self.name}: arrival handoff took {waited:.2f}s; "
                           f"AMS said: {said.strip() or 'nothing'}")
         return waited
 
@@ -12521,7 +12521,7 @@ class afcBambuAMS(afcUnit):
         if cur_extruder is None:
             cur_extruder = getattr(cur_lane, "extruder_obj", None)
         if self._bridge is None:
-            self.logger.warning(f"AFC bambu {self.name}: bridge not connected, cannot load "
+            self.logger.warning(f"{self.name}: bridge not connected, cannot load "
                                 f"{cur_lane.name}")
             return False
 
@@ -12532,7 +12532,7 @@ class afcBambuAMS(afcUnit):
             pass
         ok, _slot = self.select_lane(cur_lane)
         if not ok:
-            self.logger.warning(f"AFC bambu {self.name}: lane {cur_lane.name} is not mapped to "
+            self.logger.warning(f"{self.name}: lane {cur_lane.name} is not mapped to "
                                 f"an AMS slot")
             return False
 
@@ -12585,7 +12585,7 @@ class afcBambuAMS(afcUnit):
         except Exception:
             _dry_now = False
         if _dry_now:
-            self.logger.debug(f"AFC bambu {self.name}: skipping the pre-load prime -- the "
+            self.logger.debug(f"{self.name}: skipping the pre-load prime -- the "
                               f"chamber is drying and mode 09/7F arms the follower before "
                               f"the select, which the printer never does")
         if (not self._is_ht()
@@ -12597,7 +12597,7 @@ class afcBambuAMS(afcUnit):
                     self._bridge.send({"cmd": "prime", "unit": self.ams_index, "slot": slot})
             except Exception:
                 # So a failed prime can be told from a skipped one.
-                self.logger.debug(f"AFC bambu {self.name}: pre-load prime failed",
+                self.logger.debug(f"{self.name}: pre-load prime failed",
                                   traceback=traceback.format_exc())
         self.feed(cur_lane, feed_dist)
         loaded = self._feed_until_sensor(cur_lane, timeout, limit_mm, expect_mm)
@@ -12608,7 +12608,7 @@ class afcBambuAMS(afcUnit):
             and attempts > 0
             and not loaded):
             attempts = 0
-            routine_info(self.logger, f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
+            routine_info(self.logger, f"{self.name}: {cur_lane.name} -- the AMS declared a "
                                       f"fault after its own retries, so there is no re-home retry; "
                                       f"reporting the failure now.")
         # A retry would feed past the path again, and the A1 leaves its own stall to its user.
@@ -12646,7 +12646,7 @@ class afcBambuAMS(afcUnit):
                and recover < attempts):
             why = _not_listening()
             if why:
-                routine_info(self.logger, f"AFC bambu {self.name}: {cur_lane.name} -- the AMS gave "
+                routine_info(self.logger, f"{self.name}: {cur_lane.name} -- the AMS gave "
                                           f"up AND {why}, so it is not listening; failing now "
                                           f"instead of re-homing into a unit that cannot answer. "
                                           f"{_RETRY_HINT}.")
@@ -12662,7 +12662,7 @@ class afcBambuAMS(afcUnit):
             _how = ("retrying without the re-home -- the chamber is drying "
                     "and a park would unstage the bay" if _hot
                     else "re-homing AMS and retrying")
-            routine_info(self.logger, f"AFC bambu {self.name}: load of {cur_lane.name} stalled; "
+            routine_info(self.logger, f"{self.name}: load of {cur_lane.name} stalled; "
                                       f"{_how} (recover {recover}/{attempts})")
             self.stop()
             if not _hot:
@@ -12686,7 +12686,7 @@ class afcBambuAMS(afcUnit):
                 try:
                     reeled = self.eject_lane(cur_lane)
                 except Exception as e:
-                    self.logger.warning(f"AFC bambu {self.name}: reel-back after failed load "
+                    self.logger.warning(f"{self.name}: reel-back after failed load "
                                         f"of {cur_lane.name} did not complete: {e}")
                 tail = ("reeled it back to the bay" if reeled
                         else "could not reel it back -- clear the path manually")
@@ -12699,7 +12699,7 @@ class afcBambuAMS(afcUnit):
                     cur_lane.loaded_to_hub = False
                     reeled = True
                 except Exception as e:
-                    self.logger.warning(f"AFC bambu {self.name}: unload-back after failed load "
+                    self.logger.warning(f"{self.name}: unload-back after failed load "
                                         f"of {cur_lane.name} did not complete: {e}")
                 finally:
                     self.stop()
@@ -12768,7 +12768,7 @@ class afcBambuAMS(afcUnit):
             and getattr(self, "_lite_fault_err", None) is not None):
             # A sensorless AMS Lite flagged a stall at the gears: clear it, hold the tray. The grip
             # check tells the gears from a stuck spool.
-            routine_info(self.logger, f"AFC bambu {self.name}: the AMS Lite stopped {cur_lane.name} "
+            routine_info(self.logger, f"{self.name}: the AMS Lite stopped {cur_lane.name} "
                                       f"itself ({self._lite_fault_words(self._lite_fault_err)}); "
                                       f"clearing it and checking that the extruder takes it")
             self.rehome()
@@ -12781,7 +12781,7 @@ class afcBambuAMS(afcUnit):
         try:
             self._advance_into_extruder(cur_lane, cur_extruder)
         except Exception as e:
-            self.logger.warning(f"AFC bambu {self.name}: tool_stn advance failed for "
+            self.logger.warning(f"{self.name}: tool_stn advance failed for "
                                 f"{cur_lane.name}: {e}")
             self.stop()
 
@@ -12819,7 +12819,7 @@ class afcBambuAMS(afcUnit):
             while (cause is not None
                    and tries < GRIP_RETRIES):
                 tries += 1
-                routine_info(self.logger, f"AFC bambu {self.name}: {cause} Backing it off "
+                routine_info(self.logger, f"{self.name}: {cause} Backing it off "
                                           f"{GRIP_BACK_MM:.0f}mm and feeding it again "
                                           f"({tries}/{GRIP_RETRIES}).")
                 mark = self._grip_refeed(cur_lane, cur_extruder, feed_dist, timeout)
@@ -12934,14 +12934,14 @@ class afcBambuAMS(afcUnit):
         try:
             if getattr(lane, "spool_id", None) in (None, "", 0):
                 return
-            self.logger.debug(f"AFC bambu {self.name}: unbinding {lane.name} from spool "
+            self.logger.debug(f"{self.name}: unbinding {lane.name} from spool "
                               f"{lane.spool_id} -- {reason}")
             lane.spool_id = ''
             restore = getattr(self, "_restore_config_tare", None)
             if restore is not None:
                 restore(lane)
         except Exception as e:
-            self.logger.debug(f"AFC bambu {self.name}: could not unbind {lane}: {e}")
+            self.logger.debug(f"{self.name}: could not unbind {lane}: {e}")
 
     def _restore_config_tare(self, lane: Any) -> None:
         """
@@ -12987,7 +12987,7 @@ class afcBambuAMS(afcUnit):
                 if rfid is not None:
                     self._spool_obj = rfid.for_unit(self)
             except Exception:
-                self.logger.debug(f"AFC bambu {self.name}: could not attach the Spoolman module",
+                self.logger.debug(f"{self.name}: could not attach the Spoolman module",
                                   traceback=traceback.format_exc())
                 self._spool_obj = None
         return self._spool_obj
@@ -13020,7 +13020,7 @@ class afcBambuAMS(afcUnit):
                 from extras.AFC_BambuAMS_rfid import measurement_only
                 self._meas_obj = measurement_only(self)
             except Exception:
-                self.logger.debug(f"AFC bambu {self.name}: could not build the measurement "
+                self.logger.debug(f"{self.name}: could not build the measurement "
                                   f"delegate -- measurements will not reach the lanes",
                                   traceback=traceback.format_exc())
                 self._meas_obj = None
@@ -13232,7 +13232,7 @@ class afcBambuAMS(afcUnit):
                     fn(*args, **kwargs)
         except Exception:
             try:
-                self.logger.debug(f"AFC bambu {self.name}: owed measurement follow-up failed",
+                self.logger.debug(f"{self.name}: owed measurement follow-up failed",
                                   traceback=traceback.format_exc())
             except Exception:
                 pass
@@ -13258,9 +13258,9 @@ class afcBambuAMS(afcUnit):
         except Exception as e:
             try:
                 # The raise can come after the lane was written; the traceback says where.
-                self.logger.warning(f"AFC bambu {self.name}: could not apply a measurement "
+                self.logger.warning(f"{self.name}: could not apply a measurement "
                                     f"({e}); the log has where it failed")
-                self.logger.debug(f"AFC bambu {self.name}: measurement apply failed",
+                self.logger.debug(f"{self.name}: measurement apply failed",
                                   traceback=traceback.format_exc())
             except Exception:
                 pass
@@ -13281,7 +13281,7 @@ class afcBambuAMS(afcUnit):
             if sp: sp._drain_spool_summary(*args, **kwargs)
         except Exception:
             try:
-                self.logger.debug(f"AFC bambu {self.name}: spool summary failed",
+                self.logger.debug(f"{self.name}: spool summary failed",
                                   traceback=traceback.format_exc())
             except Exception:
                 pass
@@ -13337,23 +13337,23 @@ class afcBambuAMS(afcUnit):
         if before != self.AMS_STATE_STALLED:
             return True
 
-        self.logger.debug(f"AFC bambu {self.name}: unit is latched in error (state "
+        self.logger.debug(f"{self.name}: unit is latched in error (state "
                           f"{before}) before {what} for {lane.name}, re-homing to clear it first")
         try:
             self.rehome()
             self.afc.reactor.pause(self.afc.reactor.monotonic() + self.REHOME_SETTLE_S)
             after = self._unit_state(self._bridge.latest_status())
         except Exception:
-            self.logger.debug(f"AFC bambu {self.name}: re-home for {lane.name} raised",
+            self.logger.debug(f"{self.name}: re-home for {lane.name} raised",
                               traceback=traceback.format_exc())
             return True
 
         if after == self.AMS_STATE_STALLED:
-            self.logger.warning(f"AFC bambu {self.name}: {lane.name}, the unit would not "
+            self.logger.warning(f"{self.name}: {lane.name}, the unit would not "
                                 f"leave its error state after a re-home, so it is jammed "
                                 f"rather than merely latched. Not sending {what}.")
             return False
-        self.logger.debug(f"AFC bambu {self.name}: {lane.name}, error cleared by the "
+        self.logger.debug(f"{self.name}: {lane.name}, error cleared by the "
                           f"re-home (state {before} -> {after}), continuing with {what}")
         return True
 
@@ -13379,7 +13379,7 @@ class afcBambuAMS(afcUnit):
         if cur_extruder.tool_stn_unload > 0:
             afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
                            "STN unload", wait_tool=True)
-        self.logger.warning(f"AFC bambu {self.name}: {cur_lane.name} ran out, so its leftover "
+        self.logger.warning(f"{self.name}: {cur_lane.name} ran out, so its leftover "
                             f"filament cannot be reeled back into the AMS. Skipped the AMS "
                             f"retract; the follower keeps pushing so the leftover can be "
                             f"pulled out of {cur_lane.name}'s path, until the hub sensor reads "
@@ -13416,15 +13416,15 @@ class afcBambuAMS(afcUnit):
             if self._unload_left_filament(cur_lane):
                 in_print = afc.function.in_print()
                 afc.error.handle_lane_failure(
-                    cur_lane, f"AFC bambu unload of {cur_lane.name}: the AMS already "
+                    cur_lane, f"Unload of {cur_lane.name}: the AMS already "
                     f"reeled it home, but the {sensor} still sees "
                     f"filament. {self._clear_toolhead_hint(in_print)}", pause=in_print)
                 return False
-            self.logger.debug(f"AFC bambu {self.name}: the {sensor} is clear and the "
+            self.logger.debug(f"{self.name}: the {sensor} is clear and the "
                               f"AMS already reeled {cur_lane.name} home, so it is unloaded")
             return self._finish_unload(cur_lane)
         if self._bridge is None:
-            self.logger.warning(f"AFC bambu {self.name}: bridge not connected, cannot unload "
+            self.logger.warning(f"{self.name}: bridge not connected, cannot unload "
                                 f"{cur_lane.name}")
             return False
 
@@ -13470,7 +13470,7 @@ class afcBambuAMS(afcUnit):
                     _e0 = afc.gcode_move.last_position[3]
                 except Exception:
                     _e0 = None
-                self.logger.debug(f"AFC bambu {self.name}: toolhead retract issued for "
+                self.logger.debug(f"{self.name}: toolhead retract issued for "
                                   f"{cur_lane.name}: {cur_extruder.tool_stn_unload:.0f}mm at "
                                   f"{cur_extruder.tool_unload_speed:.0f}mm/s from E="
                                   f"{'?' if _e0 is None else format(_e0, '.1f')} "
@@ -13497,7 +13497,7 @@ class afcBambuAMS(afcUnit):
                         stuck = (f"the toolhead sensor still sees filament "
                                  f"after {LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
                                  f"retract. Free it at the toolhead")
-                    msg = (f"AFC bambu unload failed for {cur_lane.name}: {stuck}, then run "
+                    msg = (f"Unload failed for {cur_lane.name}: {stuck}, then run "
                            f"{self.get_lane_reset_command(cur_lane, 0.0)}.")
                     afc.error.handle_lane_failure(cur_lane, msg, pause=afc.function.in_print())
                     return False
@@ -13536,7 +13536,7 @@ class afcBambuAMS(afcUnit):
                     ams_state = (info or {}).get("state", "?")
                 except Exception:
                     ams_state = "?"
-                self.logger.debug(f"AFC bambu {self.name}: {sensor} still sees "
+                self.logger.debug(f"{self.name}: {sensor} still sees "
                                   f"filament after retract for {cur_lane.name} (AMS slot "
                                   f"state: {ams_state}), re-kicking (stop/select/retract, "
                                   f"attempt {attempt + 1})")
@@ -13557,7 +13557,7 @@ class afcBambuAMS(afcUnit):
                     except Exception:
                         still_gripped = True
                     if still_gripped:
-                        msg = (f"AFC bambu unload failed for "
+                        msg = (f"Unload failed for "
                                f"{cur_lane.name}: the AMS gave up reeling it "
                                f"back and latched, the filament is still "
                                f"gripped at the toolhead. Free it by hand "
@@ -13565,7 +13565,7 @@ class afcBambuAMS(afcUnit):
                                f"{self.get_lane_reset_command(cur_lane, 0.0)}"
                                f".\nAMS said: {_fault_reason(latched)}")
                     else:
-                        msg = (f"AFC bambu unload failed for "
+                        msg = (f"Unload failed for "
                                f"{cur_lane.name}: the filament cleared the "
                                f"toolhead but the AMS latched before reeling "
                                f"it home, the tip is stranded in the bowden. Run "
@@ -13579,20 +13579,20 @@ class afcBambuAMS(afcUnit):
                     if afcBambuAMS._buffer_is_toolhead_sensor(cur_lane):
                         then = ("resume" if afc.function.in_print()
                                 else "run the unload again")
-                        msg = (f"AFC bambu unload of {cur_lane.name}: the AMS "
+                        msg = (f"Unload of {cur_lane.name}: the AMS "
                                f"says it reeled it home, but the bay's hub "
                                f"sensor still sees filament, so it never left "
                                f"the path (the buffer standing in for the "
                                f"toolhead sensor cannot tell). Pull it back "
                                f"to the bay by hand, then {then}.")
                     else:
-                        msg = (f"AFC bambu unload of {cur_lane.name}: the AMS "
+                        msg = (f"Unload of {cur_lane.name}: the AMS "
                                f"reeled it home, but the toolhead sensor still "
                                f"sees filament, so a piece is left in the "
                                f"toolhead or the sensor is stuck. "
                                f"{self._clear_toolhead_hint(afc.function.in_print())}")
                 else:
-                    msg = (f"AFC bambu unload failed for {cur_lane.name}: "
+                    msg = (f"Unload failed for {cur_lane.name}: "
                            f"filament still at the {sensor} after "
                            f"retract retries, and the AMS did not report "
                            f"reeling it home; run LANE_UNLOAD (eject) or check the unit")
@@ -13603,7 +13603,7 @@ class afcBambuAMS(afcUnit):
             return self._finish_unload(cur_lane)
         except Exception as e:
             afc.error.handle_lane_failure(cur_lane,
-                                          f"AFC bambu unload failed for {cur_lane.name}: {e}",
+                                          f"Unload failed for {cur_lane.name}: {e}",
                                           pause=afc.function.in_print())
             return False
         finally:
@@ -13680,7 +13680,7 @@ class afcBambuAMS(afcUnit):
                         and not self._toolhead_sensor_triggered(cur_lane)):
                         at_head = False
                         if splitter is not None:
-                            self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} "
+                            self.logger.debug(f"{self.name}: {cur_lane.name} "
                                               f"cleared the toolhead sensor; on to the "
                                               f"splitter switch {splitter.name}")
                     if (not at_head
@@ -13693,7 +13693,7 @@ class afcBambuAMS(afcUnit):
                             last = "the toolhead sensor"
                         else:
                             last = "the extruder"
-                        self.logger.debug(f"AFC bambu {self.name}: {cur_lane.name} cleared "
+                        self.logger.debug(f"{self.name}: {cur_lane.name} cleared "
                                           f"{last}; {past:.0f}mm more")
                     elif now >= deadline:
                         return False
@@ -13702,7 +13702,7 @@ class afcBambuAMS(afcUnit):
                           == afcBambuAMS.AMS_STATE_STALLED):
                         where = ("the toolhead sensor" if at_head
                                  else f"the splitter switch {splitter.name}")
-                        self.logger.warning(f"AFC bambu {self.name}: the AMS Lite stalled "
+                        self.logger.warning(f"{self.name}: the AMS Lite stalled "
                                             f"retracting {cur_lane.name} before it cleared {where}")
                         return False
                 if clear_t is not None:
@@ -13751,7 +13751,7 @@ class afcBambuAMS(afcUnit):
         if (getattr(lane, "tool_loaded", False)
             and self._bridge is not None
             and slot is not None):
-            self.logger.debug(f"AFC bambu {self.name}: {lane.name} tool-loaded at prep, "
+            self.logger.debug(f"{self.name}: {lane.name} tool-loaded at prep, "
                               f"engaging follower")
             self._engage_follower(lane)
 
@@ -14049,7 +14049,7 @@ class afcBambuAMS(afcUnit):
                                            round(measured, 1))
             except Exception:
                 saved = False
-        routine_info(self.logger, f"AFC bambu {self.name}: the AMS measured its own filament path at "
+        routine_info(self.logger, f"{self.name}: the AMS measured its own filament path at "
                                   f"{measured:.0f}mm (was {old:.0f}mm)"
                                   f"{' via ' + source if source else ''}. Adopting it"
                                   f"{' and saving it' if saved else ' for this session'} -- this "
@@ -14103,13 +14103,13 @@ class afcBambuAMS(afcUnit):
         :return bool: True if the AMS reported the reel-back complete
         """
         if self._bridge is None:
-            self.logger.warning(f"AFC bambu {self.name}: bridge not connected, cannot eject "
+            self.logger.warning(f"{self.name}: bridge not connected, cannot eject "
                                 f"{lane.name}")
             return False
         if self._is_lite():
             # Its spring-loaded holder cannot take the tube back, so the filament comes out by hand.
             self._lite_release()
-            self.logger.info(f"AFC bambu {self.name}: an AMS Lite cannot reel "
+            self.logger.info(f"{self.name}: an AMS Lite cannot reel "
                              f"{getattr(lane, 'name', 'a lane')} back to its spool. It is "
                              f"released: pull the filament out at the AMS Lite.")
             lane.loaded_to_hub = False
@@ -14130,14 +14130,14 @@ class afcBambuAMS(afcUnit):
             # The follower tick's fault check is muted while _unload_in_progress.
             latched = self._ams_fault_since(fault0)
             if latched:
-                self.logger.warning(f"AFC bambu {self.name}: "
+                self.logger.warning(f"{self.name}: "
                                     f"{getattr(lane, 'name', 'lane')} could not be reeled back "
                                     f"-- the AMS gave up and latched. The filament is still "
                                     f"out of the bay; free it by hand before loading this lane "
                                     f"again.\nAMS said: {_fault_reason(latched)}")
             elif not finished:
                 # _wait_move may return on its deadline short of the bay.
-                self.logger.warning(f"AFC bambu {self.name}: "
+                self.logger.warning(f"{self.name}: "
                                     f"{getattr(lane, 'name', 'lane')} eject stopped on a "
                                     f"timeout, not on the AMS's own completion report -- the "
                                     f"filament may not be fully back in the bay. Check the "

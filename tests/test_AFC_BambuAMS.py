@@ -264,10 +264,10 @@ def _held_claim(held: Optional[Dict[str, Dict[str, Any]]], *,
         unit.hold_lanes(held)
     assert unit.claim(_HELD_CLAIM_UID, model)
     assert unit.logger.messages == [
-        ("debug", f"AFC bambu {name}: chain index not resolved yet (UID "
+        ("debug", f"{name}: chain index not resolved yet (UID "
                   f"{_HELD_CLAIM_UID}); holding this unit's registrations "
                   f"until the chain map arrives"),
-        ("debug", f"AFC bambu {name}: claimed UID {_HELD_CLAIM_UID} as "
+        ("debug", f"{name}: claimed UID {_HELD_CLAIM_UID} as "
                  f"{model} and brought online live (ams_index=0).")]
     unit.logger.messages.clear()
     for i, bay in enumerate(bays):
@@ -340,10 +340,10 @@ def _p2_held_claim(monkeypatch: pytest.MonkeyPatch,
         unit.hold_lanes(held)
     assert unit.claim(_P2_HELD_UID, "boxed") is True
     assert unit.logger.messages == [
-        ("debug", f"AFC bambu AMS: chain index not resolved yet (UID "
+        ("debug", f"AMS: chain index not resolved yet (UID "
                   f"{_P2_HELD_UID}); holding this unit's registrations "
                   f"until the chain map arrives"),
-        ("debug", f"AFC bambu AMS: claimed UID {_P2_HELD_UID} as boxed and "
+        ("debug", f"AMS: claimed UID {_P2_HELD_UID} as boxed and "
                  f"brought online live (ams_index=0).")]
     unit.logger.messages.clear()
     wire_keys = ("material", "color", "uid", "tray_uid")
@@ -409,7 +409,7 @@ def _p2_keeps(tag: str) -> LogLine:
     :param tag: the tag's material
     :return LogLine: the line for lane15's record kept by its bay's tag
     """
-    return ("debug", f"AFC bambu AMS: lane15 keeps its saved record: the tag "
+    return ("debug", f"AMS: lane15 keeps its saved record: the tag "
                      f"in bay 1 ({tag}) is the same spool")
 
 
@@ -428,11 +428,11 @@ def _p2_applied(tag: str, colour: str, uid: str, bed: str = "?C (unknown)",
     """
     shown = f" #{colour}" if colour else ""
     lines: List[LogLine] = [
-        ("info", f"AFC bambu {unit}: applied tag to {lane}: Bambu "
+        ("info", f"{unit}: applied tag to {lane}: Bambu "
                  f"{tag}{shown}")]
     if summary:
         lines.append((
-            "debug", f"AFC bambu {unit}: {lane} tag -- {tag} | color "
+            "debug", f"{unit}: {lane} tag -- {tag} | color "
                      f"{'#' + colour if colour else '?'} | uid {uid} | "
                      f"remaining no measurement yet | nominal 1000 g | "
                      f"nozzle ?-?C | bed {bed}"))
@@ -447,7 +447,7 @@ def _p2_dropped(tag: str, why: str, sid: Optional[int] = None) -> LogLine:
     :return LogLine: the line for lane15's record replaced by its bay's tag
     """
     link = f" and its link to spool {sid}" if sid is not None else ""
-    return ("info", f"AFC bambu AMS: lane15 -- the tag in bay 1 ({tag}) is "
+    return ("info", f"AMS: lane15 -- the tag in bay 1 ({tag}) is "
                     f"not the spool saved for this lane ({why}); the tag "
                     f"replaces the saved record{link}")
 
@@ -519,7 +519,7 @@ _P2_TRAY_NEW = "f" * 32
 
 
 #: The flap unit's line prefix.
-_P2_FLAP = "AFC bambu Bambu_AMS_1"
+_P2_FLAP = "Bambu_AMS_1"
 
 
 def _p2_flap_bay(slot: int, present: bool, tagged: bool = True,
@@ -792,12 +792,12 @@ def _p2_follow_unit(monkeypatch: pytest.MonkeyPatch, *,
 
 
 #: The line of a lane re-engaged at startup or after a restore.
-_P2_REASSERT = ("debug", "AFC bambu AMS: lane15 loaded at startup, "
+_P2_REASSERT = ("debug", "AMS: lane15 loaded at startup, "
                          "re-asserting AMS loaded state + follower")
 
 
 #: The line of the loaded-lane follower restored for lane15.
-_P2_RESTORED = ("debug", "AFC bambu AMS: restored the follower for lane15 (AFC "
+_P2_RESTORED = ("debug", "AMS: restored the follower for lane15 (AFC "
                         "records it loaded to the toolhead) -- mode:4, "
                         "one-shot.")
 
@@ -1002,7 +1002,7 @@ def _p4_readout(remaining: str, *, lane: str = "lane12", head: str = "ABS",
     :param source: where the bed temperature came from
     :return tuple: the readout line
     """
-    return ("debug", f"AFC bambu Bambu_AMS_1: {lane} tag -- {head} | "
+    return ("debug", f"Bambu_AMS_1: {lane} tag -- {head} | "
                      f"color {colour} | uid {uid} | remaining {remaining} "
                      f"| nominal {nominal} g | nozzle {nozzle}C | bed "
                      f"{bed}C ({source})")
@@ -1154,12 +1154,12 @@ def _bambu_p5_measuring_unit(
 
 
 #: What the one-edge verdict block says, for the unit "HT" and its bay 0.
-_P5_RETRYING = ("AFC bambu HT: slot 0 one-edged its insert measurement "
+_P5_RETRYING = ("HT: slot 0 one-edged its insert measurement "
                 "(rst:0, no percent narrated) -- measure_on_insert is "
                 "retrying it once")
 
 
-_P5_ONE_PULL = ("AFC bambu HT: slot 0 finished its cycle but never narrated a "
+_P5_ONE_PULL = ("HT: slot 0 finished its cycle but never narrated a "
                 "percent (rst:0) -- it took only ONE pull, so there was no "
                 "second edge to measure from. That is geometric and it "
                 "follows the SPOOL, not the bay: the second edge needs a full "
@@ -1215,7 +1215,7 @@ def _bambu_p5_assist(on: bool, slot: int = 0, unit: int = 0) -> dict:
 
 
 #: A narrated stall raised on lane1 at the toolhead, mid-print.
-_P5_NARRATED = ("AFC bambu Bambu_AMS_1: AMS reported a stall on lane1, motor "
+_P5_NARRATED = ("Bambu_AMS_1: AMS reported a stall on lane1, motor "
                 "1.60A -- the spool is likely tangled or the path jammed. "
                 "Clear the snag, then resume.\nAMS said: feed finish -1, "
                 "stall\nOnce cleared, click resume to continue printing")
@@ -2749,7 +2749,7 @@ class TestAfcBambuAMSCmdAFCBambuFaultReload:
         gcmd = unit.gcode.run("AFC_BAMBU_FAULT_RELOAD")     # does not raise
         assert unit.logger.messages == [
             ("warning",
-             "AFC bambu Bambu_AMS_1: reload-after-fault check failed "
+             "Bambu_AMS_1: reload-after-fault check failed "
              "(bookkeeping went wrong); resuming anyway. If the toolhead is "
              "empty, pause and load the lane by hand.")]
         assert gcmd.messages == [
@@ -3240,7 +3240,7 @@ class TestAfcBambuAMSCmdAFCBambuScan:
         :return LogLine: the debug line
         """
         return ("debug",
-                f"AFC bambu Bambu_AMS_1: slot {slot} scan verdict -> "
+                f"Bambu_AMS_1: slot {slot} scan verdict -> "
                 f"{verdict} (fw seq={seq} res={res} | record: mat={mat} "
                 f"uid={uid} present={present})")
 
@@ -3310,9 +3310,9 @@ class TestAfcBambuAMSCmdAFCBambuScan:
         assert unit.logger.messages == [
             self._verdict(0), self._verdict(1), self._verdict(2),
             self._verdict(3, seq=0, res=0, **tagged),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and "
                      "name from the bay's record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool "
                       "and its bay's tag 95F2C30C (PLA Basic) matches the "
                       "lane -- looking the tag up in Spoolman; the lane is "
                       "left as AFC restored it")]
@@ -3352,12 +3352,12 @@ class TestAfcBambuAMSCmdAFCBambuScan:
                                  (136, {"uid": "95f2c30c"}))]
         assert unit.logger.messages == [
             self._verdict(3, "read", seq=2, res=1, **tagged),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 "
+            ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 "
                       "| color #0086D6 | uid 95F2C30C | remaining no "
                       "measurement yet | nominal 1000 g | nozzle ?-?C | bed "
                       "55C (material)"),
             self._verdict(3, seq=2, res=1, **tagged),
-            ("debug", f"AFC bambu Bambu_AMS_1: matched lane15 to Spoolman "
+            ("debug", f"Bambu_AMS_1: matched lane15 to Spoolman "
                       f"spool 136 by tray UID {self.TRAY15}")]
         assert unit.gcode.messages == []
 
@@ -3556,7 +3556,7 @@ class TestAfcBambuAMSStartCapscan:
         :return LogLine: the debug line
         """
         return ("debug",
-                f"AFC bambu Bambu_AMS_1: slot {slot} scan verdict -> none (fw "
+                f"Bambu_AMS_1: slot {slot} scan verdict -> none (fw "
                 f"seq=None res=None | record: mat={mat} uid={uid} "
                 f"present={present})")
 
@@ -3596,9 +3596,9 @@ class TestAfcBambuAMSStartCapscan:
                      "Measured about 56% left -- roughly 460 g of a 1000 g "
                      "spool; kept on the lane -- the Spoolman module "
                      "([AFC_BambuAMS_rfid]) is off."),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane8: "
+            ("info", "Bambu_AMS_1: applied tag to lane8: "
                      "Bambu PLA Basic"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 tag -- PLA Basic | color "
+            ("debug", "Bambu_AMS_1: lane8 tag -- PLA Basic | color "
                       "? | uid D13FDB0E | remaining 56% MEASURED (~460 g) | "
                       "nominal 1000 g | nozzle ?-?C | bed 55C (material)"),
             self._verdict(2, "-", "-", True),
@@ -3621,7 +3621,7 @@ class TestAfcBambuAMSStartCapscan:
         assert unit._cap_pending == {}
         assert unit._cap_pending_slot is None
         assert unit.logger.messages == [(
-            "info", "AFC bambu Bambu_AMS_1: lane8 (slot 1) capscan ended "
+            "info", "Bambu_AMS_1: lane8 (slot 1) capscan ended "
                     "without a measurement (no reading within 180 s); it is "
                     "no longer waiting for one")]
 
@@ -3662,7 +3662,7 @@ class TestAfcBambuAMSCmdAFCBambuCapscan:
     ARMED = ("AFC_BAMBU_CAPSCAN: capacity re-scan armed for lane8 (slot 1) on "
              "Bambu_AMS_1 -- the AMS pulls the spool, re-reads the tag and "
              "measures remain%; check the slot's remain_pct in about a minute")
-    WARNED = ("AFC bambu Bambu_AMS_1: lane8 is bound to Spoolman spool 164, "
+    WARNED = ("Bambu_AMS_1: lane8 is bound to Spoolman spool 164, "
               "and with the Spoolman module ([AFC_BambuAMS_rfid]) off this "
               "measurement stays on the lane and is not written to that "
               "spool. AFC reloads a bound lane's weight from Spoolman at "
@@ -4679,7 +4679,7 @@ class TestAfcBambuAMSRecoverToBay:
             {"cmd": "info"},
             {"cmd": "stop"}]
         assert unit.logger.messages == [(
-            "debug", "AFC bambu Bambu_AMS_1: move ended on NARRATION after "
+            "debug", "Bambu_AMS_1: move ended on NARRATION after "
                      "3.0s (ok=True): retract done")]
         assert unit.afc.save_vars.calls == [((), {})]            # persisted
         return unit, lane
@@ -4717,7 +4717,7 @@ class TestAfcBambuAMSRecoverToBay:
         # Neither the relink nor the reel-back went out.
         assert bridge.sent == []
         assert unit.logger.messages == [(
-            "warning", "AFC bambu Bambu_AMS_1: recover reel-back for lane1 "
+            "warning", "Bambu_AMS_1: recover reel-back for lane1 "
                        "did not complete: port closed")]
         # The lane is settled from the bay all the same.
         assert (lane.tool_loaded, lane.loaded_to_hub, lane.status.name) == (
@@ -4904,10 +4904,10 @@ class TestAfcBambuAMSPrimeScanBaseline:
 
     UID15 = "95f2c30c"
     TRAY15 = "4e3177c31fea42d08bc240c818a37f80"
-    NOT_POLLED = ("debug", "AFC bambu Bambu_AMS_1: the bridge has not polled "
+    NOT_POLLED = ("debug", "Bambu_AMS_1: the bridge has not polled "
                            "this unit's bays yet; keeping the lanes as they "
                            "are")
-    WAITS = ("debug", "AFC bambu Bambu_AMS_1: scan priming waits until the "
+    WAITS = ("debug", "Bambu_AMS_1: scan priming waits until the "
                       "bridge has polled this unit and re-read its bays")
 
     @classmethod
@@ -5078,9 +5078,9 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert client.asked == []
         assert unit.logger.messages == [
             self.NOT_POLLED, self.WAITS,
-            ("debug", "AFC bambu Bambu_AMS_1: bay 4 is empty but lane15 still "
+            ("debug", "Bambu_AMS_1: bay 4 is empty but lane15 still "
                      "held filament data -- clearing it"),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool 136 "
+            ("debug", "Bambu_AMS_1: unbinding lane15 from spool 136 "
                       "-- the bay is empty")]
 
     def test_priming_waits_for_the_re_read_a_booted_bridge_owes(
@@ -5111,13 +5111,13 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert unit.afc.spool.calls == [("set_spoolID", (lane, 136), {})]
         assert unit.logger.messages == [
             self.NOT_POLLED, self.WAITS,
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: Bambu PLA "
+            ("info", "Bambu_AMS_1: applied tag to lane15: Bambu PLA "
                      "Basic #0086D6"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | "
+            ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | "
                       "color #0086D6 | uid 95F2C30C | remaining no measurement "
                       "yet | nominal 1000 g | nozzle 190-230C | bed 55C "
                       "(material)"),
-            ("debug", f"AFC bambu Bambu_AMS_1: matched lane15 to Spoolman "
+            ("debug", f"Bambu_AMS_1: matched lane15 to Spoolman "
                       f"spool 136 by tray UID {self.TRAY15}")]
 
     def test_a_re_read_that_never_settles_does_not_keep_priming_off(
@@ -5144,7 +5144,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
               "weight": 612.5, "extruder_temp": 220.0, "bed_temp": 60.0}
     TAG = {"material": "PLA Basic", "color": "3A7BD5", "rfid_uid": "5EED0001"}
     REEL = "0123456789abcdef0123456789abcdef"
-    RESTORED_159 = ("info", "AFC bambu AMS: restored the saved record of the "
+    RESTORED_159 = ("info", "AMS: restored the saved record of the "
                             "untagged spool on lane15 (spool 159)")
 
     @staticmethod
@@ -5157,7 +5157,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         :param name: the unit's name
         :return LogLine: the line for a record its bay's tag keeps
         """
-        return ("debug", f"AFC bambu {name}: {lane} keeps its saved record: "
+        return ("debug", f"{name}: {lane} keeps its saved record: "
                          f"the tag in bay {bay} ({tag}) is the same spool")
 
     @staticmethod
@@ -5168,7 +5168,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         :param name: the unit's name
         :return LogLine: the line for an untagged bay given the defaults
         """
-        return ("info", f"AFC bambu {name}: no tag on record for slot {slot}; "
+        return ("info", f"{name}: no tag on record for slot {slot}; "
                         f"applied lane defaults to {lane} -- nothing has read "
                         f"this bay yet. No scan was attempted, so this says "
                         f"nothing about the reader or the spool; reseat it, or "
@@ -5184,9 +5184,9 @@ class TestAfcBambuAMSPrimeScanBaseline:
         """
         shown = f" #{colour}" if colour else ""
         return [
-            ("info", f"AFC bambu AMS: applied tag to lane15: Bambu "
+            ("info", f"AMS: applied tag to lane15: Bambu "
                      f"{tag}{shown}"),
-            ("debug", f"AFC bambu AMS: lane15 tag -- {tag} | color "
+            ("debug", f"AMS: lane15 tag -- {tag} | color "
                       f"{'#' + colour if colour else '?'} | uid {uid} | "
                       f"remaining no measurement yet | nominal 1000 g | "
                       f"nozzle ?-?C | bed ?C (unknown)")]
@@ -5224,7 +5224,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
             self.RESTORED_159,
             *self._held_prep(("lane15", "PLA"), ("lane16", None)),
             self._defaulted(1, "lane16"),
-            ("debug", "AFC bambu AMS: slot 1 came up with a spool and no record "
+            ("debug", "AMS: slot 1 came up with a spool and no record "
                      "of it -- scanning it as a fresh insert")]
 
     @pytest.mark.parametrize("words,tag", [
@@ -5290,7 +5290,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert (lane.weight, lane.extruder_temp, lane.bed_temp) == (
             1000, None, None)
         assert unit.logger.messages == [
-            ("info", f"AFC bambu AMS: lane15 -- the tag in bay 1 ({read[0]} "
+            ("info", f"AMS: lane15 -- the tag in bay 1 ({read[0]} "
                      f"#{read[1]}) is not the spool saved for this lane "
                      f"({was}); the tag replaces the saved record"),
             *self._applied(read[0], read[1], "5EED0001"),
@@ -5348,11 +5348,11 @@ class TestAfcBambuAMSPrimeScanBaseline:
         """
         return [
             self._keeps("PLA Matte"), *self._held_prep(("lane15", "PLA Matte")),
-            ("info", f"AFC bambu AMS: lane15 -- the tag in bay 1 (PLA Matte "
+            ("info", f"AMS: lane15 -- the tag in bay 1 (PLA Matte "
                      f"#3A7BD5) is not the spool saved for this lane ({why}); "
                      f"the tag replaces the saved record and its link to "
                      f"spool 71"),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 71 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 71 -- the "
                       "tag in the bay is another spool's"),
             *self._applied("PLA Matte", "3A7BD5", "5EED0001")]
 
@@ -5389,11 +5389,11 @@ class TestAfcBambuAMSPrimeScanBaseline:
         # Applied inline, the drop is logged before the line that kept the
         # record for the check.
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 -- the tag in bay 1 (PLA Matte "
+            ("info", "AMS: lane15 -- the tag in bay 1 (PLA Matte "
                      "#3A7BD5) is not the spool saved for this lane (Spoolman "
                      "records another reel for spool 71); the tag replaces "
                      "the saved record and its link to spool 71"),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 71 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 71 -- the "
                       "tag in the bay is another spool's"),
             *self._applied("PLA Matte", "3A7BD5", "5EED0001"),
             self._keeps("PLA Matte"), *self._held_prep(("lane15", "PLA Matte"))]
@@ -5440,7 +5440,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         by = (f"tray UID {self.REEL}" if tray else "UID 5EED0001")
         assert unit.logger.messages == self._link_replaced(
             f"Spoolman records this {what} on spool 200") + [
-            ("debug", f"AFC bambu AMS: matched lane15 to Spoolman spool 200 "
+            ("debug", f"AMS: matched lane15 to Spoolman spool 200 "
                       f"by {by}")]
 
     @pytest.mark.parametrize("spools,tray", [
@@ -5467,9 +5467,9 @@ class TestAfcBambuAMSPrimeScanBaseline:
     # ── a replug: the claim hands back what the master held ───────────────
 
     HOT_UID, OTHER_UID = "HHHH", "JJJJ"
-    HOT_REARMED = ("debug", "AFC bambu Hot: slot 0 came up with a spool and no "
+    HOT_REARMED = ("debug", "Hot: slot 0 came up with a spool and no "
                            "record of it -- scanning it as a fresh insert")
-    RELEASED = ("info", "AFC_BridgeBox chain1: released Hot (UID HHHH offline "
+    RELEASED = ("info", "chain1: released Hot (UID HHHH offline "
                         ">10s); lanes dropped live, slot kept for re-plug")
 
     @staticmethod
@@ -5480,12 +5480,12 @@ class TestAfcBambuAMSPrimeScanBaseline:
           for the claim
         """
         return [
-            ("debug", f"AFC bambu Hot: chain index not resolved yet (UID "
+            ("debug", f"Hot: chain index not resolved yet (UID "
                       f"{uid}); holding this unit's registrations until the "
                       f"chain map arrives"),
-            ("debug", f"AFC bambu Hot: claimed UID {uid} as ht and brought "
+            ("debug", f"Hot: claimed UID {uid} as ht and brought "
                      f"online live (ams_index=0)."),
-            ("info", f"AFC_BridgeBox chain1: CLAIMED {uid} as ht onto Hot (1 "
+            ("info", f"chain1: CLAIMED {uid} as ht onto Hot (1 "
                      f"lanes) -- live, no restart.")]
 
     def _replug(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
@@ -5549,7 +5549,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         return cls._held_prep(("lane32", material), name="Hot", bays=1,
                               cmd="T0")
 
-    RESTORED_136 = ("info", "AFC bambu Hot: restored the saved record of the "
+    RESTORED_136 = ("info", "Hot: restored the saved record of the "
                             "untagged spool on lane32 (spool 136)")
 
     @staticmethod
@@ -5608,7 +5608,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assign = FakeGcmd({"UID": self.OTHER_UID, "NAME": "Hot"})
         master.cmd_AFC_BRIDGEBOX_ASSIGN(assign)
         assert assign.messages == [(
-            "respond_info", "AFC_BridgeBox chain1: assigned JJJJ to bay 'Hot' "
+            "respond_info", "chain1: assigned JJJJ to bay 'Hot' "
                             "(lane32) -- claimed LIVE, no restart.")]
         assert unit.unit_uid == self.OTHER_UID
         assert unit._held_lanes == {}
@@ -5685,7 +5685,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         unit.afc.default_material_type = "PLA"
         unit._prime_scan_baseline()
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: restored the saved records of the "
+            ("info", "AMS: restored the saved records of the "
                      "untagged spools on lane15 (spool 159), lane16; lane17, "
                      "lane18 have only the AFC defaults saved last session, "
                      "as nothing has read their spools; reseat them, or run "
@@ -5701,7 +5701,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         unit._prime_scan_baseline()
         lane = unit.lanes["lane15"]
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 has only the AFC defaults saved "
+            ("info", "AMS: lane15 has only the AFC defaults saved "
                      "last session, as nothing has read its spool; reseat it, "
                      "or run AFC_BAMBU_SCAN LANE=lane15"),
             *self._held_prep(("lane15", "PLA"))]
@@ -5753,7 +5753,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert unit._restored_bays == set()
         colour = tag["color"] or ""
         assert unit.logger.messages == [
-            ("info", f"AFC bambu AMS: lane15 -- the tag in bay 1 ({shown}) is "
+            ("info", f"AMS: lane15 -- the tag in bay 1 ({shown}) is "
                      f"not the spool saved for this lane (PLA #050505); the "
                      f"tag replaces the saved record"),
             *[(lvl, msg.replace("uid 5EED0001", "uid 0A1B2C3D"))
@@ -5814,7 +5814,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
             "PLA", "Matte", "#FF0000", 1000)
         assert unit._afc_owned == {0}
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 -- the tag in bay 1 (PLA Matte "
+            ("info", "AMS: lane15 -- the tag in bay 1 (PLA Matte "
                      "#FF0000) is not the spool saved for this lane (PLA); "
                      "the tag replaces the saved record"),
             *[(lvl, msg.replace("uid 5EED0001", "uid 0A1B2C3D"))
@@ -5850,7 +5850,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert (lane.weight, lane.extruder_temp) == (
             rec["weight"], rec.get("extruder_temp"))
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: restored the saved record of the "
+            ("info", "AMS: restored the saved record of the "
                      "untagged spool on lane15"),
             *self._held_prep(("lane15", "PLA"))]
 
@@ -5865,7 +5865,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         lane = unit.lanes["lane15"]
         assert (lane.weight, lane.bed_temp) == (640.0, 95.0)
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: restored the saved record of the "
+            ("info", "AMS: restored the saved record of the "
                      "untagged spool on lane15"),
             *self._held_prep(("lane15", "ABS"))]
 
@@ -5884,7 +5884,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert (lane.color, lane.weight, lane.bed_temp) == (
             "#FFFFFF", 1000.0, bed)
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 has only the AFC defaults saved "
+            ("info", "AMS: lane15 has only the AFC defaults saved "
                      "last session, as nothing has read its spool; reseat it, "
                      "or run AFC_BAMBU_SCAN LANE=lane15"),
             *self._held_prep(("lane15", "PLA"))]
@@ -5928,9 +5928,9 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert unit._defaulted_bays == set()
         assert unit.logger.messages == [
             *self._held_prep(empty=["lane15"]),
-            ("debug", "AFC bambu AMS: bay 1 is empty but lane15 still held "
+            ("debug", "AMS: bay 1 is empty but lane15 still held "
                      "filament data -- clearing it"),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 159 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 159 -- the "
                       "bay is empty")]
 
     def test_a_bay_with_nothing_held_gets_defaults(self):
@@ -5943,7 +5943,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
             *self._held_prep(("lane15", None)), self._defaulted(0, "lane15"),
             self.REARMED]
 
-    REARMED = ("debug", "AFC bambu AMS: slot 0 came up with a spool and no "
+    REARMED = ("debug", "AMS: slot 0 came up with a spool and no "
                        "record of it -- scanning it as a fresh insert")
 
     def test_a_claimed_live_bay_with_nothing_held_is_rescanned_once(
@@ -6037,14 +6037,14 @@ class TestAfcBambuAMSPrimeScanBaseline:
         master._claim_pool_unit("AAAA", "boxed")
         unit = printer.lookup_object("AFC_BambuAMS Alpha")
         assert unit.logger.messages == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane records "
+            ("debug", "chain1: holding the saved lane records "
                       "of Alpha for their units"),
-            ("debug", "AFC bambu Alpha: chain index not resolved yet (UID "
+            ("debug", "Alpha: chain index not resolved yet (UID "
                       "AAAA); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("debug", "AFC bambu Alpha: claimed UID AAAA as boxed and brought "
+            ("debug", "Alpha: claimed UID AAAA as boxed and brought "
                      "online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED AAAA as boxed onto Alpha "
+            ("info", "chain1: CLAIMED AAAA as boxed onto Alpha "
                      "(4 lanes) -- live, no restart.")]
         unit.logger.messages.clear()
         return printer, unit
@@ -6094,7 +6094,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
         assert unit.logger.messages == [
             self._keeps("PLA Matte", "lane24", 1, "Alpha"),
             self._keeps("ABS", "lane26", 3, "Alpha"),
-            ("info", "AFC bambu Alpha: restored the saved record of the "
+            ("info", "Alpha: restored the saved record of the "
                      "untagged spool on lane25"),
             *self._held_prep(("lane24", "PLA Matte"), ("lane25", "PETG"),
                              ("lane26", "ABS"), empty=["lane27"],
@@ -6169,7 +6169,7 @@ class TestAfcBambuAMSRestoreClaimedLaneVars:
         assert (lane.spool_id, lane.material, lane.color) == (
             159, "PLA", "#050505")
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: could not re-fetch spool 159 for "
+            ("debug", "AMS: could not re-fetch spool 159 for "
                       "lane15: Spoolman down")]
 
     def test_without_spoolman_the_stored_profile_is_copied(self):
@@ -6304,10 +6304,10 @@ class TestAfcBambuAMSApplyHeldLanes:
     LOADED = {"lane24": {"material": "PLA", "spool_id": None,
                          "tool_loaded": True}}
     CLAIMED = [
-        ("debug", f"AFC bambu Alpha: chain index not resolved yet (UID "
+        ("debug", f"Alpha: chain index not resolved yet (UID "
                   f"{_HELD_CLAIM_UID}); holding this unit's registrations "
                   f"until the chain map arrives"),
-        ("debug", f"AFC bambu Alpha: claimed UID {_HELD_CLAIM_UID} as boxed "
+        ("debug", f"Alpha: claimed UID {_HELD_CLAIM_UID} as boxed "
                  f"and brought online live (ams_index=0).")]
     LEFT = ("Unload that filament by hand and run UNSET_LANE_LOADED to clear "
             "the record.")
@@ -6386,7 +6386,7 @@ class TestAfcBambuAMSApplyHeldLanes:
         assert unit.lanes["lane24"].tool_loaded is False
         assert (sync.calls, unit.afc.spool.calls) == ([], [])
         assert unit.logger.messages == [
-            ("warning", f"AFC bambu Alpha: extruder records lane24 as loaded, "
+            ("warning", f"Alpha: extruder records lane24 as loaded, "
                         f"but lane24 was not saved loaded under this unit "
                         f"({_HELD_CLAIM_UID}), so the filament in extruder is "
                         f"not from this unit and lane24 is left unloaded. "
@@ -6398,7 +6398,7 @@ class TestAfcBambuAMSApplyHeldLanes:
         unit, sync, _master = self._claim(monkeypatch, {})
         assert unit.lanes["lane24"].tool_loaded is False
         assert unit.logger.messages == [
-            ("warning", f"AFC bambu Alpha: extruder records lane24 as loaded, "
+            ("warning", f"Alpha: extruder records lane24 as loaded, "
                         f"but no saved record of lane24 is attributed to this "
                         f"unit ({_HELD_CLAIM_UID}), so AFC cannot tell which "
                         f"unit the filament in extruder is from, and lane24 "
@@ -6470,11 +6470,11 @@ class TestAfcBambuAMSDropHeldRecord:
         assert unit._dropped_links == {"lane15": "71"}
         assert unit._afc_owned == set()
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 -- the tag in bay 1 (PLA Basic "
+            ("info", "AMS: lane15 -- the tag in bay 1 (PLA Basic "
                      "#3A7BD5) is not the spool saved for this lane (PLA "
                      "#3A7BD5); the tag replaces the saved record and its "
                      "link to spool 71"),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 71 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 71 -- the "
                       "tag in the bay is another spool's")]
         unit._reset_lookup_state()
         assert unit._match_only_bays == set()
@@ -6483,22 +6483,22 @@ class TestAfcBambuAMSDropHeldRecord:
         assert unit._match_only_bays == set()
         assert unit._dropped_links == {}
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 -- the tag in bay 1 (PLA Basic "
+            ("info", "AMS: lane15 -- the tag in bay 1 (PLA Basic "
                      "#3A7BD5) is not the spool saved for this lane (PLA "
                      "#3A7BD5); the tag replaces the saved record")]
 
     def test_the_line_says_why_or_that_it_was_only_the_defaults(self):
         unit = self._dropped(self.LINKED, why="Spoolman records another reel")
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 -- the tag in bay 1 (PLA Basic "
+            ("info", "AMS: lane15 -- the tag in bay 1 (PLA Basic "
                      "#3A7BD5) is not the spool saved for this lane (Spoolman "
                      "records another reel); the tag replaces the saved "
                      "record and its link to spool 71"),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 71 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 71 -- the "
                       "tag in the bay is another spool's")]
         unit = self._dropped({"material": "PLA"}, defaults=True)
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: lane15 -- the tag in bay 1 replaces the "
+            ("info", "AMS: lane15 -- the tag in bay 1 replaces the "
                      "AFC defaults saved for this lane")]
         assert unit.lanes["lane15"].material == ""
 
@@ -6508,9 +6508,9 @@ class TestAfcBambuAMSLinkLanded:
 
     #: The lines of lane15 cleared again when spool 159's fetch lands.
     CLEARED = [
-        ("debug", "AFC bambu AMS: spool 159's Spoolman data landed on lane15 "
+        ("debug", "AMS: spool 159's Spoolman data landed on lane15 "
                   "after its saved record was dropped -- clearing it again"),
-        ("debug", "AFC bambu AMS: unbinding lane15 from spool 159 -- its "
+        ("debug", "AMS: unbinding lane15 from spool 159 -- its "
                   "saved record was dropped")]
 
     class _FetchingSpool(FakeAfcSpool):
@@ -6579,7 +6579,7 @@ class TestAfcBambuAMSLinkLanded:
             _p2_keeps("PETG"), *_p2_held_prep(("lane15", "PETG")),
             _p2_dropped("PETG #FF0000",
                         "Spoolman records other tags for spool 159", 159),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 159 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 159 -- the "
                       "tag in the bay is another spool's"),
             *_p2_applied("PETG", "FF0000", "0A1B2C3D", "70C (material)")]
         saves = unit.afc.save_vars.call_count
@@ -6705,7 +6705,7 @@ class TestAfcBambuAMSKeptLinkContradicted:
         assert unit.logger.messages == [
             _p2_dropped("PLA Matte #050505",
                         "Spoolman records other tags for spool 159", 159),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 159 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 159 -- the "
                       "tag in the bay is another spool's"),
             *_p2_applied("PLA Matte", "050505", "0A1B2C3D", "55C (material)")]
 
@@ -6757,7 +6757,7 @@ class TestAfcBambuAMSKeptLinkContradicted:
         assert unit.logger.messages == [
             _p2_dropped("PLA Matte #050505",
                         "Spoolman records other tags for spool 159", 159),
-            ("debug", "AFC bambu AMS: unbinding lane15 from spool 159 -- the "
+            ("debug", "AMS: unbinding lane15 from spool 159 -- the "
                       "tag in the bay is another spool's"),
             *_p2_applied("PLA Matte", "050505", "0A1B2C3D", "55C (material)"),
             _p2_keeps("PLA Matte"),
@@ -6824,7 +6824,7 @@ class TestAfcBambuAMSSettleRestoredBay:
         sid = rec.get("spool_id")
         kept = f" (spool {sid})" if sid else ""
         assert unit.logger.messages == [
-            ("info", f"AFC bambu AMS: restored the saved record of the "
+            ("info", f"AMS: restored the saved record of the "
                      f"untagged spool on lane15{kept}"),
             *_p2_held_prep(("lane15", rec["material"] or None))]
         unit.logger.messages.clear()
@@ -7202,10 +7202,10 @@ class TestAfcBambuAMSClaim:
         :return list: the lines of a claim of UID onto AMS
         """
         return [
-            ("debug", f"AFC bambu AMS: chain index not resolved yet (UID "
+            ("debug", f"AMS: chain index not resolved yet (UID "
                       f"{self.UID}); holding this unit's registrations until "
                       f"the chain map arrives"),
-            ("debug", f"AFC bambu AMS: claimed UID {self.UID} as {model} and "
+            ("debug", f"AMS: claimed UID {self.UID} as {model} and "
                      f"brought online live (ams_index=0).")]
 
     def test_a_claim_and_a_reconnect_start_a_new_look(self, monkeypatch):
@@ -7402,7 +7402,7 @@ class TestAfcBambuAMSClaim:
         :param tag: the bay's chip UID as the line shows it
         :return LogLine: the line of lane15's tag looked up in Spoolman
         """
-        return ("debug", f"AFC bambu AMS: lane15 has no Spoolman spool and its "
+        return ("debug", f"AMS: lane15 has no Spoolman spool and its "
                          f"bay's tag {tag} (PLA Basic) matches the lane -- "
                          f"looking the tag up in Spoolman; the lane is left as "
                          f"AFC restored it")
@@ -7424,9 +7424,9 @@ class TestAfcBambuAMSClaim:
         assert unit._spool._spoolman_no_match == {self.UID15}
         assert unit.afc.spool.calls == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: slot 3 scan verdict -> none (fw seq=0 "
+            ("debug", "AMS: slot 3 scan verdict -> none (fw seq=0 "
                       "res=0 | record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu AMS: lane15 -- filling in vendor and name from "
+            ("debug", "AMS: lane15 -- filling in vendor and name from "
                      "the bay's record (PLA Basic)"),
             self._looking("95F2C30C")]
         unit.logger.messages.clear()
@@ -7464,7 +7464,7 @@ class TestAfcBambuAMSClaim:
                                  (sid, {"uid": shown.lower()}))]
         assert unit.logger.messages == [
             self._looking(shown),
-            ("debug", f"AFC bambu AMS: matched lane15 to Spoolman spool {sid} "
+            ("debug", f"AMS: matched lane15 to Spoolman spool {sid} "
                       f"by {how}")]
         self._frames(unit, 3)
         assert client.searches == 2
@@ -7572,7 +7572,7 @@ class TestAfcBambuAMSResolveUidIndex:
             2, status=True)
         assert unit.reactor.callbacks == []        # resolved, no retry
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: pinned to UID CCC at chain index 2 (was "
+            ("debug", "AMS: pinned to UID CCC at chain index 2 (was "
                      "ams_index 0)")]
 
     def test_already_correct_no_change(self, monkeypatch):
@@ -7587,7 +7587,7 @@ class TestAfcBambuAMSResolveUidIndex:
         assert unit._bridge.sent == [{"cmd": "chain"}] + _p2_registers(
             1, units=False)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: UID BBB confirmed at ams_index 1")]
+            ("debug", "AMS: UID BBB confirmed at ams_index 1")]
 
     def test_dry_id_not_updated_when_fixed(self, monkeypatch):
         # A model with a fixed id (follows=False) keeps its id byte on
@@ -7600,7 +7600,7 @@ class TestAfcBambuAMSResolveUidIndex:
         assert unit.ams_index == 2
         assert unit.dry_ams_id == 0x80             # fixed id untouched
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: pinned to UID CCC at chain index 2 (was "
+            ("debug", "AMS: pinned to UID CCC at chain index 2 (was "
                      "ams_index 0)")]
 
     def test_not_found_retries(self, monkeypatch):
@@ -7622,7 +7622,7 @@ class TestAfcBambuAMSResolveUidIndex:
         assert unit.ams_index == 0
         assert unit.reactor.callbacks == []        # no more retries
         assert unit.logger.messages == [
-            ("warning", "AFC bambu AMS: unit_uid ZZZ never appeared on the "
+            ("warning", "AMS: unit_uid ZZZ never appeared on the "
                         "chain (['AAA']); check the unit_uid value against "
                         "AFC_BAMBU_UIDS. Holding chain index 0.")]
 
@@ -7668,7 +7668,7 @@ class TestAfcBambuAMSAdoptIndex:
         unit._presence_ok = True
         return unit
 
-    CONFIRMED = ("debug", "AFC bambu AMS: UID AAAA confirmed at ams_index 0")
+    CONFIRMED = ("debug", "AMS: UID AAAA confirmed at ams_index 0")
 
     def test_the_first_confirmation_drops_the_unverified_cache(
             self, monkeypatch):
@@ -7729,7 +7729,7 @@ class TestAfcBambuAMSAdoptIndex:
         assert (unit.ams_index, unit.dry_ams_id) == (1, 1)
         assert unit._bridge.sent == _p2_registers(1, status=True)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: pinned to UID AAAA at chain index 1 (was "
+            ("debug", "AMS: pinned to UID AAAA at chain index 1 (was "
                      "ams_index 0)")]
 
     @pytest.mark.parametrize("idx", [0, 1], ids=["confirmed", "moved"])
@@ -7741,7 +7741,7 @@ class TestAfcBambuAMSAdoptIndex:
                                                                       100.0)
         assert unit._bridge.sent == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: chain index not resolved yet (UID "
+            ("debug", "AMS: chain index not resolved yet (UID "
                       "AAAA); holding this unit's registrations until the "
                       "chain map arrives")]
         unit.logger.messages.clear()
@@ -7760,7 +7760,7 @@ class TestAfcBambuAMSAdoptIndex:
             assert unit._bridge.sent == (_p2_registers(1, status=True)
                                          + _p2_registers(1) + arm)
             assert unit.logger.messages == [
-                ("debug", "AFC bambu AMS: pinned to UID AAAA at chain index 1 "
+                ("debug", "AMS: pinned to UID AAAA at chain index 1 "
                          "(was ams_index 0)")]
 
     def test_an_ht_moved_off_its_index_drops_the_old_flag(self, monkeypatch):
@@ -7778,7 +7778,7 @@ class TestAfcBambuAMSAdoptIndex:
             {"cmd": "mcaddr", "unit": 5, "addr": 0x1800, "pay": 0x81},
             {"cmd": "status"}]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: pinned to UID AAAA at chain index 5 (was "
+            ("debug", "AMS: pinned to UID AAAA at chain index 5 (was "
                      "ams_index 0)")]
 
 
@@ -7790,7 +7790,7 @@ class TestAfcBambuAMSResolveUidBlocking:
     """
 
     #: The line of AABB found at chain index 1.
-    PINNED = ("debug", "AFC bambu AMS: pinned to UID AABB at chain index 1 "
+    PINNED = ("debug", "AMS: pinned to UID AABB at chain index 1 "
                       "(was ams_index 0)")
 
     def test_no_bridge_is_not_resolved(self, monkeypatch):
@@ -7826,7 +7826,7 @@ class TestAfcBambuAMSResolveUidBlocking:
         # The background retry takes over 2 s on.
         assert [at for _cb, at in unit.reactor.callbacks] == [104.0]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: unit_uid AABB not on the chain after 2s "
+            ("debug", "AMS: unit_uid AABB not on the chain after 2s "
                       "(chain so far: ['ZZZZ']); holding chain index 0 until "
                       "it appears (background retry)")]
         unit.reactor.run_callbacks(until=104.0)
@@ -7839,7 +7839,7 @@ class TestAfcBambuAMSResolveUidBlocking:
         assert unit._resolve_uid_blocking(timeout=5.0) is False
         assert unit._bridge.sent == [{"cmd": "chain"}] * 5    # once a second
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: unit_uid AABB not on the chain after 5s "
+            ("debug", "AMS: unit_uid AABB not on the chain after 5s "
                       "(chain so far: empty); holding chain index 0 until it "
                       "appears (background retry)")]
 
@@ -7863,7 +7863,7 @@ class TestAfcBambuAMSResolveUidBlocking:
         assert unit.ams_index == 0
         assert [at for _cb, at in unit.reactor.callbacks] == [102.0]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: unit_uid AABB not on the chain after 1s "
+            ("debug", "AMS: unit_uid AABB not on the chain after 1s "
                       "(chain so far: empty); holding chain index 0 until it "
                       "appears (background retry)")]
 
@@ -7922,7 +7922,7 @@ class TestAfcBambuAMSAnnounceUnit:
         :param what: the send that failed
         :return LogLine: the warning naming it
         """
-        return ("warning", f"AFC bambu AMS: could not announce {what} to the "
+        return ("warning", f"AMS: could not announce {what} to the "
                            f"bridge (boom); narration or addressing may be "
                            f"wrong")
 
@@ -7963,7 +7963,7 @@ class TestAfcBambuAMSAnnounceUnit:
         assert unit._bridge.sent == (self.ANNOUNCE0[:1]
                                      + self.ANNOUNCE0[2:])
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: connect announce could not send htunit "
+            ("debug", "AMS: connect announce could not send htunit "
                       "(RuntimeError('boom'))")]
 
     def test_a_failing_units_send_does_not_skip_the_rest(self, monkeypatch):
@@ -8037,7 +8037,7 @@ class TestAfcBambuAMSAnnounceUnit:
         assert (unit._announce_deferred, unit._announce_defer_t0) == (True,
                                                                       100.0)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: chain index not resolved yet (unclaimed "
+            ("debug", "AMS: chain index not resolved yet (unclaimed "
                       "pool slot, no UID yet); holding this unit's "
                       "registrations until the chain map arrives")]
         # A second deferral keeps when the wait started.
@@ -8047,7 +8047,7 @@ class TestAfcBambuAMSAnnounceUnit:
         assert unit._announce_defer_t0 == 100.0
         assert unit._bridge.sent == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: chain index not resolved yet (unclaimed "
+            ("debug", "AMS: chain index not resolved yet (unclaimed "
                       "pool slot, no UID yet); holding this unit's "
                       "registrations until the chain map arrives")]
 
@@ -8075,7 +8075,7 @@ class TestAfcBambuAMSAnnounceUnit:
         assert unit._bridge.sent == [self.ANNOUNCE0[2]]     # capen
         assert unit.logger.messages == [
             self._failed("units"),
-            ("debug", "AFC bambu AMS: connect announce could not send htunit "
+            ("debug", "AMS: connect announce could not send htunit "
                       "(RuntimeError('boom'))"),
             self._failed("arm cadence")]
 
@@ -8250,10 +8250,10 @@ class TestAfcBambuAMSOnBridgeReconnect:
         assert bridge_sent(bridge) == ([{"cmd": "info"}] + self.SETTLED
                                        + [{"cmd": "relink"}])
         # The real bridge logs each info request it sends.
-        asked = ("debug", 'AFC bambu: request_info -> sent {"cmd":"info"}')
+        asked = ("debug", 'BridgeBox: request_info -> sent {"cmd":"info"}')
         assert unit.logger.messages == [
             asked, asked,
-            ("debug", "AFC bambu AMS: bridge rebooted -- relinking the chain "
+            ("debug", "AMS: bridge rebooted -- relinking the chain "
                      "so the units drop their park (they lost their master "
                      "mid-frame)")]
 
@@ -8302,12 +8302,12 @@ class TestAfcBambuAMSAnnounceAfterSettle:
             "send": RuntimeError("gone")}))
         unit._announce_after_settle()
         assert unit._bridge.sent == []
-        failed = ("warning", "AFC bambu AMS: could not announce {} to the "
+        failed = ("warning", "AMS: could not announce {} to the "
                              "bridge (gone); narration or addressing may be "
                              "wrong")
         assert unit.logger.messages == [
             (failed[0], failed[1].format("units")),
-            ("debug", "AFC bambu AMS: connect announce could not send htunit "
+            ("debug", "AMS: connect announce could not send htunit "
                       "(RuntimeError('gone')), capen (RuntimeError('gone'))"),
             (failed[0], failed[1].format("arm cadence"))]
         # The loaded-lane restore is still scheduled.
@@ -8328,7 +8328,7 @@ class TestAfcBambuAMSAnnounceAfterSettle:
         unit.reactor.run_callbacks(until=101.0)
         assert unit._bridge.sent == _p2_engage(0)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu AMS: lane15 loaded at startup, re-asserting "
+            ("debug", "AMS: lane15 loaded at startup, re-asserting "
                       "AMS loaded state + follower")]
 
     def test_uid_is_re_resolved_after_a_reboot(self, monkeypatch):
@@ -8360,7 +8360,7 @@ class TestAfcBambuAMSRelinkAfterReboot:
             return super().__getattribute__(name)
 
     #: What the real bridge logs for each info request it sends.
-    ASKED = ("debug", 'AFC bambu: request_info -> sent {"cmd":"info"}')
+    ASKED = ("debug", 'BridgeBox: request_info -> sent {"cmd":"info"}')
 
     @staticmethod
     def _relinking(name: str) -> LogLine:
@@ -8368,7 +8368,7 @@ class TestAfcBambuAMSRelinkAfterReboot:
         :param name: the unit's name
         :return LogLine: the line of a relink sent after a reboot
         """
-        return ("debug", f"AFC bambu {name}: bridge rebooted -- relinking the "
+        return ("debug", f"{name}: bridge rebooted -- relinking the "
                         f"chain so the units drop their park (they lost their "
                         f"master mid-frame)")
 
@@ -8457,7 +8457,7 @@ class TestAfcBambuAMSRelinkAfterReboot:
         assert bridge_sent(bridge) == []
         assert unit.reactor.callbacks == []
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS0: bridge rebooted, but a print is running "
+            ("info", "AMS0: bridge rebooted, but a print is running "
                      "-- not relinking. Units may show a fault until the print "
                      "ends; AFC_BAMBU_RELINK UNIT=AMS0 clears it by hand.")]
 
@@ -8538,7 +8538,7 @@ class TestAfcBambuAMSRelinkAfterReboot:
         unit = make_bambu_unit("AMS", printer=printer, bridge=bridge)
         unit.logger.messages.clear()
         unit._relink_after_reboot()
-        failed = "AFC bambu AMS: post-reboot relink failed"
+        failed = "AMS: post-reboot relink failed"
         assert unit.logger.messages == [self._relinking("AMS"),
                                         ("debug", failed)]
         assert [line for line, _tb in unit.logger.tracebacks] == [failed]
@@ -8700,7 +8700,7 @@ class TestAfcBambuAMSRestoreLoadedFollower:
         unit.logger.messages.clear()
         unit.reactor.run_callbacks(until=108.0)        # the claim's restore
         lane = unit.lanes["lane15"]
-        waits = ("debug", "AFC bambu AMS: scan priming waits until the bridge "
+        waits = ("debug", "AMS: scan priming waits until the bridge "
                           "has polled this unit and re-read its bays")
         if record_loaded:
             assert lane.tool_loaded is True
@@ -8775,9 +8775,9 @@ class TestAfcBambuAMSRestoreFollowerOnReturn:
         assert [o for o in sent[:-5]
                 if o["cmd"] in ("raw", "select", "assist")] == []
         assert unit.logger.messages == [
-            ("debug", f"AFC bambu AMS: UID {_P2_HELD_UID} confirmed at "
+            ("debug", f"AMS: UID {_P2_HELD_UID} confirmed at "
                       f"ams_index 0"),
-            ("debug", "AFC bambu AMS: scan priming waits until the bridge has "
+            ("debug", "AMS: scan priming waits until the bridge has "
                       "polled this unit and re-read its bays"),
             _P2_REASSERT, _P2_RESTORED]
 
@@ -9047,7 +9047,7 @@ class TestAfcBambuAMSSystemTest:
         assert lane._afc_prep_done is False
         assert unit.logger.messages == [
             self.LOADED,
-            ("warning", "AFC bambu: set_afc_prep_done failed: lane gone")]
+            ("warning", "BridgeBox: set_afc_prep_done failed: lane gone")]
 
     def test_an_empty_bay_leaves_the_lane_idle(self, monkeypatch):
         unit = self._unit(monkeypatch, present=False, material="PLA",
@@ -10057,11 +10057,11 @@ class TestAfcBambuAMSOnStatus:
             {"cmd": "capscan", "trig": 1, "ins": 1, "unit": 0, "slot": 3}]
         assert unit._scan_defer == [False, False, False, False]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unit is free -- scanning the spool "
+            ("debug", "Bambu_AMS_1: unit is free -- scanning the spool "
                      "in slot 3 that was held back"),
-            ("debug", "AFC bambu Bambu_AMS_1: new spool detected in slot 3, "
+            ("debug", "Bambu_AMS_1: new spool detected in slot 3, "
                       "scanning tag"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> waiting (fw "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> waiting (fw "
                       "seq=0 res=0 | record: mat=- uid=- present=True)")]
 
     def test_a_held_insert_that_does_not_stay_gets_no_defaults(
@@ -10354,9 +10354,9 @@ class TestAfcBambuAMSOnStatus:
         assert unit.ams_index == 1
         assert unit._slots == [{}, {}, {}, {}]     # keyed to the old index
         assert unit.logger.messages == [
-            ("warning", "AFC bambu AMS: chain re-enrolled -- UID AAAA00 moved "
+            ("warning", "AMS: chain re-enrolled -- UID AAAA00 moved "
                         "from index 0 to 1; re-adopting"),
-            ("debug", "AFC bambu AMS: pinned to UID AAAA00 at chain index 1 "
+            ("debug", "AMS: pinned to UID AAAA00 at chain index 1 "
                      "(was ams_index 0)")]
 
     def test_a_chain_map_that_cannot_be_read_keeps_the_index(self,
@@ -10374,7 +10374,7 @@ class TestAfcBambuAMSOnStatus:
         broken = {"slots": [None]}
         unit._on_status(broken)
         unit._on_status(broken)
-        msg = ("AFC bambu AMS: status apply error: 'NoneType' object has no "
+        msg = ("AMS: status apply error: 'NoneType' object has no "
                "attribute 'get'")
         assert unit.logger.messages == [("warning", msg), ("debug", msg)]
 
@@ -10721,7 +10721,7 @@ class TestAfcBambuAMSCheckUnitStalled:
         """:param ustate: unit 1's state byte from now on"""
         unit._bridge.status = {"units": [{"n": 1, "ustate": ustate}]}
 
-    STALLED = ("AFC bambu AMS: the AMS reports it has STALLED (state 7) on "
+    STALLED = ("AMS: the AMS reports it has STALLED (state 7) on "
                "lane1 -- the spool is likely tangled or the path jammed. Clear "
                "the snag, then resume.")
 
@@ -10749,7 +10749,7 @@ class TestAfcBambuAMSCheckUnitStalled:
 
     OVERFEED = ("[AMS_SWITCH]assist finish stall! pos:-0.27->0.64, "
                 "det:43mm")
-    OVERFEED_LOG = ("debug", "AFC bambu AMS: lane1: the AMS's assist timed "
+    OVERFEED_LOG = ("debug", "AMS: lane1: the AMS's assist timed "
                             "out before the buffer filled (buffer -0.27 -> "
                             "0.64). Not a jam; the follower re-arms once the "
                             "AMS recovers and the extruder pulls.")
@@ -11123,7 +11123,7 @@ class TestAfcBambuAMSSyncLanes:
         :param present: its presence
         :return LogLine: the trace line for a bay's verdict changing
         """
-        return ("debug", f"AFC bambu {unit}: slot {slot} scan verdict -> "
+        return ("debug", f"{unit}: slot {slot} scan verdict -> "
                          f"{verdict} (fw seq={seq} res={res} | record: "
                          f"mat={mat} uid={uid} present={present})")
 
@@ -11308,12 +11308,12 @@ class TestAfcBambuAMSSyncLanes:
     #: The lane before anything reached it.
     BLANK = (None, "", "", None, 0.0)
     #: The readout of the PLA Matte record.
-    READOUT = ("debug", "AFC bambu BambuAMS_2: lane23 tag -- PLA Matte | "
+    READOUT = ("debug", "BambuAMS_2: lane23 tag -- PLA Matte | "
                         "color #7A7A7A | uid 01D0EC0F | remaining no "
                         "measurement yet | nominal 1000 g | nozzle 190-?C | "
                         "bed 55C (material)")
     #: The line for the record reaching the lane.
-    APPLIED_LINE = ("info", "AFC bambu BambuAMS_2: applied tag to lane23: "
+    APPLIED_LINE = ("info", "BambuAMS_2: applied tag to lane23: "
                             "Bambu PLA Matte #7A7A7A")
 
     def test_mid_scan_the_lane_is_not_touched(self, monkeypatch):
@@ -11355,7 +11355,7 @@ class TestAfcBambuAMSSyncLanes:
             self.APPLIED_LINE, self.READOUT]
 
     #: The defaults line for bay 0's untagged reel, scanned and read nothing.
-    NO_PROFILE = ("info", "AFC bambu BambuAMS_2: no readable tag profile in "
+    NO_PROFILE = ("info", "BambuAMS_2: no readable tag profile in "
                           "slot 0; applied lane defaults to lane23 -- the "
                           "tag's UID is 01D0EC0F, bind it to a spool in "
                           "Spoolman to track this reel")
@@ -11444,7 +11444,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._scan_t0 == [None] * 4
         assert self._matte_lane(unit.lanes["lane23"]) == self.BLANK
         assert unit.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_2: slot 0 scan verdict -> read (fw seq=None res=None | "
+            ("debug", "BambuAMS_2: slot 0 scan verdict -> read (fw seq=None res=None | "
                       "record: mat=- uid=01d0ec0f present=True)")]
 
     def test_a_failing_debug_line_never_stops_a_read(self, monkeypatch):
@@ -11458,7 +11458,7 @@ class TestAfcBambuAMSSyncLanes:
         assert self._matte_lane(unit.lanes["lane23"]) == self.APPLIED
         assert unit._scan_t0 == [None] * 4
         assert unit.logger.messages == [
-            ("info", "AFC bambu BambuAMS_2: applied tag to lane23: Bambu PLA Matte #7A7A7A")]
+            ("info", "BambuAMS_2: applied tag to lane23: Bambu PLA Matte #7A7A7A")]
 
     # A late tag beats a no-tag verdict: the bay's record can improve after
     # the unit has answered. Bay 0's scan opened at 100.0, the clock reads
@@ -11485,7 +11485,7 @@ class TestAfcBambuAMSSyncLanes:
         :param why: the line's tail
         :return LogLine: the no-tag defaults line for bay 0 of BambuAMS_2
         """
-        return ("info", f"AFC bambu BambuAMS_2: no readable tag profile in "
+        return ("info", f"BambuAMS_2: no readable tag profile in "
                         f"slot 0; applied lane defaults to {lane} -- {why}")
 
     #: The tail for a record with no UID either.
@@ -11506,13 +11506,13 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.logger.messages == [
             self._verdict("BambuAMS_2", 0, "notag", mat="PLA Matte",
                           uid="ecb61cd0"),
-            ("debug", "AFC bambu BambuAMS_2: lane19 -- the unit ran its scan "
+            ("debug", "BambuAMS_2: lane19 -- the unit ran its scan "
                      "and measure and reported no NEW read; keeping the tag "
                      "already on this bay (PLA Matte ECB61CD0) for the lane "
                      "rather than giving it defaults"),
-            ("info", "AFC bambu BambuAMS_2: applied tag to lane19: Bambu PLA "
+            ("info", "BambuAMS_2: applied tag to lane19: Bambu PLA "
                      "Matte #A3D8E1"),
-            ("debug", "AFC bambu BambuAMS_2: lane19 tag -- PLA Matte | color "
+            ("debug", "BambuAMS_2: lane19 tag -- PLA Matte | color "
                       "#A3D8E1 | uid ECB61CD0 | remaining no measurement yet "
                       "| nominal 1000 g | nozzle ?-?C | bed 55C (material)")]
 
@@ -11592,7 +11592,7 @@ class TestAfcBambuAMSSyncLanes:
                f"filament does not grow, so the lower reading stands)")
         lines: List[LogLine] = []
         if held is not None:
-            lines.append(("debug", f"AFC bambu BambuAMS_2: slot 0 measured "
+            lines.append(("debug", f"BambuAMS_2: slot 0 measured "
                                    f"{pct}%, held at the {held}% this reel "
                                    f"measured before -- filament does not "
                                    f"grow, and the odometer is worth about "
@@ -11612,7 +11612,7 @@ class TestAfcBambuAMSSyncLanes:
         return lines
 
     #: The verdict trace for bay 0's PLA Matte reel with no scan open.
-    MATTE_NONE = ("debug", "AFC bambu BambuAMS_2: slot 0 scan verdict -> none "
+    MATTE_NONE = ("debug", "BambuAMS_2: slot 0 scan verdict -> none "
                            "(fw seq=None res=None | record: mat=PLA Matte "
                            "uid=ecb61cd0 present=True)")
 
@@ -11728,11 +11728,11 @@ class TestAfcBambuAMSSyncLanes:
                 lane.filament_name, lane.color, lane.spool_id)
 
     #: The verdict trace for bay 0's PLA Basic reel with no scan open.
-    BASIC_NONE = ("debug", "AFC bambu BambuAMS_2: slot 0 scan verdict -> none "
+    BASIC_NONE = ("debug", "BambuAMS_2: slot 0 scan verdict -> none "
                            "(fw seq=None res=None | record: mat=PLA Basic "
                            "uid=01d0ec0f present=True)")
     #: The readout of that record.
-    BASIC_READOUT = ("debug", "AFC bambu BambuAMS_2: lane19 tag -- PLA Basic "
+    BASIC_READOUT = ("debug", "BambuAMS_2: lane19 tag -- PLA Basic "
                               "GFA00 | color #FF0000 | uid 01D0EC0F | "
                               "remaining no measurement yet | nominal 1000 g "
                               "| nozzle ?-?C | bed 55C (material)")
@@ -11747,7 +11747,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._afc_owned == {0}
         assert unit.logger.messages == [
             self.BASIC_NONE,
-            ("debug", "AFC bambu BambuAMS_2: lane19 -- filling in color "
+            ("debug", "BambuAMS_2: lane19 -- filling in color "
                      "#FF0000 and variant Basic and vendor and name from the "
                      "bay's record (PLA Basic)")]
 
@@ -11770,11 +11770,11 @@ class TestAfcBambuAMSSyncLanes:
             "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", 109)
         assert unit._afc_owned == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_2: slot 0 scan verdict -> read (fw "
+            ("debug", "BambuAMS_2: slot 0 scan verdict -> read (fw "
                       "seq=None res=None | record: mat=PLA Basic "
                       "uid=01d0ec0f present=True)"),
             self.BASIC_READOUT,
-            ("info", "AFC bambu BambuAMS_2: applied tag to lane19: Bambu PLA "
+            ("info", "BambuAMS_2: applied tag to lane19: Bambu PLA "
                      "Basic #FF0000")]
 
     def test_pulling_the_spool_clears_the_mark(self, monkeypatch):
@@ -11797,7 +11797,7 @@ class TestAfcBambuAMSSyncLanes:
             "PLA", "", "", "", "", "")
         assert unit.logger.messages == [
             self._verdict("BambuAMS_2", 0, "notag"),
-            ("debug", "AFC bambu BambuAMS_2: unbinding lane19 from spool 109 "
+            ("debug", "BambuAMS_2: unbinding lane19 from spool 109 "
                       "-- the scan read no tag, so this link is the previous "
                       "spool's"),
             self._defaults_for("lane19", self.NO_UID)]
@@ -11835,7 +11835,7 @@ class TestAfcBambuAMSSyncLanes:
             "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", None)
         assert unit.logger.messages == [
             self.BASIC_NONE,
-            ("info", "AFC bambu BambuAMS_2: applied tag to lane19: Bambu PLA "
+            ("info", "BambuAMS_2: applied tag to lane19: Bambu PLA "
                      "Basic #FF0000"),
             self.BASIC_READOUT]
 
@@ -11851,7 +11851,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.logger.messages == [
             self._verdict("BambuAMS_2", 0, "none", mat="PLA Sparkle",
                           uid="04c07001"),
-            ("debug", "AFC bambu BambuAMS_2: lane19 -- filling in variant "
+            ("debug", "BambuAMS_2: lane19 -- filling in variant "
                      "Sparkle and vendor and name from the bay's record (PLA "
                      "Sparkle)")]
 
@@ -11867,7 +11867,7 @@ class TestAfcBambuAMSSyncLanes:
             "PLA", "Basic", "Bambu", "Bambu PLA Basic", "#FF0000", None)
         assert unit.logger.messages == [
             self.BASIC_NONE,
-            ("info", "AFC bambu BambuAMS_2: applied tag to lane19: Bambu PLA "
+            ("info", "BambuAMS_2: applied tag to lane19: Bambu PLA "
                      "Basic #FF0000"),
             self.BASIC_READOUT]
 
@@ -11994,9 +11994,9 @@ class TestAfcBambuAMSSyncLanes:
         :return list: the log lines, in order
         """
         held = [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane8 spool=164 material='PLA "
                       "Basic' density=1.24 pct_raw=89 radius_m=None circ_m=None save_r_m=None "
@@ -12007,7 +12007,7 @@ class TestAfcBambuAMSSyncLanes:
                 ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "89% left -- roughly 732 g of a 1000 g spool; updated Spoolman spool "
                          "164."),
-                ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 164 "
+                ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 164 "
                          "(physical AMS measurement)")]
         return held + [
             ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about 89% "
@@ -12031,7 +12031,7 @@ class TestAfcBambuAMSSyncLanes:
             self._frames(unit)                # before PREP: only the baseline
             assert lane.weight == 600
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
+                ("debug", "Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
                           "before this connection; recorded, not applied -- the lane keeps what "
                           "it had")]
             unit.logger.messages.clear()
@@ -12039,7 +12039,7 @@ class TestAfcBambuAMSSyncLanes:
             self._frames(unit)                # after PREP
             assert lane.weight == 600
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
                           "res=None | record: mat=ABS uid=d13fdb0e present=True)")]
             unit.logger.messages.clear()
             unit._scan_primed = True
@@ -12061,9 +12061,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane10"]
         self._frames(unit)                    # connection start: recorded
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         self._in_session(unit)
@@ -12082,7 +12082,7 @@ class TestAfcBambuAMSSyncLanes:
                 ("info", "Bambu_AMS_1 lane10: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "89% left -- roughly 732 g of a 1000 g spool; updated Spoolman spool "
                          "164."),
-                ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 164 "
+                ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 164 "
                          "(physical AMS measurement)")]
         else:
             assert self._writes(unit) == []
@@ -12119,9 +12119,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane8"]
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12137,7 +12137,7 @@ class TestAfcBambuAMSSyncLanes:
                       "Basic' density=1.24 pct_raw=89 radius_m=None circ_m=None save_r_m=None "
                       "radius_src=none source='physical AMS measurement' nominal=1000 "
                       "grams_written=732 grams_modelled=732"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e"),
+            ("debug", "Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e"),
             ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about 89% "
                      "left -- roughly 732 g of a 1000 g spool; a Spoolman lookup for D13FDB0E is "
                      "in progress; the measurement goes to the spool it finds.")]
@@ -12150,9 +12150,9 @@ class TestAfcBambuAMSSyncLanes:
         assert self._writes(unit) == [self.UID_163, self.SET_163]
         assert unit._measure._bind_owed == {}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 bound to spool 163 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane8 bound to spool 163 after its measurement; "
                       "handing the measured 732 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
                      "(physical AMS measurement)")]
         unit.logger.messages.clear()
         lane.weight = 700                     # set by hand
@@ -12167,9 +12167,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane8"]
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12205,15 +12205,15 @@ class TestAfcBambuAMSSyncLanes:
         self._stamp(unit, 5, 89)
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane8 spool=None material='PLA "
                       "Basic' density=1.24 pct_raw=89 radius_m=None circ_m=None save_r_m=None "
                       "radius_src=none source='physical AMS measurement' nominal=1000 "
                       "grams_written=732 grams_modelled=732"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e"),
+            ("debug", "Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e"),
             ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about 89% "
                      "left -- roughly 732 g of a 1000 g spool; a Spoolman lookup for D13FDB0E is "
                      "in progress; the measurement goes to the spool it finds.")]
@@ -12284,7 +12284,7 @@ class TestAfcBambuAMSSyncLanes:
                 ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "82% left -- roughly 674 g of a 1000 g spool; updated Spoolman spool "
                          "164."),
-                ("debug", "AFC bambu Bambu_AMS_1: wrote 674.0 g remaining to Spoolman spool 164 "
+                ("debug", "Bambu_AMS_1: wrote 674.0 g remaining to Spoolman spool 164 "
                          "(physical AMS measurement)")]
         else:
             assert self._writes(unit) == []
@@ -12306,9 +12306,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane8"]
         self._frames(unit)                    # connection start: recorded
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12318,16 +12318,16 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)
         assert 1 not in unit._meas_seen
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: spool REMOVED from slot 1 (AMS bay 2)")]
+            ("debug", "Bambu_AMS_1: spool REMOVED from slot 1 (AMS bay 2)")]
         unit.logger.messages.clear()
         unit._slots[1] = {"index": 1, "present": True, "weight": 1000,
                           "rfid_uid": "7392020a", "material": "PLA Basic",
                           "meas_seq": 4, "meas_pct": None}
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: spool INSERTED in slot 1 (AMS bay 2)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane8: Bambu PLA Basic"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid 7392020A | "
+            ("debug", "Bambu_AMS_1: spool INSERTED in slot 1 (AMS bay 2)"),
+            ("info", "Bambu_AMS_1: applied tag to lane8: Bambu PLA Basic"),
+            ("debug", "Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid 7392020A | "
                       "remaining no measurement yet | nominal 1000 g | nozzle ?-?C | bed ?C "
                       "(unknown)")]
         unit.logger.messages.clear()
@@ -12371,9 +12371,9 @@ class TestAfcBambuAMSSyncLanes:
         for name in ("afc_led", "is_printing", "in_print"):
             monkeypatch.setattr(unit.afc.function, name, _bambu_p3_fails)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._slots[1] = {"index": 1, "present": False, "meas_seq": 4,
@@ -12382,7 +12382,7 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.status, lane.loaded_to_hub) == (AFCLaneState.NONE,
                                                      False)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: spool REMOVED from slot 1 (AMS bay 2)")]
+            ("debug", "Bambu_AMS_1: spool REMOVED from slot 1 (AMS bay 2)")]
         unit.logger.messages.clear()
         unit._slots[1] = slot_info(1, material="PLA Basic", uid="7392020a",
                                    weight=1000, mseq=4)
@@ -12390,9 +12390,9 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.status, lane.loaded_to_hub) == (AFCLaneState.LOADED,
                                                      True)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: spool INSERTED in slot 1 (AMS bay 2)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane8: Bambu PLA Basic"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid 7392020A | "
+            ("debug", "Bambu_AMS_1: spool INSERTED in slot 1 (AMS bay 2)"),
+            ("info", "Bambu_AMS_1: applied tag to lane8: Bambu PLA Basic"),
+            ("debug", "Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid 7392020A | "
                       "remaining no measurement yet | nominal 1000 g | nozzle ?-?C | bed 55C "
                       "(material)")]
 
@@ -12423,7 +12423,7 @@ class TestAfcBambuAMSSyncLanes:
         assert self._writes(unit) == writes
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 70% (seq 6) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 70% (seq 6) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had")]
         unit.logger.messages.clear()
         self._stamp(unit, 7, 80)              # moved after the reconnect
@@ -12439,7 +12439,7 @@ class TestAfcBambuAMSSyncLanes:
                 ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "80% left -- roughly 658 g of a 1000 g spool; updated Spoolman spool "
                          "164."),
-                ("debug", "AFC bambu Bambu_AMS_1: wrote 658.0 g remaining to Spoolman spool 164 "
+                ("debug", "Bambu_AMS_1: wrote 658.0 g remaining to Spoolman spool 164 "
                          "(physical AMS measurement)")]
         else:
             assert unit.logger.messages == [
@@ -12462,9 +12462,9 @@ class TestAfcBambuAMSSyncLanes:
         self._in_session(unit)
         unit._cap_open_pending(1, asked=True)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._on_bridge_reconnect()
@@ -12491,7 +12491,7 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)                    # no meas_seq in the record yet
         assert unit._stamp_looked == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         self._stamp(unit, 7, 138)
@@ -12500,7 +12500,7 @@ class TestAfcBambuAMSSyncLanes:
         assert self._writes(unit) == []
         assert unit._meas_seen == {1: (7, 138)}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
                       "before this connection; recorded, not applied -- the lane keeps what it "
                       "had")]
 
@@ -12512,9 +12512,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane8"]
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12551,9 +12551,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane8"]
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12568,7 +12568,7 @@ class TestAfcBambuAMSSyncLanes:
                       "Basic' density=1.24 pct_raw=89 radius_m=None circ_m=None save_r_m=None "
                       "radius_src=none source='physical AMS measurement' nominal=1000 "
                       "grams_written=732 grams_modelled=732"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 164 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 164 "
                      "(physical AMS measurement)"),
             ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about 89% "
                      "left -- roughly 732 g of a 1000 g spool; updated Spoolman spool 164.")]
@@ -12583,9 +12583,9 @@ class TestAfcBambuAMSSyncLanes:
                           "meas_seq": 4, "meas_pct": 60}
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=- uid=- present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12615,9 +12615,9 @@ class TestAfcBambuAMSSyncLanes:
         lane = unit.lanes["lane8"]
         self._frames(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._prep_seen = unit._scan_primed = True
@@ -12641,13 +12641,13 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.spool_id, lane.weight) == (163, 732)
         assert self._writes(unit) == [self.UID_163, self.SET_163]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e"),
+            ("debug", "Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e"),
             ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about 89% "
                      "left -- roughly 732 g of a 1000 g spool; a Spoolman lookup for D13FDB0E is "
                      "in progress; the measurement goes to the spool it finds."),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 bound to spool 163 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane8 bound to spool 163 after its measurement; "
                       "handing the measured 732 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
                      "(physical AMS measurement)")]
 
     # A reclaim: BridgeBox releases a unit and claims it again through the
@@ -12663,10 +12663,10 @@ class TestAfcBambuAMSSyncLanes:
         :return list: what a claim of Bambu_AMS_1 onto RECLAIM_UID says
         """
         return [
-            ("debug", f"AFC bambu Bambu_AMS_1: chain index not resolved yet "
+            ("debug", f"Bambu_AMS_1: chain index not resolved yet "
                       f"(UID {cls.RECLAIM_UID}); holding this unit's "
                       f"registrations until the chain map arrives"),
-            ("debug", f"AFC bambu Bambu_AMS_1: claimed UID {cls.RECLAIM_UID} "
+            ("debug", f"Bambu_AMS_1: claimed UID {cls.RECLAIM_UID} "
                      f"as {model} and brought online live (ams_index=0).")]
 
     @classmethod
@@ -12708,7 +12708,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.afc.save_vars.call_count == 1
         if section:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
                           "res=None | record: mat=PLA Basic uid=d13fdb0e present=True)"),
                 ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane8 spool=164 material='PLA "
                           "Basic' density=1.24 pct_raw=63 radius_m=None circ_m=None "
@@ -12717,11 +12717,11 @@ class TestAfcBambuAMSSyncLanes:
                 ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "63% left -- roughly 518 g of a 1000 g spool; updated Spoolman spool "
                          "164."),
-                ("debug", "AFC bambu Bambu_AMS_1: wrote 518.0 g remaining to Spoolman spool 164 "
+                ("debug", "Bambu_AMS_1: wrote 518.0 g remaining to Spoolman spool 164 "
                          "(physical AMS measurement)")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
                           "res=None | record: mat=PLA Basic uid=d13fdb0e present=True)"),
                 ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane8 spool=164 material='PLA "
                           "Basic' density=1.24 pct_raw=63 radius_m=None circ_m=None "
@@ -12774,7 +12774,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.afc.save_vars.call_count == 1
         assert unit._meas_seen == {1: (6, 70)}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 70% (seq 6) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 70% (seq 6) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had")]
 
     @SECTIONS
@@ -12805,7 +12805,7 @@ class TestAfcBambuAMSSyncLanes:
                                                                518)
         if section:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
                           "res=None | record: mat=PLA Basic uid=d13fdb0e present=True)"),
                 ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "63% left -- roughly 518 g of a 1000 g spool; no Spoolman lookup has "
@@ -12813,7 +12813,7 @@ class TestAfcBambuAMSSyncLanes:
                          "run AFC_BAMBU_SCAN LANE=lane8 to link it.")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None "
                           "res=None | record: mat=PLA Basic uid=d13fdb0e present=True)"),
                 ("info", "Bambu_AMS_1 lane8: tag read: PLA Basic [tag D13FDB0E]. Measured about "
                          "63% left -- roughly 518 g of a 1000 g spool; kept on the lane -- the "
@@ -12867,9 +12867,9 @@ class TestAfcBambuAMSSyncLanes:
         unit.logger.messages.clear()
         self._settle(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 -- cycle ended with no new read; already "
+            ("debug", "Bambu_AMS_1: lane8 -- cycle ended with no new read; already "
                      "measured this session (63% held), spool unchanged")]
 
     @pytest.mark.parametrize("bound", ["d13fdb0e", "7392020a", None],
@@ -12884,17 +12884,17 @@ class TestAfcBambuAMSSyncLanes:
         self._settle(unit)
         if bound == "d13fdb0e":
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=None "
                           "res=None | record: mat=PLA Basic uid=d13fdb0e present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane8 -- the unit ran its scan and measure and "
+                ("debug", "Bambu_AMS_1: lane8 -- the unit ran its scan and measure and "
                          "reported no NEW read (same spool as last time); keeping the tag "
                          "already on this bay (PLA Basic D13FDB0E) for the lane rather than "
                          "giving it defaults")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=None "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=None "
                           "res=None | record: mat=PLA Basic uid=d13fdb0e present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane8 -- the unit ran its scan and measure and "
+                ("debug", "Bambu_AMS_1: lane8 -- the unit ran its scan and measure and "
                          "reported no NEW read; keeping the tag already on this bay (PLA Basic "
                          "D13FDB0E) for the lane rather than giving it defaults")]
 
@@ -12939,19 +12939,19 @@ class TestAfcBambuAMSSyncLanes:
             # An AMS 1 is asked to scan and measure the insert.
             assert bridge.sent == [{"cmd": "capscan", "trig": 1, "ins": 1,
                                     "unit": 0, "slot": 1}]
-            scanning = ("debug", "AFC bambu Bambu_AMS_1: new spool detected "
+            scanning = ("debug", "Bambu_AMS_1: new spool detected "
                                  "in slot 1, scanning tag")
         else:
             # An HT does both on its own.
             assert bridge.sent == []
-            scanning = ("debug", "AFC bambu Bambu_AMS_1: new spool in slot "
+            scanning = ("debug", "Bambu_AMS_1: new spool in slot "
                                  "1; HT scans and measures it on insert "
                                  "(firmware-driven at 0x1800)")
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 56% "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 56% "
                       "(seq 3) from before this connection; recorded, not "
                       "applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: spool INSERTED in slot 1 (AMS "
+            ("debug", "Bambu_AMS_1: spool INSERTED in slot 1 (AMS "
                      "bay 2)"),
             scanning,
             self._verdict("Bambu_AMS_1", 1, "waiting", mat="PLA Basic",
@@ -12966,12 +12966,12 @@ class TestAfcBambuAMSSyncLanes:
         assert lane.weight == 400
         assert self._writes(unit) == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=1 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=1 res=1 | "
                       "record: mat=PLA Basic uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid D13FDB0E | "
+            ("debug", "Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid D13FDB0E | "
                       "remaining 56% stamped before this connection, not applied | nominal 1000 "
                       "g | nozzle ?-?C | bed 55C (material)"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=1 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=1 res=1 | "
                       "record: mat=PLA Basic uid=d13fdb0e present=True)")]
 
     @SECTIONS
@@ -12991,12 +12991,12 @@ class TestAfcBambuAMSSyncLanes:
         assert bridge.sent == [{"cmd": "capscan", "trig": 1, "ins": 1,
                                 "unit": 0, "slot": 1}]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
                       "before this connection; recorded, not applied -- the lane keeps what it "
                       "had"),
-            ("debug", "AFC bambu Bambu_AMS_1: spool INSERTED in slot 1 (AMS bay 2)"),
-            ("debug", "AFC bambu Bambu_AMS_1: new spool detected in slot 1, scanning tag"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> waiting (fw seq=None "
+            ("debug", "Bambu_AMS_1: spool INSERTED in slot 1 (AMS bay 2)"),
+            ("debug", "Bambu_AMS_1: new spool detected in slot 1, scanning tag"),
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> waiting (fw seq=None "
                       "res=None | record: mat=ABS uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         self._frames(unit, 1)             # the scan still moving filament
@@ -13007,12 +13007,12 @@ class TestAfcBambuAMSSyncLanes:
         assert lane.weight == 600
         assert self._writes(unit) == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=8 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=8 res=1 | "
                       "record: mat=ABS uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane12 tag -- ABS | color ? | uid D13FDB0E | "
+            ("debug", "Bambu_AMS_1: lane12 tag -- ABS | color ? | uid D13FDB0E | "
                       "remaining 138% stamped before this connection, not applied | nominal 1000 "
                       "g | nozzle ?-?C | bed 90C (material)"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=8 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=8 res=1 | "
                       "record: mat=ABS uid=d13fdb0e present=True)")]
 
     # The same percent, measured now.
@@ -13033,10 +13033,10 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)
         assert lane.weight == 900
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
                       "before this connection; recorded, not applied -- the lane keeps what it "
                       "had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=ABS uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._cap_open_pending(1, asked=True)     # the CAPSCAN
@@ -13056,7 +13056,7 @@ class TestAfcBambuAMSSyncLanes:
                          "roughly 952 g of a 1000 g spool (the AMS read 138%, meaning it "
                          "measures a little larger than a reference full spool); updated "
                          "Spoolman spool 163."),
-                ("debug", "AFC bambu Bambu_AMS_1: wrote 952.0 g remaining to Spoolman spool 163 "
+                ("debug", "Bambu_AMS_1: wrote 952.0 g remaining to Spoolman spool 163 "
                          "(physical AMS measurement) -- measured 138%, capped to the spool's "
                          "1000 g nominal")]
         else:
@@ -13088,10 +13088,10 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)
         self._in_session(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
                       "before this connection; recorded, not applied -- the lane keeps what it "
                       "had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=ABS uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         self._stamp(unit, 8, 138)
@@ -13111,10 +13111,10 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)
         self._in_session(unit)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 138% (seq 7) from "
                       "before this connection; recorded, not applied -- the lane keeps what it "
                       "had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=ABS uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit._cap_open_pending(1, asked=True)
@@ -13141,9 +13141,9 @@ class TestAfcBambuAMSSyncLanes:
         assert lane.weight == 952
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 7) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 7) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=ABS uid=d13fdb0e present=True)"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane12 spool=163 material='ABS' "
                       "density=1.04 pct_raw=138 radius_m=None circ_m=None save_r_m=None "
@@ -13196,11 +13196,11 @@ class TestAfcBambuAMSSyncLanes:
         cls._frames(unit)
         assert unit._scan_verdict(1) == "waiting"
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=4 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=4 res=1 | "
                       "record: mat=PLA Matte uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> waiting (fw seq=4 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> waiting (fw seq=4 res=1 | "
                       "record: mat=- uid=- present=True)")]
         unit.logger.messages.clear()
         return unit, full
@@ -13234,20 +13234,20 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)                    # the tag applies, bind goes out
         assert unit.afc.spool.asked == [(lane, 163)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
                       "record: mat=PLA Matte uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid D13FDB0E | "
+            ("debug", "Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid D13FDB0E | "
                       "remaining 84% MEASURED (~691 g) | nominal 1000 g | nozzle ?-?C | bed 55C "
                       "(material)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane14 -- 84% weighed at its material now it is "
+            ("info", "Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
+            ("debug", "Bambu_AMS_1: lane14 -- 84% weighed at its material now it is "
                       "known: 691 g, not the 840 g written before the tag landed"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool 163 by UID "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool 163 by UID "
                       "d13fdb0e"),
             ("info", "Bambu_AMS_1 lane14: tag read: PLA Matte [tag D13FDB0E]. Measured about 84% "
                      "left -- roughly 691 g of a 1000 g spool; a Spoolman lookup for D13FDB0E is "
                      "in progress; the measurement goes to the spool it finds."),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
                       "record: mat=PLA Matte uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit.afc.spool.land(890)              # Spoolman's stored figure
@@ -13260,9 +13260,9 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._measure._convert_owed == {}
         assert unit.get_status()["slots"][1]["remain_pct"] == 84
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane14 bound to spool 163 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane14 bound to spool 163 after its measurement; "
                       "handing the measured 691 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 691.0 g remaining to Spoolman spool 163 "
+            ("debug", "Bambu_AMS_1: wrote 691.0 g remaining to Spoolman spool 163 "
                      "(physical AMS measurement)")]
 
     @SECTIONS
@@ -13287,35 +13287,35 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.get_status()["slots"][1]["remain_pct"] == 84
         if section:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
                           "record: mat=PLA Matte uid=d13fdb0e present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid "
+                ("debug", "Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid "
                           "D13FDB0E | remaining 84% MEASURED (~691 g) | nominal 1000 g | nozzle "
                           "?-?C | bed 55C (material)"),
-                ("info", "AFC bambu Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane14 -- 84% weighed at its material now it "
+                ("info", "Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
+                ("debug", "Bambu_AMS_1: lane14 -- 84% weighed at its material now it "
                           "is known: 691 g, not the 840 g written before the tag landed"),
-                ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool 163 by UID "
+                ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool 163 by UID "
                           "d13fdb0e"),
                 ("info", "Bambu_AMS_1 lane14: tag read: PLA Matte [tag D13FDB0E]. Measured about "
                          "84% left -- roughly 691 g of a 1000 g spool; a Spoolman lookup for "
                          "D13FDB0E is in progress; the measurement goes to the spool it finds."),
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
                           "record: mat=PLA Matte uid=d13fdb0e present=True)")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
                           "record: mat=PLA Matte uid=d13fdb0e present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid "
+                ("debug", "Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid "
                           "D13FDB0E | remaining 84% MEASURED (~691 g) | nominal 1000 g | nozzle "
                           "?-?C | bed 55C (material)"),
-                ("info", "AFC bambu Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane14 -- 84% weighed at its material now it "
+                ("info", "Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
+                ("debug", "Bambu_AMS_1: lane14 -- 84% weighed at its material now it "
                           "is known: 691 g, not the 840 g written before the tag landed"),
                 ("info", "Bambu_AMS_1 lane14: tag read: PLA Matte [tag D13FDB0E]. Measured about "
                          "84% left -- roughly 691 g of a 1000 g spool; kept on the lane -- the "
                          "Spoolman module ([AFC_BambuAMS_rfid]) is off."),
-                ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
+                ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
                           "record: mat=PLA Matte uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         saves = unit.afc.save_vars.call_count
@@ -13343,16 +13343,16 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit, 3)
         assert lane.weight == 800
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
                       "record: mat=PLA Matte uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid D13FDB0E | "
+            ("debug", "Bambu_AMS_1: lane14 tag -- PLA Matte | color ? | uid D13FDB0E | "
                       "remaining 84% MEASURED (~691 g) | nominal 1000 g | nozzle ?-?C | bed 55C "
                       "(material)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
+            ("info", "Bambu_AMS_1: applied tag to lane14: Bambu PLA Matte"),
             ("info", "Bambu_AMS_1 lane14: tag read: PLA Matte [tag D13FDB0E]. Measured about 84% "
                      "left -- roughly 840 g of a 1000 g spool; kept on the lane -- the Spoolman "
                      "module ([AFC_BambuAMS_rfid]) is off."),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
                       "record: mat=PLA Matte uid=d13fdb0e present=True)")]
 
     # A stale binding rebound after the measurement: a spool swapped while
@@ -13374,9 +13374,9 @@ class TestAfcBambuAMSSyncLanes:
         unit._prep_seen = unit._scan_primed = True
         unit._open_scan(1)                    # AFC_BAMBU_SCAN
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=4 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=4 res=1 | "
                       "record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         # An AMS 1 record: the UID, no profile.
@@ -13389,7 +13389,7 @@ class TestAfcBambuAMSSyncLanes:
                       "Basic' density=1.24 pct_raw=89 radius_m=None circ_m=None save_r_m=None "
                       "radius_src=none source='capscan' nominal=1000 grams_written=732 "
                       "grams_modelled=732"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 150 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 150 "
                      "(physical AMS measurement)")]
         unit.logger.messages.clear()
         # The scan ends with no readable profile: the lane is unbound from
@@ -13398,18 +13398,18 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit, 2)
         assert unit.afc.spool.asked == [(lane, 163)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> waiting (fw seq=5 res=3 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> waiting (fw seq=5 res=3 | "
                       "record: mat=- uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=5 res=3 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> notag (fw seq=5 res=3 | "
                       "record: mat=- uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane10 -- kept the measured 732 g through a no-tag "
+            ("debug", "Bambu_AMS_1: lane10 -- kept the measured 732 g through a no-tag "
                       "scan (89% held, no removal since)"),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane10 from spool 150 -- the scan read "
+            ("debug", "Bambu_AMS_1: unbinding lane10 from spool 150 -- the scan read "
                       "no tag, so this link is the previous spool's"),
-            ("info", "AFC bambu Bambu_AMS_1: no readable tag profile in slot 1; applied lane "
+            ("info", "Bambu_AMS_1: no readable tag profile in slot 1; applied lane "
                      "defaults to lane10 -- the tag's UID is D13FDB0E, bind it to a spool in "
                      "Spoolman to track this reel"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane10 to Spoolman spool 163 by UID "
+            ("debug", "Bambu_AMS_1: matched lane10 to Spoolman spool 163 by UID "
                       "d13fdb0e on a read-less scan")]
         unit.logger.messages.clear()
         unit.afc.spool.land(1000)             # 163's stored figure
@@ -13420,9 +13420,9 @@ class TestAfcBambuAMSSyncLanes:
             self.SET_163]
         assert unit._measure._bind_owed == {}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane10 bound to spool 163 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane10 bound to spool 163 after its measurement; "
                       "handing the measured 732 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
                      "(physical AMS measurement)")]
 
     def test_a_contradicted_binding_rebinds_and_gets_the_measurement(
@@ -13441,9 +13441,9 @@ class TestAfcBambuAMSSyncLanes:
         unit._prep_seen = unit._scan_primed = True
         unit._open_scan(1)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=4 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=4 res=1 | "
                       "record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         assert unit._adopt_measured_remain(1, 89, "capscan", seq=5) is True
@@ -13452,7 +13452,7 @@ class TestAfcBambuAMSSyncLanes:
                       "Basic' density=1.24 pct_raw=89 radius_m=None circ_m=None save_r_m=None "
                       "radius_src=none source='capscan' nominal=1000 grams_written=732 "
                       "grams_modelled=732"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 150 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 150 "
                      "(physical AMS measurement)")]
         unit.logger.messages.clear()
         unit._slots[1] = dict(unit._slots[1], meas_seq=5, meas_pct=89,
@@ -13460,19 +13460,19 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit)                    # read: unbind 150, bind by UID
         assert unit.afc.spool.asked == [(lane, 163)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> read (fw seq=5 res=1 | "
                       "record: mat=PLA Basic uid=d13fdb0e present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane10 tag -- PLA Basic | color ? | uid D13FDB0E | "
+            ("debug", "Bambu_AMS_1: lane10 tag -- PLA Basic | color ? | uid D13FDB0E | "
                       "remaining 89% MEASURED (~732 g) | nominal 1000 g | nozzle ?-?C | bed 55C "
                       "(material)"),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane10 from spool 150 -- tag D13FDB0E is "
+            ("debug", "Bambu_AMS_1: unbinding lane10 from spool 150 -- tag D13FDB0E is "
                       "in this bay now, and Spoolman does not list it on that spool"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane10 to Spoolman spool 163 by UID "
+            ("debug", "Bambu_AMS_1: matched lane10 to Spoolman spool 163 by UID "
                       "d13fdb0e"),
             ("info", "Bambu_AMS_1 lane10: tag read: PLA Basic [tag D13FDB0E]. Measured about 89% "
                      "left -- roughly 732 g of a 1000 g spool; a Spoolman lookup for D13FDB0E is "
                      "in progress; the measurement goes to the spool it finds."),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=5 res=1 | "
                       "record: mat=PLA Basic uid=d13fdb0e present=True)")]
         unit.logger.messages.clear()
         unit.afc.spool.land(1000)
@@ -13482,9 +13482,9 @@ class TestAfcBambuAMSSyncLanes:
             ("set_remaining_weight", (150, 732.0)), self.UID_163,
             self.SET_163]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane10 bound to spool 163 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane10 bound to spool 163 after its measurement; "
                       "handing the measured 732 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
+            ("debug", "Bambu_AMS_1: wrote 732.0 g remaining to Spoolman spool 163 "
                      "(physical AMS measurement)")]
 
     def test_a_unit_missing_its_stamp_memos_starts_a_look(self, monkeypatch):
@@ -13500,9 +13500,9 @@ class TestAfcBambuAMSSyncLanes:
         assert (unit._stamp_looked, unit._meas_baselined) == ({1}, {1})
         assert unit._meas_seen == {1: (4, 60)}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 60% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)")]
 
     def test_the_readout_does_not_call_a_restart_stamp_measured(
@@ -13517,15 +13517,15 @@ class TestAfcBambuAMSSyncLanes:
         # The tag's nominal 1000 g surfaces, not the stamp's 518 g.
         assert lane.weight == 1000
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 carries measurement 63% (seq 4) from before "
+            ("debug", "Bambu_AMS_1: slot 1 carries measurement 63% (seq 4) from before "
                       "this connection; recorded, not applied -- the lane keeps what it had"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
+            ("debug", "Bambu_AMS_1: slot 1 scan verdict -> none (fw seq=None res=None "
                       "| record: mat=PLA Basic uid=d13fdb0e present=True)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane8: Bambu PLA Basic"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid D13FDB0E | "
+            ("info", "Bambu_AMS_1: applied tag to lane8: Bambu PLA Basic"),
+            ("debug", "Bambu_AMS_1: lane8 tag -- PLA Basic | color ? | uid D13FDB0E | "
                       "remaining 63% stamped before this connection, not applied | nominal 1000 "
                       "g | nozzle ?-?C | bed 55C (material)"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e")]
+            ("debug", "Bambu_AMS_1: matched lane8 to Spoolman spool 163 by UID d13fdb0e")]
 
     # A tagged bay whose lane has no spool: lane15 on bay 3, tag 95F2C30C,
     # Spoolman spool 136 (card_uids "4B8E44F6,95F2C30C" and the reel's
@@ -13669,14 +13669,14 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.spool_vendor, lane.filament_name) == ("Bambu",
                                                            "Bambu PLA Basic")
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80")]
         unit.logger.messages.clear()
         self._frames(unit, 5)
@@ -13700,9 +13700,9 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._spoolman_latched == set()
         assert unit.lanes["lane15"].spool_id == 109
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)")]
 
     @pytest.mark.parametrize("stale", ["material", "colour", "no-colour",
@@ -13728,7 +13728,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.lanes["lane15"].spool_id is None
         assert unit._spoolman_latched == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
 
     @pytest.mark.parametrize("owned", [True, False],
@@ -13748,13 +13748,13 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._scan_verdict(3) == "none"
         if owned:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the "
+                ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the "
                          "bay's record (PLA Basic)")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)")]
         unit.logger.messages.clear()
         self._measured_74(unit)
@@ -13768,10 +13768,10 @@ class TestAfcBambuAMSSyncLanes:
                       "Basic' density=1.24 pct_raw=74 radius_m=None circ_m=None "
                       "save_r_m=0.075167 radius_src=narration source='physical AMS measurement' "
                       "nominal=1000 grams_written=611 grams_modelled=608"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80"),
             ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. Measured "
                      "about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman lookup for "
@@ -13785,9 +13785,9 @@ class TestAfcBambuAMSSyncLanes:
         assert client.calls == [self.UID_136, self.SET_136]
         assert client.searches == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 611 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
 
     @pytest.mark.parametrize("rrq", [True, False],
@@ -13804,9 +13804,9 @@ class TestAfcBambuAMSSyncLanes:
         self._capscan_74(unit)
         self._frames(unit, 2)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)")]
         unit.logger.messages.clear()
         self._measured_74(unit, reread_pending=rrq, material=None, sku=None,
@@ -13827,10 +13827,10 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit, 1)
         assert client.searches == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80"),
             ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. Measured "
                      "about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman lookup for "
@@ -13841,9 +13841,9 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.spool_id, lane.weight) == (136, 611)
         assert client.calls == [self.UID_136, self.SET_136]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 611 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
 
     # What the restart lookup will and will not bind. AFC's set_spoolID
@@ -13868,14 +13868,14 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.afc.spool.asked == []
         assert self._as_restored(lane) == before
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("info", "AFC bambu Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool 136, "
+            ("info", "Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool 136, "
                      "which has no remaining weight on record, so the lane was not linked to it "
                      "(AFC clears a lane linked to a spool without one). Correct spool 136's "
                      "weight in Spoolman, then run AFC_BAMBU_SCAN LANE=lane15 to link it")]
@@ -13915,14 +13915,14 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert unit.afc.spool.asked == [(unit.lanes["lane15"], 136)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80")]
 
     def test_a_read_of_the_bay_binds_whatever_spoolman_says(self,
@@ -13939,13 +13939,13 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert unit.afc.spool.asked == [(unit.lanes["lane15"], 136)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: Bambu PLA Basic #0086D6"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 | "
+            ("info", "Bambu_AMS_1: applied tag to lane15: Bambu PLA Basic #0086D6"),
+            ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 | "
                       "uid 95F2C30C | remaining no measurement yet | nominal 1000 g | nozzle "
                       "?-?C | bed 55C (material)"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80")]
 
     @pytest.mark.parametrize("spoolman", ["zero-weight", "unknown-uid"])
@@ -13974,25 +13974,25 @@ class TestAfcBambuAMSSyncLanes:
         assert lane.weight == 611
         if spoolman == "zero-weight":
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the "
+                ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the "
                          "bay's record (PLA Basic)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+                ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                           "95F2C30C (PLA Basic) matches the lane -- looking the tag up in "
                           "Spoolman; the lane is left as AFC restored it"),
-                ("info", "AFC bambu Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool "
+                ("info", "Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool "
                          "136, which has no remaining weight on record, so the lane was not "
                          "linked to it (AFC clears a lane linked to a spool without one). "
                          "Correct spool 136's weight in Spoolman, then run AFC_BAMBU_SCAN "
                          "LANE=lane15 to link it")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the "
+                ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the "
                          "bay's record (PLA Basic)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+                ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                           "95F2C30C (PLA Basic) matches the lane -- looking the tag up in "
                           "Spoolman; the lane is left as AFC restored it")]
         unit.logger.messages.clear()
@@ -14017,14 +14017,14 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._spool._spoolman_no_match == set()
         assert 3 not in unit._spoolman_latched
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: Spoolman did not answer the lookup of 95F2C30C for "
+            ("debug", "Bambu_AMS_1: Spoolman did not answer the lookup of 95F2C30C for "
                       "lane15; asking again in 30 s")]
         unit.logger.messages.clear()
         self._frames(unit, 5)
@@ -14051,10 +14051,10 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 2
         assert unit.afc.spool.asked == [(lane, 136)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80"),
             ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. Measured "
                      "about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman lookup for "
@@ -14065,9 +14065,9 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.spool_id, lane.weight) == (136, 611)
         assert client.calls == [self.UID_136, self.SET_136]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 611 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
         unit.logger.messages.clear()
         self._frames(unit, 5)
@@ -14101,11 +14101,11 @@ class TestAfcBambuAMSSyncLanes:
         assert lane.spool_id is None
         assert unit._spoolman_latched == {3}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it")]
         unit.logger.messages.clear()
@@ -14144,23 +14144,23 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 2
         assert unit.afc.spool.asked == [(lane, 136)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> waiting (fw seq=1 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> waiting (fw seq=1 res=1 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=2 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=2 res=1 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 | "
+            ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 | "
                       "uid 95F2C30C | remaining 73% MEASURED (~600 g) | nominal 1000 g | nozzle "
                       "?-?C | bed 55C (material)"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=3 lane=lane15 spool=None material='PLA "
                       "Basic' density=1.24 pct_raw=73 radius_m=None circ_m=None save_r_m=None "
                       "radius_src=stale(rec=74) source='physical AMS measurement' nominal=1000 "
                       "grams_written=600 grams_modelled=600"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80"),
             ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. Measured "
                      "about 73% left -- roughly 600 g of a 1000 g spool; a Spoolman lookup for "
                      "95F2C30C is in progress; the measurement goes to the spool it finds."),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=2 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=2 res=1 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
         unit.logger.messages.clear()
         unit.afc.spool.land(670.8)
@@ -14172,9 +14172,9 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit, 3)
         assert client.searches == 2
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 600 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 600.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 600.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
 
     @pytest.mark.parametrize("restored", ["PLA", "PETG"],
@@ -14200,7 +14200,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._scan_verdict(3) == "waiting"
         assert client.searches == 0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> waiting (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> waiting (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
         unit.logger.messages.clear()
         self._measured_74(unit)               # the unit reads and measures
@@ -14209,16 +14209,16 @@ class TestAfcBambuAMSSyncLanes:
         assert unit._measure._bind_owed == {3: (74, 1000, None, True)}
         if restored == "PLA":
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=1 res=1 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=1 res=1 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 "
+                ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 "
                           "| uid 95F2C30C | remaining 74% MEASURED (~611 g) | nominal 1000 g | "
                           "nozzle ?-?C | bed 55C (material)"),
                 ("debug", "capsample unit=Bambu_AMS_1 slot=3 lane=lane15 spool=None "
                           "material='PLA Basic' density=1.24 pct_raw=74 radius_m=None "
                           "circ_m=None save_r_m=0.075167 radius_src=narration source='physical "
                           "AMS measurement' nominal=1000 grams_written=611 grams_modelled=608"),
-                ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
+                ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
                           "UID 4e3177c31fea42d08bc240c818a37f80"),
                 ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. "
                          "Measured about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman "
@@ -14226,17 +14226,17 @@ class TestAfcBambuAMSSyncLanes:
                          "it finds.")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=1 res=1 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=1 res=1 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 "
+                ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 "
                           "| uid 95F2C30C | remaining 74% MEASURED (~611 g) | nominal 1000 g | "
                           "nozzle ?-?C | bed 55C (material)"),
                 ("debug", "capsample unit=Bambu_AMS_1 slot=3 lane=lane15 spool=None "
                           "material='PLA Basic' density=1.24 pct_raw=74 radius_m=None "
                           "circ_m=None save_r_m=0.075167 radius_src=narration source='physical "
                           "AMS measurement' nominal=1000 grams_written=611 grams_modelled=608"),
-                ("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: Bambu PLA Basic #0086D6"),
-                ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
+                ("info", "Bambu_AMS_1: applied tag to lane15: Bambu PLA Basic #0086D6"),
+                ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
                           "UID 4e3177c31fea42d08bc240c818a37f80"),
                 ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. "
                          "Measured about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman "
@@ -14248,11 +14248,11 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.spool_id, lane.weight) == (136, 611)
         assert client.calls == [self.UID_136, self.SET_136]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=1 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=1 res=1 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 611 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
 
     #: What lane defaults leave on lane15 (default_material_type PLA; AFC
@@ -14281,23 +14281,23 @@ class TestAfcBambuAMSSyncLanes:
             assert unit.afc.spool.asked == [(lane, 136)]
             if owned:
                 assert unit.logger.messages == [
-                    ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 "
+                    ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 "
                               "res=0 | record: mat=PLA Basic uid=95f2c30c present=True)"),
-                    ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from "
+                    ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from "
                              "the bay's record (PLA Basic)"),
-                    ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's "
+                    ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's "
                               "tag 95F2C30C (PLA Basic) matches the lane -- looking the tag up "
                               "in Spoolman; the lane is left as AFC restored it"),
-                    ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by "
+                    ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by "
                               "tray UID 4e3177c31fea42d08bc240c818a37f80")]
             else:
                 assert unit.logger.messages == [
-                    ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 "
+                    ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 "
                               "res=0 | record: mat=PLA Basic uid=95f2c30c present=True)"),
-                    ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's "
+                    ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's "
                               "tag 95F2C30C (PLA Basic) matches the lane -- looking the tag up "
                               "in Spoolman; the lane is left as AFC restored it"),
-                    ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by "
+                    ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by "
                               "tray UID 4e3177c31fea42d08bc240c818a37f80")]
             return
         assert client.searches == 0
@@ -14305,7 +14305,7 @@ class TestAfcBambuAMSSyncLanes:
         assert self._dressing(lane) == self.DEFAULTS
         assert 3 not in unit._spoolman_latched
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
         unit.logger.messages.clear()
         # A scan of the bay is what links it.
@@ -14317,22 +14317,22 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert unit.afc.spool.asked == [(lane, 136)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=1 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> read (fw seq=1 res=1 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 | "
+            ("debug", "Bambu_AMS_1: lane15 tag -- PLA Basic GFA00 | color #0086D6 | "
                       "uid 95F2C30C | remaining 74% MEASURED (~611 g) | nominal 1000 g | nozzle "
                       "?-?C | bed 55C (material)"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=3 lane=lane15 spool=None material='PLA "
                       "Basic' density=1.24 pct_raw=74 radius_m=None circ_m=None "
                       "save_r_m=0.075167 radius_src=narration source='physical AMS measurement' "
                       "nominal=1000 grams_written=611 grams_modelled=608"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: Bambu PLA Basic #0086D6"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("info", "Bambu_AMS_1: applied tag to lane15: Bambu PLA Basic #0086D6"),
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80"),
             ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. Measured "
                      "about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman lookup for "
                      "95F2C30C is in progress; the measurement goes to the spool it finds."),
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=1 res=1 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=1 res=1 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
 
     @pytest.mark.parametrize("owned", [True, False],
@@ -14358,23 +14358,23 @@ class TestAfcBambuAMSSyncLanes:
             assert (lane.spool_vendor, lane.filament_name) == (
                 "Bambu", "Bambu PLA Basic")
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the "
+                ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the "
                          "bay's record (PLA Basic)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+                ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                           "95F2C30C (PLA Basic) matches the lane -- looking the tag up in "
                           "Spoolman; the lane is left as AFC restored it"),
-                ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
+                ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
                           "UID 4e3177c31fea42d08bc240c818a37f80")]
         else:
             assert unit.logger.messages == [
-                ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+                ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                           "record: mat=PLA Basic uid=95f2c30c present=True)"),
-                ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+                ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                           "95F2C30C (PLA Basic) matches the lane -- looking the tag up in "
                           "Spoolman; the lane is left as AFC restored it"),
-                ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
+                ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray "
                           "UID 4e3177c31fea42d08bc240c818a37f80")]
         unit.logger.messages.clear()
         self._frames(unit, 3)                 # the bind is in flight: asked once
@@ -14396,7 +14396,7 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.afc.spool.asked == []
         assert self._dressing(lane) == self.DEFAULTS
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
 
     @pytest.mark.parametrize("link", ["steady", "reconnected"])
@@ -14412,14 +14412,14 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit, 3)
         assert unit._lookup_refused == {3: (self.UID15, 136)}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("info", "AFC bambu Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool 136, "
+            ("info", "Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool 136, "
                      "which has no remaining weight on record, so the lane was not linked to it "
                      "(AFC clears a lane linked to a spool without one). Correct spool 136's "
                      "weight in Spoolman, then run AFC_BAMBU_SCAN LANE=lane15 to link it")]
@@ -14458,14 +14458,14 @@ class TestAfcBambuAMSSyncLanes:
         assert unit.afc.spool.asked == [(lane, 136)]
         assert unit._spool._bind_pending == {3}   # until AFC has fetched it
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80")]
         unit.logger.messages.clear()
         self._capscan_74(unit)
@@ -14493,9 +14493,9 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert client.calls == [self.UID_136, self.SET_136]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 611 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
 
     def test_a_claimed_lane_waits_for_the_reread_its_record_is_owed(
@@ -14509,9 +14509,9 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 0
         assert unit._spoolman_latched == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)")]
         unit.logger.messages.clear()
         unit._slots[3] = dict(unit._slots[3], reread_pending=False)
@@ -14519,10 +14519,10 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert unit.afc.spool.asked == [(unit.lanes["lane15"], 136)]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80")]
 
     def test_a_retry_nothing_will_send_is_not_said_to_be_in_progress(
@@ -14538,14 +14538,14 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert unit._lookup_retry == {3: 130.0}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: Spoolman did not answer the lookup of 95F2C30C for "
+            ("debug", "Bambu_AMS_1: Spoolman did not answer the lookup of 95F2C30C for "
                       "lane15; asking again in 30 s")]
         unit.logger.messages.clear()
         lane.material, lane.sub_type = "PETG", ""
@@ -14576,9 +14576,9 @@ class TestAfcBambuAMSSyncLanes:
         self._frames(unit, 3)
         assert client.searches == 0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)")]
         unit.logger.messages.clear()
         self._measured_74(unit)
@@ -14591,10 +14591,10 @@ class TestAfcBambuAMSSyncLanes:
                       "Basic' density=1.24 pct_raw=74 radius_m=None circ_m=None "
                       "save_r_m=0.075167 radius_src=narration source='physical AMS measurement' "
                       "nominal=1000 grams_written=611 grams_modelled=608"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("info", "AFC bambu Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool 136, "
+            ("info", "Bambu_AMS_1: lane15 -- tag 95F2C30C matches Spoolman spool 136, "
                      "which has no remaining weight on record, so the lane was not linked to it "
                      "(AFC clears a lane linked to a spool without one). Correct spool 136's "
                      "weight in Spoolman, then run AFC_BAMBU_SCAN LANE=lane15 to link it"),
@@ -14620,7 +14620,7 @@ class TestAfcBambuAMSSyncLanes:
         self._capscan_74(unit)
         self._frames(unit, 2)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)")]
         unit.logger.messages.clear()
         if record == "read":
@@ -14661,9 +14661,9 @@ class TestAfcBambuAMSSyncLanes:
         self._capscan_74(unit)
         self._frames(unit, 2)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
+            ("debug", "Bambu_AMS_1: lane15 -- filling in vendor and name from the bay's "
                      "record (PLA Basic)")]
         unit.logger.messages.clear()
         self._measured_74(unit, material=None, sku=None, color=None)
@@ -14700,16 +14700,16 @@ class TestAfcBambuAMSSyncLanes:
         assert client.searches == 1
         assert unit._spool._bind_owed == {3: (74, 1000, None, True)}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none (fw seq=0 res=0 | "
                       "record: mat=PLA Basic uid=95f2c30c present=True)"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=3 lane=lane15 spool=None material='PLA "
                       "Basic' density=1.24 pct_raw=74 radius_m=None circ_m=None "
                       "save_r_m=0.075167 radius_src=narration source='physical AMS measurement' "
                       "nominal=1000 grams_written=611 grams_modelled=608"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool and its bay's tag "
                       "95F2C30C (PLA Basic) matches the lane -- looking the tag up in Spoolman; "
                       "the lane is left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman spool 136 by tray UID "
                       "4e3177c31fea42d08bc240c818a37f80"),
             ("info", "Bambu_AMS_1 lane15: tag read: PLA Basic (0086D6) [tag 95F2C30C]. Measured "
                      "about 74% left -- roughly 611 g of a 1000 g spool; a Spoolman lookup for "
@@ -14721,9 +14721,9 @@ class TestAfcBambuAMSSyncLanes:
         assert (lane.spool_id, lane.weight) == (136, 611)
         assert client.calls == [self.UID_136, self.SET_136]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
+            ("debug", "Bambu_AMS_1: lane15 bound to spool 136 after its measurement; "
                       "handing the measured 611 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
+            ("debug", "Bambu_AMS_1: wrote 611.0 g remaining to Spoolman spool 136 "
                      "(physical AMS measurement)")]
 
 
@@ -14734,7 +14734,7 @@ class TestAfcBambuAMSMeasureSettled:
     """
 
     #: What the hold says, once per bay.
-    HOLDING = ("AFC bambu BambuAMS_2: lane19 read its tag; holding the lane "
+    HOLDING = ("BambuAMS_2: lane19 read its tag; holding the lane "
                "until the unit finishes measuring the spool -- this model "
                "stops calibrating if we write mid-cycle")
 
@@ -14846,7 +14846,7 @@ class TestAfcBambuAMSMeasureSettled:
         assert unit._measure_settled(2, {"meas_seq": None}) is False
         assert unit._measure_wait_said == {2}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_2: slot 2 read its tag; holding the "
+            ("debug", "BambuAMS_2: slot 2 read its tag; holding the "
                      "lane until the unit finishes measuring the spool -- "
                      "this model stops calibrating if we write mid-cycle")]
 
@@ -14924,7 +14924,7 @@ class TestAfcBambuAMSFillMissingVariant:
         :param record: the record's material string
         :return LogLine: the fill's line
         """
-        return ("debug", f"AFC bambu BambuAMS_1: {lane} -- filling in {what} "
+        return ("debug", f"BambuAMS_1: {lane} -- filling in {what} "
                         f"from the bay's record ({record})")
 
     def _fill(self, monkeypatch: pytest.MonkeyPatch, info: Dict[str, Any],
@@ -15351,13 +15351,13 @@ class TestAfcBambuAMSRestoreUntaggedDefaults:
     """
 
     #: The defaults line for an untagged bay nothing has asked about.
-    NO_RECORD = ("info", "AFC bambu AMS: no tag on record for slot 0; "
+    NO_RECORD = ("info", "AMS: no tag on record for slot 0; "
                          "applied lane defaults to lane15 -- nothing has read "
                          "this bay yet. No scan was attempted, so this says "
                          "nothing about the reader or the spool; reseat it, "
                          "or run AFC_BAMBU_SCAN LANE=lane15")
     #: A unit claimed live hands such a bay to the insert path.
-    REARM = ("debug", "AFC bambu AMS: slot 0 came up with a spool and no "
+    REARM = ("debug", "AMS: slot 0 came up with a spool and no "
                      "record of it -- scanning it as a fresh insert")
 
     @staticmethod
@@ -15631,13 +15631,13 @@ class TestAfcBambuAMSOpenScan:
         unit._open_scan(0)
         assert unit._measure_wait_said == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_2: lane19 read its tag; holding the lane until the unit "
+            ("debug", "BambuAMS_2: lane19 read its tag; holding the lane until the unit "
                      "finishes measuring the spool -- this model stops calibrating if we write "
                      "mid-cycle")]
         unit.logger.messages.clear()
         assert unit._measure_settled(0, {"meas_seq": None}) is False
         assert unit.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_2: lane19 read its tag; holding the "
+            ("debug", "BambuAMS_2: lane19 read its tag; holding the "
                      "lane until the unit finishes measuring the spool -- "
                      "this model stops calibrating if we write mid-cycle")]
 
@@ -15738,7 +15738,7 @@ class TestAfcBambuAMSOpenScan:
         assert (lane.material, lane.weight) == ("PLA", 1000)
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("info", "AFC bambu AMS: no readable tag profile in slot 0; applied lane defaults to "
+            ("info", "AMS: no readable tag profile in slot 0; applied lane defaults to "
                      "lane15 -- the unit read no tag here. That is an empty bay, or a chip whose "
                      "keys are not Bambu's: an AMS reports a UID only for tags it can "
                      "authenticate, so no UID does not mean no chip")]
@@ -16074,7 +16074,7 @@ class TestAfcBambuAMSScanVerdict:
         unit._finalize_scan(0)
         assert unit.lanes["lane1"].material == "Unknown"
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: no readable tag profile in "
+            ("info", "Bambu_AMS_1: no readable tag profile in "
                      "slot 0; applied lane defaults to lane1 -- the unit read "
                      "no tag here. That is an empty bay, or a chip whose keys "
                      "are not Bambu's: an AMS reports a UID only for tags it "
@@ -16195,7 +16195,7 @@ class TestAfcBambuAMSWaitHubClear:
         assert reactor.monotonic() >= start + 5.0
         assert len(reactor.pauses) >= 49
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: lane15 unloaded but bay 1's "
+            ("warning", "Bambu_AMS_1: lane15 unloaded but bay 1's "
                         "hub sensor still reads filament (0xE8); the hub "
                         "shows occupied until it clears")]
 
@@ -16270,7 +16270,7 @@ class TestAfcBambuAMSCheckRunoutDrain:
         assert unit._bridge.sent == [
             {"cmd": "assist", "unit": 0, "slot": 0, "on": False}]
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: stopped pushing lane4's "
+            ("info", "Bambu_AMS_1: stopped pushing lane4's "
                      "leftover: the hub sensor reads it gone (0xAD)")]
 
     def test_a_reading_passing_through_does_not_end_it(self, monkeypatch):
@@ -16321,7 +16321,7 @@ class TestAfcBambuAMSCheckRunoutDrain:
         assert unit._runout_hub_clear_t is None
         off = {"cmd": "assist", "unit": 0, "slot": 0, "on": False}
         assert unit._bridge.sent == [off]
-        said = [("info", "AFC bambu Bambu_AMS_1: lane4 ran out and its hub "
+        said = [("info", "Bambu_AMS_1: lane4 ran out and its hub "
                          "sensor reads clear (0xB1): stopped the follower. "
                          "AFC still records lane4 at the toolhead: unload "
                          "it, or run UNSET_LANE_LOADED if the toolhead is "
@@ -16367,7 +16367,7 @@ class TestAfcBambuAMSCheckRunoutDrain:
         assert unit._bridge.sent == [
             {"cmd": "assist", "unit": 0, "slot": 0, "on": False}]
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: stopped pushing lane4's "
+            ("info", "Bambu_AMS_1: stopped pushing lane4's "
                      "leftover: the hub sensor reads it gone (0xB1)")]
 
 
@@ -16395,7 +16395,7 @@ class TestAfcBambuAMSEndRunoutDrain:
         assert unit._runout_drain is None
         assert unit._bridge.sent == []
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: stopped pushing lane4's "
+            ("info", "Bambu_AMS_1: stopped pushing lane4's "
                      "leftover: AFC_BAMBU_FOLLOWER ENABLE=0")]
 
     def test_a_dropping_end_sends_the_assist_off(self, monkeypatch):
@@ -16405,7 +16405,7 @@ class TestAfcBambuAMSEndRunoutDrain:
         assert unit._bridge.sent == [
             {"cmd": "assist", "unit": 0, "slot": 0, "on": False}]
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: stopped pushing lane4's "
+            ("info", "Bambu_AMS_1: stopped pushing lane4's "
                      "leftover: a spool went into the bay")]
 
     def test_no_push_running_is_a_no_op(self, monkeypatch):
@@ -16422,9 +16422,9 @@ class TestAfcBambuAMSArmPresenceRunout:
     RUNOUT_CONFIRM_S (1.5 s) after the arm, through _confirm_presence_runout.
     """
 
-    ARMED = ("debug", "AFC bambu Bambu_AMS_1: AMS bay 3 went empty under lane6 "
+    ARMED = ("debug", "Bambu_AMS_1: AMS bay 3 went empty under lane6 "
                      "while printing; runout if it stays empty for 1.5s")
-    CONFIRMED = ("info", "AFC bambu Bambu_AMS_1: RUNOUT on lane6: AMS bay 3 "
+    CONFIRMED = ("info", "Bambu_AMS_1: RUNOUT on lane6: AMS bay 3 "
                          "stayed empty while printing")
 
     @staticmethod
@@ -16522,7 +16522,7 @@ class TestAfcBambuAMSArmPresenceRunout:
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
             self.ARMED, self.CONFIRMED,
-            ("info", "AFC bambu Bambu_AMS_1: lane6 ran out, switching to its "
+            ("info", "Bambu_AMS_1: lane6 ran out, switching to its "
                      "runout lane lane9 on another extruder (the AMS retract "
                      "is skipped)")]
         assert other.lanes["lane9"].extruder_obj is not lane.extruder_obj
@@ -16575,7 +16575,7 @@ class TestAfcBambuAMSArmPresenceRunout:
         assert unit.lanes["lane6"].status == AFCLaneState.TOOLED
         assert unit.logger.messages == [
             self.ARMED,
-            ("warning", "AFC bambu Bambu_AMS_1: AMS bay 3 read empty "
+            ("warning", "Bambu_AMS_1: AMS bay 3 read empty "
                         "mid-print, but the bridge cannot vouch for presence "
                         "right now; not treating it as a runout")]
 
@@ -16612,7 +16612,7 @@ class TestAfcBambuAMSArmPresenceRunout:
         unit._arm_presence_runout(2, inlet=True)
         assert unit._runout_pending == {2: 100.0}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: AMS bay 3 the AMS says its inlet "
+            ("debug", "Bambu_AMS_1: AMS bay 3 the AMS says its inlet "
                      "switch cleared under lane6 while printing; runout if "
                      "it stays empty for 1.5s")]
 
@@ -17147,7 +17147,7 @@ class TestAfcBambuAMSSendHtFlag:
         unit._send_ht_flag(unit._bridge)
         assert unit._bridge.sent == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: connect announce could not send "
+            ("debug", "Bambu_AMS_1: connect announce could not send "
                       "htunit (RuntimeError('port closed')), capen "
                       "(RuntimeError('port closed'))")]
 
@@ -17349,7 +17349,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         :param bay: its 1-based bay
         :return tuple: the line saying the lane was cleared
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: bay {bay} is empty but "
+        return ("debug", f"Bambu_AMS_1: bay {bay} is empty but "
                         f"{name} still held filament data -- clearing it")
 
     def test_empty_bay_with_stale_material_is_cleared(self, monkeypatch):
@@ -17383,7 +17383,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         assert not hasattr(unit, "_match_only_bays")
         assert unit.logger.messages == [
             self._cleared("lane16", 1),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane16 from spool 130 "
+            ("debug", "Bambu_AMS_1: unbinding lane16 from spool 130 "
                       "-- the bay is empty")]
 
     def test_empty_bay_still_bound_to_spoolman_is_unbound(self, monkeypatch):
@@ -17398,7 +17398,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
             self._cleared("lane18", 4),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane18 from spool 130 "
+            ("debug", "Bambu_AMS_1: unbinding lane18 from spool 130 "
                       "-- the bay is empty")]
 
     def test_a_unit_without_the_tare_restore_still_unbinds(self,
@@ -17414,7 +17414,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
             self._cleared("lane18", 4),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane18 from spool 130 "
+            ("debug", "Bambu_AMS_1: unbinding lane18 from spool 130 "
                       "-- the bay is empty")]
 
     def test_a_present_bay_is_left_alone(self, monkeypatch):
@@ -17452,7 +17452,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         unit._reconcile_empty_bays()
         assert unit.afc.save_vars.call_count == 0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: empty-bay reconcile skipped: "
+            ("debug", "Bambu_AMS_1: empty-bay reconcile skipped: "
                       "object of type 'NoneType' has no len()")]
 
     def test_a_spool_put_in_it_later_gets_a_reads_lookup(self, monkeypatch):
@@ -17479,9 +17479,9 @@ class TestAfcBambuAMSReconcileEmptyBays:
         assert unit._dropped_links == {"lane15": "71"}
         assert unit._match_only_bays == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: bay 1 is empty but lane15 still "
+            ("debug", "Bambu_AMS_1: bay 1 is empty but lane15 still "
                      "held filament data -- clearing it"),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool 71 "
+            ("debug", "Bambu_AMS_1: unbinding lane15 from spool 71 "
                       "-- the bay is empty")]
         # During a print no scan is opened; the unit's own read surfaces and
         # its lookup is a read's (may create), not match-only.
@@ -17496,11 +17496,11 @@ class TestAfcBambuAMSReconcileEmptyBays:
         assert sync.calls == [((lane, info), {})]
         assert lane.material == "PETG"
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: spool INSERTED in slot 0 (AMS "
+            ("debug", "Bambu_AMS_1: spool INSERTED in slot 0 (AMS "
                      "bay 1)"),
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: Bambu "
+            ("info", "Bambu_AMS_1: applied tag to lane15: Bambu "
                      "PETG #FF0000"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PETG | color "
+            ("debug", "Bambu_AMS_1: lane15 tag -- PETG | color "
                       "#FF0000 | uid 0BADF00D | remaining no measurement yet "
                       "| nominal 1000 g | nozzle 230-260C | bed 70C "
                       "(material)")]
@@ -17525,7 +17525,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
             self._cleared("lane15", 1),
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool 71 "
+            ("debug", "Bambu_AMS_1: unbinding lane15 from spool 71 "
                       "-- the bay is empty")]
 
 
@@ -17727,7 +17727,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         :param slot: the bay, 0-based
         :return tuple: the insert edge's line
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: spool INSERTED in slot {slot} "
+        return ("debug", f"Bambu_AMS_1: spool INSERTED in slot {slot} "
                         f"(AMS bay {slot + 1})")
 
     @staticmethod
@@ -17736,18 +17736,18 @@ class TestAfcBambuAMSMaybeAutoScan:
         :param slot: the bay, 0-based
         :return tuple: the removal edge's line
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: spool REMOVED from slot {slot} "
+        return ("debug", f"Bambu_AMS_1: spool REMOVED from slot {slot} "
                         f"(AMS bay {slot + 1})")
 
-    SCANNING = ("debug", "AFC bambu Bambu_AMS_1: new spool detected in slot 0, "
+    SCANNING = ("debug", "Bambu_AMS_1: new spool detected in slot 0, "
                          "scanning tag")
-    HELD = ("info", "AFC bambu Bambu_AMS_1: spool in slot 1 -- lane2 goes on "
+    HELD = ("info", "Bambu_AMS_1: spool in slot 1 -- lane2 goes on "
                     "lane defaults until it is read, and the SCAN is held: a "
                     "lane on this unit is loaded to the toolhead and a scan "
                     "would move filament on it. It scans itself when that "
                     "lane comes out, or run AFC_BAMBU_SCAN LANE=lane2 "
                     "whenever you like")
-    PULL_IN = ("info", "AFC bambu Bambu_AMS_1: slot 1 inserted while a lane is "
+    PULL_IN = ("info", "Bambu_AMS_1: slot 1 inserted while a lane is "
                        "loaded and idle -- dropping the follower, priming the "
                        "bay in (motion only, no scan/measure), then "
                        "re-engaging the loaded lane. Scan deferred.")
@@ -17831,7 +17831,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit._cap_pending == {0: 100.0}
         assert unit.logger.messages == [
             self._inserted(),
-            ("debug", "AFC bambu Bambu_AMS_1: new spool in slot 0; HT scans "
+            ("debug", "Bambu_AMS_1: new spool in slot 0; HT scans "
                       "and measures it on insert (firmware-driven at 0x1800)")]
 
     def test_boxed_ams_scans_on_insert(self, monkeypatch):
@@ -18031,7 +18031,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         unit.reactor.run_callbacks(until=101.5)
         assert unit.afc.error.messages == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: AMS bay 3 went empty under lane6 "
+            ("debug", "Bambu_AMS_1: AMS bay 3 went empty under lane6 "
                      "while printing; runout if it stays empty for 1.5s")]
 
     def test_the_removal_edge_arms_the_runout(self, monkeypatch):
@@ -18042,7 +18042,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit._runout_pending == {2: 100.0}
         assert unit.logger.messages == [
             self._removed(2),
-            ("debug", "AFC bambu Bambu_AMS_1: AMS bay 3 went empty under lane6 "
+            ("debug", "Bambu_AMS_1: AMS bay 3 went empty under lane6 "
                      "while printing; runout if it stays empty for 1.5s")]
         unit.reactor.run_callbacks(until=101.5)
         assert unit.afc.error.messages == [self._runout_error("lane6")]
@@ -18050,9 +18050,9 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit._runout_pending == {}
         assert unit.logger.messages == [
             self._removed(2),
-            ("debug", "AFC bambu Bambu_AMS_1: AMS bay 3 went empty under lane6 "
+            ("debug", "Bambu_AMS_1: AMS bay 3 went empty under lane6 "
                      "while printing; runout if it stays empty for 1.5s"),
-            ("info", "AFC bambu Bambu_AMS_1: RUNOUT on lane6: AMS bay 3 "
+            ("info", "Bambu_AMS_1: RUNOUT on lane6: AMS bay 3 "
                      "stayed empty while printing")]
 
     @staticmethod
@@ -18072,7 +18072,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         unit = _p4_printing_unit(monkeypatch, "lane14", bridge=bridge)
         return unit, bridge
 
-    INLET = ("debug", "AFC bambu Bambu_AMS_1: AMS bay 3 the AMS says its inlet "
+    INLET = ("debug", "Bambu_AMS_1: AMS bay 3 the AMS says its inlet "
                      "switch cleared under lane14 while printing; runout if "
                      "it stays empty for 1.5s")
 
@@ -18091,7 +18091,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert lane.name in unit._runout_empty
         assert unit.logger.messages == [
             self.INLET,
-            ("info", "AFC bambu Bambu_AMS_1: RUNOUT on lane14: AMS bay 3 "
+            ("info", "Bambu_AMS_1: RUNOUT on lane14: AMS bay 3 "
                      "stayed empty while printing")]
 
     def test_one_inlet_narration_arms_one_runout(self, monkeypatch):
@@ -18110,7 +18110,7 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit.afc.error.messages == [self._runout_error("lane14")]
         assert unit.logger.messages == [
             self.INLET,
-            ("info", "AFC bambu Bambu_AMS_1: RUNOUT on lane14: AMS bay 3 "
+            ("info", "Bambu_AMS_1: RUNOUT on lane14: AMS bay 3 "
                      "stayed empty while printing")]
 
     def test_an_inlet_that_reads_filament_again_before_the_confirm_is_not_one(
@@ -18287,13 +18287,13 @@ class TestAfcBambuAMSMaybeAutoScan:
         assert unit.reactor.callbacks == []
         assert unit.logger.messages == [
             self._inserted(1),
-            ("debug", "AFC bambu Bambu_AMS_1: new spool detected in slot 1, "
+            ("debug", "Bambu_AMS_1: new spool detected in slot 1, "
                       "scanning tag")]
 
 
 class TestAfcBambuAMSStartTagScan:
     CAPSCAN = {"cmd": "capscan", "trig": 1, "ins": 1, "unit": 0, "slot": 0}
-    SCANNING = ("debug", "AFC bambu Bambu_AMS_1: new spool detected in slot 0, "
+    SCANNING = ("debug", "Bambu_AMS_1: new spool detected in slot 0, "
                          "scanning tag")
 
     def test_ht_insert_marks_the_slot(self, monkeypatch):
@@ -18311,7 +18311,7 @@ class TestAfcBambuAMSStartTagScan:
         assert unit._scan_motion_t0[0] == 123.0
         assert unit._bridge.sent == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: new spool in slot 0; HT scans "
+            ("debug", "Bambu_AMS_1: new spool in slot 0; HT scans "
                       "and measures it on insert (firmware-driven at "
                       "0x1800)")]
 
@@ -18479,7 +18479,7 @@ class TestAfcBambuAMSFinalizeScan:
         """
         head = ("no readable tag profile in slot 0" if scanned
                 else "no tag on record for slot 0")
-        return ("info", f"AFC bambu Bambu_AMS_1: {head}; applied lane "
+        return ("info", f"Bambu_AMS_1: {head}; applied lane "
                         f"defaults to {lane}{why}")
 
     @staticmethod
@@ -18510,9 +18510,9 @@ class TestAfcBambuAMSFinalizeScan:
         assert lane.material == "Unknown"
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane8 -- kept the measured 518 "
+            ("debug", "Bambu_AMS_1: lane8 -- kept the measured 518 "
                       "g through a no-tag scan (63% held, no removal since)"),
-            ("info", "AFC bambu Bambu_AMS_1: no readable tag profile in slot "
+            ("info", "Bambu_AMS_1: no readable tag profile in slot "
                      "1; applied lane defaults to lane8" + self.SCANNED)]
 
     def test_without_a_held_measurement_the_weight_goes(self, monkeypatch):
@@ -18556,7 +18556,7 @@ class TestAfcBambuAMSFinalizeScan:
         assert unit.lanes["lane1"].spool_id == ""
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane1 from spool 42 "
+            ("debug", "Bambu_AMS_1: unbinding lane1 from spool 42 "
                       "-- the scan read no tag, so this link is the previous "
                       "spool's"),
             self._applied(self.SCANNED)]
@@ -18627,7 +18627,7 @@ class TestAfcBambuAMSFinalizeScan:
         assert (lane.spool_id, lane.material) == ("", "Unknown")
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane1 from spool 159 "
+            ("debug", "Bambu_AMS_1: unbinding lane1 from spool 159 "
                       "-- the scan read no tag, so this link is the previous "
                       "spool's"),
             self._applied(self.SCANNED)]
@@ -18678,7 +18678,7 @@ class TestAfcBambuAMSFinalizeScan:
         assert unit.lanes["lane1"].spool_id == ""
         assert unit.lanes["lane1"].material == "Unknown"
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane1 from spool 42 "
+            ("debug", "Bambu_AMS_1: unbinding lane1 from spool 42 "
                       "-- the scan read no tag, so this link is the previous "
                       "spool's"),
             self._applied(self.SCANNED)]
@@ -19036,7 +19036,7 @@ class TestAfcBambuAMSLogTagReadout:
         monkeypatch.setattr(unit.printer, "lookup_object", _lookup)
         unit._log_tag_readout(unit.lanes["lane12"], self._tag(meas_pct=90),
                               force=True)
-        failed = ("AFC bambu Bambu_AMS_1: could not attach the Spoolman "
+        failed = ("Bambu_AMS_1: could not attach the Spoolman "
                   "module")
         assert unit._spool_obj is None
         assert unit.logger.messages == [("debug", failed),
@@ -19124,14 +19124,14 @@ class TestAfcBambuAMSBootHold:
         assert unit.afc.spool.calls == [("set_spoolID", (lane, 136), {})]
         assert self._restored(lane) == before
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 3 scan verdict -> none "
+            ("debug", "Bambu_AMS_1: slot 3 scan verdict -> none "
                       "(fw seq=None res=None | record: mat=PLA Basic "
                       "uid=95f2c30c present=True)"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool "
                       "and its bay's tag 95F2C30C (PLA Basic) matches the "
                       "lane -- looking the tag up in Spoolman; the lane is "
                       "left as AFC restored it"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane15 to Spoolman "
+            ("debug", "Bambu_AMS_1: matched lane15 to Spoolman "
                       "spool 136 by tray UID 4e3177c31fea42d08bc240c818a37f80")]
         unit.logger.messages.clear()
         for _ in range(5):
@@ -19197,7 +19197,7 @@ class TestAfcBambuAMSBootHold:
 class TestAfcBambuAMSLookupUnbound:
     """One Spoolman lookup for a restored lane with no spool."""
 
-    LOOKUP = ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool "
+    LOOKUP = ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool "
                        "and its bay's tag 95F2C30C (PLA Basic) matches the "
                        "lane -- looking the tag up in Spoolman; the lane is "
                        "left as AFC restored it")
@@ -19258,16 +19258,16 @@ class TestAfcBambuAMSLookupUnbound:
         assert unit._spoolman_latched == {3}
         assert unit.logger.messages == [
             self.LOOKUP,
-            ("debug", "AFC bambu Bambu_AMS_1: lookup for an unbound lane "
+            ("debug", "Bambu_AMS_1: lookup for an unbound lane "
                       "failed")]
         assert [m for m, _tb in unit.logger.tracebacks] == [
-            "AFC bambu Bambu_AMS_1: lookup for an unbound lane failed"]
+            "Bambu_AMS_1: lookup for an unbound lane failed"]
 
 
 class TestAfcBambuAMSDefaultsUntilRead:
     """A spool put in during a print: lane defaults until it is read."""
 
-    NOTICE = ("info", "AFC bambu Bambu_AMS_1: spool INSERTED in slot 3 "
+    NOTICE = ("info", "Bambu_AMS_1: spool INSERTED in slot 3 "
                       "during a print, and nothing has read it -- lane15 is "
                       "on lane defaults and linked to no spool until it is "
                       "read. The unit may read it on its own; to read it "
@@ -19372,7 +19372,7 @@ class TestAfcBambuAMSDefaultsUntilRead:
             "Unknown", "", "#FFFFFF")
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool "
+            ("debug", "Bambu_AMS_1: unbinding lane15 from spool "
                       "136 -- nothing has read the spool in the bay, so this "
                       "link is the previous spool's"),
             self.NOTICE]
@@ -19418,7 +19418,7 @@ class TestAfcBambuAMSDefaultsUntilRead:
         unit._removed_bays = {3}
         unit._defaults_until_read(3, None)
         assert unit.lanes["lane15"].material == "PLA"
-        line = ("AFC bambu Bambu_AMS_1: lane defaults for the slot 3 insert "
+        line = ("Bambu_AMS_1: lane defaults for the slot 3 insert "
                 "failed")
         assert unit.logger.messages == [("debug", line)]
         assert [m for m, _tb in unit.logger.tracebacks] == [line]
@@ -19457,7 +19457,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         :param lane: the lane the green tag went onto
         :return list: the lines a change to the green tag writes
         """
-        return [("info", f"AFC bambu Bambu_AMS_1: applied tag to {lane}: "
+        return [("info", f"Bambu_AMS_1: applied tag to {lane}: "
                          f"Bambu PLA #00AE42"),
                 _p4_readout("no measurement yet", lane=lane, head="PLA GFA00",
                             colour="#00AE42", uid="?", nozzle="210-230",
@@ -19539,7 +19539,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         assert owed.calls == [((lane, info), {})]
         assert (lane.material, lane.sub_type) == ("PLA", "Basic")
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool "
                       "and its bay's tag 95F2C30C (PLA Basic) matches the "
                       "lane -- looking the tag up in Spoolman; the lane is "
                       "left as AFC restored it")]
@@ -19575,7 +19575,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         assert sync.calls == [((lane, info), {"restored": True})]
         assert (lane.material, lane.sub_type) == ("PLA", "Basic")
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 has no Spoolman spool "
+            ("debug", "Bambu_AMS_1: lane15 has no Spoolman spool "
                       "and its bay's tag 95F2C30C (PLA Basic) matches the "
                       "lane -- looking the tag up in Spoolman; the lane is "
                       "left as AFC restored it")]
@@ -19661,7 +19661,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         :param material: the tag's material string, as the readout quotes it
         :return list: the lines a bare material tag onto lane15 writes
         """
-        return [("info", f"AFC bambu Bambu_AMS_1: applied tag to lane15: "
+        return [("info", f"Bambu_AMS_1: applied tag to lane15: "
                          f"{name}"),
                 _p4_readout("no measurement yet", lane="lane15",
                             head=material, uid="?")]
@@ -19734,9 +19734,9 @@ class TestAfcBambuAMSSurfaceSlotInfo:
 
     # what every Sparkle tag onto the blank lane15 writes; the tag's remain%
     # is never quoted
-    SPARKLE = [("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: "
+    SPARKLE = [("info", "Bambu_AMS_1: applied tag to lane15: "
                         "Bambu PLA Sparkle #2D2B28"),
-               ("debug", "AFC bambu Bambu_AMS_1: lane15 tag -- PLA Sparkle | "
+               ("debug", "Bambu_AMS_1: lane15 tag -- PLA Sparkle | "
                          "color #2D2B28 | uid 04C07001 | remaining no "
                          "measurement yet | nominal 1000 g | nozzle ?-?C | "
                          "bed ?C (unknown)")]
@@ -19781,7 +19781,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
                                        "weight": "1kg"})
         assert lane.weight == 1000
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu PLA"),
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu PLA"),
             _p4_readout("no measurement yet", lane="lane1", head="PLA",
                         uid="?")]
 
@@ -19794,7 +19794,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         assert (lane.material, lane.extruder_temp, lane.bed_temp) == (
             "PLA", None, None)
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu PLA"),
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu PLA"),
             _p4_readout("no measurement yet", lane="lane1", head="PLA",
                         uid="?", nozzle="hot-?", bed="warm", source="tag")]
 
@@ -19805,7 +19805,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
                                        "color": "#00AE42"})
         assert lane.color == "#00AE42"
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu PLA "
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu PLA "
                      "#00AE42"),
             _p4_readout("no measurement yet", lane="lane1", head="PLA",
                         colour="#00AE42", uid="?")]
@@ -19845,7 +19845,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
                 unit.lanes["lane1"].sub_type) == ("ABS", "")
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu ABS "
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu ABS "
                      "#00AE42"),
             _p4_readout("no measurement yet", lane="lane1", head="ABS",
                         colour="#00AE42", uid="?")]
@@ -19856,7 +19856,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         assert unit.lanes["lane1"].sub_type == "Matte"
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu PLA "
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu PLA "
                      "Matte #00AE42"),
             _p4_readout("no measurement yet", lane="lane1", head="PLA Matte",
                         colour="#00AE42", uid="?")]
@@ -19867,7 +19867,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         assert unit.lanes["lane1"].color == "#00AE42"
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu PLA "
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu PLA "
                      "#00AE42"),
             _p4_readout("no measurement yet", lane="lane1", head="PLA",
                         colour="#00AE42", uid="?")]
@@ -19898,7 +19898,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         # not part of the change test.
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: applied tag to lane1: Bambu PLA"),
+            ("info", "Bambu_AMS_1: applied tag to lane1: Bambu PLA"),
             _p4_readout("no measurement yet", lane="lane1", head="PLA",
                         uid="?", bed="55", source="material")]
 
@@ -19927,7 +19927,7 @@ class TestAfcBambuAMSSurfaceSlotInfo:
         return unit, [kw for _args, kw in sync.calls]
 
     # the default reel's two lines; the repeat pass changes nothing
-    DISPATCHED = [("info", "AFC bambu Bambu_AMS_1: applied tag to lane15: "
+    DISPATCHED = [("info", "Bambu_AMS_1: applied tag to lane15: "
                            "Bambu PLA #00AE42"),
                   _p4_readout("no measurement yet", lane="lane15", head="PLA",
                               colour="#00AE42", uid="5EED0001",
@@ -20210,7 +20210,7 @@ class TestAfcBambuAMSDropSilentDry:
         assert unit._drying is False
         assert unit._dry_host_refusal == self.REFUSAL
         assert unit.logger.messages == [
-            ("info", "AFC bambu BambuAMS_HT: not drying -- the unit never "
+            ("info", "BambuAMS_HT: not drying -- the unit never "
                      "answered the dry command (silent for 45s)")]
 
     def test_silence_inside_the_grace_is_still_starting(self, monkeypatch):
@@ -20227,7 +20227,7 @@ class TestAfcBambuAMSDropSilentDry:
         assert unit._drying is False
         assert unit._dry_host_refusal == self.REFUSAL
         assert unit.logger.messages == [
-            ("info", "AFC bambu BambuAMS_HT: not drying -- the unit never "
+            ("info", "BambuAMS_HT: not drying -- the unit never "
                      "answered the dry command (silent for 45s)")]
 
     def test_live_telemetry_means_the_unit_answered(self, monkeypatch):
@@ -20309,7 +20309,7 @@ class TestAfcBambuAMSFinishTimedDry:
     HEATER_STOP resets it.
     """
 
-    FINISHED = ("info", "AFC bambu Bambu_AMS_1: drying finished (the 60 min "
+    FINISHED = ("info", "Bambu_AMS_1: drying finished (the 60 min "
                         "cycle ran out)")
 
     @staticmethod
@@ -20487,7 +20487,7 @@ class TestAfcBambuAMSDryremSaysDrying:
         :param name: the unit
         :return tuple: the adoption line
         """
-        return ("info", f"AFC bambu {name}: adopting the unit's own dry cycle "
+        return ("info", f"{name}: adopting the unit's own dry cycle "
                         f"-- its countdown moved {was}s -> {now}s, so a cycle "
                         f"this host did not start is running ({now}s left)")
 
@@ -20706,7 +20706,7 @@ class TestAfcBambuAMSGetStatus:
     SECTIONS = pytest.mark.parametrize("section", [None, True],
                                        ids=["no-section", "section"])
     #: The HT's verdict when its one retry one-edged as well.
-    GIVING_UP = ("AFC bambu HT: slot 0 one-edged again on the retry -- giving "
+    GIVING_UP = ("HT: slot 0 one-edged again on the retry -- giving "
                  "up for this insert. AFC_BAMBU_CAPSCAN UNIT=HT LANE=lane23 "
                  "runs it by hand")
 
@@ -20725,7 +20725,7 @@ class TestAfcBambuAMSGetStatus:
         :param record: the bay record's "mat=... uid=..." part
         :return LogLine: bay 1's scan verdict line when the unit read none
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: slot 1 scan verdict -> none "
+        return ("debug", f"Bambu_AMS_1: slot 1 scan verdict -> none "
                          f"(fw seq=None res=None | record: {record} "
                          f"present=True)")
 
@@ -20736,7 +20736,7 @@ class TestAfcBambuAMSGetStatus:
         :param seq: its sequence
         :return LogLine: the line for a stamp found at connection start
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: slot 1 carries measurement "
+        return ("debug", f"Bambu_AMS_1: slot 1 carries measurement "
                          f"{pct}% (seq {seq}) from before this connection; "
                          f"recorded, not applied -- the lane keeps what it had")
 
@@ -20931,7 +20931,7 @@ class TestAfcBambuAMSGetStatus:
         assert status["dry_confirmed"] is False
         assert status["dry_remaining"] is None
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: drying finished (the unit "
+            ("info", "Bambu_AMS_1: drying finished (the unit "
                      "stopped reporting chamber telemetry)")]
 
     # A boxed dry deafens the receiver: the commanded length ends it.
@@ -20980,7 +20980,7 @@ class TestAfcBambuAMSGetStatus:
         assert status["dry_minutes"] is None
         assert status["dry_rotate"] is None
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: drying finished (the 60 min "
+            ("info", "Bambu_AMS_1: drying finished (the 60 min "
                      "cycle ran out)")]
 
     def test_the_frozen_countdown_does_not_re_arm_it(self, monkeypatch):
@@ -20991,7 +20991,7 @@ class TestAfcBambuAMSGetStatus:
         assert unit._drying is False
         assert status["drying"] is False
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: drying finished (the 60 min "
+            ("info", "Bambu_AMS_1: drying finished (the 60 min "
                      "cycle ran out)")]
 
     # measure_on_insert retries a one-edged insert measurement once.
@@ -21022,7 +21022,7 @@ class TestAfcBambuAMSGetStatus:
         assert unit._cap_pending == {}
         assert unit.lanes["lane23"].weight == 789
         assert unit.logger.messages == [
-            ("debug", "AFC bambu HT: slot 0 calibration completed (rst:0) -- "
+            ("debug", "HT: slot 0 calibration completed (rst:0) -- "
                      "re-reading the bay to collect the measured percent"),
             ("debug", "capsample unit=HT slot=0 lane=lane23 spool=None "
                       "material='PLA Basic' density=1.24 pct_raw=96 "
@@ -21070,7 +21070,7 @@ class TestAfcBambuAMSGetStatus:
         unit.get_status()
         assert unit._bridge.sent == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu HT: slot 0 calibration refused (rst:1) -- "
+            ("debug", "HT: slot 0 calibration refused (rst:1) -- "
                      "capacity not enabled for this tray")]
 
     # What a pool spare and a claimed unit publish from the same frame.
@@ -21193,9 +21193,9 @@ class TestAfcBambuAMSGetStatus:
         assert unit._cap_adopted_t == 40.0
         assert unit.lanes["lane23"].weight == 789
         assert unit.logger.messages == [
-            ("debug", "AFC bambu HT: slot 0 calibration completed (rst:0) -- "
+            ("debug", "HT: slot 0 calibration completed (rst:0) -- "
                      "re-reading the bay to collect the measured percent"),
-            ("debug", "AFC bambu HT: could not attach the Spoolman module"),
+            ("debug", "HT: could not attach the Spoolman module"),
             ("debug", "capsample unit=HT slot=0 lane=lane23 spool=None "
                       "material='PLA Basic' density=1.24 pct_raw=96 "
                       "radius_m=None circ_m=None save_r_m=None "
@@ -21206,7 +21206,7 @@ class TestAfcBambuAMSGetStatus:
                      "the Spoolman module ([AFC_BambuAMS_rfid]) is off.")]
         assert [(m, tb.strip().splitlines()[-1])
                 for m, tb in unit.logger.tracebacks] == [
-            ("AFC bambu HT: could not attach the Spoolman module",
+            ("HT: could not attach the Spoolman module",
              "RuntimeError: section half-built")]
 
     def test_a_unit_without_motion_stamps_reports_no_bay_scanning(
@@ -21221,10 +21221,10 @@ class TestAfcBambuAMSGetStatus:
 class TestAfcBambuAMSStatusApplyMeasurements:
     SECTIONS = pytest.mark.parametrize("section", [None, True],
                                        ids=["no-section", "section"])
-    LANE8_ENDED = ("AFC bambu Bambu_AMS_1: lane8 (slot 1) capscan ended "
+    LANE8_ENDED = ("Bambu_AMS_1: lane8 (slot 1) capscan ended "
                    "without a measurement (no reading within 180 s); it is no "
                    "longer waiting for one")
-    LANE9_ENDED = ("AFC bambu Bambu_AMS_1: lane9 (slot 2) capscan ended "
+    LANE9_ENDED = ("Bambu_AMS_1: lane9 (slot 2) capscan ended "
                    "without a measurement (no reading within 180 s); it is no "
                    "longer waiting for one")
 
@@ -21337,13 +21337,13 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._bridge.released_bus == ["Bambu_AMS_1"]
         assert unit._bridge.claimed_bus is None
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: could not apply a measurement "
+            ("warning", "Bambu_AMS_1: could not apply a measurement "
                         "(lane refused the write); the log has where it "
                         "failed"),
-            ("debug", "AFC bambu Bambu_AMS_1: measurement apply failed")]
+            ("debug", "Bambu_AMS_1: measurement apply failed")]
         assert [(m, tb.strip().splitlines()[-1])
                 for m, tb in unit.logger.tracebacks] == [
-            ("AFC bambu Bambu_AMS_1: measurement apply failed",
+            ("Bambu_AMS_1: measurement apply failed",
              "RuntimeError: lane refused the write")]
 
     def test_a_bridge_without_a_bus_release_still_adopts(self, monkeypatch):
@@ -21389,7 +21389,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._bridge.sent == []
         assert unit._cap_pending == {0: 10.0}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu HT: capscan/calibrate/follower status: "
+            ("debug", "HT: capscan/calibrate/follower status: "
                       "verdict garbled")]
 
     def test_a_lane_printed_to_nothing_does_not_republish_its_measurement(
@@ -21483,7 +21483,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._bridge.sent == []
         assert unit._auto_cali_slot == 0          # latched all the same
         assert unit.logger.messages == [
-            ("debug", "AFC bambu HT: slot 0 one-edged its insert measurement "
+            ("debug", "HT: slot 0 one-edged its insert measurement "
                      "and the retry could not start (no spool present in "
                      "slot 0 (AMS bay 1)) -- AFC_BAMBU_CAPSCAN UNIT=HT "
                      "LANE=lane23 runs it by hand")]
@@ -21519,10 +21519,10 @@ class TestAfcBambuAMSStatusApplyMeasurements:
                                          cali={"rst": 9, "t": 50.0})
         other._status_apply_measurements({"slots": []})
         assert unit.logger.messages == [
-            ("debug", "AFC bambu HT: slot 0 calibration aborted (rst:4) -- "
+            ("debug", "HT: slot 0 calibration aborted (rst:4) -- "
                      "stalled during calibration")]
         assert other.logger.messages == [
-            ("debug", "AFC bambu HT: slot 0 calibration returned rst:9")]
+            ("debug", "HT: slot 0 calibration returned rst:9")]
 
     def test_a_verdict_is_read_once(self, monkeypatch):
         unit = _bambu_p5_one_edged_unit(monkeypatch, model="ams1")
@@ -21629,7 +21629,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._cap_unattr_t == 8726.8
         assert unit._cap_pending == {3: 8670.3}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: a 142% reading names tray 2 "
+            ("debug", "Bambu_AMS_1: a 142% reading names tray 2 "
                       "and the bays waiting are [3] -- not attributing it by "
                       "narration; the firmware's per-bay stamp decides")]
 
@@ -21642,7 +21642,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         unit._status_apply_measurements({"slots": []})   # said once
         assert unit._held_measurements() == {}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: a 142% reading names tray None "
+            ("debug", "Bambu_AMS_1: a 142% reading names tray None "
                       "and the bays waiting are [1, 3] -- not attributing it "
                       "by narration; the firmware's per-bay stamp decides")]
 
@@ -21688,10 +21688,10 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._cap_pending_slot is None
         assert unit._cap_orphan_t == 8729.0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane15 (slot 3) capscan ended "
+            ("debug", "Bambu_AMS_1: lane15 (slot 3) capscan ended "
                       "without a measurement (no reading within 180 s); it is "
                       "no longer waiting for one"),
-            ("debug", "AFC bambu Bambu_AMS_1: unclaimed 142% reading "
+            ("debug", "Bambu_AMS_1: unclaimed 142% reading "
                       "(t=8729.0, restored=False, pend=None, t0=8130.0, "
                       "adopted_t=None)")]
 
@@ -21791,7 +21791,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
             {"cmd": "cali", "auto": 0, "unit": 1, "slot": 1},
             {"cmd": "reread", "unit": 1, "slot": 1}]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 calibration completed "
+            ("debug", "Bambu_AMS_1: slot 1 calibration completed "
                      "(rst:0) -- re-reading the bay to collect the measured "
                      "percent"),
             ("debug", "capsample unit=Bambu_AMS_1 slot=1 lane=lane8 "
@@ -21813,7 +21813,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
             self._poll(unit, at)
         assert unit._cap_orphan_t == 9733.0409
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unclaimed 56% reading "
+            ("debug", "Bambu_AMS_1: unclaimed 56% reading "
                       "(t=9733.0409, restored=False, pend=None, t0=0.0, "
                       "adopted_t=None)")]
 
@@ -21874,7 +21874,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         self._poll(unit, 9798.5)                  # said once per reading
         assert unit._cap_stale_t == 9733.0409
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: tray 1's 56% reading is not "
+            ("debug", "Bambu_AMS_1: tray 1's 56% reading is not "
                       "newer than this capscan (meas t=9733.0409, window "
                       "t0=9798.08) -- not adopted")]
 
@@ -21895,7 +21895,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._start_capscan(2, cali=True)
         self._poll(unit, 3121.0)
         assert unit.logger.messages == [
-            ("debug", f"AFC bambu Bambu_AMS_1: {said} not newer than this "
+            ("debug", f"Bambu_AMS_1: {said} not newer than this "
                       f"capscan (meas t=1477.707, window t0=3120.931) -- not "
                       f"adopted")]
 
@@ -21914,7 +21914,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._cap_restore_t == 9710.0
         assert unit.lanes["lane8"].weight == 999
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 reported a "
+            ("debug", "Bambu_AMS_1: slot 1 reported a "
                       "flash-restored 55% -- that is the previous spool's "
                       "figure for this bay, not this spool's; waiting for "
                       "the live measurement")]
@@ -21945,7 +21945,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         :param uid: its record's tag UID, "-" for none
         :return LogLine: the bay's scan verdict line when the unit read none
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: slot {slot} scan verdict -> "
+        return ("debug", f"Bambu_AMS_1: slot {slot} scan verdict -> "
                          f"none (fw seq=None res=None | record: mat={mat} "
                          f"uid={uid} present=True)")
 
@@ -22021,7 +22021,7 @@ class TestAfcBambuAMSStatusApplyMeasurements:
         assert unit._bridge.released_bus == ["Bambu_AMS_1"]
         assert unit.lanes["lane8"].weight == 460   # the stamp's adoption
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: slot 1 calibration completed "
+            ("debug", "Bambu_AMS_1: slot 1 calibration completed "
                      "(rst:0) -- re-reading the bay to collect the measured "
                      "percent")]
 
@@ -22281,7 +22281,7 @@ class TestAfcBambuAMSCommittedLanes:
 
 
 class TestAfcBambuAMSCheckLinkLoss:
-    SILENT_6S = ("AFC bambu Bambu_AMS_1: the bridge has sent nothing for 6s "
+    SILENT_6S = ("Bambu_AMS_1: the bridge has sent nothing for 6s "
                  "while printing. Pausing: the extruder would go on pulling "
                  "against an AMS that is no longer being driven. The link "
                  "reconnects by itself -- resume once it is back.")
@@ -22500,30 +22500,30 @@ class TestAfcBambuAMSRaiseAmsFault:
 
 
 class TestAfcBambuAMSMaybeAutoRecover:
-    ARMED = ("AFC bambu Bambu_AMS_1: auto error recovery for lane15 -- "
+    ARMED = ("Bambu_AMS_1: auto error recovery for lane15 -- "
              "unloading (cut, retract, unload) and reloading the same spool, "
              "then resuming the print if the reload takes. Disable with "
              "auto_error_recovery: False.")
     UNLOAD = "TOOL_UNLOAD LANE=lane15"
     LOAD = "CHANGE_TOOL LANE=lane15"
-    RESUMED = ("AFC bambu Bambu_AMS_1: lane15 is reloaded and the print has "
+    RESUMED = ("Bambu_AMS_1: lane15 is reloaded and the print has "
                "been RESUMED automatically (1 of 1 this print). Disable with "
                "auto_error_recovery_limit: 0.")
-    HELD = ("AFC bambu Bambu_AMS_1: lane15 did NOT reload -- the AMS is HELD "
+    HELD = ("Bambu_AMS_1: lane15 did NOT reload -- the AMS is HELD "
             "IN ERROR and will not try again on its own. Clear the jam, then "
             "press resume: that is what tells it to load.")
-    DECLARED = ("AFC bambu Bambu_AMS_1: lane15 -- the unit has given up "
+    DECLARED = ("Bambu_AMS_1: lane15 -- the unit has given up "
                 "(state 7). Parked; the print stays PAUSED. Clear the jam and "
                 "resume.")
-    NOT_PAUSED = ("AFC bambu Bambu_AMS_1: lane15 is reloaded and ready; the "
+    NOT_PAUSED = ("Bambu_AMS_1: lane15 is reloaded and ready; the "
                   "print was not paused, so there is nothing to resume.")
-    RESUME_FAILED = ("AFC bambu Bambu_AMS_1: lane15 is reloaded but the "
+    RESUME_FAILED = ("Bambu_AMS_1: lane15 is reloaded but the "
                      "resume failed (pause_resume said no); the print stays "
                      "PAUSED. Press resume when you are ready.")
-    UNQUEUED = ("AFC bambu Bambu_AMS_1: auto error recovery for lane15 could "
+    UNQUEUED = ("Bambu_AMS_1: auto error recovery for lane15 could "
                 "not run (gcode busy); the lane is still paused and held. "
                 "Recover it by hand.")
-    STUCK = ("AFC bambu Bambu_AMS_1: auto error recovery for lane15 stopped: the unload "
+    STUCK = ("Bambu_AMS_1: auto error recovery for lane15 stopped: the unload "
              "did not take, so lane15 is still at the toolhead. The print stays PAUSED. "
              "Check the lane and the toolhead, then resume.")
 
@@ -22534,7 +22534,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
         :param limit: auto_error_recovery_limit
         :return str: the warning once the resume budget is spent
         """
-        return (f"AFC bambu Bambu_AMS_1: lane15 is reloaded and ready, but "
+        return (f"Bambu_AMS_1: lane15 is reloaded and ready, but "
                 f"this print has already been resumed automatically {count} "
                 f"time(s) (auto_error_recovery_limit: {limit}). THE PRINT IS "
                 f"STILL PAUSED -- a jam that keeps coming back needs a person. "
@@ -22835,7 +22835,7 @@ class TestAfcBambuAMSMaybeAutoRecover:
 
 
 class TestAfcBambuAMSCheckChainResolve:
-    STUCK = ("AFC bambu Bambu_AMS_1: UID AAAA00000000000000000001 still has "
+    STUCK = ("Bambu_AMS_1: UID AAAA00000000000000000001 still has "
              "no chain index after 30s -- this unit is not answering the "
              "bus, so its registrations have not been sent. Check it is "
              "powered and chained; AFC_BAMBU_UIDS shows the map.")
@@ -22897,9 +22897,9 @@ class TestAfcBambuAMSCheckChainResolve:
 
 
 class TestAfcBambuAMSFaultHoldActive:
-    RESUMED = ("debug", "AFC bambu Bambu_AMS_1: print resumed, re-arming the "
+    RESUMED = ("debug", "Bambu_AMS_1: print resumed, re-arming the "
                        "follower.")
-    NO_PRINT = ("debug", "AFC bambu Bambu_AMS_1: no print to resume, "
+    NO_PRINT = ("debug", "Bambu_AMS_1: no print to resume, "
                         "releasing the follower hold.")
 
     @staticmethod
@@ -23058,7 +23058,7 @@ class TestAfcBambuAMSCheckAmsFault:
         :param printing: a print is running
         :return str: the message _check_ams_fault raises
         """
-        msg = (f"AFC bambu Bambu_AMS_1: AMS reported a stall on {lane}{extra}"
+        msg = (f"Bambu_AMS_1: AMS reported a stall on {lane}{extra}"
                f" -- the spool is likely tangled or the path jammed. Clear "
                f"the snag, then resume.\nAMS said: {said}")
         if printing:
@@ -23082,7 +23082,7 @@ class TestAfcBambuAMSCheckAmsFault:
         assert unit._bridge.sent == []
         assert unit._overfeed_lane is unit.lanes["lane22"]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane22: the AMS's assist timed "
+            ("debug", "Bambu_AMS_1: lane22: the AMS's assist timed "
                      "out before the buffer filled (buffer 0.10 -> 0.71). Not "
                      "a jam; the follower re-arms once the AMS recovers and "
                      "the extruder pulls.")]
@@ -23099,7 +23099,7 @@ class TestAfcBambuAMSCheckAmsFault:
         assert unit.afc.error.messages == []
         assert unit._fault_seen == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane22: still parked from the "
+            ("debug", "Bambu_AMS_1: lane22: still parked from the "
                       "assist timeout, not a new stall: [AMS_COMMON]state:6,"
                       "tray_now:2,tray_exit:15  [AMS_LED]mc set t2")]
 
@@ -23343,7 +23343,7 @@ class TestAfcBambuAMSCheckAmsFault:
 
 class TestAfcBambuAMSRunStallChecks:
     #: The state-byte stall raised on lane1 at the toolhead, mid-print.
-    STALLED = ("AFC bambu Bambu_AMS_1: the AMS reports it has STALLED (state "
+    STALLED = ("Bambu_AMS_1: the AMS reports it has STALLED (state "
                "7) on lane1 -- the spool is likely tangled or the path "
                "jammed. Clear the snag, then resume.\nOnce cleared, click "
                "resume to continue printing")
@@ -23458,7 +23458,7 @@ class TestAfcBambuAMSRunStallChecks:
 class TestAfcBambuAMSCheckLiteClog:
     """An AMS Lite in a print: the extruder pushing with no odometer step."""
 
-    CLOGGED = ("AFC bambu Bambu_AMS_1: lane1 has stopped moving: the extruder "
+    CLOGGED = ("Bambu_AMS_1: lane1 has stopped moving: the extruder "
                "pushed {mm}mm, but the AMS Lite's odometer saw no filament "
                "leave the tray. The nozzle may be clogged, the extruder gears "
                "slipping, or the spool snagged. Clear it, then resume.")
@@ -23593,7 +23593,7 @@ class TestAfcBambuAMSCheckLiteClog:
 class TestAfcBambuAMSCheckFeedStopped:
     """A boxed unit in a print: the extruder pushing while its buffer holds."""
 
-    STOPPED = ("AFC bambu Bambu_AMS_1: lane1 is not feeding: the extruder "
+    STOPPED = ("Bambu_AMS_1: lane1 is not feeding: the extruder "
                "pushed {mm}mm, but the AMS buffer never moved (a printing "
                "extruder drains it every ~20mm). The filament may not have "
                "reached the extruder gears, the gears may be slipping, or the "
@@ -23765,7 +23765,7 @@ class TestAfcBambuAMSCheckFeedStopped:
 
 
 class TestAfcBambuAMSDetectorTick:
-    RESUMED = ("debug", "AFC bambu Bambu_AMS_1: print resumed, re-arming the "
+    RESUMED = ("debug", "Bambu_AMS_1: print resumed, re-arming the "
                        "follower.")
 
     @staticmethod
@@ -23844,11 +23844,11 @@ class TestAfcBambuAMSDetectorTick:
         monkeypatch.setattr(unit._bridge, "last_fault", _broken_fault)
         assert unit._detector_tick(10.0) == pytest.approx(10.1)
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: link-loss check raised "
+            ("warning", "Bambu_AMS_1: link-loss check raised "
                         "RuntimeError('socket gone'); detector tick "
                         "continuing."),
             self.RESUMED,
-            ("warning", "AFC bambu Bambu_AMS_1: fault check raised "
+            ("warning", "Bambu_AMS_1: fault check raised "
                         "RuntimeError('fault table gone'); detector tick "
                         "continuing.")]
 
@@ -23887,7 +23887,7 @@ class TestAfcBambuAMSDetectorTick:
         monkeypatch.setattr(unit, "_auto_arm", _broken)
         assert unit._detector_tick(10.0) == pytest.approx(10.1)
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: follower auto-arm raised "
+            ("warning", "Bambu_AMS_1: follower auto-arm raised "
                         "RuntimeError('no lanes'); detector tick continuing.")]
 
 
@@ -23952,7 +23952,7 @@ class TestAfcBambuAMSFollowTick:
         unit._announce_defer_t0 = 100.0
         assert unit._follow_tick(140.0) == pytest.approx(140.1)
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: UID AAAA00000000000000000001 "
+            ("warning", "Bambu_AMS_1: UID AAAA00000000000000000001 "
                         "still has no chain index after 30s -- this unit is "
                         "not answering the bus, so its registrations have "
                         "not been sent. Check it is powered and chained; "
@@ -24155,7 +24155,7 @@ class TestAfcBambuAMSFollowTick:
         assert unit._following_lane is None
         assert unit._follow_standdown_log == 10.0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: standing the follower down for "
+            ("debug", "Bambu_AMS_1: standing the follower down for "
                       "lane1 -- no tool-loaded lane on this unit "
                       "(afc.current=None, active extruder=extruder). If this "
                       "repeats at a lane that IS loaded, the active-extruder "
@@ -24282,7 +24282,7 @@ class TestAfcBambuAMSFollowTick:
         assert unit._follow_fault_hold is False
         assert unit._bridge.sent == self.ENGAGE
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: print resumed, re-arming the "
+            ("debug", "Bambu_AMS_1: print resumed, re-arming the "
                      "follower.")]
 
     # A lane whose bay ran out (printer 2, lane4) is not re-armed.
@@ -24329,7 +24329,7 @@ class TestAfcBambuAMSFollowTick:
         :param buff: the buffer reading logged
         :return LogLine: the follow line for lane1 at fstate 4, online
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: follow lane1 buff={buff} "
+        return ("debug", f"Bambu_AMS_1: follow lane1 buff={buff} "
                          f"fstate=4 online=True")
 
     def test_follow_telemetry_is_logged_on_change_only(self, monkeypatch):
@@ -24365,9 +24365,9 @@ class TestAfcBambuAMSFollowTick:
         assert unit._follow_tick(10.0) == pytest.approx(10.1)
         err = "RuntimeError('bridge table gone')"
         assert unit.logger.messages == [
-            ("warning", f"AFC bambu Bambu_AMS_1: link-loss check raised "
+            ("warning", f"Bambu_AMS_1: link-loss check raised "
                         f"{err}; follower tick continuing."),
-            ("warning", f"AFC bambu Bambu_AMS_1: fault check raised {err}; "
+            ("warning", f"Bambu_AMS_1: fault check raised {err}; "
                         f"follower tick continuing.")]
 
 
@@ -24457,7 +24457,7 @@ class TestAfcBambuAMSBridgeFinish:
 
 
 class TestAfcBambuAMSWaitMove:
-    PREFIX = "AFC bambu Bambu_AMS_1: move ended on"
+    PREFIX = "Bambu_AMS_1: move ended on"
     AMS2_UNLOAD = ("[AMS_SWITCH]SRL_state_switch finish, sucessful, "
                    "err_code:0x00")
     HT_UNLOAD = ("[AMS_SWITCH]AMS_CTRL_state_switch finish, sucessful, "
@@ -25118,7 +25118,7 @@ class TestAfcBambuAMSFeedUntilSensor:
         :param n: the kick number
         :return LogLine: the debug line each kick logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: feeding lane1 to sensor "
+        return ("debug", f"Bambu_AMS_1: feeding lane1 to sensor "
                          f"(kick {n}); letting the AMS run its own retry")
 
     @staticmethod
@@ -25127,11 +25127,11 @@ class TestAfcBambuAMSFeedUntilSensor:
         :param kicks: kicks it took
         :return LogLine: the line a re-kicked arrival logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 reached the toolhead "
+        return ("debug", f"Bambu_AMS_1: lane1 reached the toolhead "
                         f"sensor after {kicks} feed kick(s)")
 
     #: The info line for a fault the unit declares during the loop.
-    FAULT_SAID = ("debug", "AFC bambu Bambu_AMS_1: lane1 -- the AMS reported "
+    FAULT_SAID = ("debug", "Bambu_AMS_1: lane1 -- the AMS reported "
                           "a fault during the load; still feeding, the unit "
                           "runs its own recovery while the request continues")
 
@@ -25194,11 +25194,11 @@ class TestAfcBambuAMSFeedUntilSensor:
         monkeypatch.setattr(unit, "_buffer_gate_reading", _step)
         assert unit._feed_until_sensor(lane, 0.12) is False
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: feeding lane1 to sensor "
+            ("debug", "Bambu_AMS_1: feeding lane1 to sensor "
                       "(kick 1); letting the AMS run its own retry; buffer "
                       "fps 0.66 (smoothed 0.62, peak 0.62, needs 0.70), "
                       "odometer still 0.2s"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane1 feed ended without the "
+            ("debug", "Bambu_AMS_1: lane1 feed ended without the "
                      "buffer calling the load; buffer fps 0.44 (smoothed "
                      "0.40, peak 0.71, needs 0.70), odometer still 0.2s"),
         ]
@@ -25276,7 +25276,7 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert unit._bridge.sent == [self.FEED] * 3 + [self.STOP]
         assert unit.logger.messages == [
             self._kick(1), self._kick(2), self._kick(3),
-            ("warning", "AFC bambu Bambu_AMS_1: lane1 -- the unit has "
+            ("warning", "Bambu_AMS_1: lane1 -- the unit has "
                         "reported STALLED for 10s without clearing, so this "
                         "attempt stops feeding and hands over to the recovery "
                         "re-home.")]
@@ -25326,7 +25326,7 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert unit.logger.messages == [self._kick(1), self._kick(2)]
 
     #: The warning for a unit that has spent its own retries.
-    GAVE_UP = ("warning", f"AFC bambu Bambu_AMS_1: lane1 -- the AMS says it "
+    GAVE_UP = ("warning", f"Bambu_AMS_1: lane1 -- the AMS says it "
                           f"has STOPPED retrying, so this load stops asking. "
                           f"Clear the path at the unit. {_P6_RETRY}.")
 
@@ -25365,7 +25365,7 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert unit.logger.messages == [self._kick(1), self._kick(2)]
 
     #: The warning for a printer that shut down under the load.
-    SHUT_DOWN = ("warning", "AFC bambu Bambu_AMS_1: lane1 -- the printer has "
+    SHUT_DOWN = ("warning", "Bambu_AMS_1: lane1 -- the printer has "
                             "shut down, so this load stops feeding. Nothing "
                             "can reach the toolhead until Klipper is "
                             "restarted.")
@@ -25410,7 +25410,7 @@ class TestAfcBambuAMSFeedUntilSensor:
         assert unit._feed_until_sensor(lane, 60.0) is False
         assert unit._bridge.sent == [self.STOP]
         assert unit.logger.messages == [
-            ("warning", f"AFC bambu Bambu_AMS_1: lane1 -- the link to the "
+            ("warning", f"Bambu_AMS_1: lane1 -- the link to the "
                         f"bridge has been down 13s, so every command this "
                         f"load sends is being dropped. Stopping rather than "
                         f"feeding a bus we cannot reach. {_P6_RETRY}.")]
@@ -25527,7 +25527,7 @@ class TestAfcBambuAMSFeedUntilSensor:
         :param mm: how far it fed
         :return LogLine: the line a sensorless arrival logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 stopped {mm}mm in by "
+        return ("debug", f"Bambu_AMS_1: lane1 stopped {mm}mm in by "
                          f"the AMS Lite's odometer; taking it as at the "
                          f"extruder gears")
 
@@ -25881,9 +25881,9 @@ class TestAfcBambuAMSUnitLoadLane:
     """The follower guard held around the load, and a runout push ended."""
 
     #: The lines a load that trips the sensor on its first kick logs.
-    LOADED = [("debug", "AFC bambu Bambu_AMS_1: feeding lane1 to sensor "
+    LOADED = [("debug", "Bambu_AMS_1: feeding lane1 to sensor "
                         "(kick 1); letting the AMS run its own retry"),
-              ("debug", "AFC bambu Bambu_AMS_1: lane1 reached the toolhead "
+              ("debug", "Bambu_AMS_1: lane1 reached the toolhead "
                        "sensor after 1 feed kick(s)")]
 
     def _rig(self, monkeypatch: pytest.MonkeyPatch,
@@ -25930,7 +25930,7 @@ class TestAfcBambuAMSUnitLoadLane:
         assert unit._load_in_progress is False
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: bridge not connected, cannot "
+            ("warning", "Bambu_AMS_1: bridge not connected, cannot "
                         "load lane1")]
 
     def test_a_load_on_the_unit_ends_the_push(self, monkeypatch):
@@ -25944,7 +25944,7 @@ class TestAfcBambuAMSUnitLoadLane:
             {"cmd": "select", "unit": 0, "slot": 0}]
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: stopped pushing lane1's "
+            ("info", "Bambu_AMS_1: stopped pushing lane1's "
                      "leftover: lane1 is loading")] + self.LOADED
 
     def test_no_push_leaves_the_follower_to_the_load(self, monkeypatch):
@@ -25988,21 +25988,21 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
     #: What a successful load sends after the bulk feed.
     ARRIVAL = [KICK, STOP] + FINISH + [ASSIST]
 
-    KICKED = ("debug", "AFC bambu Bambu_AMS_1: feeding lane1 to sensor "
+    KICKED = ("debug", "Bambu_AMS_1: feeding lane1 to sensor "
                        "(kick 1); letting the AMS run its own retry")
-    ARRIVED = ("debug", "AFC bambu Bambu_AMS_1: lane1 reached the toolhead "
+    ARRIVED = ("debug", "Bambu_AMS_1: lane1 reached the toolhead "
                        "sensor after 1 feed kick(s)")
-    SKIP_PRIME = ("debug", "AFC bambu Bambu_AMS_1: skipping the pre-load "
+    SKIP_PRIME = ("debug", "Bambu_AMS_1: skipping the pre-load "
                            "prime -- the chamber is drying and mode 09/7F "
                            "arms the follower before the select, which the "
                            "printer never does")
-    FAULT_SAID = ("debug", "AFC bambu Bambu_AMS_1: lane1 -- the AMS reported "
+    FAULT_SAID = ("debug", "Bambu_AMS_1: lane1 -- the AMS reported "
                           "a fault during the load; still feeding, the unit "
                           "runs its own recovery while the request continues")
-    NO_RETRY = ("info", "AFC bambu Bambu_AMS_1: lane1 -- the AMS declared a "
+    NO_RETRY = ("info", "Bambu_AMS_1: lane1 -- the AMS declared a "
                         "fault after its own retries, so there is no re-home "
                         "retry; reporting the failure now.")
-    GAVE_UP = ("warning", f"AFC bambu Bambu_AMS_1: lane1 -- the AMS says it "
+    GAVE_UP = ("warning", f"Bambu_AMS_1: lane1 -- the AMS says it "
                           f"has STOPPED retrying, so this load stops asking. "
                           f"Clear the path at the unit. {_P6_RETRY}.")
     #: The reel back into the bay after a declared fault: the 100mm unload
@@ -26011,7 +26011,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
              {"cmd": "retract", "unit": 0, "slot": 0, "mm": 550.0,
               "mmps": 20.0},
              STOP]
-    REELED = ("debug", "AFC bambu Bambu_AMS_1: move ended on NARRATION after "
+    REELED = ("debug", "Bambu_AMS_1: move ended on NARRATION after "
                        "0.1s (ok=True): [AMS_SWITCH]feed finish 0")
     #: What a load whose unit declares a fault logs: no re-home retry, and the
     #: filament reeled into the bay.
@@ -26120,7 +26120,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         how = ("retrying without the re-home -- the chamber is drying and a "
                "park would unstage the bay" if hot
                else "re-homing AMS and retrying")
-        return ("info", f"AFC bambu Bambu_AMS_1: load of lane1 stalled; "
+        return ("info", f"Bambu_AMS_1: load of lane1 stalled; "
                         f"{how} (recover {n}/{of})")
 
     def _timed_out(self, within: int = 7, tail: Optional[str] = None) -> str:
@@ -26204,7 +26204,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
     #: The AMS's own multi-stage unwind to the bay.
     UNWIND = [SELECT, {"cmd": "unload", "unit": 0, "slot": 0}]
     #: 100mm at the 60mm/s deadline rate: 1.67s * 2 + 5s.
-    REEL_DEADLINE = ("debug", "AFC bambu Bambu_AMS_1: move ended on the "
+    REEL_DEADLINE = ("debug", "Bambu_AMS_1: move ended on the "
                               "DEADLINE (8s) -- no signal arrived")
     #: The window of a staged lane: 100mm at 60mm/s plus the 1s retry.
     STAGED_WINDOW = [KICK, KICK, STOP]
@@ -26278,7 +26278,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
             self.KICKED,
-            ("debug", "AFC bambu Bambu_AMS_1: move ended on NARRATION after "
+            ("debug", "Bambu_AMS_1: move ended on NARRATION after "
                       "0.1s (ok=True): [AMS_SWITCH]feed finish 0")]
 
     def test_a_reel_back_that_fails_says_so_and_still_stops(self,
@@ -26295,7 +26295,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
             self.KICKED,
-            ("warning", "AFC bambu Bambu_AMS_1: unload-back after failed "
+            ("warning", "Bambu_AMS_1: unload-back after failed "
                         "load of lane1 did not complete: write failed")]
 
     # a heating unit still loads
@@ -26392,9 +26392,9 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
             self.KICKED, self.FAULT_SAID, self.NO_RETRY,
-            ("debug", "AFC bambu Bambu_AMS_1: move ended on the DEADLINE "
+            ("debug", "Bambu_AMS_1: move ended on the DEADLINE "
                       "(23s) -- no signal arrived"),
-            ("warning", "AFC bambu Bambu_AMS_1: lane1 eject stopped on a "
+            ("warning", "Bambu_AMS_1: lane1 eject stopped on a "
                         "timeout, not on the AMS's own completion report -- "
                         "the filament may not be fully back in the bay. Check "
                         "the bay before loading it again.")]
@@ -26417,7 +26417,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
             self.KICKED, self.FAULT_SAID, self.NO_RETRY,
-            ("warning", "AFC bambu Bambu_AMS_1: reel-back after failed load "
+            ("warning", "Bambu_AMS_1: reel-back after failed load "
                         "of lane1 did not complete: write failed")]
 
     def test_a_declared_fault_with_one_retry_configured_gets_none_either(
@@ -26738,7 +26738,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS[:2]
         assert unit.logger.messages == [
             self.KICKED, self.ARRIVED,
-            ("warning", "AFC bambu Bambu_AMS_1: tool_stn advance failed for "
+            ("warning", "Bambu_AMS_1: tool_stn advance failed for "
                         "lane1: extruder stalled")]
 
     # the measured path
@@ -26765,7 +26765,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
         assert unit.logger.messages == [
             self.KICKED, self.ARRIVED,
-            ("info", "AFC bambu Bambu_AMS_1: the AMS measured its own "
+            ("info", "Bambu_AMS_1: the AMS measured its own "
                      "filament path at 3346mm (was 100mm) via odometer. "
                      "Adopting it for this session -- this sizes the load "
                      "give-up deadline.")]
@@ -26792,10 +26792,10 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit._unit_load_lane(lane) is True
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: pre-load prime failed"),
+            ("debug", "Bambu_AMS_1: pre-load prime failed"),
             self.KICKED, self.ARRIVED]
         assert [m for m, _tb in unit.logger.tracebacks] == [
-            "AFC bambu Bambu_AMS_1: pre-load prime failed"]
+            "Bambu_AMS_1: pre-load prime failed"]
 
     def test_a_heater_read_that_raises_never_stops_a_load(self, monkeypatch):
         class _Torn(dict):
@@ -26856,7 +26856,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
             self.KICKED,
-            ("info", f"AFC bambu Bambu_AMS_1: lane1 -- the AMS gave up AND "
+            ("info", f"Bambu_AMS_1: lane1 -- the AMS gave up AND "
                      f"the link to it is down, so it is not listening; "
                      f"failing now instead of re-homing into a unit that "
                      f"cannot answer. {_P6_RETRY}.")]
@@ -26881,7 +26881,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc.afcDeltaTime.messages == []
         assert unit.logger.messages == [
             self.KICKED, self.GAVE_UP,
-            ("info", f"AFC bambu Bambu_AMS_1: lane1 -- the AMS gave up AND "
+            ("info", f"Bambu_AMS_1: lane1 -- the AMS gave up AND "
                      f"{why}, so it is not listening; failing now instead of "
                      f"re-homing into a unit that cannot answer. "
                      f"{_P6_RETRY}.")]
@@ -26962,7 +26962,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc_bowden_length == 1200.0
         assert unit.logger.messages == [
             self.KICKED, self.ARRIVED,
-            ("info", "AFC bambu Bambu_AMS_1: the AMS measured its own "
+            ("info", "Bambu_AMS_1: the AMS measured its own "
                      "filament path at 1200mm (was 1500mm) via odometer. "
                      "Adopting it for this session -- this sizes the load "
                      "give-up deadline.")]
@@ -26986,7 +26986,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit.afc_bowden_length == 1200.0
         assert unit.logger.messages == [
             self.KICKED, self.ARRIVED,
-            ("info", "AFC bambu Bambu_AMS_1: the AMS measured its own "
+            ("info", "Bambu_AMS_1: the AMS measured its own "
                      "filament path at 1200mm (was 1500mm) via odometer. "
                      "Adopting it for this session -- this sizes the load "
                      "give-up deadline.")]
@@ -27063,7 +27063,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         bridge.on_send = on_send
         return unit, lane, bridge
 
-    GEARS = ("debug", "AFC bambu Bambu_AMS_1: lane1 stopped 1200mm in by the "
+    GEARS = ("debug", "Bambu_AMS_1: lane1 stopped 1200mm in by the "
                       "AMS Lite's odometer; taking it as at the extruder "
                       "gears")
 
@@ -27125,7 +27125,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         sent = unit._bridge.sent
         assert sent[sent.index(self.REHOME):] == [self.REHOME, self.SELECT,
                                                   self.ASSIST]
-        assert ("info", "AFC bambu Bambu_AMS_1: the AMS Lite stopped lane1 "
+        assert ("info", "Bambu_AMS_1: the AMS Lite stopped lane1 "
                         "itself (its feed stalled (error 02 01)); clearing it "
                         "and checking that the extruder takes it"
                 ) in unit.logger.messages
@@ -27224,7 +27224,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
         assert unit._lite_grip_check(lane, lane.extruder_obj, 0.0) is None
         assert unit.reactor.now == pytest.approx(102.0, abs=0.06)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: no grip check for lane1: the "
+            ("debug", "Bambu_AMS_1: no grip check for lane1: the "
                       "AMS Lite's odometer stopped reporting")]
 
     def test_a_pull_seen_late_still_counts(self, monkeypatch):
@@ -27331,7 +27331,7 @@ class TestAfcBambuAMSBoxedGrip:
                                       (0.92, 0)) is None
         assert unit.reactor.now == pytest.approx(100.5, abs=0.06)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: the extruder took lane1: the "
+            ("debug", "Bambu_AMS_1: the extruder took lane1: the "
                       "buffer dropped 0.22 from 0.92 0.5s into the push")]
 
     def test_the_buffer_need_not_drain(self, monkeypatch):
@@ -27364,7 +27364,7 @@ class TestAfcBambuAMSBoxedGrip:
         assert unit._boxed_grip_check(lane, lane.extruder_obj,
                                       (0.92, 3)) is None
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: the extruder took lane1: the "
+            ("debug", "Bambu_AMS_1: the extruder took lane1: the "
                       "AMS refilled its buffer (49mm) 0.4s into the push")]
 
     def test_a_buffer_that_never_drops_fails(self, monkeypatch):
@@ -27404,7 +27404,7 @@ class TestAfcBambuAMSBoxedGrip:
         assert unit._boxed_grip_check(lane, lane.extruder_obj,
                                       (0.92, 0)) is None
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: no grip check for lane1: the "
+            ("debug", "Bambu_AMS_1: no grip check for lane1: the "
                       "link to the bridge is down")]
 
     # in the load
@@ -27430,7 +27430,7 @@ class TestAfcBambuAMSBoxedGrip:
         assert unit.afc.e_moves[1] == (-50.0, 25.0, "grip back off", False)
         assert [m[2] for m in unit.afc.e_moves] == [
             "tool stn", "grip back off", "tool stn"]
-        assert ("info", f"AFC bambu Bambu_AMS_1: {self.UNFELT} Backing it "
+        assert ("info", f"Bambu_AMS_1: {self.UNFELT} Backing it "
                         f"off 50mm and feeding it again (1/1).") in (
             unit.logger.messages)
         assert unit.afc.error.calls == []
@@ -27646,7 +27646,7 @@ class TestAfcBambuAMSUnbindSpool:
         :param reason: why
         :return LogLine: the line an unbind logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: unbinding lane15 from spool "
+        return ("debug", f"Bambu_AMS_1: unbinding lane15 from spool "
                          f"87 -- {reason}")
 
     def test_unbind_is_a_noop_when_there_is_no_binding(self, monkeypatch):
@@ -27706,7 +27706,7 @@ class TestAfcBambuAMSUnbindSpool:
         unit._unbind_spool(_Stuck())
         assert unit.logger.messages == [
             self._unbinding("the bay is empty"),
-            ("debug", "AFC bambu Bambu_AMS_1: could not unbind lane15: "
+            ("debug", "Bambu_AMS_1: could not unbind lane15: "
                       "binding is read-only")]
 
 
@@ -27759,10 +27759,10 @@ class TestAfcBambuAMSSpool:
         assert unit._spool is None
         assert unit._spool_looked_up is True         # not retried every pass
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: could not attach the Spoolman "
+            ("debug", "Bambu_AMS_1: could not attach the Spoolman "
                       "module")]
         assert [m for m, _tb in unit.logger.tracebacks] == [
-            "AFC bambu Bambu_AMS_1: could not attach the Spoolman module"]
+            "Bambu_AMS_1: could not attach the Spoolman module"]
 
     def test_the_delegate_is_built_and_bound_to_its_unit(self, monkeypatch):
         unit, _asked = self._rig(monkeypatch, section=True)
@@ -27853,7 +27853,7 @@ class TestAfcBambuAMSMeasure:
         assert unit._measure is None
         assert unit._measure is None                 # latched, not retried
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: could not build the measurement "
+            ("debug", "Bambu_AMS_1: could not build the measurement "
                       "delegate -- measurements will not reach the lanes")]
 
 
@@ -27928,7 +27928,7 @@ class TestAfcBambuAMSLaneRemainPct:
         monkeypatch.setattr(rfid_mod, "measurement_only", broken)
         assert unit._lane_remain_pct(0, self._bay()) == 52
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: could not build the measurement "
+            ("debug", "Bambu_AMS_1: could not build the measurement "
                       "delegate -- measurements will not reach the lanes")]
 
 
@@ -28019,7 +28019,7 @@ class TestAfcBambuAMSSpoolmanSync:
         return unit, lane, synced, client
 
     #: The unbind a contradicted binding logs.
-    UNBOUND = ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool "
+    UNBOUND = ("debug", "Bambu_AMS_1: unbinding lane15 from spool "
                         "71 -- tag F1F2F3F4 is in this bay now, and Spoolman "
                         "does not list it on that spool")
 
@@ -28091,7 +28091,7 @@ class TestAfcBambuAMSApplyRemainWeight:
         monkeypatch.setattr(unit._spool, "_apply_remain_weight", broken)
         unit._apply_remain_weight(unit.lanes["lane8"], dict(unit._slots[1]))
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: owed measurement follow-up "
+            ("debug", "Bambu_AMS_1: owed measurement follow-up "
                       "failed")]
 
 
@@ -28181,7 +28181,7 @@ class TestAfcBambuAMSAdoptMeasuredRemain:
         assert unit.logger.messages == [
             self._sample(518, spool=164),
             self._said(518, "updated Spoolman spool 164"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 518.0 g remaining to "
+            ("debug", "Bambu_AMS_1: wrote 518.0 g remaining to "
                      "Spoolman spool 164 (physical AMS measurement)")]
 
     @NO_SPOOLMAN
@@ -28207,7 +28207,7 @@ class TestAfcBambuAMSAdoptMeasuredRemain:
         assert unit.lanes["lane8"].weight == 999.0
         assert unit.afc.save_vars.call_count == 0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: could not build the measurement "
+            ("debug", "Bambu_AMS_1: could not build the measurement "
                       "delegate -- measurements will not reach the lanes")]
 
     def test_a_delegate_that_raises_is_logged_and_refused(self, monkeypatch):
@@ -28217,11 +28217,11 @@ class TestAfcBambuAMSAdoptMeasuredRemain:
         monkeypatch.setattr(unit._measure, "_adopt_measured_remain", torn)
         assert unit._adopt_measured_remain(1, 63, "capscan", seq=1.0) is False
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: could not apply a measurement "
+            ("warning", "Bambu_AMS_1: could not apply a measurement "
                         "(lane torn); the log has where it failed"),
-            ("debug", "AFC bambu Bambu_AMS_1: measurement apply failed")]
+            ("debug", "Bambu_AMS_1: measurement apply failed")]
         assert [m for m, _tb in unit.logger.tracebacks] == [
-            "AFC bambu Bambu_AMS_1: measurement apply failed"]
+            "Bambu_AMS_1: measurement apply failed"]
 
 
 class TestAfcBambuAMSAckFaults:
@@ -28313,22 +28313,22 @@ class TestAfcBambuAMSUnitUnloadLane:
                (-100.0, 25.0, "STN unload", True),
                (-100.0, 25.0, "STN unload (concurrent with AMS reel)", False)]
     #: The toolhead retract line, read at E -2 - 100.
-    ISSUED = ("debug", "AFC bambu Bambu_AMS_1: toolhead retract issued for "
+    ISSUED = ("debug", "Bambu_AMS_1: toolhead retract issued for "
                        "lane1: 100mm at 25mm/s from E=-102.0 (queued, overlaps "
                        "the AMS reel)")
     #: A 300mm retract at the 60mm/s deadline rate: 5s * 2 + 5s.
-    DEADLINE = ("debug", "AFC bambu Bambu_AMS_1: move ended on the DEADLINE "
+    DEADLINE = ("debug", "Bambu_AMS_1: move ended on the DEADLINE "
                          "(15s) -- no signal arrived")
-    FAULT_ENDED = ("debug", "AFC bambu Bambu_AMS_1: move ended on a FAULT "
+    FAULT_ENDED = ("debug", "Bambu_AMS_1: move ended on a FAULT "
                             "after 0.0s")
-    RAN_OUT = ("warning", "AFC bambu Bambu_AMS_1: lane1 ran out, so its "
+    RAN_OUT = ("warning", "Bambu_AMS_1: lane1 ran out, so its "
                           "leftover filament cannot be reeled back into the "
                           "AMS. Skipped the AMS retract; the follower keeps "
                           "pushing so the leftover can be pulled out of "
                           "lane1's path, until the hub sensor reads it gone, "
                           "a spool goes into its bay, a lane on Bambu_AMS_1 "
                           "loads, or AFC_BAMBU_FOLLOWER LANE=lane1 ENABLE=0.")
-    STUCK = ("AFC bambu unload failed for lane1: filament still at the "
+    STUCK = ("Unload failed for lane1: filament still at the "
              "toolhead sensor after retract retries, and the AMS did not "
              "report reeling it home; run LANE_UNLOAD (eject) or check the "
              "unit")
@@ -28379,7 +28379,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         :param n: the re-kick
         :return LogLine: the warning each re-kick logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: toolhead sensor still sees "
+        return ("debug", f"Bambu_AMS_1: toolhead sensor still sees "
                            f"filament after retract for lane1 (AMS slot "
                            f"state: idle), re-kicking (stop/select/retract, "
                            f"attempt {n})")
@@ -28389,7 +28389,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         :param said: the unit's words, filtered
         :return str: the failure for a latch with filament at the toolhead
         """
-        return (f"AFC bambu unload failed for lane1: the AMS gave up reeling "
+        return (f"Unload failed for lane1: the AMS gave up reeling "
                 f"it back and latched, the filament is still gripped at the "
                 f"toolhead. Free it by hand (heat, then retract), then run "
                 f"{self.RECOVER}.\nAMS said: {said}")
@@ -28480,10 +28480,10 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit._runout_drain is lane
         assert unit.afc.error.messages == []
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unit is latched in error "
+            ("debug", "Bambu_AMS_1: unit is latched in error "
                         "(state 7) before pushing the leftover out for lane1, "
                         "re-homing to clear it first"),
-            ("debug", "AFC bambu Bambu_AMS_1: lane1, error cleared by the "
+            ("debug", "Bambu_AMS_1: lane1, error cleared by the "
                      "re-home (state 7 -> 2), continuing with pushing the "
                      "leftover out"),
             self.RAN_OUT]
@@ -28670,7 +28670,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, f"AFC bambu unload failed for lane1: the filament "
+             (lane, f"Unload failed for lane1: the filament "
                     f"cleared the toolhead but the AMS latched before "
                     f"reeling it home, the tip is stranded in the bowden. "
                     f"Run {self.RECOVER} then LANE_UNLOAD to finish the "
@@ -28694,10 +28694,10 @@ class TestAfcBambuAMSUnitUnloadLane:
                                             self.STUCK)]
         assert unit.logger.messages == [
             self.ISSUED, self.DEADLINE, self._rekicked(1),
-            ("debug", "AFC bambu Bambu_AMS_1: unit is latched in error "
+            ("debug", "Bambu_AMS_1: unit is latched in error "
                         "(state 7) before re-kick 1 for lane1, re-homing to "
                         "clear it first"),
-            ("warning", "AFC bambu Bambu_AMS_1: lane1, the unit would not "
+            ("warning", "Bambu_AMS_1: lane1, the unit would not "
                         "leave its error state after a re-home, so it is "
                         "jammed rather than merely latched. Not sending "
                         "re-kick 1.")]
@@ -28722,7 +28722,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.afc.e_moves[2] == (
             -45.0, 12.0, "STN unload (concurrent with AMS reel)", False)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: toolhead retract issued for "
+            ("debug", "Bambu_AMS_1: toolhead retract issued for "
                       "lane1: 45mm at 12mm/s from E=-47.0 (queued, overlaps "
                       "the AMS reel)"),
             self.DEADLINE]
@@ -28735,7 +28735,7 @@ class TestAfcBambuAMSUnitUnloadLane:
                             lambda *a, **k: unit.afc.e_moves.append(a))
         unit.unit_unload_lane(lane, lane.extruder_obj)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: toolhead retract issued for "
+            ("debug", "Bambu_AMS_1: toolhead retract issued for "
                       "lane1: 100mm at 25mm/s from E=? (queued, overlaps the "
                       "AMS reel)"),
             self.DEADLINE]
@@ -28760,7 +28760,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         _p6_at(unit, 100.05, lambda: bridge.tray_release.__setitem__(
             0, (1, tray)))
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
-        released = ("debug", "AFC bambu Bambu_AMS_1: move ended on the TRAY "
+        released = ("debug", "Bambu_AMS_1: move ended on the TRAY "
                              "RELEASE after 0.1s -- tray 0 -> none")
         assert unit.logger.messages == [self.ISSUED,
                                         released if ended else self.DEADLINE]
@@ -28776,7 +28776,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.reactor.now == pytest.approx(100.1)
         assert unit.logger.messages == [
             self.ISSUED,
-            ("debug", "AFC bambu Bambu_AMS_1: move ended on the STATE SWITCH "
+            ("debug", "Bambu_AMS_1: move ended on the STATE SWITCH "
                       "after 0.1s -- AMS_CTRL_state_switch finish")]
 
     # what it cannot do
@@ -28788,7 +28788,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert lane.status == AFCLaneState.TOOLED       # untouched
         assert unit.afc.e_moves == []
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: bridge not connected, cannot "
+            ("warning", "Bambu_AMS_1: bridge not connected, cannot "
                         "unload lane1")]
 
     def test_a_step_that_raises_is_a_lane_failure(self, monkeypatch):
@@ -28799,7 +28799,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit._unload_in_progress is False
         assert unit.afc.error.messages == [
-            ("handle_lane_failure", "AFC bambu unload failed for lane1: "
+            ("handle_lane_failure", "Unload failed for lane1: "
                                     "extruder stalled")]
         assert unit.logger.messages == []
 
@@ -28815,7 +28815,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     #: The AMS Lite's retract: sized only by its runaway guard.
     LITE_RETRACT = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 300.0,
                     "mmps": 20.0}
-    LITE_STUCK = ("AFC bambu unload failed for lane1: the toolhead sensor "
+    LITE_STUCK = ("Unload failed for lane1: the toolhead sensor "
                   "still sees filament after 20s of AMS Lite retract. Free it "
                   "at the toolhead, then run AFC_BAMBU_RECOVER "
                   "UNIT=Bambu_AMS_1 LANE=lane1.")
@@ -28857,7 +28857,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.afc.error.messages == []
         assert unit.logger.messages == [
             self.ISSUED,
-            ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+            ("debug", "Bambu_AMS_1: lane1 cleared the toolhead "
                       "sensor; 30mm more")]
 
     def test_an_ams_lite_that_never_clears_the_sensor_fails_the_lane(
@@ -28882,7 +28882,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, "AFC bambu unload failed for lane1: [AFC_hub "
+             (lane, "Unload failed for lane1: [AFC_hub "
                     "Bambu_AMS_1_hub] at the splitter still sees filament "
                     "after 20s of AMS Lite retract. An AMS Lite pulls back at "
                     "most 300mm, so that switch has to sit closer than that "
@@ -28892,7 +28892,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert lane.status == AFCLaneState.ERROR
         assert unit.logger.messages == [
             self.ISSUED,
-            ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+            ("debug", "Bambu_AMS_1: lane1 cleared the toolhead "
                       "sensor; on to the splitter switch Bambu_AMS_1_hub")]
 
     def test_an_ams_lite_stuck_at_the_toolhead_names_the_toolhead(
@@ -28911,12 +28911,12 @@ class TestAfcBambuAMSUnitUnloadLane:
 
     #: The failure when the AMS released the tray and the sensor still sees
     #: filament.
-    REELED_STUCK = ("AFC bambu unload of lane1: the AMS reeled it home, but "
+    REELED_STUCK = ("Unload of lane1: the AMS reeled it home, but "
                     "the toolhead sensor still sees filament, so a piece is "
                     "left in the toolhead or the sensor is stuck. Clear the "
                     "toolhead, then run the unload again.")
     #: The failure when the toolhead is still not clear on the next unload.
-    STILL_HELD = ("AFC bambu unload of lane1: the AMS already reeled it "
+    STILL_HELD = ("Unload of lane1: the AMS already reeled it "
                   "home, but the toolhead sensor still sees filament. Clear "
                   "the toolhead, then run the unload again.")
 
@@ -28945,7 +28945,7 @@ class TestAfcBambuAMSUnitUnloadLane:
              {"pause": False})]
         assert unit._reeled_home_lane == "lane1"
         assert lane.status == AFCLaneState.ERROR
-        released = ("debug", "AFC bambu Bambu_AMS_1: move ended on the TRAY "
+        released = ("debug", "Bambu_AMS_1: move ended on the TRAY "
                              "RELEASE after 0.1s -- tray 0 -> none")
         assert unit.logger.messages == [
             self.ISSUED, released, self._rekicked(1), self.DEADLINE,
@@ -28985,7 +28985,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert lane.loaded_to_hub is True
         assert unit._reeled_home_lane is None
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: the toolhead sensor is clear and "
+            ("debug", "Bambu_AMS_1: the toolhead sensor is clear and "
                      "the AMS already reeled lane1 home, so it is unloaded")]
 
     def test_the_next_unload_with_the_toolhead_still_held_fails_again(
@@ -29041,7 +29041,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, "AFC bambu unload failed for lane1: filament still at the "
+             (lane, "Unload failed for lane1: filament still at the "
                     "bay's hub sensor after retract retries, and the AMS did "
                     "not report reeling it home; run LANE_UNLOAD (eject) or "
                     "check the unit"),
@@ -29049,7 +29049,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert lane.tool_loaded is True
         assert unit._bridge.sent == (self.TO_RETRACT + self.REKICK
                                      + self.REKICK)
-        rekick = [("debug", f"AFC bambu Bambu_AMS_1: bay's hub sensor still "
+        rekick = [("debug", f"Bambu_AMS_1: bay's hub sensor still "
                               f"sees filament after retract for lane1 (AMS "
                               f"slot state: idle), re-kicking (stop/select/"
                               f"retract, attempt {n})") for n in (1, 2)]
@@ -29065,7 +29065,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, "AFC bambu unload of lane1: the AMS says it reeled it "
+             (lane, "Unload of lane1: the AMS says it reeled it "
                     "home, but the bay's hub sensor still sees filament, so "
                     "it never left the path (the buffer standing in for the "
                     "toolhead sensor cannot tell). Pull it back to the bay by "
@@ -29081,7 +29081,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert bridge.sent == sent
         assert lane.tool_loaded is False
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: the bay's hub sensor is clear and "
+            ("debug", "Bambu_AMS_1: the bay's hub sensor is clear and "
                      "the AMS already reeled lane1 home, so it is unloaded")]
 
 
@@ -29114,7 +29114,7 @@ class TestAfcBambuAMSPrepPostLoad:
         assert unit._following_lane is lane
         assert lane.loaded_to_hub is True
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane1 tool-loaded at prep, "
+            ("debug", "Bambu_AMS_1: lane1 tool-loaded at prep, "
                       "engaging follower")]
 
     def test_staged_only_does_not_arm(self, monkeypatch):
@@ -29459,7 +29459,7 @@ class TestAfcBambuAMSAdoptMeasuredPath:
         :param how: "for this session", or "and saving it"
         :return LogLine: the line an adoption logs
         """
-        return ("info", f"AFC bambu Bambu_AMS_1: the AMS measured its own "
+        return ("info", f"Bambu_AMS_1: the AMS measured its own "
                         f"filament path at {mm}mm (was {was}mm) via {via}. "
                         f"Adopting it {how} -- this sizes the load give-up "
                         f"deadline.")
@@ -29799,7 +29799,7 @@ class TestAfcBambuAMSFinishUnload:
         assert unit._finish_unload(lane) is True
         assert lane._load_state is True
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: lane1 unloaded but bay 1's "
+            ("warning", "Bambu_AMS_1: lane1 unloaded but bay 1's "
                         "hub sensor still reads filament (0xE8); the hub "
                         "shows occupied until it clears")]
 
@@ -29893,7 +29893,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
         :param mm: the distance past the sensor
         :return LogLine: the line the sensor clearing logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+        return ("debug", f"Bambu_AMS_1: lane1 cleared the toolhead "
                          f"sensor; {mm}mm more")
 
     # the distance past the sensor
@@ -29924,7 +29924,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
         assert lane.extruder_obj.sensor.reads == 0
         assert unit._bridge.sent == [self.RETRACT, self.STOP]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the extruder; "
+            ("debug", "Bambu_AMS_1: lane1 cleared the extruder; "
                       "25mm more")]
 
     def test_with_no_odometer_the_distance_is_timed(self, monkeypatch):
@@ -29999,7 +29999,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
         assert unit.reactor.now == 100.0
         assert unit._bridge.sent == [self.RETRACT, self.STOP]
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: the AMS Lite stalled "
+            ("warning", "Bambu_AMS_1: the AMS Lite stalled "
                         "retracting lane1 before it cleared the toolhead "
                         "sensor")]
 
@@ -30030,7 +30030,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
     # a switch at the splitter
 
     #: The toolhead sensor clearing ahead of the splitter switch.
-    ON_TO = ("debug", "AFC bambu Bambu_AMS_1: lane1 cleared the toolhead "
+    ON_TO = ("debug", "Bambu_AMS_1: lane1 cleared the toolhead "
                       "sensor; on to the splitter switch Bambu_AMS_1_hub")
 
     @staticmethod
@@ -30039,7 +30039,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
         :param mm: the distance past the switch
         :return LogLine: the line the splitter switch clearing logs
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: lane1 cleared the splitter "
+        return ("debug", f"Bambu_AMS_1: lane1 cleared the splitter "
                          f"switch Bambu_AMS_1_hub; {mm}mm more")
 
     def test_the_distance_runs_from_the_splitter_switch(self, monkeypatch):
@@ -30086,7 +30086,7 @@ class TestAfcBambuAMSLiteUnloadRetract:
         assert unit._bridge.sent == [self.RETRACT, self.STOP]
         assert unit.logger.messages == [
             self.ON_TO,
-            ("warning", "AFC bambu Bambu_AMS_1: the AMS Lite stalled "
+            ("warning", "Bambu_AMS_1: the AMS Lite stalled "
                         "retracting lane1 before it cleared the splitter "
                         "switch Bambu_AMS_1_hub")]
 
@@ -30116,9 +30116,9 @@ class TestAfcBambuAMSEjectLane:
     RETRACT = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 950.0,
                "mmps": 20.0}
     LATCH = (7, "[AMS_COMMON]en:1,mode:3 [AMS_LED]TIMEOUT error 2", 0.0)
-    FINISHED = ("debug", "AFC bambu Bambu_AMS_1: move ended on NARRATION "
+    FINISHED = ("debug", "Bambu_AMS_1: move ended on NARRATION "
                          "after 0.1s (ok=True): [AMS_SWITCH]feed finish 0")
-    FAULT_ENDED = ("debug", "AFC bambu Bambu_AMS_1: move ended on a FAULT "
+    FAULT_ENDED = ("debug", "Bambu_AMS_1: move ended on a FAULT "
                             "after 0.0s")
 
     def _rig(self, monkeypatch: pytest.MonkeyPatch, *,
@@ -30162,7 +30162,7 @@ class TestAfcBambuAMSEjectLane:
         :param said: the unit's words, filtered
         :return LogLine: the warning for an eject the unit gave up on
         """
-        return ("warning", f"AFC bambu Bambu_AMS_1: lane20 could not be "
+        return ("warning", f"Bambu_AMS_1: lane20 could not be "
                            f"reeled back -- the AMS gave up and latched. The "
                            f"filament is still out of the bay; free it by "
                            f"hand before loading this lane again.\nAMS said: "
@@ -30199,7 +30199,7 @@ class TestAfcBambuAMSEjectLane:
         assert lane._load_state is True
         assert unit._unload_in_progress is False
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: bridge not connected, cannot "
+            ("warning", "Bambu_AMS_1: bridge not connected, cannot "
                         "eject lane20")]
 
     def test_a_latch_is_said_in_the_units_own_words(self, monkeypatch):
@@ -30244,16 +30244,16 @@ class TestAfcBambuAMSEjectLane:
         assert 135.0 <= unit.reactor.now < 135.2     # the 35s deadline
         assert lane.loaded_to_hub is False
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: move ended on the DEADLINE "
+            ("debug", "Bambu_AMS_1: move ended on the DEADLINE "
                       "(35s) -- no signal arrived"),
-            ("warning", "AFC bambu Bambu_AMS_1: lane20 eject stopped on a "
+            ("warning", "Bambu_AMS_1: lane20 eject stopped on a "
                         "timeout, not on the AMS's own completion report -- "
                         "the filament may not be fully back in the bay. Check "
                         "the bay before loading it again.")]
 
     # an AMS Lite cannot reel a lane home
 
-    LITE_LET_GO = ("info", "AFC bambu Bambu_AMS_1: an AMS Lite cannot reel "
+    LITE_LET_GO = ("info", "Bambu_AMS_1: an AMS Lite cannot reel "
                            "lane20 back to its spool. It is released: pull "
                            "the filament out at the AMS Lite.")
 
@@ -30281,7 +30281,7 @@ class TestAfcBambuAMSEjectLane:
         assert unit.eject_lane(lane) is False
         assert lane.loaded_to_hub is True
         assert unit.logger.messages == [
-            ("warning", "AFC bambu Bambu_AMS_1: bridge not connected, cannot "
+            ("warning", "Bambu_AMS_1: bridge not connected, cannot "
                         "eject lane20")]
 
 
@@ -30417,7 +30417,7 @@ class TestDeadlineMmps:
         assert unit._wait_move(300.0) is False
         assert unit.reactor.now - 100.0 == pytest.approx(15.0, abs=0.11)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: move ended on the DEADLINE "
+            ("debug", "Bambu_AMS_1: move ended on the DEADLINE "
                       "(15s) -- no signal arrived")]
 
     def test_the_timeout_is_sized_from_the_measured_rate(self, monkeypatch):
@@ -30564,7 +30564,7 @@ class TestMoveDeadlineMaxS:
         assert unit._wait_move(3250.0) is False
         assert unit.reactor.now - 100.0 == pytest.approx(35.0, abs=0.11)
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: move ended on the DEADLINE "
+            ("debug", "Bambu_AMS_1: move ended on the DEADLINE "
                       "(35s) -- no signal arrived")]
 
 

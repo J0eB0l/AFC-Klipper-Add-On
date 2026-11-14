@@ -1028,13 +1028,13 @@ def _p6_claim_log(uid: str, bay: str, model: str = "boxed",
     """
     return [
         ("debug",
-         f"AFC bambu {bay}: chain index not resolved yet (UID {uid}); "
+         f"{bay}: chain index not resolved yet (UID {uid}); "
          "holding this unit's registrations until the chain map arrives"),
         ("debug",
-         f"AFC bambu {bay}: claimed UID {uid} as {model} and brought online "
+         f"{bay}: claimed UID {uid} as {model} and brought online "
          "live (ams_index=0)."),
         ("info",
-         f"AFC_BridgeBox chain1: CLAIMED {uid} as {model} onto {bay} "
+         f"chain1: CLAIMED {uid} as {model} onto {bay} "
          f"({lanes} lanes) -- live, no restart.{tail}"),
     ]
 
@@ -1824,7 +1824,7 @@ class TestAfcBridgeBoxInit:
         :param need: the AMS bays pool_ams and the recorded AMS need
         :return str: the ready line for HHHH holding the AMS band at four bays
         """
-        return (f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on lane40 "
+        return (f"chain1: HT {H} (Bambu_AMS_HT_1) on lane40 "
                 f"keeps its lanes, so the AMS band stays 4 bays although pool_ams "
                 f"and the recorded AMS need only {need}. Set pool_ams: 4 to "
                 f"silence this. AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID={H} lets "
@@ -1933,18 +1933,18 @@ class TestAfcBridgeBoxInit:
                                     dry_max_temp=-1)
         opts.update(pool)
         m = self._direct(tmp_path, self._MinvalConfig, printer, **opts)
-        note = ("AFC_BridgeBox chain1: dry_max_temp is -1, below 0, so it is "
+        note = ("chain1: dry_max_temp is -1, below 0, so it is "
                 "ignored and each heated unit dries up to its model's own "
                 "ceiling. Remove it or set a positive value to silence this.")
         assert m.dry_max_temp == 0
         assert m._dry_note == note
         assert _bbx_ready(m) == [
             ("warning", note),
-            ("warning", "AFC_BridgeBox chain1: could not open the bridge for "
+            ("warning", "chain1: could not open the bridge for "
                         "scouting (could not open port "
                         "/dev/serial/by-id/usb-chain1-if00); will keep "
                         "retrying."),
-            ("info", "AFC_BridgeBox chain1: no roster configured and no "
+            ("info", "chain1: no roster configured and no "
                      "recorded roster -- scouting the chain. Detected units "
                      "are recorded in AFC_BridgeBox.cfg; RESTART then "
                      "enrolls them.")]
@@ -2222,7 +2222,7 @@ class TestAfcBridgeBoxInit:
         bridge = FakeBridge()
         live_bridges()[m.serial_port] = bridge
         assert _bbx_ready(m) == [
-            ("info", "AFC_BridgeBox chain1: no roster configured and no "
+            ("info", "chain1: no roster configured and no "
                      "recorded roster -- scouting the chain. Detected units "
                      "are recorded in AFC_BridgeBox.cfg; RESTART then "
                      "enrolls them.")]
@@ -2867,7 +2867,7 @@ class TestAfcBridgeBoxInit:
         assert self._lanes(m) == _bbx_lanes_span(24, 31)
         assert self._state_names(m) == {A: "Red"}
         assert m._layout_notes == [
-            f"AFC_BridgeBox chain1: AMS {A} was recorded as Alpha, which no "
+            f"chain1: AMS {A} was recorded as Alpha, which no "
             f"ams_names entry or default name gives an AMS. It is now Red, "
             f"and its lanes stay lane24-lane27. Lane records saved "
             f"under Alpha (spool, material, colour, T# map) do not carry over "
@@ -2915,7 +2915,7 @@ class TestAfcBridgeBoxInit:
                          dry_max_temp=-1, **opts)
         assert hasattr(m, "logger") is False
         assert m._dry_note == (
-            "AFC_BridgeBox chain1: dry_max_temp is -1, below 0, so it is "
+            "chain1: dry_max_temp is -1, below 0, so it is "
             "ignored and each heated unit dries up to its model's own "
             "ceiling. Remove it or set a positive value to silence this.")
         _bbx_quiet(m.printer)
@@ -3029,7 +3029,7 @@ class TestAfcBridgeBoxInit:
     # at most four AMS bays
 
     NO_BAY_E = (
-        f"AFC_BridgeBox chain1: AMS {E} is recorded but has no bay: all 4 "
+        f"chain1: AMS {E} is recorded but has no bay: all 4 "
         f"AMS bays belong to other units (Bambu_AMS_1 ({A}), Bambu_AMS_2 "
         f"({B}), Bambu_AMS_3 ({C}), Bambu_AMS_4 ({D})), and a Bambu bus "
         f"addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
@@ -3114,7 +3114,7 @@ class TestAfcBridgeBoxInit:
         assert m._state_get(SEC, "lane_map") == (
             f"{A}:24:4, {B}:28:4, {C}:32:4, {D}:36:4, {H}:40:1")
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) "
                         f"keeps its name, and its lanes changed: "
                         f"lane44 -> lane40."),
             ("warning", self.NO_BAY_E + "frees that bay and this AMS claims "
@@ -3140,7 +3140,7 @@ class TestAfcBridgeBoxInit:
             f"{A}:Bambu_AMS_1, {B}:Bambu_AMS_2, {C}:Bambu_AMS_3, "
             f"{E}:Bambu_AMS_4, {H}:Bambu_AMS_HT_1")
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: AMS {E} was recorded as "
+            ("warning", f"chain1: AMS {E} was recorded as "
                         f"Bambu_AMS_5, past the 4 AMS bays a Bambu bus "
                         f"addresses. It is now Bambu_AMS_4, and its lanes "
                         f"changed: lane40-lane43 -> "
@@ -3149,7 +3149,7 @@ class TestAfcBridgeBoxInit:
                         f"not carry over to Bambu_AMS_4; a tagged spool is "
                         f"read again from its tag. Its learned bowden "
                         f"lengths stay with the unit."),
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) "
                         f"keeps its name, and its lanes changed: "
                         f"lane44 -> lane40.")]
         m2 = _bbx_restart(tmp_path)
@@ -3170,7 +3170,7 @@ class TestAfcBridgeBoxInit:
         # _ht_band caps the recorded five-bay band at four, so the HT moves
         # from lane44 to lane40, and the band note says so.
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) on "
                         f"lane44 holds the AMS band at 4 bays although "
                         f"pool_ams and the recorded AMS need only 1. "
                         f"Bambu_AMS_HT_1 moves to lane40, past those 4 "
@@ -3178,7 +3178,7 @@ class TestAfcBridgeBoxInit:
                         f"AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID={H} lets the "
                         f"band shrink to 1 at the next RESTART, and erases "
                         f"what it learned."),
-            ("warning", f"AFC_BridgeBox chain1: AMS {A} was recorded as N5, "
+            ("warning", f"chain1: AMS {A} was recorded as N5, "
                         f"past the 4 AMS bays a Bambu bus addresses. It is "
                         f"now N1, and its lanes changed: lane40-lane43"
                         f" -> lane24-lane27. Lane records "
@@ -3186,7 +3186,7 @@ class TestAfcBridgeBoxInit:
                         f"not carry over to N1; a tagged spool is read again "
                         f"from its tag. Its learned bowden lengths stay with "
                         f"the unit."),
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) "
                         f"keeps its name, and its lanes changed: "
                         f"lane44 -> lane40.")]
 
@@ -3203,7 +3203,7 @@ class TestAfcBridgeBoxInit:
                                              (40, 1, "Bambu_AMS_HT_1"),
                                              (41, 1, "Bambu_AMS_HT_2"))
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) on "
                         f"lane40, HT {G} (Bambu_AMS_HT_2) on lane37"
                         f" hold the AMS band at 4 bays although pool_ams "
                         f"and the recorded AMS need only 1. Bambu_AMS_HT_2 "
@@ -3212,7 +3212,7 @@ class TestAfcBridgeBoxInit:
                         f"CHAIN=chain1 UID=<uid> for each lets the band "
                         f"shrink to 1 at the next RESTART, and erases what "
                         f"they learned."),
-            ("warning", f"AFC_BridgeBox chain1: HT {G} (Bambu_AMS_HT_2) "
+            ("warning", f"chain1: HT {G} (Bambu_AMS_HT_2) "
                         f"keeps its name, and its lanes changed: "
                         f"lane37 -> lane41.")]
 
@@ -3226,7 +3226,7 @@ class TestAfcBridgeBoxInit:
         assert m._lane_map[A] == (32, 4)
         assert self._layout(m)[40] == "Bambu_AMS_HT_1"
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: AMS {A} was recorded as "
+            ("warning", f"chain1: AMS {A} was recorded as "
                         f"Alpha, which no ams_names entry or default name "
                         f"gives an AMS. It is now Bambu_AMS_3, and its lanes "
                         f"stay lane32-lane35. Lane records saved "
@@ -3246,7 +3246,7 @@ class TestAfcBridgeBoxInit:
         assert E not in _bbx_uids(m).values()
         assert m._unbayed == {E: None}
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: AMS {A} was recorded as "
+            ("warning", f"chain1: AMS {A} was recorded as "
                         f"Alpha, which no ams_names entry or default name "
                         f"gives an AMS. It is now Bambu_AMS_1, and its lanes "
                         f"stay lane24-lane27. Lane records saved "
@@ -3270,7 +3270,7 @@ class TestAfcBridgeBoxInit:
         # Three AMS left, the highest on the fourth bay: the band still
         # covers it, and pool_ams builds no spare past the three recorded.
         assert self._forget(m2, B) == [
-            ("respond_info", f"AFC_BridgeBox chain1: forgot {B} -- lanes "
+            ("respond_info", f"chain1: forgot {B} -- lanes "
                              f"28-31 and the name Bambu_AMS_2 freed for "
                              f"reuse -- slot freed to the pool LIVE; the "
                              f"next same-family unit claims it with no "
@@ -3341,7 +3341,7 @@ class TestAfcBridgeBoxInit:
         assert self._layout(m2)[40] == "Bambu_AMS_HT_1"
         assert m2._lane_map[H] == (40, 1)
         assert m2._state_get(SEC, "ams_band") == "2"
-        moved = [("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
+        moved = [("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) "
                              f"keeps its name, and its lanes changed: "
                              f"lane40 -> lane32.")]
         for notes in (moved, []):
@@ -3374,12 +3374,12 @@ class TestAfcBridgeBoxInit:
             (32, 1, "Bambu_AMS_HT_1"), (33, 1, "Bambu_AMS_HT_2"))
         assert m._lane_map[H] == (32, 1)
         assert _bbx_ready(m) == [
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) on "
                         f"lane40 cannot keep its lanes: [AFC_lane "
                         f"lane40] already exists outside this chain. The AMS "
                         f"band is 2 bays, what pool_ams and the recorded AMS "
                         f"need, and the HT lanes follow it."),
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) "
                         f"keeps its name, and its lanes changed: "
                         f"lane40 -> lane32.")]
         m = _bbx_restart(tmp_path, pool_ams=2, printer=_around())
@@ -3413,7 +3413,7 @@ class TestAfcBridgeBoxInit:
         :param fam: AMS or HT
         :return str: the ready line for a unit that drew a new name
         """
-        return (f"AFC_BridgeBox chain1: {fam} {uid} was recorded as {saved}, "
+        return (f"chain1: {fam} {uid} was recorded as {saved}, "
                 f"{why}. It is now {now}, and {lanes}. Lane records saved "
                 f"under {saved} (spool, material, colour, T# map) do not "
                 f"carry over to {now}; a tagged spool is read again from its "
@@ -3482,7 +3482,7 @@ class TestAfcBridgeBoxInit:
 
     # pool_ams above the four AMS a Bambu bus addresses
 
-    POOL6_NOTE = ("AFC_BridgeBox chain1: pool_ams is 6, but a Bambu bus "
+    POOL6_NOTE = ("chain1: pool_ams is 6, but a Bambu bus "
                   "addresses at most 4 AMS, so 4 AMS bays are built and the "
                   "HT lanes start at lane40. Set pool_ams: 4 to silence this.")
 
@@ -3517,7 +3517,7 @@ class TestAfcBridgeBoxInit:
             "uid": H, "family": "ht", "name": "Bambu_AMS_HT_1", "now": None}}
         assert _bbx_ready(m) == [
             ("warning", self.POOL6_NOTE),
-            ("warning", f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) "
+            ("warning", f"chain1: HT {H} (Bambu_AMS_HT_1) "
                         f"keeps its name, and its lanes changed: "
                         f"lane48 -> lane40.")]
 
@@ -3600,7 +3600,7 @@ class TestAfcBridgeBoxInit:
         :param named: the name the bay wears instead
         :return str: the ready line for a name list entry that gave way
         """
-        return (f"AFC_BridgeBox chain1: {what}, so {bay} is named {named} -- "
+        return (f"chain1: {what}, so {bay} is named {named} -- "
                 f"give each bay a name of its own.")
 
     def test_an_ams_entry_equal_to_an_ht_name_costs_no_bay(self, tmp_path):
@@ -3681,7 +3681,7 @@ class TestAfcBridgeBoxInit:
             assert m._lane_map[C] == (32, 4)
             assert m._lane_moves == {}
             assert _bbx_ready(m) == [
-                ("warning", "AFC_BridgeBox chain1: the default name of AMS "
+                ("warning", "chain1: the default name of AMS "
                             "bay 4 (Bambu_AMS_4) is ams_names entry 3, so AMS "
                             "bay 4 is named Bambu_AMS_4_2.")]
 
@@ -3726,7 +3726,7 @@ class TestAfcBridgeBoxInit:
                 (29, 1, "Bambu_AMS_HT_2_2"))
             assert m._rank_of("ht", "Bambu_AMS_HT_2_2") == 1
             assert _bbx_ready(m) == [
-                ("warning", "AFC_BridgeBox chain1: the default name of HT "
+                ("warning", "chain1: the default name of HT "
                             "bay 2 (Bambu_AMS_HT_2) is ht_names entry 1, so "
                             "HT bay 2 is named Bambu_AMS_HT_2_2.")]
 
@@ -3883,12 +3883,12 @@ class TestAfcBridgeBoxInit:
 
     #: What AFC's logger holds once a tick claims CCCC onto Bambu_AMS_2.
     CCCC_CLAIMED = [
-        ("debug", f"AFC bambu Bambu_AMS_2: chain index not resolved yet "
+        ("debug", f"Bambu_AMS_2: chain index not resolved yet "
                   f"(UID {C}); holding this unit's registrations until the "
                   f"chain map arrives"),
-        ("debug", f"AFC bambu Bambu_AMS_2: claimed UID {C} as boxed and "
+        ("debug", f"Bambu_AMS_2: claimed UID {C} as boxed and "
                  f"brought online live (ams_index=0)."),
-        ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto "
+        ("info", f"chain1: CLAIMED {C} as boxed onto "
                  f"Bambu_AMS_2 (4 lanes) -- live, no restart.")]
     #: The popup that claim raises on the printer's gcode.
     CCCC_PROMPT = [
@@ -3917,7 +3917,7 @@ class TestAfcBridgeBoxInit:
         assert m._name_map[C] == "Bambu_AMS_2"
         assert m._lane_map[C] == (28, 4)
         assert self._forget(m, A) == [
-            ("respond_info", f"AFC_BridgeBox chain1: forgot {A} -- lanes "
+            ("respond_info", f"chain1: forgot {A} -- lanes "
                              f"24-27 and the name Bambu_AMS_1 freed for "
                              f"reuse -- slot freed to the pool LIVE; the "
                              f"next same-family unit claims it with no "
@@ -3925,10 +3925,10 @@ class TestAfcBridgeBoxInit:
         # The ticks claimed, recorded and saved CCCC and raised its popup;
         # FORGET logged nothing and closed the popup.
         assert m.printer.afc.logger.messages == self.CCCC_CLAIMED + [
-            ("info", f"AFC_BridgeBox chain1: NEW unit(s) on the chain: "
+            ("info", f"chain1: NEW unit(s) on the chain: "
                      f"boxed:{C} -- recorded. A restart adds its temperature "
                      f"card."),
-            ("info", f"AFC_BridgeBox chain1: saved {C} on Bambu_AMS_2 "
+            ("info", f"chain1: saved {C} on Bambu_AMS_2 "
                      f"(lane28-lane31); it comes back there after a "
                      f"restart.")]
         assert m.printer.gcode.messages == self.CCCC_PROMPT + [
@@ -3952,7 +3952,7 @@ class TestAfcBridgeBoxInit:
         assert _bbx_keys(m, "AFC_BambuAMS Bambu_AMS_1")[
             "afc_bowden_length"] == "3632.0"
         assert _bbx_ready(m) == [
-            ("info", f"AFC_BridgeBox chain1: learned values stored under "
+            ("info", f"chain1: learned values stored under "
                      f"Bambu_AMS_1 now belong to its unit {A} "
                      f"(afc_bowden_length)")]
 
@@ -3968,7 +3968,7 @@ class TestAfcBridgeBoxInit:
         assert "afc_bowden_length" not in _bbx_keys(
             m, "AFC_BambuAMS Bambu_AMS_2")
         assert _bbx_ready(m) == [
-            ("info", "AFC_BridgeBox chain1: learned values stored under "
+            ("info", "chain1: learned values stored under "
                      "Bambu_AMS_2 dropped -- no unit is recorded with that "
                      "name")]
 
@@ -4157,14 +4157,14 @@ class TestAfcBridgeBoxInit:
         assign = FakeGcmd({"UID": C, "NAME": "Bravo"})
         m.cmd_AFC_BRIDGEBOX_ASSIGN(assign)
         assert assign.messages == [
-            ("respond_info", f"AFC_BridgeBox chain1: assigned {C} to bay "
+            ("respond_info", f"chain1: assigned {C} to bay "
                              f"'Bravo' (lane28-lane31) -- claimed "
                              f"LIVE, no restart.")]
         assert m.persist_learned("Bravo", "afc_bowden_length", 3632.0) is True
         force = FakeGcmd({"UID": C, "NAME": "Charlie", "FORCE": 1})
         m.cmd_AFC_BRIDGEBOX_ASSIGN(force)
         assert force.messages == [
-            ("respond_info", f"AFC_BridgeBox chain1: assigned {C} to bay "
+            ("respond_info", f"chain1: assigned {C} to bay "
                              f"'Charlie' (lane32-lane35) -- claimed "
                              f"LIVE, no restart.")]
         # Alpha waits for the offline A; Bravo was handed nothing (C had
@@ -4176,13 +4176,13 @@ class TestAfcBridgeBoxInit:
             "Charlie": (C, False, [{"afc_bowden_length": 3632.0}]),
             "Bambu_AMS_HT_1": (None, True, [])}
         assert m.printer.afc.logger.messages == [
-            ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto Bravo "
+            ("info", f"chain1: CLAIMED {C} as boxed onto Bravo "
                      f"(0 lanes) -- live, no restart."),
-            ("info", f"AFC_BridgeBox chain1: released Bravo (UID {C}, "
+            ("info", f"chain1: released Bravo (UID {C}, "
                      f"AFC_BRIDGEBOX_ASSIGN); lanes dropped live"),
-            ("debug", f"AFC_BridgeBox chain1: Charlie takes the "
+            ("debug", f"chain1: Charlie takes the "
                      f"afc_bowden_length 3632mm that UID {C} learned."),
-            ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto "
+            ("info", f"chain1: CLAIMED {C} as boxed onto "
                      f"Charlie (0 lanes) -- live, no restart.")]
         # Each ASSIGN closes the popup that could have run it, and each
         # claim saves AFC's var file.
@@ -4221,11 +4221,11 @@ class TestAfcBridgeBoxInit:
         assign = FakeGcmd({"UID": C, "NAME": "Bravo"})
         m.cmd_AFC_BRIDGEBOX_ASSIGN(assign)
         assert assign.messages == [
-            ("respond_info", f"AFC_BridgeBox chain1: assigned {C} to bay "
+            ("respond_info", f"chain1: assigned {C} to bay "
                              f"'Bravo' (lane28-lane31) -- claimed "
                              f"LIVE, no restart.")]
         assert m.printer.afc.logger.messages == [
-            ("info", f"AFC_BridgeBox chain1: CLAIMED {C} as boxed onto Bravo "
+            ("info", f"chain1: CLAIMED {C} as boxed onto Bravo "
                      f"(0 lanes) -- live, no restart.")]
         assert m.printer.gcode.messages == [
             ("respond_raw", "// action:prompt_end")]
@@ -4711,17 +4711,17 @@ class TestAfcBridgeBoxInit:
         assert (m2.lane_base, m2._lane_map[B]) == (15, (19, 1))
         assert m2._state_get("AFC_BridgeBox chain2", "lane_base") == "15"
         assert logs == [
-            ("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) keeps "
+            ("warning", f"chain1: HT {A} (Bambu_AMS_HT_1) keeps "
                         f"its name, and its lanes changed: lane9 "
                         f"-> lane13."),
-            ("info", "AFC_BridgeBox chain2: Other units now hold lane numbers "
+            ("info", "chain2: Other units now hold lane numbers "
                      "among this chain's lanes, so its lanes moved up past "
                      "the highest of those (14): lane11-lane16 became "
                      "lane15-lane20, with their saved lane records, T# maps "
                      "and learned values.")]
         # Back to pool_ams 1: the recorded HT keeps lane13, and chain2, now
         # past it, stays.
-        kept = [("warning", f"AFC_BridgeBox chain1: HT {A} (Bambu_AMS_HT_1) on "
+        kept = [("warning", f"chain1: HT {A} (Bambu_AMS_HT_1) on "
                             f"lane13 keeps its lanes, so the AMS band "
                             f"stays 2 bays although pool_ams and the recorded "
                             f"AMS need only 1. Set pool_ams: 2 to silence "
@@ -4863,11 +4863,11 @@ class TestAfcBridgeBoxInit:
         return m1, m2, notes
 
     HT_MOVED = [
-        f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) on lane40 "
+        f"chain1: HT {H} (Bambu_AMS_HT_1) on lane40 "
         f"cannot keep its lanes: [AFC_BridgeBox chain2] further down the "
         f"config builds lane40. The AMS band is 1 bays, what pool_ams and "
         f"the recorded AMS need, and the HT lanes follow it.",
-        f"AFC_BridgeBox chain1: HT {H} (Bambu_AMS_HT_1) keeps its name, and "
+        f"chain1: HT {H} (Bambu_AMS_HT_1) keeps its name, and "
         f"its lanes changed: lane40 -> lane28."]
 
     def test_an_explicit_lane_base_over_the_ht_lane_moves_it(self, tmp_path):
@@ -5619,7 +5619,7 @@ class TestAfcBridgeBoxPersistBayOwner:
         printer = make_printer(var_file=str(tmp_path / "AFC.var"))
         write_unit_vars(printer, {"Alpha": records})
         m = _bbx_boot(tmp_path, printer=printer, **opts)
-        held = [("debug", "AFC_BridgeBox chain1: holding the saved lane "
+        held = [("debug", "chain1: holding the saved lane "
                           "records of Alpha for their units")]
         assert _bbx_ready(m) == held
         assert m._held == {"Alpha": {"uid": A, "lanes": records}}
@@ -5800,7 +5800,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m1.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 12-15 and the name "
+            "chain1: forgot AAAA -- lanes 12-15 and the name "
             "Bambu_AMS_1 freed for reuse -- its bay is free now, but with no "
             "pool nothing claims it: AFC_BRIDGEBOX_ASSIGN another unit onto "
             "it while that unit is online, or RESTART. NOTE: your roster: "
@@ -5822,7 +5822,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse. Applies at the next RESTART.")]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -5843,7 +5843,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert (bay["uid"], bay["bound"]) == (None, None)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse -- its bay is free now, but with no "
             "pool nothing claims it: AFC_BRIDGEBOX_ASSIGN another unit onto "
             "it while that unit is online, or RESTART. NOTE: your roster: "
@@ -5871,7 +5871,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._state_get(SEC, "lane_map") == "BBBB:28:4"
         assert m._state_get(SEC, "name_map") == "BBBB:Bambu_AMS_2"
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse, learned values erased. Applies at "
             "the next RESTART."))]
         assert _p3_log(m) == []
@@ -5883,7 +5883,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(NAME="Bambu_AMS_1")
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse. Applies at the next RESTART."))]
         assert m._name_map == {B: "Bambu_AMS_2"}
         assert _p3_log(m) == []
@@ -5912,7 +5912,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._forget_suppressed == {A}
         assert _p3_bridge(m).sent == [{"cmd": "forget", "uid": "aaaa"}]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse. Applies at the next RESTART. It is "
             "still on the wire, so re-enroll is suppressed until you "
             "physically pull it -- a re-plug then enrolls it fresh."))]
@@ -5932,7 +5932,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._forget_suppressed == {A}
         assert m.printer.lookup_object("AFC_lane lane24").unassigned is True
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse, saved lane records erased -- its "
             "bay is free now, but with no pool nothing claims it: "
             "AFC_BRIDGEBOX_ASSIGN another unit onto it while that unit is "
@@ -5943,7 +5943,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
             "roster."))]
         assert _p3_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA, "
+            "chain1: released Bambu_AMS_1 (UID AAAA, "
             "AFC_BRIDGEBOX_FORGET); lanes dropped live")]
         assert _p3_console(m) == [END]
 
@@ -5964,7 +5964,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._state_get(SEC, "lane_map") == "BBBB:28:4"
         assert bay["bound"] is None
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse, saved lane records erased -- its "
             "bay is free now, but with no pool nothing claims it: "
             "AFC_BRIDGEBOX_ASSIGN another unit onto it while that unit is "
@@ -5975,7 +5975,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
             "roster."))]
         assert _p3_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA, "
+            "chain1: released Bambu_AMS_1 (UID AAAA, "
             "AFC_BRIDGEBOX_FORGET); lanes dropped live")]
         assert _p3_console(m) == [END]
 
@@ -5989,7 +5989,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._state_get(SEC, "lane_map") == "BBBB:28:4"
         assert m._forget_suppressed == {A}
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse. Applies at the next RESTART. It is "
             "still on the wire, so re-enroll is suppressed until you "
             "physically pull it -- a re-plug then enrolls it fresh."))]
@@ -6008,7 +6008,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
             "Forget a Bambu AMS unit", ["Alpha  [AAAA\u2026]"],
             ["Forget Alpha|AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=AAAA|error"])
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: forget picker -- Alpha")]
+            ("respond_info", "chain1: forget picker -- Alpha")]
         assert _p3_state(tmp_path) == before
         assert _p3_log(m) == []
 
@@ -6037,13 +6037,13 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
                 if live else "")
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Alpha freed for reuse, saved lane records erased -- slot freed "
             "to the pool LIVE; the next same-family unit claims it with no "
             "reboot." + wire)]
         released = [(
             "info",
-            "AFC_BridgeBox chain1: released Alpha (UID AAAA, "
+            "chain1: released Alpha (UID AAAA, "
             "AFC_BRIDGEBOX_FORGET); lanes dropped live")]
         assert _p3_log(m) == (released if live else [])
         assert _p3_console(m) == [END]
@@ -6058,7 +6058,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID=A)
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Alpha freed for reuse -- slot freed to the pool LIVE; the next "
             "same-family unit claims it with no reboot."))]
         assert m._owners() == {}
@@ -6079,7 +6079,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert (m._held, m._owners()) == ({}, {})
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- saved lane records erased. "
+            "chain1: forgot AAAA -- saved lane records erased. "
             "Applies at the next RESTART."))]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -6101,7 +6101,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID=A)
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Alpha freed for reuse, saved lane records erased -- slot freed "
             "to the pool LIVE; the next same-family unit claims it with no "
             "reboot. NOTE: your roster: option still lists this uid -- "
@@ -6133,12 +6133,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert (bay["uid"], bay["bound"]) == (None, None)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot GGGG -- saved lane records erased "
+            "chain1: forgot GGGG -- saved lane records erased "
             "-- slot freed to the pool LIVE; the next same-family unit claims "
             "it with no reboot."))]
         assert _p3_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID GGGG, "
+            "chain1: released Bambu_AMS_4 (UID GGGG, "
             "AFC_BRIDGEBOX_FORGET); lanes dropped live")]
         assert _p3_console(m) == [END]
 
@@ -6165,12 +6165,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert (bay["uid"], bay["bound"]) == (None, None)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot GGGG -- saved lane records erased "
+            "chain1: forgot GGGG -- saved lane records erased "
             "-- slot freed to the pool LIVE; the next same-family unit claims "
             "it with no reboot."))]
         assert _p3_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID GGGG, "
+            "chain1: released Bambu_AMS_4 (UID GGGG, "
             "AFC_BRIDGEBOX_FORGET); lanes dropped live")]
         assert _p3_console(m) == [END]
 
@@ -6194,7 +6194,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert D not in m._no_bay_told and D not in m._replace_offered
         assert m._popup_queue == [("new", A)]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name "
+            "chain1: forgot DDDD -- lanes 36-39 and the name "
             "Bambu_AMS_4 freed for reuse -- slot freed to the pool LIVE; the "
             "next same-family unit claims it with no reboot."))]
         assert _p3_log(m) == []
@@ -6223,7 +6223,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert snap["system"]["extruders"] == {
             "extruder": {"lane_loaded": None}}
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name "
+            "chain1: forgot DDDD -- lanes 36-39 and the name "
             "Bambu_AMS_4 freed for reuse -- cleared lane36 from the toolhead "
             "-- slot freed to the pool LIVE; the next same-family unit claims "
             "it with no reboot."))]
@@ -6238,7 +6238,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         _p3_tick(m, 100, 111)
         m.printer.afc.prep_done = False
         m._ready_at = m.printer.reactor.now
-        wait = [("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
+        wait = [("debug", "chain1: unit claims wait for PREP")]
         assert _p3_refused(m, tmp_path, "FORGET", _p3_cmd(UID=D), wait) == (
             "AFC_BRIDGEBOX_FORGET: PREP has not run yet, so which lane AFC "
             "records as loaded to the toolhead is not known -- run this "
@@ -6248,7 +6248,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert _p3_bay(m, "Bambu_AMS_4")["uid"] is None
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name "
+            "chain1: forgot DDDD -- lanes 36-39 and the name "
             "Bambu_AMS_4 freed for reuse -- slot freed to the pool LIVE; the "
             "next same-family unit claims it with no reboot."))]
         assert _p3_log(m) == []
@@ -6304,7 +6304,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID=D)
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name "
+            "chain1: forgot DDDD -- lanes 36-39 and the name "
             "Bambu_AMS_4 freed for reuse -- its bay is free now, but with no "
             "pool nothing claims it: AFC_BRIDGEBOX_ASSIGN another unit onto "
             "it while that unit is online, or RESTART."))]
@@ -6321,7 +6321,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID=D)
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name "
+            "chain1: forgot DDDD -- lanes 36-39 and the name "
             "Bambu_AMS_4 freed for reuse -- slot freed to the pool LIVE; the "
             "next same-family unit claims it with no reboot."))]
         assert _p3_log(m) == []
@@ -6357,7 +6357,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID=G)
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: forgot GGGG.")]
+            ("respond_info", "chain1: forgot GGGG.")]
         assert "Bambu_AMS_4" not in m._owners()
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -6380,7 +6380,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot GGGG -- saved lane records erased.")]
+            "chain1: forgot GGGG -- saved lane records erased.")]
         assert m._held == {}
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
@@ -6397,7 +6397,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._state_get(SEC, "roster") == "boxed:AAAA"
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot QQQQ. Applies at the next RESTART.")]
+            "chain1: forgot QQQQ. Applies at the next RESTART.")]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
 
@@ -6419,16 +6419,16 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert m._learned_for(A) == {}
         assert m._learned_for(C) == {"afc_bowden_length": "3632.0"}
         assert assign.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Bambu_AMS_2' "
+            "chain1: assigned CCCC to bay 'Bambu_AMS_2' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert unassign.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bambu_AMS_2' "
+            "chain1: unassigned CCCC from bay 'Bambu_AMS_2' "
             "(learned values stay with the unit). It takes a free bay of its "
             "family, its last one first, and is saved there once it has been "
             "online 15s."))]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse, learned values erased -- slot freed "
             "to the pool LIVE; the next same-family unit claims it with no "
             "reboot."))]
@@ -6443,7 +6443,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID=A)
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse -- slot freed to the pool LIVE; the "
             "next same-family unit claims it with no reboot."))]
         assert _p3_log(m) == []
@@ -6471,7 +6471,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         cmd = _p3_cmd(UID="XXXX")
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: forgot XXXX.")]
+            ("respond_info", "chain1: forgot XXXX.")]
         assert m._state_get("AFC_BambuAMS Bambu_AMS_3",
                             "afc_bowden_length") == "3632.0"
         assert m._state_get("AFC_hub Bambu_AMS_3",
@@ -6500,7 +6500,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
             m._learned_section("QQQQ")) is False
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: forgot QQQQ -- learned values erased.")]
+            "chain1: forgot QQQQ -- learned values erased.")]
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
 
@@ -6531,14 +6531,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert drain_var_writes(m.printer)[-1]["system"]["extruders"] == {
             "extruder": {"lane_loaded": None}}
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: forgot AAAA -- lanes 24-27 and the name "
+            "chain1: forgot AAAA -- lanes 24-27 and the name "
             "Bambu_AMS_1 freed for reuse, saved lane records erased -- slot "
             "freed to the pool LIVE; the next same-family unit claims it with "
             "no reboot. NOTE: your roster: option still lists this uid -- "
             "remove it there too, the option overrides the recorded roster."))]
         assert _p3_log(m) == [("debug", "Activating extruder lane: None"),
             ("info", "Manually removing lane24 loaded from toolhead"),
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA, "
+            ("info", "chain1: released Bambu_AMS_1 (UID AAAA, "
                      "AFC_BRIDGEBOX_FORGET); lanes dropped live; cleared "
                      "lane24 from the toolhead")]
         assert _p3_console(m) == [END]
@@ -6596,7 +6596,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m.cmd_AFC_BRIDGEBOX_FORGET(cmd)
         assert m._name_map == {}
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: forgot "
+            ("respond_info", "chain1: forgot "
                              "0123456789ABCDEF00003331 -- lane24 and the "
                              "name Bambu_AMS_HT_1 freed for reuse -- its "
                              "bay is free now, but with no pool nothing "
@@ -6660,7 +6660,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert m._state_get(SEC, "name_map") == "AAAA:Alpha, CCCC:Bravo"
         assert m._state_get(SEC, "roster") == "boxed:AAAA, boxed:CCCC"
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
+            "chain1: assigned CCCC to bay 'Bravo' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
@@ -6672,7 +6672,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         cmd = _p3_cmd(UID=C, NAME="Bravo")
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
+            "chain1: assigned CCCC to bay 'Bravo' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
@@ -6699,15 +6699,15 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         unit = m.printer.lookup_object("AFC_BambuAMS Bravo")
         assert unit.ams_model == "ams2"
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned AAAA to bay 'Bravo' "
+            "chain1: assigned AAAA to bay 'Bravo' "
             "(lane28-lane31) -- claimed LIVE, no restart."))]
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Bravo: chain index not resolved yet (UID "
+            ("debug", "Bravo: chain index not resolved yet (UID "
                       "AAAA); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("debug", "AFC bambu Bravo: claimed UID AAAA as ams2 and brought "
+            ("debug", "Bravo: claimed UID AAAA as ams2 and brought "
                      "online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED AAAA as ams2 onto Bravo "
+            ("info", "chain1: CLAIMED AAAA as ams2 onto Bravo "
                      "(4 lanes) -- live, no restart.")]
         assert _p3_console(m) == [END]
         m._state_set({SEC: {"roster": f"boxed:{A}"}})
@@ -6759,7 +6759,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert _p3_bay(m, "Charlie")["uid"] == C
         assert m._state_get(SEC, "name_map") == "AAAA:Alpha, CCCC:Charlie"
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Charlie' "
+            "chain1: assigned CCCC to bay 'Charlie' "
             "(lane32-lane35) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
@@ -6781,7 +6781,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
              "NAME=Charlie|primary"])
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: opened the bay picker for CCCC.")]
+            "chain1: opened the bay picker for CCCC.")]
         assert _p3_log(m) == []
 
     def test_assign_closes_the_dialog_on_success(self, tmp_path, monkeypatch):
@@ -6793,7 +6793,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert _p3_console(m) == [END]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
+            "chain1: assigned CCCC to bay 'Bravo' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
@@ -6829,7 +6829,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert m._state_get(SEC, "name_map") == "AAAA:Bambu_AMS_2"
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned AAAA to bay 'Bambu_AMS_2' "
+            "chain1: assigned AAAA to bay 'Bambu_AMS_2' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == []
@@ -6849,7 +6849,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
             "AAAA:Bambu_AMS_1, DDDD:Bambu_AMS_2")
         assert m2._name_map == {A: "Bambu_AMS_1", D: "Bambu_AMS_2"}
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned DDDD to bay 'Bambu_AMS_2' "
+            "chain1: assigned DDDD to bay 'Bambu_AMS_2' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m2) == []
@@ -6875,11 +6875,11 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert (_p3_bay(m, "Charlie")["uid"],
                 _p3_bay(m, "Charlie")["bound"]) == (C, None)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Charlie' "
+            "chain1: assigned CCCC to bay 'Charlie' "
             "(lane32-lane35) -- pinned; it claims this bay once PREP "
             "finishes."))]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
+            ("debug", "chain1: unit claims wait for PREP")]
         assert _p3_console(m) == [END]
 
     def test_assign_before_prep_without_a_pool_says_to_run_it_again(
@@ -6890,11 +6890,11 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert _p3_bay(m, "Charlie")["bound"] is None
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Charlie' "
+            "chain1: assigned CCCC to bay 'Charlie' "
             "(lane32-lane35) -- pinned; PREP has not finished, run "
             "this again once it has."))]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
+            ("debug", "chain1: unit claims wait for PREP")]
         assert _p3_console(m) == [END]
 
     def test_assign_says_the_unit_is_claimed(self, tmp_path, monkeypatch):
@@ -6911,15 +6911,15 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert (afc.tool_cmds["T0"], lane5.map) == ("lane5", ["T0"])
         assert _p3_lane(m, "lane28").map == ["T1"]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Bravo' "
+            "chain1: assigned CCCC to bay 'Bravo' "
             "(lane28-lane31) -- claimed LIVE, no restart."))]
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Bravo: chain index not resolved yet (UID "
+            ("debug", "Bravo: chain index not resolved yet (UID "
                       "CCCC); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("debug", "AFC bambu Bravo: claimed UID CCCC as boxed and brought "
+            ("debug", "Bravo: claimed UID CCCC as boxed and brought "
                      "online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto Bravo "
+            ("info", "chain1: CLAIMED CCCC as boxed onto Bravo "
                      "(4 lanes) -- live, no restart.")]
         assert _p3_console(m) == [END]
 
@@ -6972,7 +6972,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert _p3_bay(m, "Bambu_AMS_2")["uid"] is None
         assert _p3_bay(m, "Bambu_AMS_3")["uid"] == D
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned DDDD to bay 'Bambu_AMS_3' "
+            "chain1: assigned DDDD to bay 'Bambu_AMS_3' "
             "(lane32-lane35) -- cleared lane29 from the toolhead -- "
             "pinned; it claims this bay when next online."))]
         assert _p3_log(m) == []
@@ -6987,7 +6987,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: assigned GGGG to bay 'Bambu_AMS_4' "
+            "chain1: assigned GGGG to bay 'Bambu_AMS_4' "
             "(lane36-lane39) -- pinned; with no pool nothing claims "
             "it, so run this again once GGGG is online and PREP has "
             "finished, and after every restart.")]
@@ -7003,7 +7003,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: opened the bay picker for DDDD.")]
+            "chain1: opened the bay picker for DDDD.")]
         assert _p3_log(m) == []
         assert _p3_console(m) == _p3_popup(
             "New AMS on Bambu_AMS_4",
@@ -7016,7 +7016,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         m.cmd_AFC_BRIDGEBOX_ASSIGN(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: opened the bay picker for AAAA.")]
+            "chain1: opened the bay picker for AAAA.")]
         assert _p3_log(m) == []
         assert _p3_console(m) == _p3_popup(
             "New AMS on Bambu_AMS_1",
@@ -7039,17 +7039,17 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         _p3_tick(m, 100, 111)
         assert (bay["bound"], bay["uid"]) == (None, C)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Bambu_AMS_3' "
+            "chain1: assigned CCCC to bay 'Bambu_AMS_3' "
             "(lane32-lane35) -- claimed LIVE, no restart."))]
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Bambu_AMS_3: chain index not resolved yet "
+            ("debug", "Bambu_AMS_3: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("debug", "AFC bambu Bambu_AMS_3: claimed UID CCCC as boxed and "
+            ("debug", "Bambu_AMS_3: claimed UID CCCC as boxed and "
                      "brought online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
+            ("info", "chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_3 (4 lanes) -- live, no restart."),
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_3 (UID CCCC "
+            ("info", "chain1: released Bambu_AMS_3 (UID CCCC "
                      "offline >10s); lanes dropped live, slot kept for "
                      "re-plug")]
 
@@ -7156,13 +7156,13 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
             "extruder": {"lane_loaded": None}}
         assert _p3_bay(m, "Bravo")["uid"] == A
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned AAAA to bay 'Bravo' "
+            "chain1: assigned AAAA to bay 'Bravo' "
             "(lane28-lane31) -- pinned; it claims this bay when next "
             "online."))]
         assert _p3_log(m) == [
             ("debug", "Activating extruder lane: None"),
             ("info", "Manually removing lane27 loaded from toolhead"),
-            ("info", "AFC_BridgeBox chain1: released Alpha (UID AAAA, "
+            ("info", "chain1: released Alpha (UID AAAA, "
                      "AFC_BRIDGEBOX_ASSIGN); lanes dropped live; cleared "
                      "lane27 from the toolhead")]
         assert _p3_console(m) == [END]
@@ -7194,17 +7194,17 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
         assert afc.tool_cmds == {"T0": "lane29", "T1": "lane30",
                                  "T2": "lane31"}
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: assigned CCCC to bay "
+            ("respond_info", "chain1: assigned CCCC to bay "
                              "'Bravo' (lane28-lane31) -- claimed "
                              "LIVE, no restart.")]
         assert _p3_log(m) == [
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane29 failed: "
+            ("warning", "chain1: TcmdAssign lane29 failed: "
                         "disk full"),
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane30 failed: "
+            ("warning", "chain1: TcmdAssign lane30 failed: "
                         "disk full"),
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane31 failed: "
+            ("warning", "chain1: TcmdAssign lane31 failed: "
                         "disk full"),
-            ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
+            ("info", "chain1: CLAIMED CCCC as boxed onto "
                      "Bravo (3 lanes) -- live, no restart.")]
         assert _p3_console(m) == [("respond_raw", "// action:prompt_end")]
 
@@ -7234,7 +7234,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert m._state_get(SEC, "name_map") == "AAAA:Alpha"
         assert m._state_get(SEC, "lane_map") == "AAAA:24:4"
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bravo' "
+            "chain1: unassigned CCCC from bay 'Bravo' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
@@ -7251,7 +7251,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         bay = _p3_bay(m, "Bravo")
         assert (bay["uid"], bay["bound"]) == (None, None)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bravo' "
+            "chain1: unassigned CCCC from bay 'Bravo' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
@@ -7267,7 +7267,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert _p3_log(m) == []
         assert _p3_console(m) == [END]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bravo' "
+            "chain1: unassigned CCCC from bay 'Bravo' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
@@ -7283,7 +7283,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert _p3_bay(m, "Bravo")["uid"] is None
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bravo' "
+            "chain1: unassigned CCCC from bay 'Bravo' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
@@ -7296,7 +7296,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert _p3_console(m) == [END]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bravo' "
+            "chain1: unassigned CCCC from bay 'Bravo' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
@@ -7316,7 +7316,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert m._state_get(SEC, "bay_owner") == "AAAA:Alpha"
         assert m._held["Alpha"]["uid"] == A
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Alpha' "
+            "chain1: unassigned AAAA from bay 'Alpha' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
@@ -7343,12 +7343,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         m.printer.afc.save_vars()
         assert drain_var_writes(m.printer)[-1]["Alpha"] == UPGRADE_VAR["Alpha"]
         assert unassign.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Alpha' "
+            "chain1: unassigned AAAA from bay 'Alpha' "
             "(learned values stay with the unit). It takes a free bay of "
             "its family, its last one first, and is saved there once it "
             "has been online 15s."))]
         assert assign.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: assigned CCCC to bay 'Alpha' "
+            "chain1: assigned CCCC to bay 'Alpha' "
             "(lane24-lane27) -- pinned; it claims this bay when "
             "next online."))]
         assert _p3_log(m) == []
@@ -7377,7 +7377,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert m.printer.afc.tools["extruder"].lane_loaded is None
         assert _p3_bay(m, "Bambu_AMS_4")["uid"] is None
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned DDDD from bay 'Bambu_AMS_4' "
+            "chain1: unassigned DDDD from bay 'Bambu_AMS_4' "
             "-- cleared lane36 from the toolhead (learned values stay with "
             "the unit). It takes a free bay of its family, its last one "
             "first, and is saved there once it has been online 15s."))]
@@ -7406,12 +7406,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert _p3_bay(m, "Bambu_AMS_2")["uid"] is None
         assert C not in m._name_map
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bambu_AMS_2' "
+            "chain1: unassigned CCCC from bay 'Bambu_AMS_2' "
             "-- lanes dropped live (learned values stay with the unit). It "
             "takes a free bay of its family, its last one first, and is "
             "saved there once it has been online 15s."))]
         assert _p3_log(m) == [
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID "
+            ("info", "chain1: released Bambu_AMS_2 (UID "
                      "CCCC, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live")]
         assert _p3_console(m) == [END]
         _p3_quiet(m)
@@ -7419,14 +7419,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert _p3_bay(m, "Bambu_AMS_2")["bound"] == C
         assert m._name_map[C] == "Bambu_AMS_2"
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Bambu_AMS_2: chain index not resolved yet "
+            ("debug", "Bambu_AMS_2: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("debug", "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and "
+            ("debug", "Bambu_AMS_2: claimed UID CCCC as boxed and "
                      "brought online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
+            ("info", "chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_2 (4 lanes) -- live, no restart."),
-            ("info", "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 "
+            ("info", "chain1: saved CCCC on Bambu_AMS_2 "
                      "(lane28-lane31); it comes back there after "
                      "a restart.")]
 
@@ -7441,7 +7441,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bambu_AMS_2' -- "
+            "chain1: unassigned CCCC from bay 'Bambu_AMS_2' -- "
             "lanes dropped live (learned values stay with the unit). roster: "
             "is set and does not list it, so it takes a free bay of its "
             "family for this session only and is not saved there; add "
@@ -7451,16 +7451,16 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert _p3_bay(m, "Bambu_AMS_2")["bound"] == C
         assert C not in m._name_map
         assert _p3_log(m) == [
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID "
+            ("info", "chain1: released Bambu_AMS_2 (UID "
                      "CCCC, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live"),
-            ("debug", "AFC bambu Bambu_AMS_2: chain index not resolved yet "
+            ("debug", "Bambu_AMS_2: chain index not resolved yet "
                       "(UID CCCC); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("debug", "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and "
+            ("debug", "Bambu_AMS_2: claimed UID CCCC as boxed and "
                      "brought online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto "
+            ("info", "chain1: CLAIMED CCCC as boxed onto "
                      "Bambu_AMS_2 (4 lanes) -- live, no restart."),
-            ("info", "AFC_BridgeBox chain1: NEW unit(s) on the chain: "
+            ("info", "chain1: NEW unit(s) on the chain: "
                      "boxed:CCCC -- recorded. Add boxed:CCCC to roster: to "
                      "enroll it (the option is set and overrides the "
                      "file); the next restart gives it the lowest free bay "
@@ -7477,14 +7477,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         cmd = _p3_cmd(UID=H, FORCE=1)
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned HHHH from bay "
+            "chain1: unassigned HHHH from bay "
             "'Bambu_AMS_HT_1' -- lanes dropped live (learned values stay "
             "with the unit). roster: is set and does not list it, so it "
             "takes a free bay of its family for this session only and is "
             "not saved there; add ht:HHHH to roster: and RESTART to give "
             "it a bay of its own."))]
         assert _p3_log(m) == [
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_HT_1 (UID "
+            ("info", "chain1: released Bambu_AMS_HT_1 (UID "
                      "HHHH, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live")]
         assert _p3_console(m) == [END]
         bay = _p3_bay(m, "Bambu_AMS_HT_1")
@@ -7498,7 +7498,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         cmd = _p3_cmd(UID=A)
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
+            "chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
             "(learned values stay with the unit). roster: is set and does "
             "not list it, so it gets no bay at the next restart; add "
             "boxed:AAAA to roster: to give it one."))]
@@ -7521,7 +7521,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         cmd = _p3_cmd(UID=H)
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned HHHH from bay "
+            "chain1: unassigned HHHH from bay "
             "'Bambu_AMS_HT_1' (learned values stay with the unit). roster: "
             "is set and does not list it, so it gets no bay at the next "
             "restart; add ht:HHHH to roster: to give it one."))]
@@ -7571,14 +7571,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
             ("set_active_spool", (None,), {}),
             ("set_active_spool", ("",), {})]
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
+            "chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
             "-- lanes dropped live (learned values stay with the unit). It "
             "takes a free bay of its family, its last one first, and is "
             "saved there once it has been online 15s."))]
         assert _p3_log(m) == [
             ("debug", "Activating extruder lane: None"),
             ("info", "Manually removing lane25 loaded from toolhead"),
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID "
+            ("info", "chain1: released Bambu_AMS_1 (UID "
                      "AAAA, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live; "
                      "cleared lane25 from the toolhead")]
         assert _p3_console(m) == [END]
@@ -7598,14 +7598,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         assert drain_var_writes(m.printer)[-1]["system"]["extruders"] == {
             "extruder": {"lane_loaded": None}}
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
+            "chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
             "-- lanes dropped live (learned values stay with the unit). It "
             "takes a free bay of its family, its last one first, and is "
             "saved there once it has been online 15s."))]
         assert _p3_log(m) == [
             ("debug", "Activating extruder lane: None"),
             ("info", "Manually removing lane24 loaded from toolhead"),
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID "
+            ("info", "chain1: released Bambu_AMS_1 (UID "
                      "AAAA, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live; "
                      "cleared lane24 from the toolhead")]
         assert _p3_console(m) == [END]
@@ -7637,12 +7637,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
                     "extruder1": {"lane_loaded": None}}]
         assert afc.current_loading == "lane1"     # the active tool untouched
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
+            "chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
             "-- lanes dropped live (learned values stay with the unit). It "
             "takes a free bay of its family, its last one first, and is "
             "saved there once it has been online 15s."))]
         assert _p3_log(m) == [
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID "
+            ("info", "chain1: released Bambu_AMS_1 (UID "
                      "AAAA, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live; "
                      "cleared lane26 from the toolhead")]
         assert _p3_console(m) == [END]
@@ -7655,12 +7655,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
         assert _p3_bay(m, "Bambu_AMS_1")["bound"] is None
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
+            "chain1: unassigned AAAA from bay 'Bambu_AMS_1' "
             "-- lanes dropped live (learned values stay with the unit). It "
             "takes a free bay of its family, its last one first, and is "
             "saved there once it has been online 15s."))]
         assert _p3_log(m) == [
-            ("info", "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID "
+            ("info", "chain1: released Bambu_AMS_1 (UID "
                      "AAAA, AFC_BRIDGEBOX_UNASSIGN); lanes dropped live")]
         assert _p3_console(m) == [END]
 
@@ -7695,13 +7695,13 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         # No status to keep, so nothing is held for CCCC.
         assert m._held == {}
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: unassigned CCCC from "
+            ("respond_info", "chain1: unassigned CCCC from "
                              "bay 'Bravo' -- lanes dropped live (learned "
                              "values stay with the unit). It takes a free "
                              "bay of its family, its last one first, and "
                              "is saved there once it has been online 15s.")]
         assert _p3_log(m) == [
-            ("info", "AFC_BridgeBox chain1: released Bravo (UID CCCC, "
+            ("info", "chain1: released Bravo (UID CCCC, "
                      "AFC_BRIDGEBOX_UNASSIGN); lanes dropped live; cleared "
                      "lane29 from the toolhead")]
         assert _p3_console(m) == [("respond_raw", "// action:prompt_end")]
@@ -7843,7 +7843,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
              "Unassign Bravo|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 UID=CCCC "
              "FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Alpha [AMS]: AAAA\n  "
+            "chain1: bay manager --\n  Alpha [AMS]: AAAA\n  "
             "Bravo [AMS]: CCCC (live)\n  Charlie [AMS]: free\n  Hot [HT]: "
             "free"))]
         assert _p3_log(m) == []
@@ -7867,7 +7867,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
             ["Unassign Bravo|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 UID=CCCC "
              "FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Alpha [AMS]: AAAA "
+            "chain1: bay manager --\n  Alpha [AMS]: AAAA "
             "(live) -- a print is active, unassign it once it ends\n  "
             "Bravo [AMS]: CCCC\n  Charlie [AMS]: free\n  Hot [HT]: free"))]
         assert _p3_log(m) == []
@@ -7884,7 +7884,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
              "Unassign Bravo|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 UID=CCCC "
              "FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Alpha [AMS]: AAAA "
+            "chain1: bay manager --\n  Alpha [AMS]: AAAA "
             "(live)\n  Bravo [AMS]: CCCC\n  Charlie [AMS]: free\n  Hot [HT]: "
             "free"))]
         assert _p3_log(m) == []
@@ -7918,7 +7918,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
              "Unassign Bambu_AMS_HT_1|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 "
              "UID=HHHH FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
+            "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
             "AAAA (live)\n  Bambu_AMS_2 [AMS]: BBBB (live)\n  Bambu_AMS_3 "
             "[AMS]: CCCC (live)\n  Bambu_AMS_4 [AMS]: DDDD\n  "
             "Bambu_AMS_HT_1 [HT]: HHHH (live)\n  Bambu_AMS_HT_2 [HT]: "
@@ -7950,7 +7950,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
              "Unassign Bambu_AMS_HT_1|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 "
              "UID=HHHH FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
+            "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
             "AAAA (live)\n  Bambu_AMS_2 [AMS]: BBBB (live)\n  Bambu_AMS_3 "
             "[AMS]: CCCC (live)\n  Bambu_AMS_4 [AMS]: DDDD\n  "
             "Bambu_AMS_HT_1 [HT]: HHHH (live)\n  Bambu_AMS_HT_2 [HT]: "
@@ -7983,7 +7983,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
              "Unassign Bambu_AMS_HT_1|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 "
              "UID=HHHH FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
+            "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
             "AAAA (live)\n  Bambu_AMS_2 [AMS]: BBBB (live)\n  Bambu_AMS_3 "
             "[AMS]: CCCC (live)\n  Bambu_AMS_4 [AMS]: DDDD -- lane36 in "
             "the toolhead from DDDD, which is not claimed: plug it back in "
@@ -8019,13 +8019,13 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
              "Unassign Bambu_AMS_HT_1|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 "
              "UID=HHHH FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
+            "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
             "AAAA (live)\n  Bambu_AMS_2 [AMS]: BBBB (live)\n  Bambu_AMS_3 "
             "[AMS]: CCCC (live)\n  Bambu_AMS_4 [AMS]: DDDD -- PREP has not "
             "run yet\n  Bambu_AMS_HT_1 [HT]: HHHH (live)\n  Bambu_AMS_HT_2 "
             "[HT]: free\n  Waiting: EEEE [AMS] -- no free bay"))]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
+            ("debug", "chain1: unit claims wait for PREP")]
 
     def test_a_bay_with_a_lane_in_the_toolhead_has_no_unassign_button(
             self, tmp_path, monkeypatch):
@@ -8037,7 +8037,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
             ["Bambu_AMS_1 [AMS]: AAAA (live) -- lane25 in the toolhead, "
              "unload it before unassigning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
+            "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
             "AAAA (live) -- lane25 in the toolhead, unload it before "
             "unassigning"))]
         assert _p3_bay(m, "Bambu_AMS_1")["bound"] == A
@@ -8055,7 +8055,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
             ["Unassign Bambu_AMS_1|AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 "
              "UID=AAAA FORCE=1|warning"])
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
+            "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: "
             "AAAA (live)"))]
         assert _p3_log(m) == []
 
@@ -8063,26 +8063,26 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
 class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
     """REPLACE forgets an offline unit and assigns its bay to a waiting one."""
 
-    REPLACING = ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+    REPLACING = ("respond_info", "chain1: replacing DDDD on "
                                  "Bambu_AMS_4 with EEEE.")
-    FORGOT = ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+    FORGOT = ("respond_info", "chain1: forgot DDDD -- lanes "
                               "36-39 and the name Bambu_AMS_4 freed for "
                               "reuse -- slot freed to the pool LIVE; the "
                               "next same-family unit claims it with no "
                               "reboot.")
-    ASSIGNED = ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+    ASSIGNED = ("respond_info", "chain1: assigned EEEE to bay "
                                 "'Bambu_AMS_4' (lane36-lane39) -- "
                                 "claimed LIVE, no restart.")
     PICKER = ("respond_info",
-              "AFC_BridgeBox chain1: opened the replace picker for EEEE.")
+              "chain1: opened the replace picker for EEEE.")
     #: What EEEE's live claim onto Bambu_AMS_4 logs.
     CLAIM_E = [
-        ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
+        ("debug", "Bambu_AMS_4: chain index not resolved yet "
                   "(UID EEEE); holding this unit's registrations until "
                   "the chain map arrives"),
-        ("debug", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
+        ("debug", "Bambu_AMS_4: claimed UID EEEE as boxed and "
                  "brought online live (ams_index=0)."),
-        ("info", "AFC_BridgeBox chain1: CLAIMED EEEE as boxed onto "
+        ("info", "chain1: CLAIMED EEEE as boxed onto "
                  "Bambu_AMS_4 (4 lanes) -- live, no restart.")]
 
     @staticmethod
@@ -8122,23 +8122,23 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert m._state_get(SEC, "lane_map") == (
             "AAAA:24:4, BBBB:28:4, CCCC:32:4, EEEE:36:4, HHHH:40:1")
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
+            ("debug", "Bambu_AMS_4: chain index not resolved yet "
                       "(UID EEEE); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("debug", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
+            ("debug", "Bambu_AMS_4: claimed UID EEEE as boxed and "
                      "brought online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED EEEE as boxed onto "
+            ("info", "chain1: CLAIMED EEEE as boxed onto "
                      "Bambu_AMS_4 (4 lanes) -- live, no restart.")]
         assert _p3_console(m) == [END, END]
         assert m.get_status()["waiting_for_bay"] == []
@@ -8153,14 +8153,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         cmd = self._replaced(m, UID=E, OLD="Bambu_AMS_4")
         assert _p3_bay(m, "Bambu_AMS_4")["bound"] == E
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
@@ -8172,14 +8172,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         cmd = self._replaced(m, OLD=D)
         assert _p3_bay(m, "Bambu_AMS_4")["bound"] == E
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
@@ -8201,14 +8201,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         bay = _p3_bay(m, "Bambu_AMS_4")
         assert (bay["uid"], bay["bound"]) == (E, None)
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "pinned; it claims this bay when next online.")]
         assert _p3_log(m) == []
@@ -8232,17 +8232,17 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         cmd = self._replaced(m, UID=E, OLD=G)
         assert _p3_bay(m, "Bambu_AMS_4")["bound"] == E
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing GGGG on "
+            ("respond_info", "chain1: replacing GGGG on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot GGGG -- saved "
+            ("respond_info", "chain1: forgot GGGG -- saved "
                              "lane records erased -- slot freed to the "
                              "pool LIVE; the next same-family unit claims "
                              "it with no reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == [(
-            "info", "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID GGGG, "
+            "info", "chain1: released Bambu_AMS_4 (UID GGGG, "
                     "AFC_BRIDGEBOX_FORGET); lanes dropped live")] + self.CLAIM_E
         assert _p3_console(m) == [END, END]
 
@@ -8296,14 +8296,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert seen == [("forget", D, None, 0),
                         ("assign", E, "Bambu_AMS_4", 0)]
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
@@ -8365,12 +8365,12 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         _p3_tick(m, 112, 112)                      # the watch claims it
         assert _p3_bay(m, "Bambu_AMS_4")["bound"] == E
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Bambu_AMS_4: chain index not resolved yet "
+            ("debug", "Bambu_AMS_4: chain index not resolved yet "
                       "(UID EEEE); holding this unit's registrations until "
                       "the chain map arrives"),
-            ("debug", "AFC bambu Bambu_AMS_4: claimed UID EEEE as boxed and "
+            ("debug", "Bambu_AMS_4: claimed UID EEEE as boxed and "
                      "brought online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED EEEE as boxed onto "
+            ("info", "chain1: CLAIMED EEEE as boxed onto "
                      "Bambu_AMS_4 (4 lanes) -- live, no restart.")]
 
     def test_an_online_old_unit_even_with_force(self, tmp_path,
@@ -8409,14 +8409,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         bridge.status = status
         cmd = self._replaced(m, UID=E, OLD=D, FORCE=1)
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_log(m) == self.CLAIM_E
@@ -8475,7 +8475,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         m = self._ready(tmp_path, monkeypatch)
         m.printer.afc.prep_done = False
         m._ready_at = m.printer.reactor.now
-        wait = [("debug", "AFC_BridgeBox chain1: unit claims wait for PREP")]
+        wait = [("debug", "chain1: unit claims wait for PREP")]
         refusal = _p3_refused(m, tmp_path, "REPLACE", _p3_cmd(UID=E, OLD=D),
                               wait)
         assert refusal == (
@@ -8484,14 +8484,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             "this again once it has")
         cmd = self._replaced(m, UID=E, OLD=D, FORCE=1)
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "pinned; it claims this bay once PREP "
                              "finishes.")]
@@ -8617,15 +8617,15 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert drain_var_writes(m.printer)[0]["system"]["extruders"] == {
             "extruder": {"lane_loaded": None}}
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing DDDD on "
+            ("respond_info", "chain1: replacing DDDD on "
                              "Bambu_AMS_4 with EEEE; cleared lane36 from "
                              "the toolhead."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse -- slot freed to the pool LIVE; the "
                              "next same-family unit claims it with no "
                              "reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned EEEE to bay "
+            ("respond_info", "chain1: assigned EEEE to bay "
                              "'Bambu_AMS_4' (lane36-lane39) -- "
                              "claimed LIVE, no restart.")]
         assert _p3_bay(m, "Bambu_AMS_4")["bound"] == E
@@ -8653,14 +8653,14 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert bay["bound"] == E
         assert cmd.messages == [
             self.REPLACING,
-            ("respond_info", "AFC_BridgeBox chain1: forgot DDDD -- lanes "
+            ("respond_info", "chain1: forgot DDDD -- lanes "
                              "36-39 and the name Bambu_AMS_4 freed for "
                              "reuse, saved lane records erased -- slot freed "
                              "to the pool LIVE; the next same-family unit "
                              "claims it with no reboot."),
             self.ASSIGNED]
         assert _p3_log(m) == [(
-            "info", "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID DDDD, "
+            "info", "chain1: released Bambu_AMS_4 (UID DDDD, "
                     "AFC_BRIDGEBOX_FORGET); lanes dropped live; cleared "
                     "lane37 from the toolhead")] + self.CLAIM_E
         assert _p3_console(m) == [END, END]
@@ -8682,7 +8682,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
              "OLD=DDDD|error"])
         assert cmd.messages == [(
             "respond_info",
-            "AFC_BridgeBox chain1: opened the replace picker for EEEE.")]
+            "chain1: opened the replace picker for EEEE.")]
         assert _p3_log(m) == []
 
     def test_a_loaded_bay_is_listed_without_a_button(self, tmp_path,
@@ -8736,7 +8736,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         cmd = self._replaced(m, UID=E)
         assert _p3_console(m) == []
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: no AMS bay is held for a unit offline "
+            "chain1: no AMS bay is held for a unit offline "
             "10s or longer: Bambu_AMS_4 (DDDD, offline 3s) -- "
             "AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE OLD=Bambu_AMS_4 "
             "FORCE=1 skips the wait."))]
@@ -8818,23 +8818,23 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         assert m._learned_for(H) == {} and m._learned_for(J) == {}
         assert m._owners()["Hot"] == J and "Hot" not in m._held
         assert cmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: replacing HHHH on Hot "
+            ("respond_info", "chain1: replacing HHHH on Hot "
                              "with JJJJ."),
-            ("respond_info", "AFC_BridgeBox chain1: forgot HHHH -- lane32 "
+            ("respond_info", "chain1: forgot HHHH -- lane32 "
                              "and the name Hot freed for reuse, learned "
                              "values and saved lane records erased -- slot "
                              "freed to the pool LIVE; the next same-family "
                              "unit claims it with no reboot."),
-            ("respond_info", "AFC_BridgeBox chain1: assigned JJJJ to bay "
+            ("respond_info", "chain1: assigned JJJJ to bay "
                              "'Hot' (lane32) -- claimed LIVE, no "
                              "restart.")]
         assert _p3_log(m) == [
-            ("debug", "AFC bambu Hot: chain index not resolved yet (UID "
+            ("debug", "Hot: chain index not resolved yet (UID "
                       "JJJJ); holding this unit's registrations until the "
                       "chain map arrives"),
-            ("debug", "AFC bambu Hot: claimed UID JJJJ as ht and brought "
+            ("debug", "Hot: claimed UID JJJJ as ht and brought "
                      "online live (ams_index=0)."),
-            ("info", "AFC_BridgeBox chain1: CLAIMED JJJJ as ht onto Hot (1 "
+            ("info", "chain1: CLAIMED JJJJ as ht onto Hot (1 "
                      "lanes) -- live, no restart.")]
         # J's bay reports an untagged spool and scan priming runs.
         _p3_quiet(m)
@@ -8858,13 +8858,13 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             ("info", "lane32 tool cmd: T0 <span class=success--text>LOCKED "
                      "AND LOADED</span>"),
             ("raw", box),
-            ("info", "AFC bambu Hot: no tag on record for slot 0; applied "
+            ("info", "Hot: no tag on record for slot 0; applied "
                      "lane defaults to lane32 -- nothing has read this bay "
                      "yet. No scan was attempted, so this says nothing about "
                      "the reader or the spool; reseat it, or run "
                      "AFC_BAMBU_SCAN LANE=lane32"),
             # Claimed live: the bay goes to the insert path, once.
-            ("debug", "AFC bambu Hot: slot 0 came up with a spool and no record "
+            ("debug", "Hot: slot 0 came up with a spool and no record "
                      "of it -- scanning it as a fresh insert")]
 
     def test_during_a_print_it_offers_no_force(self, tmp_path, monkeypatch):
@@ -8872,7 +8872,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         m.printer.set_print_state("printing")
         cmd = self._replaced(m, UID=E)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: no AMS bay is held for a unit offline "
+            "chain1: no AMS bay is held for a unit offline "
             "10s or longer: Bambu_AMS_4 (DDDD, offline 3s) -- a print is "
             "active: run this again once it ends."))]
         assert _p3_log(m) == []
@@ -8884,7 +8884,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         m.printer.afc.tools["extruder"].lane_loaded = "lane36"
         cmd = self._replaced(m, UID=E)
         assert cmd.messages == [("respond_info", (
-            "AFC_BridgeBox chain1: no AMS bay is held for a unit offline "
+            "chain1: no AMS bay is held for a unit offline "
             "10s or longer: Bambu_AMS_4 (DDDD, offline 3s) -- AFC records "
             "lane36 as loaded to the toolhead: plug DDDD back in and "
             "unload it, or take the filament out by hand and "
@@ -9174,7 +9174,7 @@ class TestAfcBridgeBoxFoldAndSweep:
         assert m._unmatched_overrides == ["AFC_BridgeBox Nope"]
         # It names the section as written, not the unit section it maps to.
         assert _p3_log(m) == [
-            ("warning", "AFC_BridgeBox chain1: [AFC_BridgeBox Nope] "
+            ("warning", "chain1: [AFC_BridgeBox Nope] "
                         "overrides nothing -- no unit and no model "
                         "by that name, so its keys are ignored. Models: "
                         "ams1, ams2, boxed, ht, lite.")]
@@ -9293,7 +9293,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_HT_1", "serial_port",
                              "/dev/evil")
         assert log == [
-            ("warning", "AFC_BridgeBox chain1: refusing to persist "
+            ("warning", "chain1: refusing to persist "
                         "'serial_port' for Bambu_AMS_HT_1 -- only "
                         "afc_bowden_length, afc_unload_bowden_length are "
                         "saved")]
@@ -9319,7 +9319,7 @@ class TestAfcBridgeBoxPersistLearned:
         keys = ("unit_uid", "extruder", "ams_model")
         assert [self._refused(m, tmp_path, "Bambu_AMS_HT_1", key, "x")
                 for key in keys] == [
-            [("warning", f"AFC_BridgeBox chain1: refusing to persist "
+            [("warning", f"chain1: refusing to persist "
                          f"'{key}' for Bambu_AMS_HT_1 -- only "
                          f"afc_bowden_length, afc_unload_bowden_length are "
                          f"saved")]
@@ -9333,7 +9333,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_HT_1",
                              "measure_on_insert", "False")
         assert log == [
-            ("warning", "AFC_BridgeBox chain1: refusing to persist "
+            ("warning", "chain1: refusing to persist "
                         "'measure_on_insert' for Bambu_AMS_HT_1 -- only "
                         "afc_bowden_length, afc_unload_bowden_length are "
                         "saved")]
@@ -9346,7 +9346,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_HT_1",
                              "afc_bowden_length", 3627.0)
         assert log == [
-            ("debug", "AFC_BridgeBox chain1: afc_bowden_length for "
+            ("debug", "chain1: afc_bowden_length for "
                      "Bambu_AMS_HT_1 kept for this session only -- no unit "
                      "is bound to the bay")]
 
@@ -9360,7 +9360,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_HT_1",
                              "afc_bowden_length", 3627.0)
         assert log == [
-            ("debug", "AFC_BridgeBox chain1: afc_bowden_length for "
+            ("debug", "chain1: afc_bowden_length for "
                      "Bambu_AMS_HT_1 kept for this session only -- the bay "
                      "is bound to HHHH but its unit carries "
                      "FFFFFFFFFFFFFFFFFFFFFFFF")]
@@ -9401,7 +9401,7 @@ class TestAfcBridgeBoxPersistLearned:
         log = self._refused(m, tmp_path, "Bambu_AMS_3", "afc_bowden_length",
                              1.0)
         assert log == [
-            ("debug", "AFC_BridgeBox chain1: afc_bowden_length for "
+            ("debug", "chain1: afc_bowden_length for "
                      "Bambu_AMS_3 kept for this session only -- no unit is "
                      "bound to the bay")]
 
@@ -9659,7 +9659,7 @@ class TestAfcBridgeBoxScoutReady:
                        "material": "PLA"}}}}
         assert _p3_state(tmp_path) == state
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha for their units")]
         assert _p3_console(m) == []
 
@@ -9698,7 +9698,7 @@ class TestAfcBridgeBoxScoutReady:
         assert seen == [(m._scout_tick, {"Alpha": {"uid": A, "lanes": {
             "lane24": self.VAR["Alpha"]["lane24"]}}})]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha for their units")]
         assert _p3_console(m) == []
 
@@ -9716,7 +9716,7 @@ class TestAfcBridgeBoxScoutReady:
         assert {bay: e["uid"] for bay, e in m._held.items()} == {
             "Alpha": A, "Bravo": B}
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha, Bravo for their units")]
         assert _p3_console(m) == []
         _p3_quiet(m)
@@ -9740,7 +9740,7 @@ class TestAfcBridgeBoxScoutReady:
         assert _p3_bay(m, "Bravo")["uid"] == B
         assert sorted(m._held) == ["Alpha"]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha for their units")]
         assert _p3_console(m) == []
 
@@ -9761,7 +9761,7 @@ class TestAfcBridgeBoxScoutReady:
         assert _p3_bay(m, "Bravo")["uid"] == B
         assert sorted(m._held) == ["Alpha"]
         assert _p3_log(m) == [
-            ("warning", "AFC_BridgeBox chain1: AMS BBBB was recorded as "
+            ("warning", "chain1: AMS BBBB was recorded as "
                         "Charlie, which no ams_names entry or default name "
                         "gives an AMS. It is now Bravo, and its lanes stay "
                         "lane28-lane31. Lane records saved under "
@@ -9769,7 +9769,7 @@ class TestAfcBridgeBoxScoutReady:
                         "carry over to Bravo; a tagged spool is read again "
                         "from its tag. Its learned bowden lengths stay with "
                         "the unit."),
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha for their units")]
         assert _p3_console(m) == []
 
@@ -9790,7 +9790,7 @@ class TestAfcBridgeBoxScoutReady:
         assert {bay: e["uid"] for bay, e in m._held.items()} == {
             "Alpha": A, "Bravo": C}
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha, Bravo for their units")]
         assert _p3_console(m) == []
         _p3_quiet(m)
@@ -9831,7 +9831,7 @@ class TestAfcBridgeBoxScoutReady:
         m._scout_ready()
         assert sorted(m._held) == ["Alpha"]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+            ("debug", "chain1: holding the saved lane "
                       "records of Alpha for their units")]
         assert _p3_console(m) == []
 
@@ -9855,16 +9855,16 @@ class TestAfcBridgeBoxCaptureBootRecords:
                      "lane25": {}}}
     #: What klippy:ready logs for the HT that :meth:`_moved` moves.
     MOVED_LOG = [
-        ("warning", "AFC_BridgeBox chain1: HT HHHH (Bambu_AMS_HT_1) on "
+        ("warning", "chain1: HT HHHH (Bambu_AMS_HT_1) on "
                     "lane40 cannot keep its lanes: "
                     "[AFC_BridgeBox chain2] further down the config "
                     "builds lane40. The AMS band is 1 bays, what "
                     "pool_ams and the recorded AMS need, and the HT "
                     "lanes follow it."),
-        ("warning", "AFC_BridgeBox chain1: HT HHHH (Bambu_AMS_HT_1) "
+        ("warning", "chain1: HT HHHH (Bambu_AMS_HT_1) "
                     "keeps its name, and its lanes changed: "
                     "lane40 -> lane28."),
-        ("debug", "AFC_BridgeBox chain1: holding the saved lane "
+        ("debug", "chain1: holding the saved lane "
                   "records of Bambu_AMS_HT_1 for their units")]
 
     class _TakenPins:
@@ -9924,7 +9924,7 @@ class TestAfcBridgeBoxCaptureBootRecords:
         m._capture_boot_records()
         assert sorted(m._held) == ["Alpha"]
         assert _p3_log(m) == [
-            ("debug", "AFC_BridgeBox chain1: holding the saved lane records "
+            ("debug", "chain1: holding the saved lane records "
                       "of Alpha for their units")]
         monkeypatch.setattr(m.printer, "_afc", None)
         _p3_quiet(m)
@@ -10013,16 +10013,16 @@ class TestAfcBridgeBoxFillHeldBays:
     ALPHA = ("lane24", "lane25", "lane26", "lane27")
     #: What klippy:ready logs when it holds Alpha's records.
     HOLDING: LogLine = (
-        "debug", "AFC_BridgeBox chain1: holding the saved lane records of "
+        "debug", "chain1: holding the saved lane records of "
                  "Alpha for their units")
     #: What a claim of AAAA onto Alpha logs, with no T# to say anything of.
     CLAIMED: List[LogLine] = [
-        ("debug", "AFC bambu Alpha: chain index not resolved yet (UID AAAA); "
+        ("debug", "Alpha: chain index not resolved yet (UID AAAA); "
                   "holding this unit's registrations until the chain map "
                   "arrives"),
-        ("debug", "AFC bambu Alpha: claimed UID AAAA as boxed and brought "
+        ("debug", "Alpha: claimed UID AAAA as boxed and brought "
                  "online live (ams_index=0)."),
-        ("info", "AFC_BridgeBox chain1: CLAIMED AAAA as boxed onto Alpha "
+        ("info", "chain1: CLAIMED AAAA as boxed onto Alpha "
                  "(4 lanes) -- live, no restart.")]
 
     @classmethod
@@ -10280,7 +10280,7 @@ class TestAfcBridgeBoxPrepSettled:
 
     #: What _prep_settled logs the first time it holds a claim back.
     WAITING: LogLine = ("debug",
-                        "AFC_BridgeBox chain1: unit claims wait for PREP")
+                        "chain1: unit claims wait for PREP")
 
     @staticmethod
     def _ready(tmp_path: pathlib.Path,
@@ -10355,7 +10355,7 @@ class TestAfcBridgeBoxPrepSettled:
         m = self._ready(tmp_path, monkeypatch)
         m._prep_wait = wait
         m.printer.reactor.now = 100.0 + wait
-        warned = [("warning", f"AFC_BridgeBox chain1: PREP has not finished "
+        warned = [("warning", f"chain1: PREP has not finished "
                               f"{said}s after startup; claiming units "
                               f"anyway.")]
         assert m._prep_settled() is True
@@ -10651,18 +10651,18 @@ class TestAfcBridgeBoxScoutTick:
         """
         learned: List[LogLine] = [] if takes is None else [
             ("debug",
-             f"AFC_BridgeBox chain1: {bay} takes the {takes} that UID {uid} "
+             f"chain1: {bay} takes the {takes} that UID {uid} "
              "learned.")]
         return [
             ("debug",
-             f"AFC bambu {bay}: chain index not resolved yet (UID {uid}); "
+             f"{bay}: chain index not resolved yet (UID {uid}); "
              "holding this unit's registrations until the chain map arrives"),
             ("debug",
-             f"AFC bambu {bay}: claimed UID {uid} as {model} and brought "
+             f"{bay}: claimed UID {uid} as {model} and brought "
              "online live (ams_index=0)."),
             *learned,
             ("info",
-             f"AFC_BridgeBox chain1: CLAIMED {uid} as {model} onto {bay} "
+             f"chain1: CLAIMED {uid} as {model} onto {bay} "
              f"({lanes} lanes) -- live, no restart."),
         ]
 
@@ -10750,10 +10750,10 @@ class TestAfcBridgeBoxScoutTick:
         assert master._recorded_raw == "boxed:BBBB"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: unit(s) gone from the chain for over 120s: boxed:AAAA -- "
+             "chain1: unit(s) gone from the chain for over 120s: boxed:AAAA -- "
              "removed from the recorded roster; applies at the next RESTART. Their learned "
              "values are kept. Plugged back in before then, one keeps its lanes and name; after "
              "the restart they stay reserved for its return unless a new AMS would otherwise "
@@ -10773,10 +10773,10 @@ class TestAfcBridgeBoxScoutTick:
                                  "roster") == "boxed:BBBB"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain2: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain2: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain2: unit(s) gone from the chain for over 120s: boxed:AAAA -- "
+             "chain2: unit(s) gone from the chain for over 120s: boxed:AAAA -- "
              "removed from the recorded roster; applies at the next RESTART. Their learned "
              "values are kept. Plugged back in before then, one keeps its lanes and name; after "
              "the restart they stay reserved for its return unless a new AMS would otherwise "
@@ -10798,10 +10798,10 @@ class TestAfcBridgeBoxScoutTick:
             "boxed:AAAA, boxed:BBBB, boxed:CCCC, boxed:EEEE")
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_4 (DDDD) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_4 (DDDD) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: unit(s) gone from the chain for over 120s: boxed:DDDD -- "
+             "chain1: unit(s) gone from the chain for over 120s: boxed:DDDD -- "
              "removed from the recorded roster; applies at the next RESTART. Their learned "
              "values are kept. Plugged back in before then, one keeps its lanes and name; after "
              "the restart they stay reserved for its return unless a new AMS would otherwise "
@@ -10826,7 +10826,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master.get_status()["pending_restart"] == []
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:X9X9 -- recorded. Add "
+             "chain1: NEW unit(s) on the chain: boxed:X9X9 -- recorded. Add "
              "boxed:X9X9 to roster: to enroll it (the option is set and overrides the file)."),
         ]
         assert self._console(master) == []
@@ -10848,7 +10848,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "boxed:AAAA"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: chain reports [boxed:AAAA] -- written to AFC_BridgeBox.cfg. "
+             "chain1: chain reports [boxed:AAAA] -- written to AFC_BridgeBox.cfg. "
              "RESTART to enroll, or copy it into roster: to pin it."),
         ]
         assert self._console(master) == []
@@ -10910,7 +10910,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "boxed:BBBB, boxed:AAAA"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded. RESTART "
+             "chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded. RESTART "
              "to enroll."),
         ]
         assert self._console(master) == []
@@ -10922,13 +10922,13 @@ class TestAfcBridgeBoxScoutTick:
         self._tick(master, 100.0)
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
         ]
         self._tick(master, 110.0)
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
         ]
         assert self._console(master) == []
@@ -10948,10 +10948,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "boxed:AAAA, boxed:BBBB"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
         ]
         assert self._console(master) == []
@@ -10970,10 +10970,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "boxed:AAAA, boxed:BBBB"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
         ]
         assert self._console(master) == []
@@ -11010,10 +11010,10 @@ class TestAfcBridgeBoxScoutTick:
         assert master._enroll_since == {C_p5: 100.0}
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. RESTART "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. RESTART "
              "to enroll."),
         ]
         assert self._console(master) == []
@@ -11083,7 +11083,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._recorded_raw == "ams2:AAAA"
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams2 "
+             "chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams2 "
              "-- applied to the running unit and recorded. Lanes and names do not move."),
         ]
         assert self._console(master) == []
@@ -11097,7 +11097,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "ams1:AAAA"
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams1 "
+             "chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams1 "
              "-- applied to the running unit and recorded. Lanes and names do not move."),
         ]
         assert self._console(master) == []
@@ -11128,7 +11128,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams2 "
+             "chain1: generation confirmed by bus dialect (0x3702): AAAA -> ams2 "
              "-- applied to the running unit and recorded. Lanes and names do not move."),
         ]
         assert self._console(master) == []
@@ -11145,7 +11145,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master.get_status()["pending_restart"] == ["add boxed:BBBB"]
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:BBBB -- recorded. RESTART "
+             "chain1: NEW unit(s) on the chain: boxed:BBBB -- recorded. RESTART "
              "to enroll."),
         ]
         assert self._console(master) == []
@@ -11184,7 +11184,7 @@ class TestAfcBridgeBoxScoutTick:
             f"ams2:{A24}, ams1:{B24}, boxed:{C24}")
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
         ]
@@ -11194,7 +11194,7 @@ class TestAfcBridgeBoxScoutTick:
             f"ams2:{A24}, ams1:{B24}, boxed:{C24}")
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
         ]
@@ -11204,11 +11204,11 @@ class TestAfcBridgeBoxScoutTick:
             f"ams2:{A24}, ams1:{B24}, ams1:{C24}")
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{C24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11263,7 +11263,7 @@ class TestAfcBridgeBoxScoutTick:
                                       bind, bind, {"cmd": "idsave"}]
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11280,7 +11280,7 @@ class TestAfcBridgeBoxScoutTick:
                                       bind, bind, {"cmd": "idsave"}]
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11295,7 +11295,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11319,7 +11319,7 @@ class TestAfcBridgeBoxScoutTick:
             assert self._sent(bridge) == []
         assert self._log(master) == [
             ("debug",
-             f"AFC_BridgeBox chain1: generation confirmed by bus dialect "
+             f"chain1: generation confirmed by bus dialect "
              f"(0x3702): {A24} -> ams1 -- applied to the running unit and "
              f"recorded. Lanes and names do not move.")]
         assert self._console(master) == []
@@ -11335,11 +11335,11 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
+             "chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11364,11 +11364,11 @@ class TestAfcBridgeBoxScoutTick:
         ]
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
+             "chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11386,7 +11386,7 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0}]
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move. The bridge has it in RAM and saves it at the next "
              "connect (no flash write mid-print)."),
@@ -11418,7 +11418,7 @@ class TestAfcBridgeBoxScoutTick:
         ]
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1, {B24} -> ams1 -- applied to "
              "the running unit and recorded. Lanes and names do not move."),
         ]
@@ -11433,7 +11433,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.ams_model, unit.dry_max_temp) == ("ams2", 55)
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11448,7 +11448,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.ams_model, unit.dry_max_temp) == ("ams2", 65)
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11509,7 +11509,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (again.has_heater, again.dry_max_temp) == expected
         assert self._log(master) == [
             ("debug",
-             f"AFC_BridgeBox chain1: generation confirmed by bus dialect "
+             f"chain1: generation confirmed by bus dialect "
              f"(0x3702): {A24} -> ams2 -- applied to the running unit and "
              f"recorded. Lanes and names do not move.")]
         assert self._console(master) == []
@@ -11521,7 +11521,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._restart_unit(tmp_path, sections).has_heater is False
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11534,7 +11534,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.has_heater, unit.dry_max_temp) == (True, 85)
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11548,7 +11548,7 @@ class TestAfcBridgeBoxScoutTick:
             "ams1", False, 65)
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11640,10 +11640,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "boxed:BBBB"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: unit(s) gone from the chain for over 120s: boxed:AAAA -- "
+             "chain1: unit(s) gone from the chain for over 120s: boxed:AAAA -- "
              "removed from the recorded roster; applies at the next RESTART. Their learned "
              "values are kept. Plugged back in before then, one keeps its lanes and name; after "
              "the restart they stay reserved for its return unless a new AMS would otherwise "
@@ -11689,7 +11689,7 @@ class TestAfcBridgeBoxScoutTick:
         assert asks == [True, False]
         assert self._log(master) == [
             *self._claim_log(A_p5, "Bambu_AMS_1"),
-            ("info", "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded."),
+            ("info", "chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded."),
         ]
         assert self._console(master) == []
 
@@ -11706,11 +11706,11 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
+             "chain1: Bambu_AMS_1 is a ams1; applied measure_on_insert=False from "
              "[AFC_BridgeBox ams1] (the bay was fabricated as a spare, before its model was "
              "known)"),
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
         ]
@@ -11738,7 +11738,7 @@ class TestAfcBridgeBoxScoutTick:
             {"cmd": "bind", "uid": A24, "idx": 0, "m": 0}]
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams1 -- applied to the running unit and recorded. "
              "Lanes and names do not move. The bridge has it in RAM and saves it at the next "
              "connect (no flash write mid-print)."),
@@ -11810,7 +11810,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (master._last_online, master._online_run) == ({}, {})
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -11836,7 +11836,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._last_online == {A_p5: 22.0}
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is back after 6s offline and stayed "
+             "chain1: Bambu_AMS_1 (UID AAAA) is back after 6s offline and stayed "
              "bound; its loaded-lane follower restore engaged nothing."),
         ]
         assert self._console(master) == []
@@ -11853,7 +11853,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (master._last_online, master._online_run) == ({}, {})
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -11888,7 +11888,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._released_at == {A_p5: 30.0}
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -11927,11 +11927,11 @@ class TestAfcBridgeBoxScoutTick:
         assert master._popup_queue == []
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
             *self._claim_log(A_p5, "Bambu_AMS_1"),
             ("info",
-             "AFC_BridgeBox chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27); it "
+             "chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -12006,13 +12006,13 @@ class TestAfcBridgeBoxScoutTick:
         assert self._bay(master, "Bambu_AMS_1")["bound"] == A_p5
         assert self._log(master) == [
             ("debug",
-             "AFC bambu Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
+             "Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
              "follower"),
             ("debug",
-             "AFC bambu Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
+             "Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
              "the toolhead) -- mode:4, one-shot."),
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is back after 3s offline and stayed "
+             "chain1: Bambu_AMS_1 (UID AAAA) is back after 3s offline and stayed "
              "bound; its loaded-lane follower restore engaged."),
         ]
         assert self._console(master) == []
@@ -12030,7 +12030,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is back after 3s offline and stayed "
+             "chain1: Bambu_AMS_1 (UID AAAA) is back after 3s offline and stayed "
              "bound; its loaded-lane follower restore engaged nothing."),
         ]
         assert self._console(master) == []
@@ -12073,13 +12073,13 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == self.ENGAGE
         assert self._log(master) == [
             ("debug",
-             "AFC bambu Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
+             "Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
              "follower"),
             ("debug",
-             "AFC bambu Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
+             "Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
              "the toolhead) -- mode:4, one-shot."),
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is back after 28s offline and stayed "
+             "chain1: Bambu_AMS_1 (UID AAAA) is back after 28s offline and stayed "
              "bound; its loaded-lane follower restore engaged."),
         ]
         assert self._console(master) == []
@@ -12096,13 +12096,13 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == self.ENGAGE
         assert self._log(master) == [
             ("debug",
-             "AFC bambu Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
+             "Bambu_AMS_1: lane24 loaded at startup, re-asserting AMS loaded state + "
              "follower"),
             ("debug",
-             "AFC bambu Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
+             "Bambu_AMS_1: restored the follower for lane24 (AFC records it loaded to "
              "the toolhead) -- mode:4, one-shot."),
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is back after 3s offline and stayed "
+             "chain1: Bambu_AMS_1 (UID AAAA) is back after 3s offline and stayed "
              "bound; its loaded-lane follower restore engaged."),
         ]
         assert self._console(master) == []
@@ -12124,7 +12124,7 @@ class TestAfcBridgeBoxScoutTick:
         assert calls == []
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
             *self._claim_log(A_p5, "Bambu_AMS_1"),
         ]
@@ -12188,11 +12188,11 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(A24, "Bambu_AMS_1"),
             ("debug",
-             "AFC_BridgeBox chain1: generation confirmed by bus dialect (0x3702): "
+             "chain1: generation confirmed by bus dialect (0x3702): "
              f"{A24} -> ams2 -- applied to the running unit and recorded. "
              "Lanes and names do not move."),
             ("info",
-             f"AFC_BridgeBox chain1: released Bambu_AMS_1 (UID {A24} offline "
+             f"chain1: released Bambu_AMS_1 (UID {A24} offline "
              ">10s); lanes dropped live, slot kept for re-plug"),
             *self._claim_log(A24, "Bambu_AMS_1", "ams2"),
         ]
@@ -12256,9 +12256,9 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             *self._claim_log(A24, "Bambu_AMS_1"),
-            ("debug", f"AFC bambu Bambu_AMS_1: UID {A24} confirmed at ams_index 0"),
+            ("debug", f"Bambu_AMS_1: UID {A24} confirmed at ams_index 0"),
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 bound in the bridge's RAM; the table is saved "
+             "chain1: Bambu_AMS_1 bound in the bridge's RAM; the table is saved "
              "when the print ends (no flash write mid-print)."),
         ]
         assert self._console(master) == []
@@ -12290,7 +12290,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._sent(bridge) == []
         assert self._log(master) == [
             *self._claim_log(A24, "Bambu_AMS_1"),
-            ("debug", f"AFC bambu Bambu_AMS_1: UID {A24} confirmed at ams_index 0"),
+            ("debug", f"Bambu_AMS_1: UID {A24} confirmed at ams_index 0"),
         ]
         assert self._console(master) == [
             ("respond_raw", "// action:prompt_begin New AMS on Bambu_AMS_1"),
@@ -12387,7 +12387,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._bay_of_uid(E_p5) is None
         assert self._log(master) == [
             ("warning",
-             "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
+             "chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
              "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), "
              "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
              "one. Bambu_AMS_3 (CCCC) is offline: if this AMS replaces it, AFC_BRIDGEBOX_FORGET "
@@ -12401,10 +12401,10 @@ class TestAfcBridgeBoxScoutTick:
                                         "ht:HHHH, boxed:DDDD, boxed:EEEE")
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:DDDD -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:DDDD -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved DDDD on Bambu_AMS_4 (lane36-lane39); it "
+             "chain1: saved DDDD on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
             self.NEW_E,
         ]
@@ -12432,7 +12432,7 @@ class TestAfcBridgeBoxScoutTick:
         }
         assert self._log(again) == [
             ("warning",
-             "AFC_BridgeBox chain1: AMS EEEE is recorded but has no bay: all 4 AMS bays belong "
+             "chain1: AMS EEEE is recorded but has no bay: all 4 AMS bays belong "
              "to other units (Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), "
              "Bambu_AMS_4 (DDDD)), and a Bambu bus addresses at most 4 AMS, so neither pool_ams "
              "nor RESTART adds one. If this AMS replaces one of them, AFC_BRIDGEBOX_FORGET "
@@ -12459,7 +12459,7 @@ class TestAfcBridgeBoxScoutTick:
         (False, "", []),
         (True, ", saved lane records erased",
          [("info",
-           "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID DDDD, "
+           "chain1: released Bambu_AMS_4 (UID DDDD, "
            "AFC_BRIDGEBOX_FORGET); lanes dropped live")]),
     ], ids=["forgotten-offline", "forgotten-still-bound"])
     def test_a_waiting_ams_claims_the_bay_forget_frees(
@@ -12483,7 +12483,7 @@ class TestAfcBridgeBoxScoutTick:
                                         CHAIN="chain1", UID=D_p5)
         assert gcmd.messages == [
             ("respond_info",
-             "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name "
+             "chain1: forgot DDDD -- lanes 36-39 and the name "
              f"Bambu_AMS_4 freed for reuse{erased} -- slot freed to the pool "
              "LIVE; the next same-family unit claims it with no reboot."),
         ]
@@ -12506,7 +12506,7 @@ class TestAfcBridgeBoxScoutTick:
                                         CHAIN="chain1", UID=D_p5)
         assert gcmd.messages == [
             ("respond_info",
-             "AFC_BridgeBox chain1: unassigned DDDD from bay 'Bambu_AMS_4' (learned values stay "
+             "chain1: unassigned DDDD from bay 'Bambu_AMS_4' (learned values stay "
              "with the unit). It takes a free bay of its family, its last one first, and is "
              "saved there once it has been online 15s."),
         ]
@@ -12527,7 +12527,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             *self._claim_log(E_p5, "Bambu_AMS_4"),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
+             "chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -12543,7 +12543,7 @@ class TestAfcBridgeBoxScoutTick:
         }
         assert self._log(again) == [
             ("warning",
-             "AFC_BridgeBox chain1: AMS DDDD is recorded but has no bay: all 4 AMS bays belong "
+             "chain1: AMS DDDD is recorded but has no bay: all 4 AMS bays belong "
              "to other units (Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), "
              "Bambu_AMS_4 (EEEE)), and a Bambu bus addresses at most 4 AMS, so neither pool_ams "
              "nor RESTART adds one. If this AMS replaces one of them, AFC_BRIDGEBOX_FORGET "
@@ -12608,14 +12608,14 @@ class TestAfcBridgeBoxScoutTick:
         if not pooled:
             assert self._log(master) == [
                 ("info",
-                 "AFC_BridgeBox chain1: Bambu_AMS_4 (DDDD) is offline on a live "
+                 "chain1: Bambu_AMS_4 (DDDD) is offline on a live "
                  "chain -- if it stays gone 120s it will be recorded as removed "
                  "(takes effect at the next RESTART)."),
                 ("info",
-                 "AFC_BridgeBox chain1: NEW unit(s) on the chain: ht:GGGG -- "
+                 "chain1: NEW unit(s) on the chain: ht:GGGG -- "
                  "recorded. RESTART to enroll."),
                 ("info",
-                 "AFC_BridgeBox chain1: NEW AMS on the chain: boxed:EEEE -- "
+                 "chain1: NEW AMS on the chain: boxed:EEEE -- "
                  f"recorded, but it has no bay: {told} for it at the next "
                  "RESTART. An AMS offline on a live chain for 120s is removed "
                  "from the recorded roster, which frees its bay at the next "
@@ -12629,15 +12629,15 @@ class TestAfcBridgeBoxScoutTick:
             + self._claim_log(C_p5, "Bambu_AMS_3")
             + self._claim_log(H_p5, "Bambu_AMS_HT_1", "ht", 1)
             + [("warning",
-                f"AFC_BridgeBox chain1: AMS EEEE has no bay: {told} and this AMS "
+                f"chain1: AMS EEEE has no bay: {told} and this AMS "
                 "claims it live. AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE "
                 "OLD=Bambu_AMS_4 does both in one step.")]
             + self._claim_log(G_p5, "Bambu_AMS_HT_2", "ht", 1)
             + [("info",
-                "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE, "
+                "chain1: NEW unit(s) on the chain: boxed:EEEE, "
                 "ht:GGGG -- recorded. A restart adds its temperature card."),
                ("info",
-                "AFC_BridgeBox chain1: saved GGGG on Bambu_AMS_HT_2 (lane41); "
+                "chain1: saved GGGG on Bambu_AMS_HT_2 (lane41); "
                 "it comes back there after a restart.")])
 
     @pytest.mark.parametrize("pooled", [True, False], ids=["pool", "no-pool"])
@@ -12661,7 +12661,7 @@ class TestAfcBridgeBoxScoutTick:
         if not pooled:
             assert self._log(master) == [
                 ("info",
-                 "AFC_BridgeBox chain1: NEW AMS on the chain: boxed:EEEE -- "
+                 "chain1: NEW AMS on the chain: boxed:EEEE -- "
                  f"recorded, but it {told}"),
             ]
             assert self._console(master) == []
@@ -12671,7 +12671,7 @@ class TestAfcBridgeBoxScoutTick:
             self._claim_log(A_p5, "Bambu_AMS_1") + self._claim_log(B_p5, "Bambu_AMS_2")
             + self._claim_log(C_p5, "Bambu_AMS_3")
             + self._claim_log(H_p5, "Bambu_AMS_HT_1", "ht", 1)
-            + [("warning", f"AFC_BridgeBox chain1: AMS EEEE {told}"),
+            + [("warning", f"chain1: AMS EEEE {told}"),
                self.NEW_E])
         assert self._console(master) == []
 
@@ -12685,7 +12685,7 @@ class TestAfcBridgeBoxScoutTick:
         self._tick(master, 100.0, 115.0)
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. RESTART "
+             "chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. RESTART "
              "to enroll."),
         ]
         again = self._restart(tmp_path, monkeypatch, pool_ams=0, pool_ht=0)
@@ -12718,7 +12718,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._tick(master, 100.0) == 103.0
         assert self._log(master) == [
             ("warning",
-             "AFC_BridgeBox chain1: extruder records lane44 as loaded, but lane44 belonged to "
+             "chain1: extruder records lane44 as loaded, but lane44 belonged to "
              "HT HHHH (Bambu_AMS_HT_1), and this boot's layout gives it to no bay. The filament "
              "in extruder is from HHHH. Unload that filament by hand and run UNSET_LANE_LOADED "
              "to clear the record."),
@@ -12726,7 +12726,7 @@ class TestAfcBridgeBoxScoutTick:
         self._tick(master, 103.0)
         assert self._log(master) == [
             ("warning",
-             "AFC_BridgeBox chain1: extruder records lane44 as loaded, but lane44 belonged to "
+             "chain1: extruder records lane44 as loaded, but lane44 belonged to "
              "HT HHHH (Bambu_AMS_HT_1), and this boot's layout gives it to no bay. The filament "
              "in extruder is from HHHH. Unload that filament by hand and run UNSET_LANE_LOADED "
              "to clear the record."),
@@ -12777,9 +12777,9 @@ class TestAfcBridgeBoxScoutTick:
         assert [pu["bound"] for pu in master._pool_units] == [None] * 4
         assert self._bay(master, "Bravo")["uid"] is None
         assert self._log(master) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP"),
+            ("debug", "chain1: unit claims wait for PREP"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. CCCC has "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. CCCC has "
              "no bay yet and takes the next free one of its family."),
         ]
         assert self._console(master) == []
@@ -12792,7 +12792,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._bay(master, "Alpha")["bound"] == A_p5
         assert self._bay(master, "Bravo")["bound"] == C_p5
         assert self._log(master) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP"),
+            ("debug", "chain1: unit claims wait for PREP"),
             *self._claim_log(A_p5, "Alpha"),
             *self._claim_log(C_p5, "Bravo"),
         ]
@@ -12806,9 +12806,9 @@ class TestAfcBridgeBoxScoutTick:
         self._tick(master, 90.0, 93.0)
         assert self._bay(master, "Alpha")["bound"] == A_p5
         assert self._log(master) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP"),
+            ("debug", "chain1: unit claims wait for PREP"),
             ("warning",
-             "AFC_BridgeBox chain1: PREP has not finished 90s after startup; claiming units "
+             "chain1: PREP has not finished 90s after startup; claiming units "
              "anyway."),
             *self._claim_log(A_p5, "Alpha"),
             *self._claim_log(C_p5, "Bravo"),
@@ -12823,17 +12823,17 @@ class TestAfcBridgeBoxScoutTick:
         self._tick(master, 135.0, 138.0)
         assert self._bay(master, "Alpha")["bound"] == A_p5
         assert self._log(master) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP"),
+            ("debug", "chain1: unit claims wait for PREP"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. CCCC has "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. CCCC has "
              "no bay yet and takes the next free one of its family."),
             ("warning",
-             "AFC_BridgeBox chain1: PREP has not finished 135s after startup; claiming units "
+             "chain1: PREP has not finished 135s after startup; claiming units "
              "anyway."),
             *self._claim_log(A_p5, "Alpha"),
             *self._claim_log(C_p5, "Bravo"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bravo (lane28-lane31); it comes back "
+             "chain1: saved CCCC on Bravo (lane28-lane31); it comes back "
              "there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bravo", "Charlie",
@@ -12846,7 +12846,7 @@ class TestAfcBridgeBoxScoutTick:
         master = self._prep_chain(
             tmp_path, monkeypatch, online=(D_p5,), owners="EEEE:Bravo", var=bravo,
             ready_log=[("debug",
-                        "AFC_BridgeBox chain1: holding the saved lane records "
+                        "chain1: holding the saved lane records "
                         "of Bravo for their units")])
         self._tick(master, 91.0)
         assert self._bay(master, "Bravo")["bound"] == D_p5
@@ -12860,7 +12860,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._bay_owner_pending is False
         assert self._log(master) == [
             ("warning",
-             "AFC_BridgeBox chain1: PREP has not finished 90s after startup; claiming units "
+             "chain1: PREP has not finished 90s after startup; claiming units "
              "anyway."),
             *self._claim_log(D_p5, "Bravo"),
         ]
@@ -12930,7 +12930,7 @@ class TestAfcBridgeBoxScoutTick:
     #: The no-bay line EEEE gets while DDDD's bay is held for it offline.
     TOLD_E = (
         "warning",
-        "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to "
+        "chain1: AMS EEEE has no bay: all 4 AMS bays belong to "
         "other units (Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 "
         "(CCCC), Bambu_AMS_4 (DDDD)), and a Bambu bus addresses at most 4 AMS, "
         "so neither pool_ams nor RESTART adds one. Bambu_AMS_4 (DDDD) is "
@@ -12941,7 +12941,7 @@ class TestAfcBridgeBoxScoutTick:
 
     #: EEEE's enrollment, after enroll_grace.
     NEW_E = ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- "
+             "chain1: NEW unit(s) on the chain: boxed:EEEE -- "
              "recorded.")
 
     @staticmethod
@@ -13004,7 +13004,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(D_p5, "Bambu_AMS_4"),
             *self._claim_log(H_p5, "Bambu_AMS_HT_1", "ht", 1),
             ("warning",
-             "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
+             "chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
              "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), "
              "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
              "one. If this AMS replaces one of them, AFC_BRIDGEBOX_FORGET CHAIN=chain1 "
@@ -13027,7 +13027,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._first_claims(),
             ("warning",
-             "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
+             "chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
              "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), "
              "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
              "one. Bambu_AMS_4 (DDDD) is offline: if this AMS replaces it, replace its entry in "
@@ -13048,7 +13048,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(A_p5, "Bambu_AMS_1"),
             *self._claim_log(H_p5, "Bambu_AMS_HT_1", "ht", 1),
             ("warning",
-             "AFC_BridgeBox chain1: new AMS EEEE has no free bay: every AMS bay built belongs "
+             "chain1: new AMS EEEE has no free bay: every AMS bay built belongs "
              "to a known unit. Bambu_AMS_2 (BBBB) is offline: if this AMS replaces it, "
              "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=BBBB frees that bay and this AMS claims it "
              "live. AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE OLD=Bambu_AMS_2 does both in "
@@ -13068,7 +13068,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(A_p5, "Bambu_AMS_1"),
             ("warning",
-             "AFC_BridgeBox chain1: new HT GGGG has no free bay: every HT bay built belongs to "
+             "chain1: new HT GGGG has no free bay: every HT bay built belongs to "
              "a known unit. Bambu_AMS_HT_1 (HHHH) is offline: if this HT replaces it, "
              "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=HHHH frees that bay and this HT claims it "
              "live. AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=GGGG OLD=Bambu_AMS_HT_1 does both in "
@@ -13091,16 +13091,16 @@ class TestAfcBridgeBoxScoutTick:
             *self._first_claims(),
             *self._claim_log(E_p5, "Bambu_AMS_4"),
             ("warning",
-             "AFC_BridgeBox chain1: AMS GGGG has no bay: all 4 AMS bays belong to other units "
+             "chain1: AMS GGGG has no bay: all 4 AMS bays belong to other units "
              "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (EEEE)), "
              "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
              "one. If this AMS replaces one of them, AFC_BRIDGEBOX_FORGET CHAIN=chain1 "
              "UID=<that unit's uid> frees that bay and this AMS claims it live."),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE, boxed:GGGG -- "
+             "chain1: NEW unit(s) on the chain: boxed:EEEE, boxed:GGGG -- "
              "recorded. A restart adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
+             "chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -13137,7 +13137,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._first_claims(),
             *self._claim_log(E_p5, "Bambu_AMS_4"),
             ("warning",
-             "AFC_BridgeBox chain1: new AMS GGGG has no free bay: every AMS bay built belongs "
+             "chain1: new AMS GGGG has no free bay: every AMS bay built belongs "
              "to a known unit. roster: is set and does not list it: add boxed:GGGG to roster: "
              "and RESTART to give it a bay."),
         ]
@@ -13332,7 +13332,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._first_claims(),
             ("warning",
-             "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
+             "chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
              "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), "
              "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
              "one. Bambu_AMS_4 (DDDD) is offline: if this AMS replaces it, AFC_BRIDGEBOX_FORGET "
@@ -13374,7 +13374,7 @@ class TestAfcBridgeBoxScoutTick:
                                         CHAIN="chain1", UID=D_p5)
         assert gcmd.messages == [
             ("respond_info",
-             "AFC_BridgeBox chain1: forgot DDDD -- lanes 36-39 and the name Bambu_AMS_4 freed "
+             "chain1: forgot DDDD -- lanes 36-39 and the name Bambu_AMS_4 freed "
              "for reuse -- slot freed to the pool LIVE; the next same-family unit claims it "
              "with no reboot."),
         ]
@@ -13388,7 +13388,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(E_p5, "Bambu_AMS_4"),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
+             "chain1: saved EEEE on Bambu_AMS_4 (lane36-lane39); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [*self._offer_popup(15),
@@ -13432,7 +13432,7 @@ class TestAfcBridgeBoxScoutTick:
         bays = master.printer.gcode.run("AFC_BRIDGEBOX_BAYS", CHAIN="chain1")
         assert bays.messages == [
             ("respond_info",
-             "AFC_BridgeBox chain1: bay manager --\n  Bambu_AMS_1 [AMS]: AAAA (live)\n  "
+             "chain1: bay manager --\n  Bambu_AMS_1 [AMS]: AAAA (live)\n  "
              "Bambu_AMS_2 [AMS]: BBBB (live)\n  Bambu_AMS_3 [AMS]: CCCC (live)\n  Bambu_AMS_4 "
              "[AMS]: DDDD\n  Bambu_AMS_HT_1 [HT]: HHHH (live)\n  Bambu_AMS_HT_2 [HT]: free"),
         ]
@@ -13499,13 +13499,13 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(A_p5, "Bambu_AMS_1"),
             ("warning",
-             "AFC_BridgeBox chain1: new HT GGGG has no free bay: every HT bay built belongs to "
+             "chain1: new HT GGGG has no free bay: every HT bay built belongs to "
              "a known unit. Bambu_AMS_HT_1 (HHHH) is offline: if this HT replaces it, "
              "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=HHHH frees that bay and this HT claims it "
              "live. AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=GGGG OLD=Bambu_AMS_HT_1 does both in "
              "one step. Once it is recorded, RESTART builds it one; raise pool_ht to keep spare "
              "HT bays for units plugged in live."),
-            ("info", "AFC_BridgeBox chain1: NEW unit(s) on the chain: ht:GGGG -- recorded."),
+            ("info", "chain1: NEW unit(s) on the chain: ht:GGGG -- recorded."),
         ]
 
     def test_a_bay_no_longer_held_stops_its_absence_clock(self, tmp_path,
@@ -13527,7 +13527,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._first_claims(),
             *self._claim_log(G_p5, "Bambu_AMS_4"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_4 (UID GGGG offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_4 (UID GGGG offline >10s); lanes dropped "
              "live"),
         ]
         assert self._console(master) == [
@@ -13554,7 +13554,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._first_claims(),
             ("warning",
-             "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
+             "chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
              "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), "
              "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
              "one. Bambu_AMS_4 (DDDD) is offline: if this AMS replaces it, AFC_BRIDGEBOX_FORGET "
@@ -13671,10 +13671,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -13712,13 +13712,13 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             *self._claim_log(E_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:EEEE -- "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:EEEE -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         # Both claimed before the popup showed, so CCCC is offered no bay.
@@ -13748,16 +13748,16 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             *self._claim_log(E_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_2",
@@ -13784,7 +13784,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC offline >2s); lanes dropped "
+             "chain1: released Bambu_AMS_2 (UID CCCC offline >2s); lanes dropped "
              "live"),
         ]
         new_c = self._new_popup(C_p5, "Bambu_AMS_2", "Bambu_AMS_3")
@@ -13797,10 +13797,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         # The removal shows once the first popup's hold is up, by when
@@ -13826,20 +13826,20 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_2 (UID CCCC offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
             *self._claim_log(E_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved EEEE on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
             *self._claim_log(C_p5, "Bambu_AMS_2"),
         ]
@@ -13894,11 +13894,11 @@ class TestAfcBridgeBoxScoutTick:
         assert master._name_map[C_p5] == "Bambu_AMS_2"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. CCCC has "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. CCCC has "
              "no bay yet and takes the next free one of its family."),
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(
@@ -13919,10 +13919,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_HT_1", "ht", 1),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("warning",
-             "AFC_BridgeBox chain1: CCCC is recorded as boxed but is on HT bay Bambu_AMS_HT_1; "
+             "chain1: CCCC is recorded as boxed but is on HT bay Bambu_AMS_HT_1; "
              "not saving it. AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 UID=CCCC FORCE=1 re-homes it."),
         ]
         # The popup showed on the claim tick, before the htmask said boxed.
@@ -13940,7 +13940,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. Add "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. Add "
              "boxed:CCCC to roster: to enroll it (the option is set and overrides the file); "
              "the next restart gives it the lowest free bay of its family, which need not be "
              "the one it is on now."),
@@ -13970,7 +13970,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             *self._claim_log(E_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:EEEE -- "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:EEEE -- "
              "recorded. Add boxed:CCCC, boxed:EEEE to roster: to enroll them (the option is "
              "set and overrides the file); the next restart gives them the lowest free bays "
              "of their family, which need not be the ones they are on now."),
@@ -14003,10 +14003,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("warning",
-             "AFC_BridgeBox chain1: Bambu_AMS_2 is saved for ZZZZ, so CCCC is not saved on it. "
+             "chain1: Bambu_AMS_2 is saved for ZZZZ, so CCCC is not saved on it. "
              "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=ZZZZ or AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 "
              "UID=ZZZZ, or AFC_BRIDGEBOX_ASSIGN CHAIN=chain1 UID=CCCC NAME=<other bay> moves "
              "CCCC to another bay."),
@@ -14027,13 +14027,13 @@ class TestAfcBridgeBoxScoutTick:
         gcmd = master.printer.gcode.run("AFC_BRIDGEBOX_FORGET",
                                         CHAIN="chain1", UID=Z)
         assert gcmd.messages == [
-            ("respond_info", "AFC_BridgeBox chain1: forgot ZZZZ. Applies at the next RESTART."),
+            ("respond_info", "chain1: forgot ZZZZ. Applies at the next RESTART."),
         ]
         self._at(master, bridge, 131.0)
         assert master._name_map[C_p5] == "Bambu_AMS_2"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         # FORGET closed the popup.
@@ -14051,10 +14051,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_3")
@@ -14073,10 +14073,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_2",
@@ -14107,7 +14107,7 @@ class TestAfcBridgeBoxScoutTick:
                                         CHAIN="chain1", UID=C_p5)
         assert gcmd.messages == [
             ("respond_info",
-             "AFC_BridgeBox chain1: unassigned CCCC from bay 'Bambu_AMS_2' -- lanes dropped "
+             "chain1: unassigned CCCC from bay 'Bambu_AMS_2' -- lanes dropped "
              "live (learned values stay with the unit). It takes a free bay of its family, its "
              "last one first, and is saved there once it has been online 15s."),
         ]
@@ -14122,18 +14122,18 @@ class TestAfcBridgeBoxScoutTick:
             "AAAA:Bambu_AMS_1, EEEE:Bambu_AMS_2, CCCC:Bambu_AMS_3")
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC, AFC_BRIDGEBOX_UNASSIGN); "
+             "chain1: released Bambu_AMS_2 (UID CCCC, AFC_BRIDGEBOX_UNASSIGN); "
              "lanes dropped live"),
             *self._claim_log(E_p5, "Bambu_AMS_2"),
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:EEEE -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved EEEE on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved EEEE on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -14155,11 +14155,11 @@ class TestAfcBridgeBoxScoutTick:
         assert master._name_map[C_p5] == "Bambu_AMS_2"
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC, AFC_BRIDGEBOX_UNASSIGN); "
+             "chain1: released Bambu_AMS_2 (UID CCCC, AFC_BRIDGEBOX_UNASSIGN); "
              "lanes dropped live"),
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [
@@ -14184,7 +14184,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(Z, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:ZZZZ -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:ZZZZ -- recorded. A restart "
              "adds its temperature card."),
         ]
         again = self._restart(tmp_path, monkeypatch, pool_ams=3, pool_ht=1)
@@ -14219,7 +14219,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(Z, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_3 (UID ZZZZ offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_3 (UID ZZZZ offline >10s); lanes dropped "
              "live"),
         ]
         # The removal popup waits behind the New AMS one still showing.
@@ -14240,10 +14240,10 @@ class TestAfcBridgeBoxScoutTick:
         assert C_p5 not in master._name_map
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
+             "chain1: Bambu_AMS_1 (AAAA) is offline on a live chain -- if it "
              "stays gone 120s it will be recorded as removed (takes effect at the next RESTART)."),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. RESTART "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. RESTART "
              "to enroll."),
         ]
         assert self._console(master) == []
@@ -14251,7 +14251,7 @@ class TestAfcBridgeBoxScoutTick:
                                         CHAIN="chain1", UID=A_p5)
         assert gcmd.messages == [
             ("respond_info",
-             "AFC_BridgeBox chain1: unassigned AAAA from bay 'Bambu_AMS_1' (learned values stay "
+             "chain1: unassigned AAAA from bay 'Bambu_AMS_1' (learned values stay "
              "with the unit). It takes the lowest free bay of its family at the next restart."),
         ]
         assert self._console(master) == self.PROMPT_END
@@ -14279,14 +14279,14 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(Z, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID ZZZZ offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_2 (UID ZZZZ offline >10s); lanes dropped "
              "live"),
             *self._claim_log("NEWW", "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:NEWW -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:NEWW -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved NEWW on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved NEWW on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         # ZZZZ held no bay, so its removal says the bay went back to the
@@ -14312,10 +14312,10 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(Z, "Bambu_AMS_2"),
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_3")
@@ -14342,10 +14342,10 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             *self._claim_log(Z, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_3")
@@ -14369,7 +14369,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(Z, "Bambu_AMS_2"),
             ("warning",
-             "AFC_BridgeBox chain1: new AMS CCCC has no free bay: every AMS bay built belongs "
+             "chain1: new AMS CCCC has no free bay: every AMS bay built belongs "
              "to a known unit. Bambu_AMS_1 (AAAA) is offline: if this AMS replaces it, "
              "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=AAAA frees that bay and this AMS claims it "
              "live. AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=CCCC OLD=Bambu_AMS_1 does both in "
@@ -14397,10 +14397,10 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_3"),
             *self._claim_log(Z, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC, boxed:ZZZZ -- "
              "recorded. A restart adds their temperature cards."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
+             "chain1: saved CCCC on Bambu_AMS_3 (lane32-lane35); it "
              "comes back there after a restart."),
         ]
         # Shown on the first tick, while Bambu_AMS_2 was still free.
@@ -14426,10 +14426,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(Z, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:ZZZZ -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:ZZZZ -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved ZZZZ on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved ZZZZ on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(Z, "Bambu_AMS_2",
@@ -14447,10 +14447,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(H_p5, "Bambu_AMS_HT_1", "ht", 1),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: ht:HHHH -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: ht:HHHH -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved HHHH on Bambu_AMS_HT_1 (lane36); it comes back "
+             "chain1: saved HHHH on Bambu_AMS_HT_1 (lane36); it comes back "
              "there after a restart."),
         ]
         assert self._console(master) == self._new_popup(H_p5, "Bambu_AMS_HT_1")
@@ -14469,14 +14469,14 @@ class TestAfcBridgeBoxScoutTick:
         # say it again.
         assert self._log(master) == [
             ("warning",
-             "AFC_BridgeBox chain1: new AMS CCCC has no free bay: every AMS bay built belongs "
+             "chain1: new AMS CCCC has no free bay: every AMS bay built belongs "
              "to a known unit. Bambu_AMS_1 (AAAA) is offline: if this AMS replaces it, "
              "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=AAAA frees that bay and this AMS claims it "
              "live. AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=CCCC OLD=Bambu_AMS_1 does both in "
              "one step. Once it is recorded, RESTART builds it one, past the AMS band, which "
              "moves the HT lanes up 4; raise pool_ams to keep spare AMS bays for units plugged "
              "in live (at most 4 AMS)."),
-            ("info", "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded."),
+            ("info", "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded."),
         ]
         offer = self._offer_popup(16, waiting=C_p5, bay="Bambu_AMS_1", old=A_p5,
                                   lanes="lane24-lane27")
@@ -14489,7 +14489,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_1"),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_1 (lane24-lane27); it "
+             "chain1: saved CCCC on Bambu_AMS_1 (lane24-lane27); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == [*offer, *self.PROMPT_END]
@@ -14635,7 +14635,7 @@ class TestAfcBridgeBoxScoutTick:
             *self._claim_log(C_p5, "Bambu_AMS_2",
                              takes="afc_bowden_length 3632mm"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_2 (UID CCCC offline >10s); lanes dropped "
              "live"),
             *self._claim_log(E_p5, "Bambu_AMS_2"),
         ]
@@ -14685,28 +14685,28 @@ class TestAfcBridgeBoxScoutTick:
         assert master._moved_err_logged == "RuntimeError: no tools"
         assert self._log(master) == [
             ("warning",
-             "AFC_BridgeBox chain1: loaded-lane check failed (RuntimeError: no tools); the "
+             "chain1: loaded-lane check failed (RuntimeError: no tools); the "
              "chain watch carries on."),
             ("warning",
-             "AFC bambu Bambu_AMS_2: claim could not restore the saved lane records: no tools"),
+             "Bambu_AMS_2: claim could not restore the saved lane records: no tools"),
             ("debug",
-             "AFC bambu Bambu_AMS_2: chain index not resolved yet (UID CCCC); holding this "
+             "Bambu_AMS_2: chain index not resolved yet (UID CCCC); holding this "
              "unit's registrations until the chain map arrives"),
             ("debug",
-             "AFC bambu Bambu_AMS_2: claimed UID CCCC as boxed and brought online live "
+             "Bambu_AMS_2: claimed UID CCCC as boxed and brought online live "
              "(ams_index=0)."),
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane28 failed: no tools"),
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane29 failed: no tools"),
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane30 failed: no tools"),
-            ("warning", "AFC_BridgeBox chain1: TcmdAssign lane31 failed: no tools"),
+            ("warning", "chain1: TcmdAssign lane28 failed: no tools"),
+            ("warning", "chain1: TcmdAssign lane29 failed: no tools"),
+            ("warning", "chain1: TcmdAssign lane30 failed: no tools"),
+            ("warning", "chain1: TcmdAssign lane31 failed: no tools"),
             ("info",
-             "AFC_BridgeBox chain1: CLAIMED CCCC as boxed onto Bambu_AMS_2 (4 lanes) -- live, "
+             "chain1: CLAIMED CCCC as boxed onto Bambu_AMS_2 (4 lanes) -- live, "
              "no restart."),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(C_p5, "Bambu_AMS_2",
@@ -14735,9 +14735,9 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == "boxed:AAAA, boxed:CCCC"
         assert self._bay(master, "Bambu_AMS_2")["bound"] is None
         assert self._log(master) == [
-            ("debug", "AFC_BridgeBox chain1: unit claims wait for PREP"),
+            ("debug", "chain1: unit claims wait for PREP"),
             ("warning",
-             "AFC_BridgeBox chain1: chain watch tick failed (AttributeError: 'NoneType' object "
+             "chain1: chain watch tick failed (AttributeError: 'NoneType' object "
              "has no attribute 'items'); will keep retrying."),
         ]
         self._log(master).clear()
@@ -14747,10 +14747,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(C_p5, "Bambu_AMS_2"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:CCCC -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
+             "chain1: saved CCCC on Bambu_AMS_2 (lane28-lane31); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == []
@@ -14814,7 +14814,7 @@ class TestAfcBridgeBoxScoutTick:
         :return tuple: the line saying boxed:AAAA stays claimed for ``lane``
         """
         return ("info",
-                "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is offline but "
+                "chain1: Bambu_AMS_1 (UID AAAA) is offline but "
                 f"AFC records {lane} as loaded to the toolhead -- keeping it "
                 f"claimed. Unload it ({unset} if the filament is already out) "
                 "and it is released on the next check.")
@@ -14866,7 +14866,7 @@ class TestAfcBridgeBoxScoutTick:
             ("debug", "Activating extruder lane: None"),
             ("info", "Manually removing lane26 loaded from toolhead"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -14915,7 +14915,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             self._held("lane24"),
             ("debug",
-             "AFC_BridgeBox chain1: Bambu_AMS_1 (UID AAAA) is back after 15s offline and stayed "
+             "chain1: Bambu_AMS_1 (UID AAAA) is back after 15s offline and stayed "
              "bound; its loaded-lane follower restore engaged nothing."),
             self._held("lane24"),
         ]
@@ -14932,7 +14932,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master.printer.afc.save_vars.call_count - saves == 0
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -14952,7 +14952,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master._released_at == {A_p5: 21.0}
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == self.REMOVED_AAAA
@@ -15041,10 +15041,10 @@ class TestAfcBridgeBoxScoutTick:
         assert self._log(master) == [
             *self._claim_log(A_p5, "Bambu_AMS_1"),
             ("info",
-             "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded. A restart "
+             "chain1: NEW unit(s) on the chain: boxed:AAAA -- recorded. A restart "
              "adds its temperature card."),
             ("info",
-             "AFC_BridgeBox chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27); it "
+             "chain1: saved AAAA on Bambu_AMS_1 (lane24-lane27); it "
              "comes back there after a restart."),
         ]
         assert self._console(master) == self._new_popup(A_p5, "Bambu_AMS_1")
@@ -15134,7 +15134,7 @@ class TestAfcBridgeBoxScoutTick:
         assert [ln.unassigned for ln in lanes] == [False, False]
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: CLAIMED AAAA as boxed onto Bambu_AMS_1 (2 lanes) -- live, "
+             "chain1: CLAIMED AAAA as boxed onto Bambu_AMS_1 (2 lanes) -- live, "
              "no restart."),
         ]
         self._log(master).clear()
@@ -15148,7 +15148,7 @@ class TestAfcBridgeBoxScoutTick:
         assert (unit.pool, unit.unit_uid) == (False, A_p5)
         assert self._log(master) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
+             "chain1: released Bambu_AMS_1 (UID AAAA offline >10s); lanes dropped "
              "live, slot kept for re-plug"),
         ]
         assert self._console(master) == []
@@ -15165,7 +15165,7 @@ class TestAfcBridgeBoxScoutTick:
         assert self._roster(master) == HT_ROSTER
         assert self._log(master) == [
             ("info",
-             f"AFC_BridgeBox chain1: chain reports [ht:{HT_UID}] -- written to "
+             f"chain1: chain reports [ht:{HT_UID}] -- written to "
              "AFC_BridgeBox.cfg. RESTART to enroll, or copy it into roster: to pin it."),
         ]
         assert self._console(master) == []
@@ -15393,7 +15393,7 @@ class TestAfcBridgeBoxRestoreReturned:
         m._restore_returned(A, 100.0, 5.0)
         assert _p6_log(m) == [(
             "debug",
-            "AFC_BridgeBox chain1: Alpha (UID AAAA) is back after 5s offline "
+            "chain1: Alpha (UID AAAA) is back after 5s offline "
             "and stayed bound; its loaded-lane follower restore engaged "
             "nothing.")]
         assert (unit._loaded_restore_done, bridge.sent) == (False, [])
@@ -15416,13 +15416,13 @@ class TestAfcBridgeBoxRestoreReturned:
         m._restore_returned(A, 100.0, 5.0)
         assert _p6_log(m) == [
             ("debug",
-             "AFC bambu Alpha: lane24 loaded at startup, re-asserting AMS "
+             "Alpha: lane24 loaded at startup, re-asserting AMS "
              "loaded state + follower"),
             ("debug",
-             "AFC bambu Alpha: restored the follower for lane24 (AFC records "
+             "Alpha: restored the follower for lane24 (AFC records "
              "it loaded to the toolhead) -- mode:4, one-shot."),
             ("debug",
-             "AFC_BridgeBox chain1: Alpha (UID AAAA) is back after 5s offline "
+             "chain1: Alpha (UID AAAA) is back after 5s offline "
              "and stayed bound; its loaded-lane follower restore engaged.")]
         # finish (three mode-07 frames), then select, then assist.
         assert bridge.sent == [
@@ -15452,7 +15452,7 @@ class TestAfcBridgeBoxRestoreReturned:
         m._restore_returned(A, 100.0, 5.0)
         assert _p6_log(m) == [(
             "warning",
-            "AFC_BridgeBox chain1: follower restore for Alpha (UID AAAA) on "
+            "chain1: follower restore for Alpha (UID AAAA) on "
             "its return failed: bus busy")]
 
 
@@ -15469,7 +15469,7 @@ class TestAfcBridgeBoxAnnounceEnrolled:
         m._announce_enrolled([f"boxed:{E}"])
         assert _p6_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:EEEE -- "
+            "chain1: NEW unit(s) on the chain: boxed:EEEE -- "
             "recorded.")]
 
     def test_a_unit_on_a_spare_bay_is_promised_its_temperature_card(
@@ -15481,7 +15481,7 @@ class TestAfcBridgeBoxAnnounceEnrolled:
         m._announce_enrolled([f"boxed:{C}"])
         assert _p6_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: NEW unit(s) on the chain: boxed:CCCC -- "
+            "chain1: NEW unit(s) on the chain: boxed:CCCC -- "
             "recorded. A restart adds its temperature card.")]
 
 
@@ -15505,13 +15505,13 @@ class TestAfcBridgeBoxPinRecordedUnits:
             m._pin_recorded_units(recorded, t, {"XXXX": 0.0, "ZZZZ": 0.0})
         assert _p6_log(m) == [
             ("warning",
-             "AFC_BridgeBox chain1: Bambu_AMS_2 is saved for ZZZZ, so XXXX is "
+             "chain1: Bambu_AMS_2 is saved for ZZZZ, so XXXX is "
              "not saved on it. AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=ZZZZ or "
              "AFC_BRIDGEBOX_UNASSIGN CHAIN=chain1 UID=ZZZZ, or "
              "AFC_BRIDGEBOX_ASSIGN CHAIN=chain1 UID=XXXX NAME=<other bay> "
              "moves XXXX to another bay."),
             ("info",
-             "AFC_BridgeBox chain1: ZZZZ is on Bambu_AMS_3 this session, not "
+             "chain1: ZZZZ is on Bambu_AMS_3 this session, not "
              "on Bambu_AMS_2, the bay it is saved on; it comes back to "
              "Bambu_AMS_2 after a restart.")]
         assert m._pin_warned == {("XXXX", "Bambu_AMS_2", "holder"),
@@ -15525,7 +15525,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
 
     #: What a release of AAAA from its saved bay Alpha logs.
     RELEASED = ("info",
-                "AFC_BridgeBox chain1: released Alpha (UID AAAA offline "
+                "chain1: released Alpha (UID AAAA offline "
                 ">10s); lanes dropped live, slot kept for re-plug")
 
     @staticmethod
@@ -15640,7 +15640,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
             ("debug", "Activating extruder lane: None"),
             ("info", "Manually removing lane24 loaded from toolhead"),
             ("info",
-             "AFC_BridgeBox chain1: released Alpha (UID AAAA offline >10s); "
+             "chain1: released Alpha (UID AAAA offline >10s); "
              "lanes dropped live, slot kept for re-plug; cleared lane24 from "
              "the toolhead")]
 
@@ -15661,7 +15661,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         assert m._held["Alpha"]["lanes"]["lane24"]["tool_loaded"] is True
         assert _p6_log(m) == [
             ("info",
-             "AFC_BridgeBox chain1: released Alpha (UID AAAA offline >10s); "
+             "chain1: released Alpha (UID AAAA offline >10s); "
              "lanes dropped live, slot kept for re-plug; cleared lane24 from "
              "the toolhead")]
 
@@ -15704,10 +15704,10 @@ class TestAfcBridgeBoxReleasePoolUnit:
         assert m._held == {}
         assert _p6_log(m) == [
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_2 (UID CCCC offline "
+             "chain1: released Bambu_AMS_2 (UID CCCC offline "
              ">10s); lanes dropped live, slot kept for re-plug"),
             ("info",
-             "AFC_BridgeBox chain1: released Bambu_AMS_3 (UID EEEE offline "
+             "chain1: released Bambu_AMS_3 (UID EEEE offline "
              ">10s); lanes dropped live")]
 
     def test_a_command_release_names_it_and_promises_no_replug(
@@ -15719,7 +15719,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         assert m._held["Alpha"]["uid"] == A
         assert _p6_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: released Alpha (UID AAAA, UNASSIGN); lanes "
+            "chain1: released Alpha (UID AAAA, UNASSIGN); lanes "
             "dropped live")]
 
     def test_a_uid_on_no_bay_releases_nothing(self, tmp_path, monkeypatch):
@@ -15831,7 +15831,7 @@ class TestAfcBridgeBoxLiveAccessTracking:
         assert m._live_access_tracking() == {}
         assert _p6_log(m) == [(
             "debug",
-            "AFC_BridgeBox chain1: no access tracking to share (shutdown); "
+            "chain1: no access tracking to share (shutdown); "
             "fabricated sections stay out of configfile.settings")]
 
 
@@ -16063,7 +16063,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert _p6_bay(m, "Bambu_AMS_1")["uid"] is None
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Bambu_AMS_1: claim found no live bridge on "
+            "Bambu_AMS_1: claim found no live bridge on "
             "/dev/serial/by-id/usb-chain1-if00; unit stays offline until "
             "restart.")]
 
@@ -16197,7 +16197,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
 
     #: The line the pack logs when Alpha's T4-T7 move to T1-T4.
     PACKED = ("info",
-              "AFC_BridgeBox chain1: a unit was forgotten, so the Bambu T#s "
+              "chain1: a unit was forgotten, so the Bambu T#s "
               "pack down: T4 -> T1, T5 -> T2, T6 -> T3, T7 -> T4")
 
     @classmethod
@@ -16286,7 +16286,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert afc.gcode.ready_gcode_handlers["T1"] is _macro
         assert _p6_log(m) == [(
             "info",
-            "AFC_BridgeBox chain1: a unit was forgotten, so the Bambu T#s "
+            "chain1: a unit was forgotten, so the Bambu T#s "
             "pack down: T4 -> T2, T5 -> T4, T6 -> T5, T7 -> T6")] + \
             _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
@@ -16334,7 +16334,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
 
     #: The opening of the line for an AMS that finds four AMS bays held.
     ALL_FOUR = (
-        "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays belong to "
+        "chain1: AMS EEEE has no bay: all 4 AMS bays belong to "
         "other units (Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 "
         "(CCCC), Bambu_AMS_4 (DDDD)), and a Bambu bus addresses at most 4 "
         "AMS, so neither pool_ams nor RESTART adds one.")
@@ -16407,7 +16407,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._claim_pool_unit(E, "boxed") is None
         assert _p6_log(m) == [(
             "warning",
-            "AFC_BridgeBox chain1: new AMS EEEE has no free bay: every AMS "
+            "chain1: new AMS EEEE has no free bay: every AMS "
             "bay built belongs to a known unit. Offline: Bambu_AMS_1 (AAAA), "
             "Bambu_AMS_2 (BBBB). If this AMS replaces one of them, "
             "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=<that unit's uid> frees "
@@ -16428,7 +16428,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m2._scout_ready()
         assert _p6_log(m2) == [(
             "warning",
-            "AFC_BridgeBox chain1: HT HHHH (Bambu_AMS_HT_1) keeps its name, "
+            "chain1: HT HHHH (Bambu_AMS_HT_1) keeps its name, "
             "and its lanes changed: lane32 -> lane36.")]
 
     def test_a_bay_inside_the_ams_band_moves_nothing(self, tmp_path,
@@ -16446,7 +16446,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._claim_pool_unit(E, "boxed") is None
         assert _p6_log(m) == [(
             "warning",
-            "AFC_BridgeBox chain1: new AMS EEEE has no free bay: every AMS "
+            "chain1: new AMS EEEE has no free bay: every AMS "
             "bay built belongs to a known unit. Offline: Bambu_AMS_1 (AAAA), "
             "Bambu_AMS_4 (BBBB). If this AMS replaces one of them, "
             "AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=<that unit's uid> frees "
@@ -16465,7 +16465,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._claim_pool_unit(G, "ht") is None
         assert _p6_log(m) == [(
             "warning",
-            "AFC_BridgeBox chain1: new HT GGGG has no free bay: every HT bay "
+            "chain1: new HT GGGG has no free bay: every HT bay "
             "built belongs to a known unit. Bambu_AMS_HT_1 (HHHH) is "
             "offline: if this HT replaces it, AFC_BRIDGEBOX_FORGET "
             "CHAIN=chain1 UID=HHHH frees that bay and this HT claims it live. "
@@ -16671,7 +16671,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             A, None)
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Alpha: claim found no live bridge on "
+            "Alpha: claim found no live bridge on "
             "/dev/serial/by-id/usb-chain1-if00; unit stays offline until "
             "restart.")]
 
@@ -16761,7 +16761,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._state_get(SEC, "bay_owner") == "EEEE:Bravo"
         assert _p6_log(m) == [
             ("warning",
-             "AFC_BridgeBox chain1: PREP has not finished 90s after startup; "
+             "chain1: PREP has not finished 90s after startup; "
              "claiming units anyway.")] + _p6_claim_log(D, "Bravo")
         # A restart before PREP runs holds the records for EEEE again.
         again = self._restart(tmp_path, monkeypatch)
@@ -16878,7 +16878,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m.printer.afc.tool_cmds == {}
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Alpha: claim found no live bridge on "
+            "Alpha: claim found no live bridge on "
             "/dev/serial/by-id/usb-chain1-if00; unit stays offline until "
             "restart.")]
         live_bridges()[m.serial_port] = bridge
@@ -16932,9 +16932,9 @@ class TestAfcBridgeBoxClaimPoolUnit:
             "lane27": ["T4"]}
         claim = _p6_claim_log(A, "Alpha")
         assert _p6_log(m) == claim[:2] + [
-            ("warning", "AFC_BridgeBox chain1: lane24: saved T3 is held by "
+            ("warning", "chain1: lane24: saved T3 is held by "
                         "lane5 -- not restored"),
-            ("warning", "AFC_BridgeBox chain1: lane24 is on T0 now")
+            ("warning", "chain1: lane24 is on T0 now")
         ] + claim[2:]
         _p6_consistent(m)
 
@@ -16969,7 +16969,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert (stand_in.map, stand_in.current_map) == (["T4"], "T4")
         claim = _p6_claim_log(A, "Alpha")
         assert _p6_log(m) == claim[:2] + [
-            ("debug", "AFC_BridgeBox chain1: lane24 takes back its saved T3 "
+            ("debug", "chain1: lane24 takes back its saved T3 "
                      "from e2, which waits for its own pool lanes")
         ] + claim[2:]
         _p6_consistent(m)
@@ -17029,7 +17029,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert self._maps(m, "lane25") == {"lane25": ["T5"]}
         claim = _p6_claim_log(A, "Alpha")
         assert _p6_log(m) == claim[:2] + [(
-            "warning", "AFC_BridgeBox chain1: lane24: saved T40 is held by "
+            "warning", "chain1: lane24: saved T40 is held by "
                        "lane5 -- not restored")] + claim[2:]
         _p6_consistent(m)
 
@@ -17137,9 +17137,9 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert (lane24.map, lane5.map) == (["T1"], ["T0"])
         claim = _p6_claim_log(A, "Alpha")
         assert _p6_log(m) == claim[:2] + [
-            ("warning", "AFC_BridgeBox chain1: lane24: saved T0 is held by "
+            ("warning", "chain1: lane24: saved T0 is held by "
                         "lane5 -- not restored"),
-            ("warning", "AFC_BridgeBox chain1: lane24 is on T1 now")
+            ("warning", "chain1: lane24 is on T1 now")
         ] + claim[2:]
         _p6_consistent(m)
 
@@ -17164,9 +17164,9 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert _p6_lane(m, "lane24").map == ["T1"]
         warned = [line for line in _p6_log(m) if line[0] == "warning"]
         assert warned == [
-            ("warning", "AFC_BridgeBox chain1: lane24: saved T0 is held by a "
+            ("warning", "chain1: lane24: saved T0 is held by a "
                         "macro -- not restored"),
-            ("warning", "AFC_BridgeBox chain1: lane24 is on T1 now")]
+            ("warning", "chain1: lane24 is on T1 now")]
 
     def test_a_running_command_counts_as_a_print(self, tmp_path,
                                                  monkeypatch):
@@ -17306,7 +17306,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         claim = _p6_claim_log(C, "Bravo")
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Bravo: extruder1 records lane28 as loaded, but no "
+            "Bravo: extruder1 records lane28 as loaded, but no "
             "saved record of lane28 is attributed to this unit (CCCC), so "
             "AFC cannot tell which unit the filament in extruder1 is from, "
             "and lane28 is left unloaded. Unload that filament by hand and "
@@ -17327,7 +17327,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         claim = _p6_claim_log(C, "Bravo")
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Bravo: extruder1 records lane28 as loaded, but lane28 "
+            "Bravo: extruder1 records lane28 as loaded, but lane28 "
             "was not saved loaded under this unit (CCCC), so the filament "
             "in extruder1 is not from this unit and lane28 is left "
             "unloaded. Unload that filament by hand and run "
@@ -17372,7 +17372,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             assert m._claim_pool_unit(C, "boxed") is None
             assert _p6_log(m) == [(
                 "warning",
-                f"AFC bambu {bay}: claim found no live bridge on "
+                f"{bay}: claim found no live bridge on "
                 "/dev/serial/by-id/usb-chain1-if00; unit stays offline "
                 "until restart.")]
         # A spare adopted for the claim goes back to the pool.
@@ -17466,7 +17466,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             A, None)
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Alpha: claim found no live bridge on "
+            "Alpha: claim found no live bridge on "
             "/dev/serial/by-id/usb-chain1-if00; unit stays offline until "
             "restart.")]
 
@@ -17483,7 +17483,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert unit._held_lanes == {}
         assert _p6_log(m) == [(
             "warning",
-            "AFC bambu Alpha: claim found no live bridge on "
+            "Alpha: claim found no live bridge on "
             "/dev/serial/by-id/usb-chain1-if00; unit stays offline until "
             "restart.")]
 
@@ -17531,7 +17531,7 @@ class TestAfcBridgeBoxNoBayMessage:
                                       f"ht:{H}"}})
         _p6_quiet(m)
         assert m._no_bay_message(E, "ams") == (
-            "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays "
+            "chain1: AMS EEEE has no bay: all 4 AMS bays "
             "belong to other units (Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), "
             "Bambu_AMS_3 (CCCC), Bambu_AMS_4 (GGGG)), and a Bambu bus "
             "addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
@@ -17549,7 +17549,7 @@ class TestAfcBridgeBoxNoBayMessage:
         _p6_tick(m, 100, 130)
         _p6_quiet(m)
         assert m._no_bay_message(E, "ams") == (
-            "AFC_BridgeBox chain1: AMS EEEE has no bay: all 4 AMS bays "
+            "chain1: AMS EEEE has no bay: all 4 AMS bays "
             "belong to other units (Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), "
             "Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), and a Bambu bus "
             "addresses at most 4 AMS, so neither pool_ams nor RESTART adds "
@@ -17603,7 +17603,7 @@ class TestAfcBridgeBoxCheckMovedLoaded:
         m._check_moved_loaded()
         assert _p6_log(m) == [(
             "warning",
-            "AFC_BridgeBox chain1: extruder records lane40 as loaded, but "
+            "chain1: extruder records lane40 as loaded, but "
             "lane40 belonged to AMS EEEE (Bambu_AMS_5), and this boot's "
             "layout gives it to Bambu_AMS_HT_1. The filament in extruder is "
             "from EEEE, so Bambu_AMS_HT_1 leaves its follower off on lane40. "
@@ -17628,10 +17628,10 @@ class TestAfcBridgeBoxCheckMovedLoaded:
             {"cmd": "assist", "on": True, "slot": 0, "unit": 0}]
         assert _p6_log(m) == [
             ("debug",
-             "AFC bambu Bambu_AMS_HT_1: lane40 loaded at startup, "
+             "Bambu_AMS_HT_1: lane40 loaded at startup, "
              "re-asserting AMS loaded state + follower"),
             ("debug",
-             "AFC bambu Bambu_AMS_HT_1: restored the follower for lane40 "
+             "Bambu_AMS_HT_1: restored the follower for lane40 "
              "(AFC records it loaded to the toolhead) -- mode:4, one-shot.")]
 
     def test_nothing_is_decided_before_prep_restores_the_records(
@@ -17666,7 +17666,7 @@ class TestAfcBridgeBoxReapplyModelOverride:
         _p6_quiet(m)
         applied = [(
             "debug",
-            "AFC_BridgeBox chain1: Bambu_AMS_1 is a ams1; applied "
+            "chain1: Bambu_AMS_1 is a ams1; applied "
             "measure_on_insert=False from [AFC_BridgeBox ams1] (the bay was "
             "fabricated as a spare, before its model was known)")]
         m._reapply_model_override(unit, "ams1")
@@ -17980,7 +17980,7 @@ class TestAfcBridgeBoxWifiText:
         with pytest.raises(configparser.Error) as err:
             self._read(tmp_path, monkeypatch, value)
         assert str(err.value) == (
-            "AFC_BridgeBox chain1: wifi_password can't hold quotes, "
+            "chain1: wifi_password can't hold quotes, "
             "backslashes or non-ASCII characters; set this network up from "
             "the bb-bridge hotspot")
 
@@ -17990,13 +17990,13 @@ class TestAfcBridgeBoxWifiText:
         with pytest.raises(configparser.Error) as err:
             self._read(tmp_path, monkeypatch, value)
         assert str(err.value) == (
-            "AFC_BridgeBox chain1: wifi_password must be 8 to 63 characters")
+            "chain1: wifi_password must be 8 to 63 characters")
 
     def test_the_ssid_limits_come_from_init(self, tmp_path, monkeypatch):
         with pytest.raises(configparser.Error) as err:
             _wifi_master(tmp_path, monkeypatch, wifi_ssid="s" * 33)
         assert str(err.value) == (
-            "AFC_BridgeBox chain1: wifi_ssid must be 1 to 32 characters")
+            "chain1: wifi_ssid must be 1 to 32 characters")
         m = _wifi_master(tmp_path, monkeypatch, wifi_ssid="s" * 32)
         assert m.wifi_ssid == "s" * 32
 
@@ -18021,7 +18021,7 @@ class TestAfcBridgeBoxRegisterWifi:
                          wifi_ssid="Shop", wifi_password="hunter22")
         link = bridge_mod._WIFI_LINKS[WIFI_USB]
         assert (link.key, link.label, link.usb_path, link.addr) == (
-            WIFI_NEW_KEY, "AFC_BridgeBox chain1", WIFI_USB, None)
+            WIFI_NEW_KEY, "chain1", WIFI_USB, None)
         assert (link.ssid, link._password) == ("Shop", "hunter22")
         assert link._save == m._save_wifi_addr
         assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
@@ -18084,7 +18084,7 @@ class TestAfcBridgeBoxSaveWifiAddr:
 
 class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
     WIPE = [{"cmd": "wifi", "clear": 1}, {"cmd": "reset"}]
-    SAID = ("AFC_BridgeBox chain1: the BridgeBox's WiFi and link key are "
+    SAID = ("chain1: the BridgeBox's WiFi and link key are "
             "wiped and it is restarting with its bb-bridge setup hotspot. "
             "Set up its WiFi again from a phone.")
 
@@ -18200,9 +18200,9 @@ AUTO_BOARD = ("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_"
               "68:EE:8F:DA:01:38-if00")
 AUTO_PICO = "/dev/serial/by-id/usb-Raspberry_Pi_Pico_C1DD3A4F368F7DA2-if00"
 AUTO_INFO = {"evt": "info", "proto": "bambubus-1", "ip": "0.0.0.0"}
-AUTO_TOOK = ("info", f"AFC_BridgeBox chain1: serial_port: auto took the "
+AUTO_TOOK = ("info", f"chain1: serial_port: auto took the "
                      f"BridgeBox on {AUTO_BOARD} and keeps it from now on")
-AUTO_NONE = ("info", "AFC_BridgeBox chain1: serial_port: auto found no free "
+AUTO_NONE = ("info", "chain1: serial_port: auto found no free "
                      "BridgeBox on USB yet. Plug one in and it is picked up "
                      "by itself.")
 
@@ -18490,6 +18490,6 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForgetBoard:
             "usb_port": "", "wifi_addr": "", "wifi_key": "cd" * 16}
         assert m._board_forgotten is True
         assert cmd.messages == [(
-            "respond_info", "AFC_BridgeBox chain1: forgot its BridgeBox. "
+            "respond_info", "chain1: forgot its BridgeBox. "
                             "RESTART, and the chain takes the next free "
                             "BridgeBox it finds on USB.")]
