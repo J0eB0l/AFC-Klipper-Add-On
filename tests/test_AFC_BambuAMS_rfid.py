@@ -494,7 +494,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert sp._bound_uid == {2: "13f56d32"}
         assert sp._spoolman_inflight == set() and sp._bind_pending == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by tray UID cf34cf1d212f46b5bc8561e05eb644c8")]
 
     def test_lost_inflight_and_pending_sets_are_rebuilt(self, monkeypatch):
@@ -512,7 +512,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert unit.afc.spool.calls == [("set_spoolID", (lane, 132), {})]
         assert sp._spoolman_inflight == set() and sp._bind_pending == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by tray UID cf34cf1d212f46b5bc8561e05eb644c8")]
 
     def test_a_chip_match_stamps_the_roll_identity_on(self, monkeypatch):
@@ -529,7 +529,7 @@ class TestBambuSpoolmanBindByUidBg:
             ("write_spool_metadata", (132, {"uid": "d34e4e39"}))]
         assert sp._bound_uid == {2: "d34e4e39"}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by UID d34e4e39")]
 
     def test_a_refused_roll_identity_stamp_still_binds(self, monkeypatch):
@@ -552,7 +552,7 @@ class TestBambuSpoolmanBindByUidBg:
             ("write_spool_metadata", (132, {"uid": "d34e4e39"}))]
         assert sp._bound_uid == {2: "d34e4e39"}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by UID d34e4e39")]
 
     class _ScanClient(FakeSpoolmanClient):
@@ -577,7 +577,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert client.reports == [("afc-pi-lane14", "d34e4e39", "pi lane14", "bambu")]
         assert unit.afc.spool.calls == [("set_spoolID", (lane, 132), {})]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by UID d34e4e39")]
 
     def test_an_unknown_tag_is_reported_too(self, monkeypatch):
@@ -601,7 +601,7 @@ class TestBambuSpoolmanBindByUidBg:
         unit.afc.reactor.run_callbacks()
         assert client.reports == []
         assert unit.logger.messages == [
-            ("info", "AFC bambu Bambu_AMS_1: lane14 -- tag D34E4E39 matches Spoolman spool "
+            ("info", "Bambu_AMS_1: lane14 -- tag D34E4E39 matches Spoolman spool "
                      "132, which has no remaining weight on record, so the lane was not "
                      "linked to it (AFC clears a lane linked to a spool without one). "
                      "Correct spool 132's weight in Spoolman, then run AFC_BAMBU_SCAN "
@@ -621,7 +621,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert sp._spoolman_no_match == set()
         assert unit._lookup_retry == {2: unit.afc.reactor.monotonic() + 30.0}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: Spoolman did not answer the lookup of "
+            ("debug", "Bambu_AMS_1: Spoolman did not answer the lookup of "
                       "D34E4E39 for lane14; asking again in 30 s")]
 
     def test_a_conflicting_roll_identity_is_left_alone(self, monkeypatch):
@@ -636,11 +636,11 @@ class TestBambuSpoolmanBindByUidBg:
         assert client.calls == [("write_spool_metadata",
                                  (132, {"uid": "d34e4e39"}))]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: spool 132 carries tray UID "
+            ("debug", "Bambu_AMS_1: spool 132 carries tray UID "
                       "4e3177c3 but this tag says "
                       "cf34cf1d212f46b5bc8561e05eb644c8 -- left alone; one of "
                       "them is on the wrong record"),
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "132 by UID d34e4e39")]
 
     def test_a_tagless_brand_still_binds_by_chip_uid(self, monkeypatch):
@@ -655,7 +655,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert client.calls == [("write_spool_metadata",
                                  (77, {"uid": "aabbccdd"}))]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "77 by UID aabbccdd (no tag profile decoded)")]
 
     def test_a_lookup_answered_after_its_spool_left_binds_nothing(
@@ -702,7 +702,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert sp._bind_pending == set()
         assert sp._bound_uid == {2: "aabbccdd"}
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "77 by UID aabbccdd")]
 
     def test_a_failed_card_uids_write_still_binds(self, monkeypatch):
@@ -717,7 +717,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert sp._bound_uid == {2: "aabbccdd"}
         assert sp._spoolman_no_match == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "77 by UID aabbccdd")]
 
     def test_a_client_that_cannot_be_built_is_a_miss(self, monkeypatch):
@@ -759,7 +759,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert sp._bind_pending == set() and sp._spoolman_inflight == set()
         assert unit.afc.reactor.run_callbacks() == 0
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "77 by UID aabbccdd")]
 
     def test_a_bind_for_an_unknown_bay_still_binds(self, monkeypatch):
@@ -775,7 +775,7 @@ class TestBambuSpoolmanBindByUidBg:
         assert unit.afc.spool.calls == [("set_spoolID", (lane, 77), {})]
         assert sp._bound_uid == {} and sp._spoolman_inflight == set()
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: matched lane14 to Spoolman spool "
+            ("debug", "Bambu_AMS_1: matched lane14 to Spoolman spool "
                       "77 by UID aabbccdd")]
 
 
@@ -843,7 +843,7 @@ class TestBambuSpoolmanBindLanded:
         assert sp._bound_uid == {} and sp._spoolman_no_match == set()
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool 136 "
+            ("debug", "Bambu_AMS_1: unbinding lane15 from spool 136 "
                       "-- its Spoolman link for tag 4B8E44F6 landed after "
                       "that spool left the bay")]
 
@@ -863,7 +863,7 @@ class TestBambuSpoolmanBindLanded:
         assert unit._defaults_due == {3: 130.0}
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane15 from spool 136 "
+            ("debug", "Bambu_AMS_1: unbinding lane15 from spool 136 "
                       "-- its Spoolman link for tag 4B8E44F6 landed after "
                       "that spool left the bay")]
 
@@ -1021,7 +1021,7 @@ class TestBambuSpoolmanBindLanded:
         return unit
 
     #: Prefix of the flap unit's lines.
-    FLAP = "AFC bambu Bambu_AMS_1"
+    FLAP = "Bambu_AMS_1"
 
     def _flap_lines(self, matched: bool) -> List[Tuple[str, str]]:
         """
@@ -1291,7 +1291,7 @@ class TestBambuSpoolmanSpoolmanSync:
         self._sync(unit, record, "lane23")
         assert unit.lanes["lane23"].spool_id == ""
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane23 from spool 87 "
+            ("debug", "Bambu_AMS_1: unbinding lane23 from spool 87 "
                       "-- tag 01D0EC0F is in this bay now, not 0A1882AC")]
 
     def test_a_binding_we_did_not_make_is_left_alone(self, monkeypatch):
@@ -1318,7 +1318,7 @@ class TestBambuSpoolmanSpoolmanSync:
         assert unit.lanes["lane23"].spool_id == ""
         # No remembered tag to name, so the reason cites Spoolman instead.
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: unbinding lane23 from spool 87 "
+            ("debug", "Bambu_AMS_1: unbinding lane23 from spool 87 "
                       "-- tag ECB61CD0 is in this bay now, and Spoolman does "
                       "not list it on that spool")]
 
@@ -1572,9 +1572,9 @@ class TestBambuSpoolmanApplyRemainWeight:
         assert client.calls == [("set_remaining_weight", (163, 952.0))]
         assert unit.afc.save_vars.call_count == 1
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane12 bound to spool 163 after "
+            ("debug", "Bambu_AMS_1: lane12 bound to spool 163 after "
                       "its measurement; handing the measured 952 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 952.0 g remaining to "
+            ("debug", "Bambu_AMS_1: wrote 952.0 g remaining to "
                      "Spoolman spool 163 (physical AMS measurement) -- "
                      "measured 138%, capped to the spool's 1000 g nominal")]
         # Handed over once, not per frame.
@@ -1598,9 +1598,9 @@ class TestBambuSpoolmanApplyRemainWeight:
         assert lane.weight == 640
         assert client.calls == [("set_remaining_weight", (41, 640.0))]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane23 bound to spool 41 after "
+            ("debug", "Bambu_AMS_1: lane23 bound to spool 41 after "
                       "its measurement; handing the measured 640 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 640.0 g remaining to "
+            ("debug", "Bambu_AMS_1: wrote 640.0 g remaining to "
                      "Spoolman spool 41 (physical AMS measurement)")]
 
     def test_a_tag_record_is_never_written_at_all(self, monkeypatch):
@@ -1639,9 +1639,9 @@ class TestBambuSpoolmanApplyRemainWeight:
         assert lane.weight == 230
         assert client.calls == [("set_remaining_weight", (41, 230.0))]
         assert unit.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_1: lane23 bound to spool 41 after "
+            ("debug", "Bambu_AMS_1: lane23 bound to spool 41 after "
                       "its measurement; handing the measured 230 g to it"),
-            ("debug", "AFC bambu Bambu_AMS_1: wrote 230.0 g remaining to "
+            ("debug", "Bambu_AMS_1: wrote 230.0 g remaining to "
                      "Spoolman spool 41 (physical AMS measurement)")]
 
     def test_a_fresh_measurement_wins_over_the_tag_record(self, monkeypatch):
@@ -2913,7 +2913,7 @@ class TestBambuSpoolmanAdoptMeasuredRemain:
         :param tail: what follows the source, for a capped reading
         :return tuple: the line the Spoolman weight write logs
         """
-        return ("debug", f"AFC bambu {unit}: wrote {grams} g remaining to "
+        return ("debug", f"{unit}: wrote {grams} g remaining to "
                         f"Spoolman spool {spool} (physical AMS "
                         f"measurement){tail}")
 
@@ -3222,7 +3222,7 @@ class TestBambuSpoolmanAdoptMeasuredRemain:
         :param floor: the reel's floor it is held at
         :return tuple: the line saying so
         """
-        return ("debug", f"AFC bambu Bambu_AMS_1: slot 0 measured {read}%, "
+        return ("debug", f"Bambu_AMS_1: slot 0 measured {read}%, "
                          f"held at the {floor}% this reel measured before -- "
                          f"filament does not grow, and the odometer is worth "
                          f"about +/-3%")

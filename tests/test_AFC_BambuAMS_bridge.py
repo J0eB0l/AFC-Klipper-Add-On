@@ -199,7 +199,7 @@ def loopback_board() -> Iterator[LoopbackBoard]:
 #: What handle_line logs when the first status frame of a connection asks
 #: the bridge who it is.
 REQUEST_INFO_LOG: LogLine = ("debug",
-                             'AFC bambu: request_info -> sent {"cmd":"info"}')
+                             'BridgeBox: request_info -> sent {"cmd":"info"}')
 
 
 class UnstartedBridgeThreads:
@@ -824,7 +824,7 @@ class TestTcpPortClose:
 
 class TestBambuBridgeInit:
     def test_a_freshly_constructed_bridge_has_a_name(self, monkeypatch):
-        # Narration renders "AFC bambu <name>: ..."; built as production
+        # Narration renders "<name>: ..."; built as production
         # builds it, with nobody assigning a name afterwards.
         reactor = FakeReactor()
         patch_module_time(monkeypatch, reactor)
@@ -929,7 +929,7 @@ class TestBambuBridgeStart:
             conn.sendall(b'us","slot":-1}\n')
             assert self._wait_for(lambda: bool(logger.messages))
             assert logger.messages == [
-                ("debug", "AFC bambu: bridge ack status (slot -1)")]
+                ("debug", "BridgeBox: bridge ack status (slot -1)")]
             assert logger.file_only == []
         finally:
             self._stop(bridge)
@@ -965,10 +965,10 @@ class TestBambuBridgeStart:
             # One failed reader attempt, then its 0.5 s backoff on the clock.
             assert reactor.now == pytest.approx(100.5)
             assert logger.messages == [
-                ("info", "AFC bambu: bridge not reachable yet (no bridge "
+                ("info", "BridgeBox: bridge not reachable yet (no bridge "
                             "yet); the reader will keep trying"),
-                ("debug", "AFC bambu: bridge reconnected"),
-                ("debug", "AFC bambu: bridge ack late (slot 0)")]
+                ("debug", "BridgeBox: bridge reconnected"),
+                ("debug", "BridgeBox: bridge ack late (slot 0)")]
         finally:
             self._stop(bridge)
 
@@ -1024,7 +1024,7 @@ class TestBambuBridgeStart:
             assert bridge.is_connected() is False
             assert bridge.down_since() == 310.0
             assert logger.messages == [
-                ("warning", "AFC bambu: bridge read failed: bridge closed the "
+                ("warning", "BridgeBox: bridge read failed: bridge closed the "
                             "connection; reconnecting")]
         finally:
             release.set()
@@ -1080,7 +1080,7 @@ class TestBambuBridgeWriter:
         bambu_bridge.send({"cmd": "chain"})
         self._run_writer(bambu_bridge)
         assert port.written == [b'{"cmd": "chain"}\n']
-        line = ("AFC bambu: bridge busy, write of 'chain' timed out after "
+        line = ("BridgeBox: bridge busy, write of 'chain' timed out after "
                 "0.5 s (may still be delivered)")
         assert bambu_bridge.logger.messages == [("debug", line)]
         # AFC.log only: it nearly always lands late.
@@ -1103,9 +1103,9 @@ class TestBambuBridgeWriter:
         self._run_writer(bambu_bridge)
         assert port.written == [item, b'{"cmd": "stop"}\n']
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge busy, write of '?' timed out after "
+            ("debug", "BridgeBox: bridge busy, write of '?' timed out after "
                       "0.5 s (may still be delivered)"),
-            ("debug", "AFC bambu: bridge busy, write of 'stop' timed out after "
+            ("debug", "BridgeBox: bridge busy, write of 'stop' timed out after "
                       "0.5 s (may still be delivered)")]
         assert bambu_bridge._write_timeouts == 2
 
@@ -1116,7 +1116,7 @@ class TestBambuBridgeWriter:
         bambu_bridge.send({"cmd": "chain"})
         self._run_writer(bambu_bridge)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge busy, write of 'chain' timed out "
+            ("debug", "BridgeBox: bridge busy, write of 'chain' timed out "
                       "(may still be delivered)")]
 
     def test_a_zero_timeout_is_not_named(self, bambu_bridge):
@@ -1127,7 +1127,7 @@ class TestBambuBridgeWriter:
         bambu_bridge.send({"cmd": "chain"})
         self._run_writer(bambu_bridge)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge busy, write of 'chain' timed out "
+            ("debug", "BridgeBox: bridge busy, write of 'chain' timed out "
                       "(may still be delivered)")]
         assert bambu_bridge._write_timeouts == 1
 
@@ -1136,7 +1136,7 @@ class TestBambuBridgeWriter:
         bambu_bridge.send({"cmd": "info"})
         self._run_writer(bambu_bridge)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge busy, write of 'info' timed out after "
+            ("debug", "BridgeBox: bridge busy, write of 'info' timed out after "
                       "0.5 s (may still be delivered)")]
 
     def test_a_timed_out_tcp_write_is_named_and_keeps_the_link(self, bambu_bridge):
@@ -1147,7 +1147,7 @@ class TestBambuBridgeWriter:
         bambu_bridge.send({"cmd": "chain"})
         self._run_writer(bambu_bridge)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge busy, write of 'chain' timed out after "
+            ("debug", "BridgeBox: bridge busy, write of 'chain' timed out after "
                       "0.2 s (may still be delivered)")]
         assert bambu_bridge._serial is port
         assert sock.closed is False
@@ -1161,7 +1161,7 @@ class TestBambuBridgeWriter:
         bridge._serial = port
         bridge.send({"cmd": "chain"})
         self._run_writer(bridge)
-        line = ("AFC bambu: bridge busy, write of 'chain' timed out after "
+        line = ("BridgeBox: bridge busy, write of 'chain' timed out after "
                 "0.2 s (may still be delivered)")
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
@@ -1176,7 +1176,7 @@ class TestBambuBridgeWriter:
         bambu_bridge.send({"cmd": "chain"})
         self._run_writer(bambu_bridge)
         assert bambu_bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge write failed: [Errno 5] Input/output "
+            ("warning", "BridgeBox: bridge write failed: [Errno 5] Input/output "
                         "error; reconnecting")]
         assert bambu_bridge._serial is None
         assert port.closed is True
@@ -1342,7 +1342,7 @@ class TestBambuBridgeBusOwner:
 
 
 class TestBambuBridgeLastFault:
-    TIMEOUT_SAID = ("info", "AFC bambu bridge: AMS: TIMEOUT -- the unit gave up "
+    TIMEOUT_SAID = ("info", "bridge: AMS: TIMEOUT -- the unit gave up "
                             "on the move")
 
     def test_ams1_state_6_is_a_fault(self, bambu_bridge):
@@ -1458,7 +1458,7 @@ class TestBambuBridgeLastFault:
         feed_amsdbg(bambu_bridge, line)
         assert bambu_bridge.last_fault() == (0, "", 1.6)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS: filament reached the hub after "
+            ("debug", "bridge: AMS: filament reached the hub after "
                      "0.05 m"),
             ams_echo(line)]
 
@@ -1572,7 +1572,7 @@ class TestBambuBridgeSetNarrationLog:
         assert self._file_lines(tmp_path / "AFC_BambuAMS.log")[-1] == (
             "0x---- u? [AMS_SWITCH]line 59 padding padding padding")
         # Sixty lines in one second pass the console's burst budget of 12.
-        burst = ("debug", "AFC bambu: the AMS is narrating faster than the "
+        burst = ("debug", "BridgeBox: the AMS is narrating faster than the "
                          "console can take (>12/s); the rest of this burst "
                          "is in AFC.log")
         echoes = [ams_echo(x) for x in lines]
@@ -1583,7 +1583,7 @@ class TestBambuBridgeSetNarrationLog:
         assert bambu_bridge._nar_lg is None
         assert self._rotating() == []
         assert bambu_bridge.logger.messages == [
-            ("warning", "AFC bambu: could not open AFC_BambuAMS.log: [Errno 2] "
+            ("warning", "BridgeBox: could not open AFC_BambuAMS.log: [Errno 2] "
                         "No such file or directory: "
                         "'/nonexistent-dir-xyz/AFC_BambuAMS.log'")]
 
@@ -1842,7 +1842,7 @@ class TestBambuBridgeNoteUartdiag:
 
     @staticmethod
     def logged(obj: dict) -> LogLine:
-        return ("debug", f"AFC bambu: bridge uartdiag {obj}")
+        return ("debug", f"BridgeBox: bridge uartdiag {obj}")
 
     def test_a_report_without_counts_is_only_logged(self, bambu_bridge):
         obj = self.report("still", edges="?")
@@ -1865,7 +1865,7 @@ class TestBambuBridgeNoteUartdiag:
         bambu_bridge._note_uartdiag(obj)
         assert bambu_bridge.logger.messages == [
             self.logged(obj),
-            ("info", "AFC bambu: the AMS bus is talking again")]
+            ("info", "BridgeBox: the AMS bus is talking again")]
         assert bambu_bridge._bus_said is None
 
     def test_the_chain_label_names_it(self, bambu_bridge):
@@ -1921,7 +1921,7 @@ class TestBambuBridgeNoteUartdiag:
         bambu_bridge._note_uartdiag(obj)
         assert bambu_bridge.logger.messages == [
             self.logged(obj),
-            ("warning", "AFC bambu: no signal on the AMS bus. Check the bus "
+            ("warning", "BridgeBox: no signal on the AMS bus. Check the bus "
                         "cable to the BridgeBox and that the AMS has power.")]
         assert bambu_bridge._bus_said == "no_signal"
         assert bambu_bridge._diag_prev == ("still", 5000, 100)
@@ -2236,23 +2236,23 @@ class TestBambuBridgeLastHtCali:
             "pct": 63, "pct_raw": 63, "radius_m": 0.071, "circumference_m": 0.449,
             "tray": None, "restored": False, "save_tray": 1,
             "save_radius_m": 0.071481, "t": 105.0}
-        diag = f"AFC bambu: bridge diag {self.HT_MEAS}"
+        diag = f"BridgeBox: bridge diag {self.HT_MEAS}"
         assert bridge.logger.messages == [
             ("debug", diag),
-            ("debug", "AFC bambu u: AMS finished measuring the spool"),
-            ("debug", "AFC bambu u: AMS measured the spool: about 63% left "
+            ("debug", "u: AMS finished measuring the spool"),
+            ("debug", "u: AMS measured the spool: about 63% left "
                       "(spool radius 71 mm)"),
-            ("debug", "AFC bambu u: AMS stored a new measurement for bay 2"),
-            ("debug", "AFC bambu u: AMS: spool turned a full revolution "
+            ("debug", "u: AMS stored a new measurement for bay 2"),
+            ("debug", "u: AMS: spool turned a full revolution "
                       "(measuring)"),
             ams_echo(self.AMS1_ODOM)]
         assert bridge.logger.file_only == [
             diag,
-            "AFC bambu u: AMS finished measuring the spool",
-            "AFC bambu u: AMS measured the spool: about 63% left (spool "
+            "u: AMS finished measuring the spool",
+            "u: AMS measured the spool: about 63% left (spool "
             "radius 71 mm)",
-            "AFC bambu u: AMS stored a new measurement for bay 2",
-            "AFC bambu u: AMS: spool turned a full revolution (measuring)",
+            "u: AMS stored a new measurement for bay 2",
+            "u: AMS: spool turned a full revolution (measuring)",
             ams_echo(self.AMS1_ODOM)[1]]
 
     def test_an_ams_line_mentioning_it_later_is_still_parsed(self, monkeypatch):
@@ -2262,7 +2262,7 @@ class TestBambuBridgeLastHtCali:
         feed_amsdbg(bridge, line, addr=0x0700, unit=1)
         assert bridge.last_ht_cali(1) == {"rst": 0, "t": 100.0}
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu u: AMS finished measuring the spool"),
+            ("debug", "u: AMS finished measuring the spool"),
             ams_echo(line)]
 
 
@@ -2273,7 +2273,7 @@ class TestBambuBridgeCapCalibrating:
     """
 
     DETECTED = "[AMS_RFID]STEP:first detected"
-    DETECTED_SAID = ("debug", "AFC bambu bridge: AMS: spool detected")
+    DETECTED_SAID = ("debug", "bridge: AMS: spool detected")
     WALL = 1_700_000_000.0
 
     @pytest.fixture
@@ -2351,7 +2351,7 @@ class TestBambuBridgeLastTerminal:
         assert bambu_bridge.last_terminal(0x0700) == 177.0
         assert bambu_bridge.last_terminal(0x1800) is None
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS finished its measuring cycle"),
+            ("debug", "bridge: AMS finished its measuring cycle"),
             ams_echo(line)]
 
 
@@ -2396,11 +2396,11 @@ class TestBambuBridgeClearDryError:
 
 class TestBambuBridgeLastDryError:
     HUB = "[AMS_CHMB]err, filament hub load!"
-    REFUSED = ("info", "AFC bambu bridge: AMS refused the drying command: "
+    REFUSED = ("info", "bridge: AMS refused the drying command: "
                        "filament hub load!. An AMS will not dry with filament out "
                        "in the hub -- reel the lane back to its bay first "
                        "(LANE_UNLOAD).")
-    LID = ("info", "AFC bambu bridge: AMS HT lid is open -- drying continues, "
+    LID = ("info", "bridge: AMS HT lid is open -- drying continues, "
                    "but the chamber cannot hold temperature until the shell is "
                    "closed.")
 
@@ -2433,7 +2433,7 @@ class TestBambuBridgeLastDryError:
         assert bambu_bridge.last_dry_error(2) is None
         assert bambu_bridge.logger.messages == [
             self.REFUSED, ams_echo(self.HUB),
-            ("debug", "AFC bambu bridge: AMS drying: self-check passed, now "
+            ("debug", "bridge: AMS drying: self-check passed, now "
                       "heating"),
             ams_echo(heating)]
 
@@ -2444,7 +2444,7 @@ class TestBambuBridgeLastDryError:
         assert bambu_bridge.last_dry_error(2) is None
         assert bambu_bridge.logger.messages == [
             self.REFUSED, ams_echo(self.HUB),
-            ("debug", "AFC bambu bridge: AMS drying: self-check started, "
+            ("debug", "bridge: AMS drying: self-check started, "
                       "target 55C"),
             ams_echo(check)]
 
@@ -2576,7 +2576,7 @@ class TestBambuBridgeTubeLen:
         :param mm: the measured length
         :return LogLine: the one-time console line for a first measurement
         """
-        return ("debug", f"AFC bambu bridge: AMS {addr} reports its measured "
+        return ("debug", f"bridge: AMS {addr} reports its measured "
                         f"filament path as {mm}mm -- using it to size move "
                         f"timeouts instead of the configured estimate")
 
@@ -2586,7 +2586,7 @@ class TestBambuBridgeTubeLen:
         :param mm: the measured length
         :return LogLine: the console line for a bare "new tube_len" report
         """
-        return ("debug", f"AFC bambu bridge: AMS learned the bay-to-hub path "
+        return ("debug", f"bridge: AMS learned the bay-to-hub path "
                         f"length: {mm} mm")
 
     def test_the_new_tube_len_form_is_read(self, bambu_bridge):
@@ -2595,7 +2595,7 @@ class TestBambuBridgeTubeLen:
         feed_amsdbg(bambu_bridge, line, addr=0x0700)
         assert bambu_bridge.tube_len(0x0700) == 3503.0
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS measured the PTFE path at 3503mm "
+            ("debug", "bridge: AMS measured the PTFE path at 3503mm "
                      "(+/-7mm)"),
             self._learned(3503),
             self._adopted("0x0700", 3503),
@@ -2701,7 +2701,7 @@ class TestBambuBridgeTubeLen:
         feed_amsdbg(bambu_bridge, line, addr=0x0700)
         assert bambu_bridge.tube_len(0x0700) == 3481.0
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS measured the PTFE path at 3481mm "
+            ("debug", "bridge: AMS measured the PTFE path at 3481mm "
                      "(+/-19mm)"),
             self._learned(3481),
             self._adopted("0x0700", 3481),
@@ -2715,7 +2715,7 @@ class TestBambuBridgeTubeLen:
         feed_amsdbg(bambu_bridge, line, addr=0x1800)
         assert bambu_bridge.tube_len(0x1800) == 2186.0
         assert bambu_bridge.logger.messages == [
-            ("info", "AFC bambu bridge: AMS: the filament STALLED after 3.71 m "
+            ("info", "bridge: AMS: the filament STALLED after 3.71 m "
                      "of a 2.19 m path -- check for a jam between the bay and "
                      "the toolhead"),
             self._adopted("0x1800", 2186),
@@ -2729,7 +2729,7 @@ class TestBambuBridgeTubeLen:
         assert bambu_bridge.tube_len(0x0700) is None
         assert bambu_bridge._tube_by_addr == {}
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS measured the PTFE path at 0mm "
+            ("debug", "bridge: AMS measured the PTFE path at 0mm "
                      "(+/-3491mm)"),
             self._learned(0),
             ams_echo(line)]
@@ -2741,7 +2741,7 @@ class TestBambuBridgeTubeLen:
         assert bambu_bridge.tube_len(0x1800) is None
         assert bambu_bridge._tube_by_addr == {}
         assert bambu_bridge.logger.messages == [
-            ("info", "AFC bambu bridge: AMS: the filament STALLED after 3.71 m "
+            ("info", "bridge: AMS: the filament STALLED after 3.71 m "
                      "of a 0.00 m path -- check for a jam between the bay and "
                      "the toolhead"),
             ams_echo(line)]
@@ -2815,7 +2815,7 @@ class TestBambuBridgeTubeLen:
         feed_amsdbg(bridge, line, addr=0x0700)
         assert bridge.tube_len(0x0700) == 3481.0
         assert logger.messages == [
-            ("debug", "AFC bambu bridge: AMS measured the PTFE path at 3481mm "
+            ("debug", "bridge: AMS measured the PTFE path at 3481mm "
                      "(+/-19mm)"),
             self._learned(3481),
             self._adopted("0x0700", 3481),
@@ -2832,9 +2832,9 @@ class TestBambuBridgeLastFinish:
     ODOM_RESET = "[AMS_DEV] STEP:odom reset tray 0"
     TRAY_GONE = "[AMS_DEV] STEP:odom tray_id error 255"
     STATE_SWITCH = "[AMS_IDLE]set ams state switch"
-    NO_TRAY = ("AFC bambu bridge: AMS: asked to move with NO TRAY SELECTED -- "
+    NO_TRAY = ("bridge: AMS: asked to move with NO TRAY SELECTED -- "
                "the unit rejected the command")
-    HT_PATH = ("debug", "AFC bambu bridge: AMS 0x1800 reports its measured "
+    HT_PATH = ("debug", "bridge: AMS 0x1800 reports its measured "
                        "filament path as 3619mm -- using it to size move "
                        "timeouts instead of the configured estimate")
 
@@ -2857,7 +2857,7 @@ class TestBambuBridgeLastFinish:
         :param path: tube_len as the console prints it
         :return LogLine: the console line for a stalled feed
         """
-        return ("info", f"AFC bambu bridge: AMS: the filament STALLED after "
+        return ("info", f"bridge: AMS: the filament STALLED after "
                         f"{got} m of a {path} m path -- check for a jam "
                         f"between the bay and the toolhead")
 
@@ -2900,7 +2900,7 @@ class TestBambuBridgeLastFinish:
         line = "[AMS_PRELOAD]preload finish"
         assert self._say(bambu_bridge, line, 0x1800) == (1, True, line)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS staged the spool at its feeder"),
+            ("debug", "bridge: AMS staged the spool at its feeder"),
             ams_echo(line)]
 
     def test_a_real_finish_in_a_blob_of_noise_still_counts(self, bambu_bridge):
@@ -3177,7 +3177,7 @@ class TestBambuBridgeLastFinish:
         assert self._say(bambu_bridge, preload, None) == (1, True, preload)
         assert self._say(bambu_bridge, feed, None) == (2, True, feed)
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS staged the spool at its feeder"),
+            ("debug", "bridge: AMS staged the spool at its feeder"),
             ams_echo(preload), ams_echo(feed)]
 
     def test_non_finish_narration_leaves_it_alone(self, bambu_bridge):
@@ -3306,7 +3306,7 @@ class TestBambuBridgeLatestStatus:
         assert seen == [{"evt": "status", "online": True, "slots": []}]
         # The first status frame of a connection asks for the board's info.
         assert bridge.logger.messages == [
-            ("debug", 'AFC bambu: request_info -> sent {"cmd":"info"}')]
+            ("debug", 'BridgeBox: request_info -> sent {"cmd":"info"}')]
 
 
 class TestBambuBridgeSend:
@@ -3325,7 +3325,7 @@ class TestBambuBridgeSend:
         assert bridge._wq.empty()
         # Never connected yet: the start, not an outage, so no warning
         assert bridge.logger.messages == [
-            ("info", "AFC bambu: link is down -- dropped stop, and anything "
+            ("info", "BridgeBox: link is down -- dropped stop, and anything "
                         "else sent until it is back")]
 
     def test_first_dropped_command_says_so_once_per_outage(self, bambu_bridge):
@@ -3336,7 +3336,7 @@ class TestBambuBridgeSend:
         for _ in range(5):
             bambu_bridge.send({"cmd": "status"})
         assert bambu_bridge.logger.messages == [
-            ("warning", "AFC bambu: link is down -- dropped status, and "
+            ("warning", "BridgeBox: link is down -- dropped status, and "
                         "anything else sent until it is back")]
         # Back, then gone again: a NEW outage speaks again.
         bambu_bridge._serial = bambu_bridge._serial_factory()
@@ -3345,9 +3345,9 @@ class TestBambuBridgeSend:
         bambu_bridge.send({"cmd": "feed"})
         assert bambu_bridge._wq.empty()
         assert bambu_bridge.logger.messages == [
-            ("warning", "AFC bambu: link is down -- dropped status, and "
+            ("warning", "BridgeBox: link is down -- dropped status, and "
                         "anything else sent until it is back"),
-            ("warning", "AFC bambu: link is down -- dropped feed, and anything "
+            ("warning", "BridgeBox: link is down -- dropped feed, and anything "
                         "else sent until it is back")]
 
 
@@ -3359,16 +3359,16 @@ class TestBambuBridgeNarrateHuman:
     """
 
     AUTH = "[AMS_DEV] STEP:card auth success!"
-    AUTH_SAID = ("debug", "AFC bambu BambuAMS_1: AMS: tag authenticated")
+    AUTH_SAID = ("debug", "BambuAMS_1: AMS: tag authenticated")
     #: A line that still reaches the console: the unit raising an error.
     RAISED = "[AMS_SWITCH]err_code:0x00 -> 0x12"
-    RAISED_SAID = ("info", "AFC bambu BambuAMS_1: AMS raised error 0x12")
+    RAISED_SAID = ("info", "BambuAMS_1: AMS raised error 0x12")
     NO_TRAY = "[AMS_RFID]STEP3,odom tray_id error 0"
-    NO_TRAY_SAID = ("AFC bambu BambuAMS_1: AMS: asked to move with NO TRAY "
+    NO_TRAY_SAID = ("BambuAMS_1: AMS: asked to move with NO TRAY "
                     "SELECTED -- the unit rejected the command")
     LINE = ("[AMS_CHMB]s:2|rf:55,0|vt:44.0|ap:35.3|hts:34,31,00|pw:100"
             "|ad:2|wd:0000|fa:98|t:70")
-    LINE_SAID = ("debug", "AFC bambu BambuAMS_1: drying -- chamber 44.0C, ad 2, "
+    LINE_SAID = ("debug", "BambuAMS_1: drying -- chamber 44.0C, ad 2, "
                          "humidity 34%, target 55C")
 
     @pytest.fixture
@@ -3419,7 +3419,7 @@ class TestBambuBridgeNarrateHuman:
             bridge = make_bambu_bridge(monkeypatch, name="BambuAMS_1")
             bridge._narrate_human(line, 100.0)
             assert bridge.logger.messages == [
-                ("debug", f"AFC bambu BambuAMS_1: {said}")], line
+                ("debug", f"BambuAMS_1: {said}")], line
 
     def test_the_same_line_twice_is_said_once(self, unit_bridge):
         unit_bridge._narrate_human(self.RAISED, 100.0)
@@ -3436,7 +3436,7 @@ class TestBambuBridgeNarrateHuman:
         unit_bridge._narrate_human(cleared, 101.2)
         assert unit_bridge.logger.messages == [
             self.RAISED_SAID,
-            ("info", "AFC bambu BambuAMS_1: AMS cleared its error")]
+            ("info", "BambuAMS_1: AMS cleared its error")]
 
     def test_an_unmatched_line_says_nothing(self, unit_bridge):
         unit_bridge._narrate_human("[AMS_FOO] something unremarkable", 100.0)
@@ -3473,16 +3473,16 @@ class TestBambuBridgeNarrateHuman:
             "j [AMS_CHMB]finish! [AMS_CHMB]set state CTC_STATE_HEATING, from "
             "selfcheck [AMS_CHMB]err, ams-ht shell open!", 100.0)
         assert unit_bridge.logger.messages == [
-            ("info", "AFC bambu BambuAMS_1: AMS HT lid is open -- drying "
+            ("info", "BambuAMS_1: AMS HT lid is open -- drying "
                      "continues, but the chamber cannot hold temperature until "
                      "the shell is closed."),
-            ("debug", "AFC bambu BambuAMS_1: AMS drying: self-check passed, "
+            ("debug", "BambuAMS_1: AMS drying: self-check passed, "
                       "now heating")]
 
     def test_other_err_lines_still_render_as_refusals(self, unit_bridge):
         unit_bridge._narrate_human("[AMS_CHMB]err, filament hub load!", 100.0)
         assert unit_bridge.logger.messages == [
-            ("info", "AFC bambu BambuAMS_1: AMS refused the drying command: "
+            ("info", "BambuAMS_1: AMS refused the drying command: "
                      "filament hub load!. An AMS will not dry with filament out "
                      "in the hub -- reel the lane back to its bay first "
                      "(LANE_UNLOAD).")]
@@ -3496,7 +3496,7 @@ class TestBambuBridgeNarrateHuman:
             2: {"temp": 23.1, "seen": 100.0, "state": 2, "target": 55.0}}
         assert unit_bridge._last_chmb_t == 100.0
         assert unit_bridge.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 23.1C, target 55C")]
+            ("debug", "BambuAMS_1: drying -- chamber 23.1C, target 55C")]
 
     def test_humidity_comes_from_ht_not_the_suffix_on_vt(self, unit_bridge):
         # A real AMS HT line. The ",00" after vt never moves, so it is not the
@@ -3508,7 +3508,7 @@ class TestBambuBridgeNarrateHuman:
             2: {"temp": 22.4, "seen": 100.0, "state": 2, "target": 55.0,
                 "humidity": 60, "ad_n": 2}}
         assert unit_bridge.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 22.4C, ad 2, "
+            ("debug", "BambuAMS_1: drying -- chamber 22.4C, ad 2, "
                      "humidity 60%, target 55C")]
 
     def test_humidity_tracks_the_chamber_over_a_cycle(self, unit_bridge):
@@ -3524,11 +3524,11 @@ class TestBambuBridgeNarrateHuman:
         assert seen == [60, 55, 40, 31]
         # The console line is once a minute: the fourth is 51 s after the third.
         assert unit_bridge.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 22.4C, humidity "
+            ("debug", "BambuAMS_1: drying -- chamber 22.4C, humidity "
                      "60%, target 55C"),
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 33.2C, humidity "
+            ("debug", "BambuAMS_1: drying -- chamber 33.2C, humidity "
                      "55%, target 55C"),
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 55.6C, humidity "
+            ("debug", "BambuAMS_1: drying -- chamber 55.6C, humidity "
                      "40%, target 55C")]
 
     def test_the_hts_spelling_is_read_too(self, unit_bridge):
@@ -3540,7 +3540,7 @@ class TestBambuBridgeNarrateHuman:
             2: {"temp": 23.1, "seen": 100.0, "state": 2, "target": 55.0,
                 "humidity": 46}}
         assert unit_bridge.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 23.1C, humidity "
+            ("debug", "BambuAMS_1: drying -- chamber 23.1C, humidity "
                      "46%, target 55C")]
 
     def test_a_line_without_humidity_records_none(self, unit_bridge):
@@ -3553,7 +3553,7 @@ class TestBambuBridgeNarrateHuman:
             2: {"temp": 44.0, "seen": 100.0, "state": 2, "target": 55.0,
                 "ad_n": 2}}
         assert unit_bridge.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 44.0C, ad 2, "
+            ("debug", "BambuAMS_1: drying -- chamber 44.0C, ad 2, "
                      "target 55C")]
 
     def test_unparseable_chamber_numbers_leave_the_record_alone(self, unit_bridge):
@@ -3572,7 +3572,7 @@ class TestBambuBridgeNarrateHuman:
         assert unit_bridge._chmb_by_unit == {2: held}
         # The console line quotes the text as it came.
         assert unit_bridge.logger.messages == [
-            ("debug", "AFC bambu BambuAMS_1: drying -- chamber 1.2.3C, target "
+            ("debug", "BambuAMS_1: drying -- chamber 1.2.3C, target "
                      "55C")]
 
     def test_unit_keyed_record_is_stored(self, unit_bridge):
@@ -3683,7 +3683,7 @@ class TestBambuBridgeRfidForeignTagSince:
         # A window opened after the refusal does not see it.
         assert bambu_bridge.rfid_foreign_tag_since(t0 + 1.0, addr=0x0700) is False
         assert bambu_bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS could not authenticate the tag -- "
+            ("debug", "bridge: AMS could not authenticate the tag -- "
                      "third-party spool, or the tag is unreadable"),
             ams_echo(line)]
 
@@ -3714,7 +3714,7 @@ class TestBambuBridgeGaveUpSince:
         # or the re-home retry would abort at once.
         assert bambu_bridge.gave_up_since(now + 1.0, addr=0x0700) is False
         assert bambu_bridge.logger.messages == [
-            ("info", f"AFC bambu bridge: the AMS reported it has STOPPED "
+            ("info", f"BridgeBox: the AMS reported it has STOPPED "
                      f"retrying ({line})"),
             ams_echo(line)]
         assert bambu_bridge.logger.file_only == [ams_echo(line)[1]]
@@ -3759,7 +3759,7 @@ class TestBambuBridgeHandleLine:
     SLOT_POLL = "[AMS_LINK]get_slot ams1 tray0 basic"
     HEARTBEAT = " [DBG] ams time: now=42044054ms diff=10005ms"
     # The console's line when a capture starts.
-    SNIFF_ON: LogLine = ("info", "AFC bambu bridge: bridge sniff mode ON -- "
+    SNIFF_ON: LogLine = ("info", "bridge: bridge sniff mode ON -- "
                                  "listen-only, this bridge is NOT driving "
                                  "the bus")
 
@@ -3832,9 +3832,9 @@ class TestBambuBridgeHandleLine:
         assert (bridge._rfid_end_t, bridge._rfid_end_by_addr) == (
             142.4, {0x0700: 142.4})
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS: spool detected"),
+            ("debug", "bridge: AMS: spool detected"),
             ams_echo(detected),
-            ("debug", "AFC bambu bridge: AMS finished measuring the spool"),
+            ("debug", "bridge: AMS finished measuring the spool"),
             ams_echo(calib), ams_echo(finish)]
 
     def test_unknown_event_is_surfaced_file_only(self, monkeypatch):
@@ -3842,7 +3842,7 @@ class TestBambuBridgeHandleLine:
         # came" look the same, so an event nothing consumes is logged.
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"nonsense","x":1}')
-        line = "AFC bambu: unhandled bridge event {'evt': 'nonsense', 'x': 1}"
+        line = "BridgeBox: unhandled bridge event {'evt': 'nonsense', 'x': 1}"
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
 
@@ -3892,9 +3892,9 @@ class TestBambuBridgeHandleLine:
         bridge.handle_line('{"evt":"sniff_mode","on":true}')
         bridge.handle_line('{"evt":"sniff_mode","on":false}')
         assert bridge.logger.messages == [
-            ("info", "AFC bambu bridge: bridge sniff mode ON -- listen-only, "
+            ("info", "bridge: bridge sniff mode ON -- listen-only, "
                      "this bridge is NOT driving the bus"),
-            ("info", "AFC bambu bridge: bridge sniff mode OFF -- bus master "
+            ("info", "bridge: bridge sniff mode OFF -- bus master "
                      "again -- capture LOSSLESS")]
 
     def test_sniff_mode_off_reports_an_incomplete_capture(self, monkeypatch):
@@ -3911,7 +3911,7 @@ class TestBambuBridgeHandleLine:
             self.SNIFF_ON,
             ("debug", "SNIFF AA sq=1 ov=0 rf=0 us=None"),
             ("debug", "SNIFF BB sq=3 ov=1 rf=0 us=None"),
-            ("info", "AFC bambu bridge: bridge sniff mode OFF -- bus master "
+            ("info", "bridge: bridge sniff mode OFF -- bus master "
                      "again -- capture INCOMPLETE: 1 blob(s) lost, 1 UART "
                      "overrun(s), 0 ring lap(s). Usable for protocol work, "
                      "NOT for reconstructing a firmware image"),
@@ -3929,7 +3929,7 @@ class TestBambuBridgeHandleLine:
             self.SNIFF_ON,
             ("debug", "SNIFF AA sq=1 ov=4 rf=2 us=None"),
             ("debug", "SNIFF BB sq=3 ov=4 rf=2 us=None"),
-            ("info", "AFC bambu bridge: bridge sniff mode OFF -- bus master "
+            ("info", "bridge: bridge sniff mode OFF -- bus master "
                      "again -- capture INCOMPLETE: 1 blob(s) lost, 0 UART "
                      "overrun(s), 0 ring lap(s). Usable for protocol work, "
                      "NOT for reconstructing a firmware image")]
@@ -3946,7 +3946,7 @@ class TestBambuBridgeHandleLine:
             self.SNIFF_ON,
             ("debug", "SNIFF AA sq=1 ov=0 rf=2 us=None"),
             ("debug", "SNIFF BB sq=2 ov=2 rf=2 us=None"),
-            ("info", "AFC bambu bridge: bridge sniff mode OFF -- bus master "
+            ("info", "bridge: bridge sniff mode OFF -- bus master "
                      "again -- capture INCOMPLETE: 0 blob(s) lost, 2 UART "
                      "overrun(s), 0 ring lap(s). Usable for protocol work, "
                      "NOT for reconstructing a firmware image")]
@@ -3963,7 +3963,7 @@ class TestBambuBridgeHandleLine:
             self.SNIFF_ON,
             ("debug", "SNIFF AA sq=1 ov=4 rf=0 us=None"),
             ("debug", "SNIFF BB sq=2 ov=4 rf=1 us=None"),
-            ("info", "AFC bambu bridge: bridge sniff mode OFF -- bus master "
+            ("info", "bridge: bridge sniff mode OFF -- bus master "
                      "again -- capture INCOMPLETE: 0 blob(s) lost, 0 UART "
                      "overrun(s), 1 ring lap(s). Usable for protocol work, "
                      "NOT for reconstructing a firmware image")]
@@ -3978,7 +3978,7 @@ class TestBambuBridgeHandleLine:
         bridge.handle_line('{"evt":"txecho","drops":"x"}')
         assert bridge._txecho_drops == 0
         assert bridge.logger.messages == [
-            ("info", "AFC bambu bridge: TX echo dropped 2 frame(s) -- the USB "
+            ("info", "BridgeBox: TX echo dropped 2 frame(s) -- the USB "
                      "link fell behind the bus. Frames MISSING from this "
                      "capture were still transmitted; do not read a gap as a "
                      "frame we never sent.")]
@@ -3987,14 +3987,14 @@ class TestBambuBridgeHandleLine:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"error","msg":"bus down"}')
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge error: bus down")]
+            ("warning", "BridgeBox: bridge error: bus down")]
 
     def test_unknown_command_right_after_connect_stays_in_the_file(
             self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
         bridge.reactor.now += BambuBridge.STALE_ERROR_S - 0.5
         bridge.handle_line('{"evt":"error","msg":"unknown command"}')
-        line = ("AFC bambu: bridge error 0.50s after connect, from a line "
+        line = ("BridgeBox: bridge error 0.50s after connect, from a line "
                 "sent before it (ignored): unknown command")
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
@@ -4004,13 +4004,13 @@ class TestBambuBridgeHandleLine:
         bridge.reactor.now += BambuBridge.STALE_ERROR_S
         bridge.handle_line('{"evt":"error","msg":"unknown command"}')
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge error: unknown command")]
+            ("warning", "BridgeBox: bridge error: unknown command")]
 
     def test_unknown_command_never_connected_warns(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch, connected=False)
         bridge.handle_line('{"evt":"error","msg":"unknown command"}')
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge error: unknown command")]
+            ("warning", "BridgeBox: bridge error: unknown command")]
 
     def test_uartdiag_is_read(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
@@ -4018,14 +4018,14 @@ class TestBambuBridgeHandleLine:
                            '"frames":3}')
         assert bridge._diag_prev == ("base", 7, 3)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge uartdiag {'evt': 'uartdiag', "
+            ("debug", "BridgeBox: bridge uartdiag {'evt': 'uartdiag', "
                       "'why': 'base', 'edges': 7, 'frames': 3}")]
 
     def test_ack_is_logged(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"ack","cmd":"dry","slot":55}')
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge ack dry (slot 55)")]
+            ("debug", "BridgeBox: bridge ack dry (slot 55)")]
         # Not a routine ack, so it may reach the console.
         assert bridge.logger.file_only == []
 
@@ -4033,7 +4033,7 @@ class TestBambuBridgeHandleLine:
         # The follower's cadence acks repeat for the length of a print.
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"ack","cmd":"assist","slot":1}')
-        line = "AFC bambu: bridge ack assist (slot 1)"
+        line = "BridgeBox: bridge ack assist (slot 1)"
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
 
@@ -4041,7 +4041,7 @@ class TestBambuBridgeHandleLine:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"slow","ms":1460,"rr_ms":1402,"rr_n":31,'
                            '"rr_max_us":32000,"capped":30,"capscan":0}')
-        line = ("AFC bambu: bridge loop held 1460 ms (bus reads 1402 ms over "
+        line = ("BridgeBox: bridge loop held 1460 ms (bus reads 1402 ms over "
                 "31, longest 32000 us, capped 30, capscans 0)")
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
@@ -4218,7 +4218,7 @@ class TestBambuBridgeHandleLine:
         self._say(bridge, text)
         # The narrator did try the console, and that raised.
         assert logger.refused == [
-            "AFC bambu u: AMS: the filament STALLED after 1.62 m of a 3.51 m "
+            "u: AMS: the filament STALLED after 1.62 m of a 3.51 m "
             "path -- check for a jam between the bay and the toolhead"]
         # The stall is still recorded, and the line still reaches AFC.log.
         assert bridge.last_fault() == (1, text, 0.0)
@@ -4264,13 +4264,13 @@ class TestBambuBridgeHandleLine:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"linkkey","saved":1,"len":9}')
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: link key stored on the bridge; it is asked "
+            ("debug", "BridgeBox: link key stored on the bridge; it is asked "
                      "for from the next connection")]
 
     def test_a_key_already_stored_is_file_only(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"linkkey","saved":0,"len":9}')
-        line = "AFC bambu: link key already stored on the bridge"
+        line = "BridgeBox: link key already stored on the bridge"
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
 
@@ -4278,7 +4278,7 @@ class TestBambuBridgeHandleLine:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"linkkey","saved":-1,"len":9}')
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: the bridge did not store the link key "
+            ("warning", "BridgeBox: the bridge did not store the link key "
                         "{'evt': 'linkkey', 'saved': -1, 'len': 9}")]
 
     # ── the mcaddr echo ──────────────────────────────────────────────────
@@ -4416,7 +4416,7 @@ class TestBambuBridgeHandleLine:
         bridge.handle_line('{"evt":"error","msg":"feed refused"}')
         bridge.reactor.run_callbacks()
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge error: feed refused")]
+            ("warning", "BridgeBox: bridge error: feed refused")]
         assert seen == []
 
     def test_junk_ignored(self, monkeypatch):
@@ -4439,7 +4439,7 @@ class TestBambuBridgeHandleLine:
         bridge.reactor.run_callbacks()
         assert seen == []
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge ack feed (slot 0)")]
+            ("debug", "BridgeBox: bridge ack feed (slot 0)")]
         assert bridge.logger.file_only == []
 
     def test_chain_caches_uids(self, monkeypatch):
@@ -4474,7 +4474,7 @@ class TestBambuBridgeHandleLine:
         assert bridge.last_finish() == (
             1, True, "[AMS_SWITCH]feed finish -1, stall, len_det:3.601 m")
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS 0x1800 reports its measured "
+            ("debug", "bridge: AMS 0x1800 reports its measured "
                      "filament path as 3619mm -- using it to size move "
                      "timeouts instead of the configured estimate"),
             ("debug", "AMS: [AMS_SWITCH]old tube_len:3619 mm"),
@@ -4499,7 +4499,7 @@ class TestBambuBridgeHandleLine:
         self._say(bridge, "[AMS_CHMB]err, filament hub load!", addr=0x1800,
                   unit=2)
         assert bridge.logger.messages == [
-            ("info", "AFC bambu bridge: AMS refused the drying command: "
+            ("info", "bridge: AMS refused the drying command: "
                      "filament hub load!. An AMS will not dry with filament "
                      "out in the hub -- reel the lane back to its bay first "
                      "(LANE_UNLOAD)."),
@@ -4515,7 +4515,7 @@ class TestBambuBridgeHandleLine:
         self._say(bridge, text, addr=0x1800)
         assert bridge._gave_up_by_addr == {0x1800: 100.0}
         assert bridge.logger.messages == [
-            ("info", "AFC bambu bridge: the AMS reported it has STOPPED "
+            ("info", "BridgeBox: the AMS reported it has STOPPED "
                      "retrying ([AMS_SWITCH]AMS_CTRL_state_switch finish, "
                      "fail, retry:5, feed_ret:0, err_code:0x12)"),
             ("debug", f"AMS: {text}")]
@@ -4536,7 +4536,7 @@ class TestBambuBridgeHandleLine:
         self._say(bridge, text, addr=0x1800)
         # Stripped first, then the first 90 characters.
         assert bridge.logger.messages == [
-            ("info", "AFC bambu bridge: the AMS reported it has STOPPED "
+            ("info", "BridgeBox: the AMS reported it has STOPPED "
                      "retrying ([AMS_SWITCH]AMS_CTRL_state_switch finish, "
                      "fail, retry:5, feed_ret:0, err_code:0x12, bldc_i)"),
             ("debug", f"AMS: {text}")]
@@ -4558,7 +4558,7 @@ class TestBambuBridgeHandleLine:
         ("[AMS_SWITCH]switch_feed rocker stall, tray_cnt:0,0,", []),
         ("[AMS_SWITCH]feed finish -1, stall, len_det:3.711 m", []),
         ("[AMS_RFID]STEP:odom calib success exit 0,dis:0.688",
-         [("debug", "AFC bambu bridge: AMS finished measuring the spool")]),
+         [("debug", "bridge: AMS finished measuring the spool")]),
     ])
     def test_ordinary_stall_chatter_is_not(self, monkeypatch, text, logged):
         bridge = make_bambu_bridge(monkeypatch)
@@ -4575,8 +4575,8 @@ class TestBambuBridgeHandleLine:
         self._say(bridge, text, addr=0x1800, unit=1)
         assert bridge._nar_lg.messages == [("debug", f"0x1800 u1 {text}")]
         assert bridge.logger.messages == [
-            ("debug", f"AFC bambu: bridge diag {text}")]
-        assert bridge.logger.file_only == [f"AFC bambu: bridge diag {text}"]
+            ("debug", f"BridgeBox: bridge diag {text}")]
+        assert bridge.logger.file_only == [f"BridgeBox: bridge diag {text}"]
 
     def test_it_does_not_break_the_repeat_collapsing_around_it(
             self, monkeypatch):
@@ -4589,7 +4589,7 @@ class TestBambuBridgeHandleLine:
         self._say(bridge, line, addr=0x0700, unit=1)
         assert bridge.logger.messages == [
             ("debug", f"AMS: {line}"),
-            ("debug", f"AFC bambu: bridge diag {self.HT_MEAS}")]
+            ("debug", f"BridgeBox: bridge diag {self.HT_MEAS}")]
         assert (bridge._last_dbg, bridge._last_dbg_n) == (line, 2)
 
     def test_it_is_never_evidence(self, monkeypatch):
@@ -4606,7 +4606,7 @@ class TestBambuBridgeHandleLine:
         assert bridge.rfid_cycle_ended_since(0.0) is False
         assert bridge._last_dbg is None
         assert bridge.logger.messages == [
-            ("debug", f"AFC bambu: bridge diag {text}")
+            ("debug", f"BridgeBox: bridge diag {text}")
             for text in (self.HT_MEAS, self.BB_GATE, self.CAP_OPEN)]
 
     # ── the calibrate echo ───────────────────────────────────────────────
@@ -4614,14 +4614,14 @@ class TestBambuBridgeHandleLine:
     def test_it_is_logged_file_only_and_not_as_unhandled(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"cali","unit":1,"slot":2}')
-        line = "AFC bambu: bridge answered cali (unit 1, slot 2)"
+        line = "BridgeBox: bridge answered cali (unit 1, slot 2)"
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
 
     def test_extra_fields_ride_along_uninterpreted(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line('{"evt":"cali","unit":1,"slot":2,"ran":0,"why":3}')
-        line = "AFC bambu: bridge answered cali (unit 1, slot 2) ran=0 why=3"
+        line = "BridgeBox: bridge answered cali (unit 1, slot 2) ran=0 why=3"
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
 
@@ -4698,16 +4698,16 @@ class TestBambuBridgeHandleLine:
         bridge.reactor.advance(5.0)
         self._say(bridge, "[AMS_SWITCH]new tube_len:3497 mm", addr=0x0700)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu bridge: AMS learned the bay-to-hub path "
+            ("debug", "bridge: AMS learned the bay-to-hub path "
                      "length: 3481 mm"),
-            ("debug", "AFC bambu bridge: AMS 0x0700 reports its measured "
+            ("debug", "bridge: AMS 0x0700 reports its measured "
                      "filament path as 3481mm -- using it to size move "
                      "timeouts instead of the configured estimate"),
             ("debug", "AMS: [AMS_SWITCH]new tube_len:3481 mm"),
-            ("debug", "AFC bambu bridge: AMS learned the bay-to-hub path "
+            ("debug", "bridge: AMS learned the bay-to-hub path "
                      "length: 3502 mm"),
             ("debug", "AMS: [AMS_SWITCH]new tube_len:3502 mm"),
-            ("debug", "AFC bambu bridge: AMS learned the bay-to-hub path "
+            ("debug", "bridge: AMS learned the bay-to-hub path "
                      "length: 3497 mm"),
             ("debug", "AMS: [AMS_SWITCH]new tube_len:3497 mm")]
         assert bridge.tube_len(0x0700) == 3497.0
@@ -4720,7 +4720,7 @@ class TestBambuBridgeHandleLine:
         bridge = BambuBridge(FakeSerial, reactor, logger)
         self._say(bridge, "[AMS_CHMB]set state CTC_STATE_HEATING")
         assert logger.messages == [
-            ("debug", "AFC bambu bridge: AMS drying: self-check passed, "
+            ("debug", "bridge: AMS drying: self-check passed, "
                      "now heating"),
             ("debug", "AMS: [AMS_CHMB]set state CTC_STATE_HEATING")]
 
@@ -4935,8 +4935,8 @@ class TestBambuBridgeChainDiag:
         bridge.handle_line('{"evt":"info","chip":"rp2040"}')
         assert bridge.chain_diag()[1] == "1.0.10.6"
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: info REPLY chip=rp2040 fw=1.0.11.0 up=None"),
-            ("debug", "AFC bambu: info REPLY chip=rp2040 fw=None up=None")]
+            ("debug", "BridgeBox: info REPLY chip=rp2040 fw=1.0.11.0 up=None"),
+            ("debug", "BridgeBox: info REPLY chip=rp2040 fw=None up=None")]
 
 
 class TestBambuBridgeCheckQuiet:
@@ -4946,7 +4946,7 @@ class TestBambuBridgeCheckQuiet:
         # Never connected: unreachable since construction, at 100.0.
         bridge.reactor.advance(46.0)
         bridge._check_quiet()
-        unreachable = ("warning", "AFC bambu: bridge has been unreachable for "
+        unreachable = ("warning", "BridgeBox: bridge has been unreachable for "
                                   "46s; commands are being dropped")
         assert bridge.logger.messages == [unreachable]
         assert bridge._silence_logged_t == 146.0
@@ -4957,7 +4957,7 @@ class TestBambuBridgeCheckQuiet:
         bridge._check_quiet()
         assert bridge.logger.messages == [
             unreachable,
-            ("warning", "AFC bambu: bridge has been unreachable for 346s; "
+            ("warning", "BridgeBox: bridge has been unreachable for 346s; "
                         "commands are being dropped")]
         assert bridge._silence_logged_t == 446.0
 
@@ -4968,7 +4968,7 @@ class TestBambuBridgeCheckQuiet:
         bridge.reactor.advance(46.0)
         bridge._check_quiet()
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge has been silent for 46s")]
+            ("warning", "BridgeBox: bridge has been silent for 46s")]
         assert bridge._silence_logged_t == 146.0
 
     def test_a_quiet_healthy_link_says_nothing(self, monkeypatch):
@@ -5029,7 +5029,7 @@ class TestBambuBridgeMarkConnected:
 
 
 class TestBambuBridgeDropIfSilent:
-    DROP_LOG: LogLine = ("warning", "AFC bambu: bridge silent for 30s on an "
+    DROP_LOG: LogLine = ("warning", "BridgeBox: bridge silent for 30s on an "
                                     "open link -- dropping it to force a "
                                     "reconnect")
 
@@ -5207,7 +5207,7 @@ class TestBambuBridgeDropIfSilent:
         assert (bridge._serial, sock.closed) == (None, True)
         assert bridge._expect_reset is False
         assert bridge.logger.messages == [
-            ("info", "AFC bambu: bridge resetting as asked; reconnecting")]
+            ("info", "BridgeBox: bridge resetting as asked; reconnecting")]
 
     def test_a_reset_over_usb_is_left_to_the_read_that_fails(
             self, monkeypatch):
@@ -5364,7 +5364,7 @@ class TestBambuBridgeDownSince:
         assert (bridge._run, bridge.down_since()) == (
             False, pytest.approx(100.2))
         assert logger.messages == [
-            ("warning", "AFC bambu: bridge read failed: tcp://test:8888: "
+            ("warning", "BridgeBox: bridge read failed: tcp://test:8888: "
                         "bridge closed the connection; reconnecting")]
 
     def test_an_open_port_is_up_even_with_a_stale_outage_stamp(
@@ -5558,9 +5558,9 @@ class TestBambuBridgeReader:
             (0.0, b'k","cmd":"b","slot":2}\n')]))
         self._run(bridge)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected"),
-            ("debug", "AFC bambu: bridge ack a (slot 1)"),
-            ("debug", "AFC bambu: bridge ack b (slot 2)")]
+            ("debug", "BridgeBox: bridge reconnected"),
+            ("debug", "BridgeBox: bridge ack a (slot 1)"),
+            ("debug", "BridgeBox: bridge ack b (slot 2)")]
         # Each chunk is a frame: the link spoke at the clock's time.
         assert (bridge._last_frame_t, bridge._spoke_since_connect) == (
             100.0, True)
@@ -5584,10 +5584,10 @@ class TestBambuBridgeReader:
         assert bridge._serial is opened[1]
         assert bridge._down_epoch == 1
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected"),
-            ("warning", "AFC bambu: bridge read failed: input/output error; "
+            ("debug", "BridgeBox: bridge reconnected"),
+            ("warning", "BridgeBox: bridge read failed: input/output error; "
                         "reconnecting"),
-            ("debug", "AFC bambu: bridge reconnected")]
+            ("debug", "BridgeBox: bridge reconnected")]
 
     def test_a_requested_reset_is_not_reported_as_a_failure(self, monkeypatch):
         opened: List[Any] = []
@@ -5606,9 +5606,9 @@ class TestBambuBridgeReader:
         self._run(bridge)
         assert bridge._expect_reset is False
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected"),
-            ("info", "AFC bambu: bridge resetting as asked; reconnecting"),
-            ("debug", "AFC bambu: bridge reconnected")]
+            ("debug", "BridgeBox: bridge reconnected"),
+            ("info", "BridgeBox: bridge resetting as asked; reconnecting"),
+            ("debug", "BridgeBox: bridge reconnected")]
 
     def test_reconnect_notifies_listeners_on_the_reactor(self, monkeypatch):
         # A reconnect usually means the Pico rebooted, so units re-push their
@@ -5625,7 +5625,7 @@ class TestBambuBridgeReader:
         assert (bridge._down_t, bridge._silence_logged_t) == (None, None)
         assert bridge._connected_t == 103.0
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected after 3s down")]
+            ("debug", "BridgeBox: bridge reconnected after 3s down")]
 
     def test_a_long_outage_coming_back_is_said_on_the_console(self, monkeypatch):
         # A short drop is AFC.log material; one the operator would have
@@ -5635,7 +5635,7 @@ class TestBambuBridgeReader:
         bridge.reactor.advance(15.0)
         self._run(bridge)
         assert bridge.logger.messages == [
-            ("info", "AFC bambu: the BridgeBox link is back after 15s")]
+            ("info", "BridgeBox: the BridgeBox link is back after 15s")]
 
     def test_a_failing_factory_backs_off_instead_of_spinning(self, monkeypatch):
         tries: List[float] = []
@@ -5680,8 +5680,8 @@ class TestBambuBridgeReader:
         assert reactor.refused == 1               # it tried to schedule
         # ...and the reader carried on reading.
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected"),
-            ("debug", "AFC bambu: bridge ack x (slot 0)")]
+            ("debug", "BridgeBox: bridge reconnected"),
+            ("debug", "BridgeBox: bridge ack x (slot 0)")]
 
     def test_one_line_per_gap_with_the_timeouts_in_it(self, monkeypatch):
         # Written when the gap ends, so it carries the length.
@@ -5694,12 +5694,12 @@ class TestBambuBridgeReader:
             (2.4, self.HB),                              # under the threshold
             (3.0, self.HB)]))                            # a WiFi-sized gap
         self._run(bridge)
-        want = ["AFC bambu: bridge was silent 10.1 s; 2 write(s) timed out "
+        want = ["BridgeBox: bridge was silent 10.1 s; 2 write(s) timed out "
                 "meanwhile",
-                "AFC bambu: bridge was silent 3.0 s; 0 write(s) timed out "
+                "BridgeBox: bridge was silent 3.0 s; 0 write(s) timed out "
                 "meanwhile"]
         assert bridge.logger.messages == (
-            [("debug", "AFC bambu: bridge reconnected")]
+            [("debug", "BridgeBox: bridge reconnected")]
             + [("debug", line) for line in want])
         assert bridge.logger.file_only == want
         assert bridge._gap_timeouts_seen == 2
@@ -5716,10 +5716,10 @@ class TestBambuBridgeReader:
         self._run(bridge)
         assert opens == []
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge was silent 3.0 s; 0 write(s) timed "
+            ("debug", "BridgeBox: bridge was silent 3.0 s; 0 write(s) timed "
                       "out meanwhile")]
         assert bridge.logger.file_only == [
-            "AFC bambu: bridge was silent 3.0 s; 0 write(s) timed out "
+            "BridgeBox: bridge was silent 3.0 s; 0 write(s) timed out "
             "meanwhile"]
 
     def test_the_first_frame_of_a_connection_is_not_a_gap(self, monkeypatch):
@@ -5729,7 +5729,7 @@ class TestBambuBridgeReader:
                                                  (0.1, self.HB)]))
         self._run(bridge)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected")]
+            ("debug", "BridgeBox: bridge reconnected")]
 
     def test_a_reconnect_starts_over(self, monkeypatch):
         # The first frame after a drop follows an outage, not a gap on this
@@ -5744,11 +5744,11 @@ class TestBambuBridgeReader:
             (0.1, self.HB), (4.0, self.HB)]))    # a gap on it, from zero
         self._run(bridge)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: bridge reconnected"),
-            ("warning", "AFC bambu: bridge read failed: input/output error; "
+            ("debug", "BridgeBox: bridge reconnected"),
+            ("warning", "BridgeBox: bridge read failed: input/output error; "
                         "reconnecting"),
-            ("debug", "AFC bambu: bridge reconnected"),
-            ("debug", "AFC bambu: bridge was silent 4.0 s; 0 write(s) timed "
+            ("debug", "BridgeBox: bridge reconnected"),
+            ("debug", "BridgeBox: bridge was silent 4.0 s; 0 write(s) timed "
                       "out meanwhile")]
 
     def test_reader_reconnects_after_read_error(self, monkeypatch):
@@ -5769,9 +5769,9 @@ class TestBambuBridgeReader:
         assert made[0].closed is True             # dropped the broken port
         assert made[1].closed is True             # and stop closed the new one
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge read failed: io error; "
+            ("warning", "BridgeBox: bridge read failed: io error; "
                         "reconnecting"),
-            ("debug", "AFC bambu: bridge reconnected")]
+            ("debug", "BridgeBox: bridge reconnected")]
 
     def test_the_watchdog_fires_from_the_READER_while_the_link_is_down(
             self, monkeypatch):
@@ -5795,9 +5795,9 @@ class TestBambuBridgeReader:
         bridge.reactor.advance(40.25)
         bridge._thread.target()
         assert bridge.logger.messages == [
-            ("info", "AFC bambu: bridge not reachable yet (nothing is "
+            ("info", "BridgeBox: bridge not reachable yet (nothing is "
                         "listening); the reader will keep trying"),
-            ("warning", "AFC bambu: bridge has been unreachable for 48s; "
+            ("warning", "BridgeBox: bridge has been unreachable for 48s; "
                         "commands are being dropped")]
         assert bridge._silence_logged_t == 147.75
 
@@ -5823,7 +5823,7 @@ class TestBambuBridgeReader:
         bridge = self._bridge(monkeypatch, factory, reactor=reactor)
         bridge.start()
         bridge._thread.target()
-        line = ("AFC bambu: bridge was silent 3.0 s; 0 write(s) timed out "
+        line = ("BridgeBox: bridge was silent 3.0 s; 0 write(s) timed out "
                 "meanwhile")
         assert bridge.logger.messages == [("debug", line)]
         assert bridge.logger.file_only == [line]
@@ -5847,7 +5847,7 @@ class TestBambuBridgeQuietDropS:
         bridge.reactor.advance(0.1)               # 30 s of silence
         assert bridge._drop_if_silent() is True
         assert bridge.logger.messages == [
-            ("warning", "AFC bambu: bridge silent for 30s on an open link -- "
+            ("warning", "BridgeBox: bridge silent for 30s on an open link -- "
                         "dropping it to force a reconnect")]
 
 
@@ -5877,15 +5877,15 @@ class TestAMSHuman:
         # An AMS 1 says [AMS_DEV] and puts a space after the bracket. These
         # are routine steps, written to AFC.log only.
         assert self._said(monkeypatch, line) == [
-            ("debug", f"AFC bambu bridge: {sentence}")]
+            ("debug", f"bridge: {sentence}")]
 
     def test_flash_cache_line_names_the_bay_one_based(self, monkeypatch):
         assert self._said(monkeypatch, "[RF] tray0: info write to flash",
                           "[RF] tray3: info write to flash") == [
-            ("debug", "AFC bambu bridge: AMS: tag for bay 1 cached in the "
+            ("debug", "bridge: AMS: tag for bay 1 cached in the "
                      "unit's flash (a later read returns it even after a "
                      "swap)"),
-            ("debug", "AFC bambu bridge: AMS: tag for bay 4 cached in the "
+            ("debug", "bridge: AMS: tag for bay 4 cached in the "
                      "unit's flash (a later read returns it even after a "
                      "swap)")]
 
@@ -5893,7 +5893,7 @@ class TestAMSHuman:
         # The [AMS_DEV] rules sit ahead of the [AMS_RFID] ones and must not
         # shadow them.
         assert self._said(monkeypatch, "[AMS_RFID]STEP:card auth success!") == [
-            ("debug", "AFC bambu bridge: AMS: tag authenticated")]
+            ("debug", "bridge: AMS: tag authenticated")]
 
     @pytest.mark.parametrize("line", [
         "[AMS_DEV] STEP:read success,valid",
@@ -5914,13 +5914,13 @@ class TestAMSHuman:
     def test_the_authentication_is_narrated_in_every_dialect(
             self, monkeypatch, line):
         assert self._said(monkeypatch, line) == [
-            ("debug", "AFC bambu bridge: AMS: tag authenticated")]
+            ("debug", "bridge: AMS: tag authenticated")]
 
     def test_a_measurement_reads_as_a_sentence(self, monkeypatch):
         assert self._said(
             monkeypatch,
             "[AMS_RFID]STEP:odom C:0.478,R:0.076,P:79%, od:0.491") == [
-            ("debug", "AFC bambu bridge: AMS measured the spool: about 79% "
+            ("debug", "bridge: AMS measured the spool: about 79% "
                      "left (spool radius 76 mm)")]
 
     def test_the_stored_flash_value_is_surfaced(self, monkeypatch):
@@ -5928,7 +5928,7 @@ class TestAMSHuman:
         assert self._said(
             monkeypatch,
             "[AMS_RFID] STEP,odom load from flash 0,R:0.075,P:75") == [
-            ("debug", "AFC bambu bridge: AMS: bay 1 remembers about 75% left "
+            ("debug", "bridge: AMS: bay 1 remembers about 75% left "
                      "from its last measurement")]
 
     def test_a_stall_names_both_distances(self, monkeypatch):
@@ -5936,15 +5936,15 @@ class TestAMSHuman:
             monkeypatch,
             "[AMS_SWITCH]feed finish -1, stall, len_det:1.620 m, "
             "tube_len:3.506 m") == [
-            ("info", "AFC bambu bridge: AMS: the filament STALLED after "
+            ("info", "bridge: AMS: the filament STALLED after "
                      "1.62 m of a 3.51 m path -- check for a jam between the "
                      "bay and the toolhead")]
 
     def test_an_error_code_is_named_not_dumped(self, monkeypatch):
         assert self._said(monkeypatch, "[AMS_LINK]err_code:0x00->0x23",
                           "[AMS_LINK]err_code:0x23->0x00") == [
-            ("info", "AFC bambu bridge: AMS raised error 0x23"),
-            ("info", "AFC bambu bridge: AMS cleared its error")]
+            ("info", "bridge: AMS raised error 0x23"),
+            ("info", "bridge: AMS cleared its error")]
 
     def test_the_assist_timeout_code_is_left_to_the_unit(self, monkeypatch):
         # 0x17 follows "assist finish stall!", which the unit words itself.
@@ -5955,13 +5955,13 @@ class TestAMSHuman:
         assert self._said(
             monkeypatch,
             "[AMS_SWITCH]feed tray:2, cnt:0,0,4,1, feed2sw:0,0,2,1") == [
-            ("debug", "AFC bambu bridge: AMS: feeding from bay 3")]
+            ("debug", "bridge: AMS: feeding from bay 3")]
 
     def test_an_assist_stop_stays_in_the_log(self, monkeypatch):
         assert self._said(
             monkeypatch,
             "[AMS_SWITCH]timeout, assist finish stall! pos:0.10->0.63") == [
-            ("debug", "AFC bambu bridge: AMS stopped its assist (buffer 0.10 "
+            ("debug", "bridge: AMS stopped its assist (buffer 0.10 "
                       "-> 0.63)")]
 
     def test_a_sentence_names_the_unit_that_spoke(self, monkeypatch):
@@ -5970,8 +5970,8 @@ class TestAMSHuman:
         bridge._narrate_human("[AMS_SWITCH]feed tray:2, cnt:0", 100.0, unit=1)
         bridge._narrate_human("[AMS_DEV] STEP,first detected", 102.0, unit=0)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_2: AMS: feeding from bay 3"),
-            ("debug", "AFC bambu bridge: AMS: spool detected")]
+            ("debug", "Bambu_AMS_2: AMS: feeding from bay 3"),
+            ("debug", "bridge: AMS: spool detected")]
 
     def test_the_commanded_unit_speaks_for_unattributed_lines(
             self, monkeypatch):
@@ -5980,16 +5980,16 @@ class TestAMSHuman:
         bridge.set_active_unit(1)
         bridge._narrate_human("[AMS_SWITCH]feed tray:2, cnt:0", 100.0)
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu Bambu_AMS_2: AMS: feeding from bay 3")]
+            ("debug", "Bambu_AMS_2: AMS: feeding from bay 3")]
 
     def test_bays_are_one_based_for_humans(self, monkeypatch):
         # The wire counts from 0; an operator counts bays from 1.
         assert self._said(monkeypatch,
                           "[AMS_RFID]STEP:odom save tray:1, R:0.0765",
                           "[AMS_IDLE]tray 0 out,clear magic_num") == [
-            ("debug", "AFC bambu bridge: AMS stored a new measurement for "
+            ("debug", "bridge: AMS stored a new measurement for "
                      "bay 2"),
-            ("debug", "AFC bambu bridge: AMS: bay 1 is now empty")]
+            ("debug", "bridge: AMS: bay 1 is now empty")]
 
 
 class TestBridgeEventsKnown:
@@ -6015,7 +6015,7 @@ class TestBridgeEventsKnown:
     def test_the_announce_no_longer_sends_selfc(self, monkeypatch):
         # Retired: an echo of it now is unexplained, so it is logged.
         assert self._logged(monkeypatch, {"evt": "selfc"}) == [
-            ("debug", "AFC bambu: unhandled bridge event {'evt': 'selfc'}")]
+            ("debug", "BridgeBox: unhandled bridge event {'evt': 'selfc'}")]
 
     def test_the_event_is_known_to_the_bridge(self, monkeypatch):
         # The unknown-event catch-all runs before the per-event branches, so
@@ -6033,7 +6033,7 @@ class TestBridgeEventsKnown:
                             {"evt": "ack"}, {"evt": "units"},
                             {"evt": "htunit"}) == [
             REQUEST_INFO_LOG,
-            ("debug", "AFC bambu: bridge ack  (slot None)")]
+            ("debug", "BridgeBox: bridge ack  (slot None)")]
 
 
 class TestChmbStateRe:
@@ -6309,7 +6309,7 @@ class TestStateSwitchDoneRe:
 
 # ── WifiLink: a chain that keys itself and moves to WiFi ─────────────────────
 
-WIFI_LABEL = "AFC_BridgeBox chain2"
+WIFI_LABEL = "chain2"
 WIFI_KEY = "0123456789abcdef0123456789abcdef"
 WIFI_ADDR = "tcp://192.168.4.80:8888"
 #: The board's answer to a challenge it sent, refusing the key.
@@ -7348,7 +7348,7 @@ class TestBambuBridgeStartWifi:
         assert bridge.logger.messages == wifi_said(
             ("warning", "connection: wifi needs the BridgeBox on this "
                         "printer's USB once, to learn its WiFi address")) + [
-            ("info", "AFC bambu: bridge not reachable yet (no such "
+            ("info", "BridgeBox: bridge not reachable yet (no such "
                         "port); the reader will keep trying")]
 
     def test_without_one_a_missing_usb_port_still_raises(self, monkeypatch):
@@ -7389,7 +7389,7 @@ class TestBambuBridgeHandleLineInfo:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.handle_line(self._info(1492))
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: info REPLY chip=ESP32S3 fw=AFC-2.90 up=1492")]
+            ("debug", "BridgeBox: info REPLY chip=ESP32S3 fw=AFC-2.90 up=1492")]
         assert bridge._fw_rebooted is False
 
     def test_uptime_going_backwards_says_the_bridge_restarted(self, monkeypatch):
@@ -7399,10 +7399,10 @@ class TestBambuBridgeHandleLineInfo:
         bridge.handle_line(self._info(1492))
         assert bridge._fw_rebooted is True
         assert bridge.logger.messages == [
-            ("debug", "AFC bambu: info REPLY chip=ESP32S3 fw=AFC-2.90 up=1492"),
-            ("debug", "AFC bambu: bridge REBOOTED (uptime 11054371 -> 1492 "
+            ("debug", "BridgeBox: info REPLY chip=ESP32S3 fw=AFC-2.90 up=1492"),
+            ("debug", "BridgeBox: bridge REBOOTED (uptime 11054371 -> 1492 "
                       "ms); units on the wire lost their master"),
-            ("info", "AFC bambu: the BridgeBox restarted; reconnecting its "
+            ("info", "BridgeBox: the BridgeBox restarted; reconnecting its "
                      "AMS units")]
 
 
@@ -7437,12 +7437,12 @@ class TestBambuBridgeHandleLineWifi:
 
     @pytest.mark.parametrize("frame, said", [
         ({"evt": "wifi", "cleared": 1, "by": "button"},
-         "AFC bambu bridge: bridge WiFi wiped, cleared=1 by=button"),
+         "bridge: bridge WiFi wiped, cleared=1 by=button"),
         ({"evt": "wifi", "cleared": 0},
-         "AFC bambu bridge: bridge WiFi wiped, cleared=0 by=command"),
+         "bridge: bridge WiFi wiped, cleared=0 by=command"),
         ({"evt": "wifi", "link": 3, "ip": "192.168.4.80", "assoc": 1,
           "tries": 2},
-         "AFC bambu bridge: pico wifi link=3 ip=192.168.4.80 assoc=1 "
+         "bridge: pico wifi link=3 ip=192.168.4.80 assoc=1 "
          "tries=2"),
     ])
     def test_wifi_frames_are_logged(self, monkeypatch, frame, said):
@@ -7491,7 +7491,7 @@ class TestBambuBridgeQuietWithDebugOff:
     def test_a_feed_ack_is_still_logged(self, monkeypatch):
         bridge = self._quiet(monkeypatch)
         bridge.handle_line(json.dumps({"evt": "ack", "cmd": "feed", "slot": 0}))
-        assert bridge.logger.messages == [("debug", "AFC bambu: bridge ack feed (slot 0)")]
+        assert bridge.logger.messages == [("debug", "BridgeBox: bridge ack feed (slot 0)")]
 
     def test_an_error_code_edge_stays_off_the_console(self, monkeypatch):
         bridge = self._quiet(monkeypatch)
@@ -7503,7 +7503,7 @@ class TestBambuBridgeQuietWithDebugOff:
         feed_amsdbg(bridge, "feed finish -1, stall, len_det:0.40 m, tube_len:1.20 m",
                     addr=0x0700)
         assert [m for m in bridge.logger.messages if m[0] == "info"] == [
-            ("info", "AFC bambu bridge: AMS: the filament STALLED after 0.40 m of a "
+            ("info", "bridge: AMS: the filament STALLED after 0.40 m of a "
                      "1.20 m path -- check for a jam between the bay and the toolhead")]
 
     def test_a_sniff_capture_is_still_written(self, monkeypatch):

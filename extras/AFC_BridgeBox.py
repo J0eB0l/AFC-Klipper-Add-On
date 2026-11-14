@@ -704,7 +704,7 @@ class afcBridgeBox:
         raw_dry = config.getint("dry_max_temp", 0)
         self.dry_max_temp = max(0, raw_dry)
         self._dry_note = (
-            f"AFC_BridgeBox {self.name}: dry_max_temp is {raw_dry}, below 0, "
+            f"{self.name}: dry_max_temp is {raw_dry}, below 0, "
             f"so it is ignored and each heated unit dries up to its model's "
             f"own ceiling. Remove it or set a positive value to silence this."
             if raw_dry < 0 else "")
@@ -1062,7 +1062,7 @@ class afcBridgeBox:
             if note:
                 self._layout_notes.append(note)
         self._name_notes = [
-            f"AFC_BridgeBox {self.name}: {note}"
+            f"{self.name}: {note}"
             for note in (self._name_note(b["family"], b["rank"])
                          for b in sorted(bays, key=lambda x: x["lane"]))
             if note]
@@ -1073,7 +1073,7 @@ class afcBridgeBox:
                    if x["family"] == "ams" and not x["spare"]]
         for b in waiting:
             self._layout_notes.append(
-                f"AFC_BridgeBox {self.name}: AMS {b['uid']} is recorded but "
+                f"{self.name}: AMS {b['uid']} is recorded but "
                 f"has no bay: "
                 + self._all_ams_bays_held(b["uid"], holders, live=False)
                 + (f" Its record as {b['was'][0]} is dropped."
@@ -2146,7 +2146,7 @@ class afcBridgeBox:
             if (had is None
                 or not moved):
                 return None
-            return (f"AFC_BridgeBox {self.name}: {fam} {b['uid']} "
+            return (f"{self.name}: {fam} {b['uid']} "
                     f"({b['name']}) keeps its name, and its lanes changed: "
                     f"{self._lanes_text(*had)} -> {now}.")
         saved, holder = b["was"]
@@ -2175,7 +2175,7 @@ class afcBridgeBox:
             lanes = f"its lanes stay {now}"
         else:
             lanes = f"its lanes are now {now}"
-        return (f"AFC_BridgeBox {self.name}: {fam} {b['uid']} was recorded "
+        return (f"{self.name}: {fam} {b['uid']} was recorded "
                 f"as {saved}, {why}. It is now {b['name']}, and {lanes}. "
                 f"Lane records saved under {saved} (spool, material, colour, "
                 f"T# map) do not carry over to {b['name']}; a tagged spool is "
@@ -2218,14 +2218,14 @@ class afcBridgeBox:
                    f"lane{clash[0]}" if by else
                    f"[AFC_lane lane{clash[0]}] already exists outside this "
                    f"chain")
-            return (f"AFC_BridgeBox {self.name}: {hts} cannot keep {its} "
+            return (f"{self.name}: {hts} cannot keep {its} "
                     f"lanes: {why}. The AMS band is {need} bays, what "
                     f"pool_ams and the recorded AMS need, and the HT lanes follow it.")
         moves = [(b, self.lane_base + band * 4 + b["rank"]) for b in held]
         moves = [(b, at) for b, at in moves
                  if self._lane_map[b["uid"]][0] != at]
         if moves:
-            text = (f"AFC_BridgeBox {self.name}: {hts} hold{'s' if one else ''} "
+            text = (f"{self.name}: {hts} hold{'s' if one else ''} "
                     f"the AMS band at {band} bays although pool_ams and the "
                     f"recorded AMS need only {need}. "
                     + ", ".join(
@@ -2234,7 +2234,7 @@ class afcBridgeBox:
                         for b, at in moves)
                     + f", past those {band} bays.")
         else:
-            text = (f"AFC_BridgeBox {self.name}: {hts} keep{'s' if one else ''} "
+            text = (f"{self.name}: {hts} keep{'s' if one else ''} "
                     f"{its} lanes, so the AMS band stays {band} bays although "
                     f"pool_ams and the recorded AMS need only {need}.")
         if (self.pool_ams
@@ -2619,7 +2619,7 @@ class afcBridgeBox:
         else:
             then = ""
         gcmd.respond_info(
-            f"AFC_BridgeBox {self.name}: the BridgeBox's WiFi and link key "
+            f"{self.name}: the BridgeBox's WiFi and link key "
             f"are wiped and it is restarting with its bb-bridge setup "
             f"hotspot. Set up its WiFi again from a phone." + then)
 
@@ -2648,7 +2648,7 @@ class afcBridgeBox:
         self._board_forgotten = True
         self._state_set({f"{self._BASE_SECTION} {self.name}":
                          {"usb_port": "", "wifi_addr": ""}})
-        gcmd.respond_info(f"AFC_BridgeBox {self.name}: forgot its BridgeBox. RESTART, and "
+        gcmd.respond_info(f"{self.name}: forgot its BridgeBox. RESTART, and "
                           f"the chain takes the next free BridgeBox it finds on USB.")
 
     def cmd_AFC_BRIDGEBOX_FORGET(self, gcmd: Any) -> None:
@@ -2725,7 +2725,7 @@ class afcBridgeBox:
                 lines = ["No recorded units to forget."]
             self._prompt("Forget a Bambu AMS unit", lines, buttons, timeout=180.0)
             gcmd.respond_info(
-                f"AFC_BridgeBox {self.name}: forget picker -- "
+                f"{self.name}: forget picker -- "
                 + (", ".join(name_map.get(u) or u[:8] for u in known)
                    or "nothing recorded"))
             return
@@ -2886,7 +2886,7 @@ class afcBridgeBox:
         if unit_name:
             freed.append(f"the name {unit_name}")
         gcmd.respond_info(
-            f"AFC_BridgeBox {self.name}: forgot {uid}"
+            f"{self.name}: forgot {uid}"
             + (f" -- {' and '.join(freed)} freed for reuse" if freed else "")
             + ((", " if freed else " -- ") + gone if gone else "")
             + (f" -- cleared {', '.join(cleared)} from the toolhead"
@@ -3176,7 +3176,7 @@ class afcBridgeBox:
                              f"in first, or give NAME=<bay name> to pin it")
                 raise gcmd.error(error_str)
             self._prompt_new_unit(uid, timeout=180.0)
-            gcmd.respond_info(f"AFC_BridgeBox {self.name}: opened the bay picker for {uid}.")
+            gcmd.respond_info(f"{self.name}: opened the bay picker for {uid}.")
             return
         if (not uid
             or not name):
@@ -3245,7 +3245,7 @@ class afcBridgeBox:
         waits = online and not claimed and not self._prep_settled()
         pooled = bool(self.pool_ams or self.pool_ht)
         gcmd.respond_info(
-            f"AFC_BridgeBox {self.name}: assigned {uid} to bay {name!r} "
+            f"{self.name}: assigned {uid} to bay {name!r} "
             f"({self._lanes_text(first_lane, span)})"
             + (f" -- cleared {', '.join(cleared)} from the toolhead"
                if cleared else "")
@@ -3356,7 +3356,7 @@ class afcBridgeBox:
         else:
             tail = "It takes the lowest free bay of its family at the next restart."
         gcmd.respond_info(
-            f"AFC_BridgeBox {self.name}: unassigned {uid}"
+            f"{self.name}: unassigned {uid}"
             + (f" from bay {was!r}" if was else "")
             + (" -- lanes dropped live" if dropped else "")
             + (f" -- cleared {', '.join(cleared)} from the toolhead"
@@ -3443,7 +3443,7 @@ class afcBridgeBox:
         lines += waiting
         self._prompt("Bambu AMS Units", lines, buttons, timeout=180.0)
         gcmd.respond_info(
-            f"AFC_BridgeBox {self.name}: bay manager --\n  "
+            f"{self.name}: bay manager --\n  "
             + "\n  ".join(lines))
 
     def cmd_AFC_BRIDGEBOX_REPLACE(self, gcmd: Any) -> None:
@@ -3534,10 +3534,10 @@ class afcBridgeBox:
         now = self._reactor_now()
         if not old_arg:
             if self._prompt_replace_unit(new, now, timeout=180.0):
-                gcmd.respond_info(f"AFC_BridgeBox {self.name}: opened the "
+                gcmd.respond_info(f"{self.name}: opened the "
                                   f"replace picker for {new}.")
             else:
-                gcmd.respond_info(f"AFC_BridgeBox {self.name}: "
+                gcmd.respond_info(f"{self.name}: "
                                   + self._no_candidate_text(new, fam, now))
             return
         target = (next((pu for pu in pools if pu.get("name") == old_arg), None)
@@ -3618,7 +3618,7 @@ class afcBridgeBox:
         cleared = (self._clear_bay_toolhead(target)
                    if loaded and not target.get("bound") else [])
         gcmd.respond_info(
-            f"AFC_BridgeBox {self.name}: replacing {old} on {bay} with {new}"
+            f"{self.name}: replacing {old} on {bay} with {new}"
             + (f"; cleared {', '.join(cleared)} from the toolhead"
                if cleared else "") + ".")
         self.cmd_AFC_BRIDGEBOX_FORGET(_ChildCommand(gcmd, UID=old, FORCE=force))
@@ -4197,7 +4197,7 @@ class afcBridgeBox:
             or not key):
             return False
         if key not in _LEARNED_KEYS:
-            self.logger.warning(f"AFC_BridgeBox {self.name}: refusing to persist '{key}' for "
+            self.logger.warning(f"{self.name}: refusing to persist '{key}' for "
                                 f"{unit_name} -- only {', '.join(_LEARNED_KEYS)} are saved")
             return False
         pu = next((p for p in getattr(self, "_pool_units", [])
@@ -4211,7 +4211,7 @@ class afcBridgeBox:
         if (not uid
             or (claimed and claimed != uid)):
             self.logger.debug(
-                f"AFC_BridgeBox {self.name}: {key} for {unit_name} kept for "
+                f"{self.name}: {key} for {unit_name} kept for "
                 f"this session only -- "
                 + (f"the bay is bound to {uid} but its unit carries {claimed}"
                    if uid else "no unit is bound to the bay"))
@@ -4226,7 +4226,7 @@ class afcBridgeBox:
             self._state_set({section: {key: value}})
             return True
         except Exception as ex:
-            self.logger.warning(f"AFC_BridgeBox {self.name}: could not persist {key} for "
+            self.logger.warning(f"{self.name}: could not persist {key} for "
                                 f"{unit_name}: {ex}")
             return False
 
@@ -4489,7 +4489,7 @@ class afcBridgeBox:
         if afc is not None:
             self.logger = afc.logger
         for miss in getattr(self, "_unmatched_overrides", None) or []:
-            self.logger.warning(f"AFC_BridgeBox {self.name}: [{miss}] overrides "
+            self.logger.warning(f"{self.name}: [{miss}] overrides "
                                 f"nothing -- no unit and no model by that name, so its keys are "
                                 f"ignored. Models: {', '.join(sorted(_SLOTS_BY_MODEL))}.")
         # From config time, once: a negative dry_max_temp, the pool_ams clamp, unnamed bays
@@ -4501,7 +4501,7 @@ class afcBridgeBox:
             ht = [pu for pu in getattr(self, "_pool_units", [])
                   if pu.get("family") == "ht"]
             self.logger.warning(
-                f"AFC_BridgeBox {self.name}: pool_ams is "
+                f"{self.name}: pool_ams is "
                 f"{self._pool_ams_asked}, but a Bambu bus addresses at most "
                 f"{_MAX_AMS_BAYS} AMS, so {_MAX_AMS_BAYS} AMS bays are built"
                 + (f" and the HT lanes start at "
@@ -4519,14 +4519,14 @@ class afcBridgeBox:
                 self._state_set({sec: {"ams_band": band}})
         for warn, note in getattr(self, "_learned_notes", None) or []:
             (self.logger.warning if warn else self.logger.info)(
-                f"AFC_BridgeBox {self.name}: {note}")
+                f"{self.name}: {note}")
         self._learned_notes = []
         # Before PREP's first save, which AFC would write with every unclaimed bay empty.
         try:
             self._capture_boot_records()
         except Exception as e:
             try:
-                self.logger.debug(f"AFC_BridgeBox {self.name}: no saved lane records held ({e})")
+                self.logger.debug(f"{self.name}: no saved lane records held ({e})")
             except Exception:
                 pass
         try:
@@ -4544,12 +4544,12 @@ class afcBridgeBox:
             try:
                 self._ensure_bridge()
             except Exception as e:
-                self.logger.warning(f"AFC_BridgeBox {self.name}: could not open the bridge "
+                self.logger.warning(f"{self.name}: could not open the bridge "
                                     f"for scouting ({e}); will keep retrying.")
         reactor = self.printer.get_reactor()
         self._scout_timer = reactor.register_timer(self._scout_tick, reactor.monotonic() + 2.0)
         if self._roster_source == "scout":
-            self.logger.info(f"AFC_BridgeBox {self.name}: no roster configured and no "
+            self.logger.info(f"{self.name}: no roster configured and no "
                              f"recorded roster -- scouting the chain. Detected units are "
                              f"recorded in {os.path.basename(self.state_file)}; RESTART "
                              f"then enrolls them.")
@@ -4641,7 +4641,7 @@ class afcBridgeBox:
                                for bay, entry in self._held.items()}
             self._bay_owner_pending = True
         if self._held:
-            self.logger.debug(f"AFC_BridgeBox {self.name}: holding the saved lane records "
+            self.logger.debug(f"{self.name}: holding the saved lane records "
                               f"of {', '.join(sorted(self._held))} for their units")
 
     @staticmethod
@@ -4810,12 +4810,12 @@ class afcBridgeBox:
         if now - since >= wait:
             if not getattr(self, "_prep_wait_warned", False):
                 self._prep_wait_warned = True
-                self.logger.warning(f"AFC_BridgeBox {self.name}: PREP has not finished "
+                self.logger.warning(f"{self.name}: PREP has not finished "
                                     f"{wait:.0f}s after startup; claiming units anyway.")
             return True
         if not getattr(self, "_prep_wait_said", False):
             self._prep_wait_said = True
-            self.logger.debug(f"AFC_BridgeBox {self.name}: unit claims wait for PREP")
+            self.logger.debug(f"{self.name}: unit claims wait for PREP")
         return False
 
     def _register_wifi(self) -> None:
@@ -4846,7 +4846,7 @@ class afcBridgeBox:
         addr = (self.serial_port if is_tcp
                 else (self._state_get(sec, "wifi_addr") or None))
         _bridge_mod._WIFI_LINKS[str(self.serial_port)] = _bridge_mod.WifiLink(
-            key, self._save_wifi_addr, f"AFC_BridgeBox {self.name}",
+            key, self._save_wifi_addr, f"{self.name}",
             usb_path=None if is_tcp else self.serial_port, addr=addr, ssid=self.wifi_ssid,
             password=self._wifi_password)
 
@@ -4871,12 +4871,12 @@ class afcBridgeBox:
                if c in "\\\""
                or not " " <= c <= "~"]
         if bad:
-            error_str = (f"AFC_BridgeBox {self.name}: {option} can't hold "
+            error_str = (f"{self.name}: {option} can't hold "
                          f"quotes, backslashes or non-ASCII characters; set "
                          f"this network up from the bb-bridge hotspot")
             raise config.error(error_str)
         if not low <= len(value) <= high:
-            error_str = f"AFC_BridgeBox {self.name}: {option} must be {low} to {high} characters"
+            error_str = f"{self.name}: {option} must be {low} to {high} characters"
             raise config.error(error_str)
         return value
 
@@ -4936,7 +4936,7 @@ class afcBridgeBox:
                 return path
         if not self._auto_said:
             self._auto_said = True
-            self.logger.info(f"AFC_BridgeBox {self.name}: serial_port: auto found no free "
+            self.logger.info(f"{self.name}: serial_port: auto found no free "
                              f"BridgeBox on USB yet. Plug one in and it is picked up by itself.")
         return None
 
@@ -4954,7 +4954,7 @@ class afcBridgeBox:
         sec = f"{self._BASE_SECTION} {self.name}"
         self.printer.get_reactor().register_async_callback(
             lambda et: self._state_set({sec: {"usb_port": path}}))
-        self.logger.info(f"AFC_BridgeBox {self.name}: serial_port: auto took the BridgeBox "
+        self.logger.info(f"{self.name}: serial_port: auto took the BridgeBox "
                          f"on {path} and keeps it from now on")
 
     def _ports_in_use(self) -> Tuple[Set[str], Set[str]]:
@@ -5086,7 +5086,7 @@ class afcBridgeBox:
             if msg != getattr(self, "_moved_err_logged", None):
                 self._moved_err_logged = msg
                 try:
-                    self.logger.warning(f"AFC_BridgeBox {self.name}: loaded-lane check failed "
+                    self.logger.warning(f"{self.name}: loaded-lane check failed "
                                         f"({msg}); the chain watch carries on.")
                 except Exception:
                     pass
@@ -5160,7 +5160,7 @@ class afcBridgeBox:
                 pooled = bool(self.pool_ams or self.pool_ht)
                 if (self._roster_source == "scout"
                     and not pooled):
-                    self.logger.info(f"AFC_BridgeBox {self.name}: chain reports "
+                    self.logger.info(f"{self.name}: chain reports "
                                      f"[{', '.join(entries)}] -- written to "
                                      f"{os.path.basename(self.state_file)}. RESTART to "
                                      f"enroll, or copy it into roster: to pin it.")
@@ -5174,7 +5174,7 @@ class afcBridgeBox:
                     listed = [e for e in new if e not in untold]
                     unlisted = [e for e in listed if e not in no_bay
                                                      and self._unlisted(e.partition(":")[2])]
-                    text = (f"AFC_BridgeBox {self.name}: NEW unit(s) on "
+                    text = (f"{self.name}: NEW unit(s) on "
                             f"the chain: {', '.join(listed)} -- recorded.")
                     if unlisted:
                         one = len(unlisted) == 1
@@ -5201,7 +5201,7 @@ class afcBridgeBox:
                     no_bay = self._new_ams_with_no_bay(new)
                     enroll = [e for e in new if e not in no_bay]
                     if enroll:
-                        self.logger.info(f"AFC_BridgeBox {self.name}: NEW unit(s) on the "
+                        self.logger.info(f"{self.name}: NEW unit(s) on the "
                                          f"chain: {', '.join(enroll)} -- recorded. RESTART "
                                          f"to enroll.")
                     self._tell_no_bay(no_bay)
@@ -5367,7 +5367,7 @@ class afcBridgeBox:
                                 if b not in drop_held:
                                     drop_held.add(b)
                                     routine_info(self.logger,
-                                        f"AFC_BridgeBox {self.name}: "
+                                        f"{self.name}: "
                                         f"{gone or b} (UID {b}) is offline but "
                                         f"AFC records "
                                         f"{', '.join(ln.name for ln in loaded)}"
@@ -5401,7 +5401,7 @@ class afcBridgeBox:
             if msg != getattr(self, "_tick_err_logged", None):
                 self._tick_err_logged = msg
                 try:
-                    self.logger.warning(f"AFC_BridgeBox {self.name}: chain watch tick failed "
+                    self.logger.warning(f"{self.name}: chain watch tick failed "
                                         f"({msg}); will keep retrying.")
                 except Exception:
                     pass
@@ -5480,7 +5480,7 @@ class afcBridgeBox:
                         gcode.respond_raw("// action:prompt_end")
                 reactor.register_callback(_close, reactor.monotonic() + timeout)
         except Exception as ex:
-            self.logger.warning(f"AFC_BridgeBox {self.name}: prompt error: {ex}")
+            self.logger.warning(f"{self.name}: prompt error: {ex}")
 
     def _close_prompt(self) -> None:
         """
@@ -6054,10 +6054,10 @@ class afcBridgeBox:
         try:
             engaged = bool(restore(since))
         except Exception as e:
-            self.logger.warning(f"AFC_BridgeBox {self.name}: follower restore for {name} "
+            self.logger.warning(f"{self.name}: follower restore for {name} "
                                 f"(UID {uid}) on its return failed: {e}")
             return
-        self.logger.debug(f"AFC_BridgeBox {self.name}: {name} (UID {uid}) is back after "
+        self.logger.debug(f"{self.name}: {name} (UID {uid}) is back after "
                           f"{gone_s:.0f}s offline and stayed bound; its loaded-lane "
                           f"follower restore {'engaged' if engaged else 'engaged nothing'}.")
 
@@ -6243,7 +6243,7 @@ class afcBridgeBox:
                 continue
             self._no_bay_told.add(u)
             self.logger.info(
-                f"AFC_BridgeBox {self.name}: NEW AMS on the chain: {e} -- "
+                f"{self.name}: NEW AMS on the chain: {e} -- "
                 f"recorded, but it has no bay: "
                 + self._all_ams_bays_held(u, ahead, live=True))
 
@@ -6267,7 +6267,7 @@ class afcBridgeBox:
         waiting = [u for u in uids
                    if u not in on_bay and u not in self._no_bay_told]
         placed = [u for u in uids if u in on_spare]
-        text = (f"AFC_BridgeBox {self.name}: NEW unit(s) on the chain: "
+        text = (f"{self.name}: NEW unit(s) on the chain: "
                 f"{', '.join(entries)} -- recorded.")
         if len(waiting) == 1:
             text += f" {waiting[0]} has no bay yet and takes the next free one of its family."
@@ -6370,7 +6370,7 @@ class afcBridgeBox:
                 if (uid, name, reason) not in warned:
                     warned.add((uid, name, reason))
                     (self.logger.warning if warn else self.logger.info)(
-                        f"AFC_BridgeBox {self.name}: {text}")
+                        f"{self.name}: {text}")
                 continue
             model = self._model_for_uid(uid)
             first = int("".join(c for c in pu["lanes"][0] if c.isdigit()))
@@ -6378,7 +6378,7 @@ class afcBridgeBox:
             self._persist_pin(uid, first, span, name, model or (
                 "ht" if pu["family"] == "ht" else "boxed"))
             pu["uid"] = uid
-            routine_info(self.logger, f"AFC_BridgeBox {self.name}: saved {uid} on {name} "
+            routine_info(self.logger, f"{self.name}: saved {uid} on {name} "
                                       f"({self._lanes_text(first, span)}); it comes back there "
                                       f"after a restart.")
 
@@ -6459,7 +6459,7 @@ class afcBridgeBox:
             if not held_bay:
                 pu["uid"] = None
             self.logger.info(
-                f"AFC_BridgeBox {self.name}: released {pu['name']} (UID {uid}"
+                f"{self.name}: released {pu['name']} (UID {uid}"
                 + (f", {why}" if why
                    else f" offline >{self.release_grace:.0f}s")
                 + "); lanes dropped live"
@@ -6537,7 +6537,7 @@ class afcBridgeBox:
                 if isinstance(at, dict):
                     return at
         except Exception as e:
-            self.logger.debug(f"AFC_BridgeBox {self.name}: no access tracking to share "
+            self.logger.debug(f"{self.name}: no access tracking to share "
                               f"({e}); fabricated sections stay out of configfile.settings")
         return {}
 
@@ -6659,7 +6659,7 @@ class afcBridgeBox:
                 activate_from_pool(lane)
                 activated.append(lane)
             except Exception as ex:
-                self.logger.warning(f"AFC_BridgeBox {self.name}: pool lane {lname} "
+                self.logger.warning(f"{self.name}: pool lane {lname} "
                                     f"activate failed: {ex}")
         # The unit never parsed a section naming this master, so this is its only way back.
         try: unit.set_master(self)
@@ -6705,7 +6705,7 @@ class afcBridgeBox:
         self._replace_offered.discard(uid)
         self._apply_model_dryer(unit, model)
         self._apply_learned(unit, uid, model)
-        self.logger.info(f"AFC_BridgeBox {self.name}: CLAIMED {uid} as {model} onto "
+        self.logger.info(f"{self.name}: CLAIMED {uid} as {model} onto "
                          f"{chosen['name']} ({len(activated)} lanes) -- live, no restart.")
         return unit
 
@@ -6804,20 +6804,20 @@ class afcBridgeBox:
         if family == "ams":
             ahead = self._ams_ahead(uid)
             if len(ahead) >= _MAX_AMS_BAYS:
-                return (f"AFC_BridgeBox {self.name}: AMS {uid} has no bay: "
+                return (f"{self.name}: AMS {uid} has no bay: "
                         + self._all_ams_bays_held(uid, ahead, live=True))
         pools = sorted(getattr(self, "_pool_units", []), key=_pool_laneno)
         ams = [pu for pu in pools if pu.get("family") == "ams"]
         fam, pool = (("HT", "pool_ht") if family == "ht"
                      else ("AMS", "pool_ams"))
-        head = (f"AFC_BridgeBox {self.name}: new {fam} {uid} has no free "
+        head = (f"{self.name}: new {fam} {uid} has no free "
                 f"bay: every {fam} bay built belongs to a known unit.")
         if self._unlisted(uid):
             return (f"{head} roster: is set and does not list it: add "
                     f"{self._roster_entry(uid)} to roster: and RESTART to give it a bay.")
         if (family == "ams"
             and len(ams) >= _MAX_AMS_BAYS):
-            return (f"AFC_BridgeBox {self.name}: AMS {uid} has no bay: "
+            return (f"{self.name}: AMS {uid} has no bay: "
                     + self._all_ams_bays_held(uid, [
                         (pu["name"],
                          _norm_uid(pu.get("uid") or pu.get("bound")))
@@ -6926,7 +6926,7 @@ class afcBridgeBox:
                                           else "")
             exts = " and ".join(loaded[ln])
             self.logger.warning(
-                f"AFC_BridgeBox {self.name}: {exts} records {ln} as loaded, "
+                f"{self.name}: {exts} records {ln} as loaded, "
                 f"but {ln} belonged to {was}, and this boot's layout gives it "
                 f"to {mv['now'] or 'no bay'}. The filament in {exts} is from "
                 f"{mv['uid']}"
@@ -6956,7 +6956,7 @@ class afcBridgeBox:
 
             :param msg: the warning
             """
-            self.logger.warning(f"AFC_BridgeBox {self.name}: {msg}")
+            self.logger.warning(f"{self.name}: {msg}")
 
         def _assign(lane: Any, maps: List[str], current: str) -> None:
             """
@@ -6970,7 +6970,7 @@ class afcBridgeBox:
             try:
                 assign_pool_tcmd(lane, afc)
             except Exception as ex:
-                self.logger.warning(f"AFC_BridgeBox {self.name}: TcmdAssign {lane.name} "
+                self.logger.warning(f"{self.name}: TcmdAssign {lane.name} "
                                     f"failed: {ex}")
             (getattr(self, "_claim_plans", None) or {}).pop(lane.name, None)
 
@@ -7033,7 +7033,7 @@ class afcBridgeBox:
                 if holder.current_map == cmd:
                     holder.current_map = holder.map[0] if holder.map else ""
                 afc.tool_cmds.pop(cmd, None)
-                self.logger.debug(f"AFC_BridgeBox {self.name}: {lane.name} takes back its saved "
+                self.logger.debug(f"{self.name}: {lane.name} takes back its saved "
                                   f"{cmd} from {holder.name}, which waits for its own pool lanes")
                 if holder not in out:
                     out.append(holder)
@@ -7137,7 +7137,7 @@ class afcBridgeBox:
             except Exception:
                 pass
             self.logger.info(
-                f"AFC_BridgeBox {self.name}: a unit was forgotten, so the "
+                f"{self.name}: a unit was forgotten, so the "
                 f"Bambu T#s pack down: "
                 + ", ".join(f"{old} -> {new}" for old, new in moves.items()))
         for chain in flagged:
@@ -7212,7 +7212,7 @@ class afcBridgeBox:
                 and tc.name in getattr(ext, "lanes", {})):
                 continue
             ext.no_lanes = False
-            self.logger.debug(f"AFC_BridgeBox {self.name}: {ext.name} left standalone mode "
+            self.logger.debug(f"{self.name}: {ext.name} left standalone mode "
                               f"(claimed lanes attached)")
 
     #: An AMS 2 answers 0x3702 within ~1.5 s and an AMS 1 never does; ~6 s at 500 ms.
@@ -7283,7 +7283,7 @@ class afcBridgeBox:
         if changed:
             self._state_set({sec: {"roster": ", ".join(refined)}})
             self.logger.debug(
-                f"AFC_BridgeBox {self.name}: generation confirmed by bus "
+                f"{self.name}: generation confirmed by bus "
                 f"dialect (0x3702): {', '.join(changed)} -- applied to the "
                 f"running unit and recorded. Lanes and names do not move."
                 + (" The bridge has it in RAM and saves it at the next "
@@ -7313,7 +7313,7 @@ class afcBridgeBox:
         self._ids_held = unit
         if first:
             try:
-                self.logger.debug(f"AFC_BridgeBox {self.name}: {getattr(unit, 'name', '?')} "
+                self.logger.debug(f"{self.name}: {getattr(unit, 'name', '?')} "
                                   f"bound in the bridge's RAM; the table is saved when the "
                                   f"print ends (no flash write mid-print).")
             except Exception:
@@ -7381,7 +7381,7 @@ class afcBridgeBox:
             if bool(getattr(obj, key, False)) == val:
                 continue
             setattr(obj, key, val)
-            self.logger.debug(f"AFC_BridgeBox {self.name}: {getattr(obj, 'name', '?')} is a "
+            self.logger.debug(f"{self.name}: {getattr(obj, 'name', '?')} is a "
                               f"{model}; applied {key}={val} from [AFC_BridgeBox {model}] "
                               f"(the bay was fabricated as a spare, before its model was known)")
             # Only once the index is this unit's (see _may_tell).
@@ -7511,11 +7511,11 @@ class afcBridgeBox:
         try:
             apply(values)
         except Exception as e:
-            self.logger.warning(f"AFC_BridgeBox {self.name}: learned values for "
+            self.logger.warning(f"{self.name}: learned values for "
                                 f"{getattr(obj, 'name', '?')} (UID {uid}) not applied: {e}")
             return
         if used:
-            self.logger.debug(f"AFC_BridgeBox {self.name}: {getattr(obj, 'name', '?')} "
+            self.logger.debug(f"{self.name}: {getattr(obj, 'name', '?')} "
                               f"takes the {', '.join(used)} that UID {uid} learned.")
 
     def _apply_model_measure(self, obj: Any, model: str) -> None:
@@ -7649,7 +7649,7 @@ class afcBridgeBox:
             if uid not in self._missing_since:
                 self._missing_since[uid] = eventtime
                 name = getattr(self, "_name_map", {}).get(uid, uid)
-                routine_info(self.logger, f"AFC_BridgeBox {self.name}: {name} ({uid}) is offline "
+                routine_info(self.logger, f"{self.name}: {name} ({uid}) is offline "
                                           f"on a live chain -- if it stays gone "
                                           f"{self.removal_grace:.0f}s it will be recorded as "
                                           f"removed (takes effect at the next RESTART).")
@@ -7667,7 +7667,7 @@ class afcBridgeBox:
                             | set(getattr(self, "_unbayed", None) or ()))
                 if u not in gone)
             self.logger.info(
-                f"AFC_BridgeBox {self.name}: unit(s) gone from the chain for "
+                f"{self.name}: unit(s) gone from the chain for "
                 f"over {self.removal_grace:.0f}s: {', '.join(dropped)} -- "
                 f"removed from the recorded roster; applies at the next "
                 f"RESTART. Their learned values are kept. Plugged back in "
