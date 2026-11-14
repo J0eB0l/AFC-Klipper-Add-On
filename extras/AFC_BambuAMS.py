@@ -12917,7 +12917,7 @@ class afcBambuAMS(afcUnit):
                                "dropped -- restore it before retrying.")
             except Exception:
                 pass
-            cause = (f"{cur_lane.name} reached the toolhead sensor and then "
+            cause = (f"reached the toolhead sensor and then "
                      f"LOST it during the {getattr(cur_extruder, 'tool_stn', 0)}"
                      f"mm advance, so the filament is not at the toolhead. It "
                      f"was not loaded, whatever the feed reported.{dropped}\n"
@@ -12944,7 +12944,7 @@ class afcBambuAMS(afcUnit):
                                           f"({tries}/{GRIP_RETRIES}).")
                 mark = self._grip_refeed(cur_lane, cur_extruder, feed_dist, timeout)
                 if mark is None:
-                    cause = (f"{cur_lane.name} was backed off "
+                    cause = (f"was backed off "
                              f"{GRIP_BACK_MM:.0f}mm because the extruder did "
                              f"not take it, and the feed did not bring it "
                              f"back to the toolhead sensor within {timeout:.0f}s.")
@@ -13539,7 +13539,7 @@ class afcBambuAMS(afcUnit):
             if self._unload_left_filament(cur_lane):
                 in_print = afc.function.in_print()
                 afc.error.handle_lane_failure(
-                    cur_lane, f"Unload of {cur_lane.name}: the AMS already "
+                    cur_lane, f"Unload: the AMS already "
                     f"reeled it home, but the {sensor} still sees "
                     f"filament. {self._clear_toolhead_hint(in_print)}", pause=in_print)
                 return False
@@ -13620,7 +13620,7 @@ class afcBambuAMS(afcUnit):
                         stuck = (f"the toolhead sensor still sees filament "
                                  f"after {LITE_UNLOAD_MAX_S:.0f}s of AMS Lite "
                                  f"retract. Free it at the toolhead")
-                    msg = (f"Unload failed for {cur_lane.name}: {stuck}, then run "
+                    msg = (f"Unload failed: {stuck}, then run "
                            f"{self.get_lane_reset_command(cur_lane, 0.0)}.")
                     afc.error.handle_lane_failure(cur_lane, msg, pause=afc.function.in_print())
                     return False
@@ -13680,16 +13680,14 @@ class afcBambuAMS(afcUnit):
                     except Exception:
                         still_gripped = True
                     if still_gripped:
-                        msg = (f"Unload failed for "
-                               f"{cur_lane.name}: the AMS gave up reeling it "
+                        msg = (f"Unload failed: the AMS gave up reeling it "
                                f"back and latched, the filament is still "
                                f"gripped at the toolhead. Free it by hand "
                                f"(heat, then retract), then run "
                                f"{self.get_lane_reset_command(cur_lane, 0.0)}"
                                f".\nAMS said: {_fault_reason(latched)}")
                     else:
-                        msg = (f"Unload failed for "
-                               f"{cur_lane.name}: the filament cleared the "
+                        msg = (f"Unload failed: the filament cleared the "
                                f"toolhead but the AMS latched before reeling "
                                f"it home, the tip is stranded in the bowden. Run "
                                f"{self.get_lane_reset_command(cur_lane, 0.0)}"
@@ -13702,20 +13700,20 @@ class afcBambuAMS(afcUnit):
                     if afcBambuAMS._buffer_is_toolhead_sensor(cur_lane):
                         then = ("resume" if afc.function.in_print()
                                 else "run the unload again")
-                        msg = (f"Unload of {cur_lane.name}: the AMS "
+                        msg = (f"Unload: the AMS "
                                f"says it reeled it home, but the bay's hub "
                                f"sensor still sees filament, so it never left "
                                f"the path (the buffer standing in for the "
                                f"toolhead sensor cannot tell). Pull it back "
                                f"to the bay by hand, then {then}.")
                     else:
-                        msg = (f"Unload of {cur_lane.name}: the AMS "
+                        msg = (f"Unload: the AMS "
                                f"reeled it home, but the toolhead sensor still "
                                f"sees filament, so a piece is left in the "
                                f"toolhead or the sensor is stuck. "
                                f"{self._clear_toolhead_hint(afc.function.in_print())}")
                 else:
-                    msg = (f"Unload failed for {cur_lane.name}: "
+                    msg = (f"Unload failed: "
                            f"filament still at the {sensor} after "
                            f"retract retries, and the AMS did not report "
                            f"reeling it home; run LANE_UNLOAD (eject) or check the unit")
@@ -13726,7 +13724,7 @@ class afcBambuAMS(afcUnit):
             return self._finish_unload(cur_lane)
         except Exception as e:
             afc.error.handle_lane_failure(cur_lane,
-                                          f"Unload failed for {cur_lane.name}: {e}",
+                                          f"Unload failed: {e}",
                                           pause=afc.function.in_print())
             return False
         finally:

@@ -26154,7 +26154,7 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
               "manually if it can't finish")
     TIMEOUT_SAID = "[AMS_LED]TIMEOUT error 0"
     #: The sentence a load lost after its 72mm advance fails with.
-    LOST = ("lane1 reached the toolhead sensor and then LOST it during the "
+    LOST = ("reached the toolhead sensor and then LOST it during the "
             "72.0mm advance, so the filament is not at the toolhead. It was "
             "not loaded, whatever the feed reported.{dropped}\nCheck the path "
             "at the extruder and that the AMS still has the filament. "
@@ -27640,7 +27640,7 @@ class TestAfcBambuAMSBoxedGrip:
         assert bridge.sent.count(self.BACK) == 1
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, f"lane1 was backed off 50mm because the extruder did not "
+             (lane, f"was backed off 50mm because the extruder did not "
                     f"take it, and the feed did not bring it back to the "
                     f"toolhead sensor within 7s. It was reeled back into the "
                     f"bay.{self.CHECK}"),
@@ -28483,7 +28483,7 @@ class TestAfcBambuAMSUnitUnloadLane:
                           "lane1's path, until the hub sensor reads it gone, "
                           "a spool goes into its bay, a lane on Bambu_AMS_1 "
                           "loads, or AFC_BAMBU_FOLLOWER LANE=lane1 ENABLE=0.")
-    STUCK = ("Unload failed for lane1: filament still at the "
+    STUCK = ("Unload failed: filament still at the "
              "toolhead sensor after retract retries, and the AMS did not "
              "report reeling it home; run LANE_UNLOAD (eject) or check the "
              "unit")
@@ -28544,7 +28544,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         :param said: the unit's words, filtered
         :return str: the failure for a latch with filament at the toolhead
         """
-        return (f"Unload failed for lane1: the AMS gave up reeling "
+        return (f"Unload failed: the AMS gave up reeling "
                 f"it back and latched, the filament is still gripped at the "
                 f"toolhead. Free it by hand (heat, then retract), then run "
                 f"{self.RECOVER}.\nAMS said: {said}")
@@ -28825,7 +28825,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, f"Unload failed for lane1: the filament "
+             (lane, f"Unload failed: the filament "
                     f"cleared the toolhead but the AMS latched before "
                     f"reeling it home, the tip is stranded in the bowden. "
                     f"Run {self.RECOVER} then LANE_UNLOAD to finish the "
@@ -28954,7 +28954,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit._unload_in_progress is False
         assert unit.afc.error.messages == [
-            ("handle_lane_failure", "Unload failed for lane1: "
+            ("handle_lane_failure", "Unload failed: "
                                     "extruder stalled")]
         assert unit.logger.messages == []
 
@@ -28970,7 +28970,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     #: The AMS Lite's retract: sized only by its runaway guard.
     LITE_RETRACT = {"cmd": "retract", "unit": 0, "slot": 0, "mm": 300.0,
                     "mmps": 20.0}
-    LITE_STUCK = ("Unload failed for lane1: the toolhead sensor "
+    LITE_STUCK = ("Unload failed: the toolhead sensor "
                   "still sees filament after 20s of AMS Lite retract. Free it "
                   "at the toolhead, then run AFC_BAMBU_RECOVER "
                   "UNIT=Bambu_AMS_1 LANE=lane1.")
@@ -29037,7 +29037,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, "Unload failed for lane1: [AFC_hub "
+             (lane, "Unload failed: [AFC_hub "
                     "Bambu_AMS_1_hub] at the splitter still sees filament "
                     "after 20s of AMS Lite retract. An AMS Lite pulls back at "
                     "most 300mm, so that switch has to sit closer than that "
@@ -29066,12 +29066,12 @@ class TestAfcBambuAMSUnitUnloadLane:
 
     #: The failure when the AMS released the tray and the sensor still sees
     #: filament.
-    REELED_STUCK = ("Unload of lane1: the AMS reeled it home, but "
+    REELED_STUCK = ("Unload: the AMS reeled it home, but "
                     "the toolhead sensor still sees filament, so a piece is "
                     "left in the toolhead or the sensor is stuck. Clear the "
                     "toolhead, then run the unload again.")
     #: The failure when the toolhead is still not clear on the next unload.
-    STILL_HELD = ("Unload of lane1: the AMS already reeled it "
+    STILL_HELD = ("Unload: the AMS already reeled it "
                   "home, but the toolhead sensor still sees filament. Clear "
                   "the toolhead, then run the unload again.")
 
@@ -29196,7 +29196,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, "Unload failed for lane1: filament still at the "
+             (lane, "Unload failed: filament still at the "
                     "bay's hub sensor after retract retries, and the AMS did "
                     "not report reeling it home; run LANE_UNLOAD (eject) or "
                     "check the unit"),
@@ -29220,7 +29220,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, "Unload of lane1: the AMS says it reeled it "
+             (lane, "Unload: the AMS says it reeled it "
                     "home, but the bay's hub sensor still sees filament, so "
                     "it never left the path (the buffer standing in for the "
                     "toolhead sensor cannot tell). Pull it back to the bay by "
