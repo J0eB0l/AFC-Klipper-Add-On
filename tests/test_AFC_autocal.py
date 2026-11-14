@@ -795,7 +795,7 @@ class TestAFCautocalApplyLaneK:
         assert stepper.applied == [(0.04, 0.02)]
         assert cal._managed_extruders == {"extruder"}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_consumer_mode_falls_back_to_extruder_before_ready(self):
         cal = make_autocal()
@@ -807,7 +807,7 @@ class TestAFCautocalApplyLaneK:
         assert stepper.applied == [(0.04, 0.04)]
         assert cal._managed_extruders == {"extruder"}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_lane_without_extruder_uses_default(self):
         cal = make_autocal(ready=True)
@@ -818,7 +818,7 @@ class TestAFCautocalApplyLaneK:
             "AFC autocal: applied K=0.040000 for lane1 on extruder")
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_applies_to_active_extruder(self):
         cal = make_autocal(calibrator=True, ready=True, toolhead="extruder1")
@@ -833,7 +833,7 @@ class TestAFCautocalApplyLaneK:
         assert stepper.applied == []
         assert cal._managed_extruders == set()
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.042500 for lane1 on extruder1")]
+            ("debug", "AFC autocal: applied K=0.042500 for lane1 on extruder1")]
 
     def test_applies_on_lane_own_extruder(self):
         cal = make_autocal(ready=True)
@@ -847,7 +847,7 @@ class TestAFCautocalApplyLaneK:
         assert default.applied == []
         assert cal._managed_extruders == {"extruder1"}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder1")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder1")]
 
     def test_prefers_config_smooth_time(self):
         cal = make_autocal(ready=True)
@@ -858,7 +858,7 @@ class TestAFCautocalApplyLaneK:
         cal._apply_lane_k("lane1")
         assert stepper.applied == [(0.05, 0.01)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.050000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.050000 for lane1 on extruder")]
 
     def test_extruder_not_found_warns(self):
         cal = make_autocal(ready=True)
@@ -933,7 +933,7 @@ class TestAFCautocalMakePaWrapper:
         assert original.calls == []
         assert gcmd.responses == ["AFC flow K active, slicer pressure advance ignored"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: slicer PA change ignored for extruder (flow K managed)")]
+            ("debug", "AFC autocal: slicer PA change ignored for extruder (flow K managed)")]
 
     def test_passes_through_when_not_managed(self):
         cal = make_autocal(ready=True)
@@ -960,7 +960,7 @@ class TestAFCautocalMakePaWrapper:
         assert original.calls == []
         assert gcmd.responses == ["AFC flow K active, slicer pressure advance ignored"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: slicer PA change ignored for extruder1 (flow K managed)")]
+            ("debug", "AFC autocal: slicer PA change ignored for extruder1 (flow K managed)")]
 
     def test_default_handler_passes_when_active_not_managed(self):
         cal = make_autocal(ready=True, toolhead="extruder")
@@ -1101,7 +1101,7 @@ class TestAFCautocalCalibrate:
         assert cal._lane_flow_k == {}
         assert flow.applied == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_no_k_measured(self):
         cal = make_autocal(calibrator=True, ready=True)
@@ -1109,7 +1109,7 @@ class TestAFCautocalCalibrate:
         assert cal._calibrate(lane) is None
         assert cal._lane_flow_k == {}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_k_cleared_by_calibration(self, autocal_spoolman):
         cal = make_autocal(calibrator=True, ready=True, spoolman=True)
@@ -1125,7 +1125,7 @@ class TestAFCautocalCalibrate:
         assert flow.applied == []
         assert autocal_spoolman.writes == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_new_k_cached_applied_persisted(self, autocal_spoolman):
         cal = make_autocal(calibrator=True, ready=True, spoolman=True)
@@ -1145,8 +1145,8 @@ class TestAFCautocalCalibrate:
         assert flow.applied == [(cal.printer.objects["toolhead"].extruder, 0.07)]
         assert autocal_spoolman.writes == [(5, 0.07)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.070000 for lane1 on extruder"),
-            ("info", "AFC autocal: calibrated and stored K=0.070000 for lane1")]
+            ("debug", "AFC autocal: applied K=0.070000 for lane1 on extruder"),
+            ("info", "lane1: flow K 0.0700 stored")]
 
     def test_uses_th_extruder_name_for_k_key(self):
         cal = make_autocal(calibrator=True, ready=True, toolhead="extruder2")
@@ -1156,8 +1156,8 @@ class TestAFCautocalCalibrate:
         cal.printer.gcode.on_script = lambda script: flow._current_k.update(extruder2=0.06)
         assert cal._calibrate(lane) == 0.06
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.060000 for lane1 on extruder2"),
-            ("info", "AFC autocal: calibrated and stored K=0.060000 for lane1")]
+            ("debug", "AFC autocal: applied K=0.060000 for lane1 on extruder2"),
+            ("info", "lane1: flow K 0.0600 stored")]
 
     def test_falls_back_to_section_name_without_klipper_name(self):
         cal = make_autocal(calibrator=True, ready=True)
@@ -1168,8 +1168,8 @@ class TestAFCautocalCalibrate:
         assert cal._calibrate(lane) == 0.06
         assert cal._lane_flow_k == {"lane1": (5, 0.06)}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.060000 for lane1 on extruder"),
-            ("info", "AFC autocal: calibrated and stored K=0.060000 for lane1")]
+            ("debug", "AFC autocal: applied K=0.060000 for lane1 on extruder"),
+            ("info", "lane1: flow K 0.0600 stored")]
 
 
 class TestAFCautocalCurrentLane:
@@ -1218,7 +1218,7 @@ class TestAFCautocalHandleToolLoaded:
         cal.printer.reactor.run_pending()
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_auto_calibrate_alone_defers(self):
         cal = make_autocal({"auto_calibrate": True}, calibrator=True, ready=True)
@@ -1238,7 +1238,7 @@ class TestAFCautocalDoToolLoaded:
         assert autocal_threads.started == []
         assert cal._k_fetch_inflight == set()
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_cached_k_not_applied_when_inactive(self, autocal_threads):
         cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True,
@@ -1275,8 +1275,8 @@ class TestAFCautocalDoToolLoaded:
         assert autocal_threads.started == []
         assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_error_logged(self, autocal_threads):
         cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
@@ -1510,7 +1510,7 @@ class TestAFCautocalCheckStagedKAsync:
         cal.printer.reactor.run_pending()
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 already has K=0.040000, not auto-loading")]
+            ("debug", "AFC autocal: lane1 spool 5 already has K=0.040000, not auto-loading")]
 
     def test_successful_read_without_k_reports_ok(self, autocal_threads,
                                                   autocal_spoolman):
@@ -1522,7 +1522,7 @@ class TestAFCautocalCheckStagedKAsync:
         assert cal._lane_flow_k == {}
         assert cal.printer.gcode.scripts == ["CHANGE_TOOL LANE=lane1"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 has no stored K, loading to calibrate")]
+            ("info", "lane1: no flow K for this spool, loading it to measure one")]
 
     def test_read_failure_reports_not_ok(self, autocal_threads, autocal_spoolman):
         cal = self._staged()
@@ -1533,7 +1533,7 @@ class TestAFCautocalCheckStagedKAsync:
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
             ("debug", "AFC_autocal: staged K read failed: down"),
-            ("info", "AFC autocal: lane1 spool 5 K unknown (Spoolman read failed), "
+            ("debug", "AFC autocal: lane1 spool 5 K unknown (Spoolman read failed), "
                      "not auto-loading")]
 
     def test_no_client_reports_none(self, autocal_threads, autocal_spoolman):
@@ -1544,7 +1544,7 @@ class TestAFCautocalCheckStagedKAsync:
         assert autocal_spoolman.built == []
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 K unknown (Spoolman read failed), "
+            ("debug", "AFC autocal: lane1 spool 5 K unknown (Spoolman read failed), "
                      "not auto-loading")]
 
     def test_thread_naming_failure_is_ignored(self, monkeypatch, autocal_threads,
@@ -1560,7 +1560,7 @@ class TestAFCautocalCheckStagedKAsync:
         cal.printer.reactor.run_pending()
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 already has K=0.040000, not auto-loading")]
+            ("debug", "AFC autocal: lane1 spool 5 already has K=0.040000, not auto-loading")]
 
 
 class TestAFCautocalStagedKReady:
@@ -1606,14 +1606,14 @@ class TestAFCautocalStagedKReady:
         assert cal._lane_flow_k == {"lane1": (5, 0.0412)}
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 already has K=0.041200, not auto-loading")]
+            ("debug", "AFC autocal: lane1 spool 5 already has K=0.041200, not auto-loading")]
 
     def test_unreadable_k_no_load(self):
         cal = self._staged(spool_id=5)
         cal._staged_k_ready("lane1", 5, None, False)
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 K unknown (Spoolman read failed), "
+            ("debug", "AFC autocal: lane1 spool 5 K unknown (Spoolman read failed), "
                      "not auto-loading")]
 
     def test_unsafe_no_load(self):
@@ -1628,7 +1628,7 @@ class TestAFCautocalStagedKReady:
         cal._staged_k_ready("lane1", 5, None, True)
         assert cal.printer.gcode.scripts == ["CHANGE_TOOL LANE=lane1"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 has no stored K, loading to calibrate")]
+            ("info", "lane1: no flow K for this spool, loading it to measure one")]
 
     def test_error_logged(self):
         cal = self._staged(spool_id=5)
@@ -1639,7 +1639,7 @@ class TestAFCautocalStagedKReady:
         cal.printer.gcode.on_script = refuse
         cal._staged_k_ready("lane1", 5, None, True)
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 spool 5 has no stored K, loading to calibrate"),
+            ("info", "lane1: no flow K for this spool, loading it to measure one"),
             ("warning", "AFC_autocal: staged load error: boom")]
 
 
@@ -1658,8 +1658,8 @@ class TestAFCautocalFetchKAsync:
         assert autocal_threads.started == []
         assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_no_spool_no_calibrate_when_disabled(self, autocal_threads):
         cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
@@ -1678,8 +1678,8 @@ class TestAFCautocalFetchKAsync:
         assert autocal_spoolman.reads == []
         assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_reads_then_applies_on_reactor(self, autocal_threads, autocal_spoolman):
         cal = make_autocal({"apply_stored_k": True}, ready=True, spoolman=True)
@@ -1697,7 +1697,7 @@ class TestAFCautocalFetchKAsync:
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_worker_failure_still_hops_back(self, autocal_threads, autocal_spoolman):
         cal = make_autocal({"apply_stored_k": True}, ready=True, spoolman=True)
@@ -1736,7 +1736,7 @@ class TestAFCautocalFetchKAsync:
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
 
 class TestAFCautocalKApplied:
@@ -1772,7 +1772,7 @@ class TestAFCautocalKApplied:
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
         assert flow.applied == [(cal.printer.objects["toolhead"].extruder, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_k_cached_not_applied_when_inactive(self):
         cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True,
@@ -1800,8 +1800,8 @@ class TestAFCautocalKApplied:
         cal._k_applied("lane1", 5, None)
         assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_no_k_no_calibrate_when_disabled(self):
         cal = make_autocal({"apply_stored_k": True}, calibrator=True, ready=True)
@@ -1874,7 +1874,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal._cal_pending == set()
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration skipped, printing")]
+            ("debug", "AFC autocal: lane1 calibration skipped, printing")]
 
     def test_prep_not_done_hard_skips(self):
         cal, lane = self._loaded()
@@ -1884,7 +1884,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal.printer.reactor.callbacks == []
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration skipped, prep not done")]
+            ("debug", "AFC autocal: lane1 calibration skipped, prep not done")]
 
     def test_startup_grace_hard_skips(self):
         cal, lane = self._loaded()
@@ -1894,7 +1894,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal.printer.reactor.callbacks == []
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration skipped, within startup grace")]
+            ("debug", "AFC autocal: lane1 calibration skipped, within startup grace")]
 
     def test_transient_state_retries_then_gives_up(self):
         cal, lane = self._loaded()
@@ -1912,7 +1912,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal._cal_pending == set()
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration gave up waiting to settle "
+            ("debug", "AFC autocal: lane1 calibration gave up waiting to settle "
                      "(state=Loading (not idle))")]
 
     def test_retry_callback_calibrates_once_idle(self):
@@ -1924,8 +1924,8 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal._cal_pending == set()
         assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_load_in_flight_waits(self):
         cal, lane = self._loaded(load_active=True)
@@ -1940,7 +1940,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         cal._calibrate_when_loaded(lane, attempts=240)
         assert cal.printer.reactor.callbacks == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration gave up waiting to settle "
+            ("debug", "AFC autocal: lane1 calibration gave up waiting to settle "
                      "(load in flight)")]
 
     def test_unloaded_while_waiting_skips(self):
@@ -1955,7 +1955,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         cal._calibrate_when_loaded(lane)
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration skipped, its tool is not on the "
+            ("debug", "AFC autocal: lane1 calibration skipped, its tool is not on the "
                      "toolhead (active extruder=extruder2); pick up/load this lane's "
                      "tool to calibrate it")]
         assert cal._cal_pending == set()
@@ -1966,7 +1966,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         cal._calibrate_when_loaded(lane)
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
-            ("info", "AFC autocal: lane1 calibration skipped, its tool is not on the "
+            ("debug", "AFC autocal: lane1 calibration skipped, its tool is not on the "
                      "toolhead (active extruder=?); pick up/load this lane's tool to "
                      "calibrate it")]
         assert cal._cal_pending == set()
@@ -1978,8 +1978,8 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal.printer.gcode.command_scripts == []
         assert cal._cal_pending == set()
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_error_clears_pending_and_logs(self):
         cal, lane = self._loaded()
@@ -1991,7 +1991,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         cal._calibrate_when_loaded(lane)
         assert cal._cal_pending == set()
         assert cal.logger.messages == [
-            ("info", "AFC autocal: running flow calibration for lane1"),
+            ("info", "lane1: measuring flow K"),
             ("warning", "AFC_autocal: deferred calibrate error: q")]
 
 
@@ -2156,7 +2156,7 @@ class TestAFCautocalReapplyCurrentK:
         cal._reapply_current_k()
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_no_state_reapplies(self):
         cal, stepper = self._cached_current({"apply_stored_k": True})
@@ -2164,7 +2164,7 @@ class TestAFCautocalReapplyCurrentK:
         cal._reapply_current_k()
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_no_afc_returns(self):
         cal, stepper = self._cached_current({"apply_stored_k": True})
@@ -2189,7 +2189,7 @@ class TestAFCautocalHandleHomeRailsEnd:
         cal._handle_home_rails_end(object(), [])
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_error_logged(self):
         cal = self._cached_current(calibrator=True)
@@ -2213,7 +2213,7 @@ class TestAFCautocalHandleActivateExtruder:
         cal._handle_activate_extruder()
         assert stepper.applied == [(0.04, 0.04)]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_error_logged(self):
         cal = self._cached_current(calibrator=True)
@@ -2264,7 +2264,7 @@ class TestAFCautocalCmdApplyLaneFlowK:
         assert stepper.applied == [(0.04, 0.04)]
         assert cal._lane_flow_k == {"lane1": (5, 0.04)}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied K=0.040000 for lane1 on extruder")]
 
     def test_reports_not_applied_when_extruder_missing(self):
         cal = make_autocal(ready=True)
@@ -2294,7 +2294,7 @@ class TestAFCautocalCmdCalibrateLaneFlowK:
         assert gcmd.responses == ["AFC_autocal: calibration produced no new K"]
         assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
-            ("info", "AFC autocal: calibration produced no new K for lane1")]
+            ("info", "lane1: flow calibration gave no new K")]
 
     def test_missing_calibrator_reports_both(self):
         cal = make_autocal(ready=True)
@@ -2316,8 +2316,8 @@ class TestAFCautocalCmdCalibrateLaneFlowK:
         assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal._lane_flow_k == {"lane1": (5, 0.07)}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied K=0.070000 for lane1 on extruder"),
-            ("info", "AFC autocal: calibrated and stored K=0.070000 for lane1")]
+            ("debug", "AFC autocal: applied K=0.070000 for lane1 on extruder"),
+            ("info", "lane1: flow K 0.0700 stored")]
 
 
 class TestAFCautocalDefaultK:
@@ -2364,7 +2364,7 @@ class TestAFCautocalApplyDefaultK:
         assert flow._current_k == {"extruder": 0.02}
         assert cal._lane_flow_k == {}  # not a stored K: calibration still runs
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied default K=0.020000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied default K=0.020000 for lane1 on extruder")]
 
     def test_consumer_sets_it_on_the_lanes_extruder(self):
         cal = make_autocal({"apply_stored_k": True}, ready=True, toolhead="extruder1")
@@ -2374,7 +2374,7 @@ class TestAFCautocalApplyDefaultK:
         assert stepper.applied == [(0.035, 0.04)]
         assert cal._managed_extruders == {"extruder"}
         assert cal.logger.messages == [
-            ("info", "AFC autocal: applied default K=0.035000 for lane1 on extruder")]
+            ("debug", "AFC autocal: applied default K=0.035000 for lane1 on extruder")]
 
     def test_not_without_apply_stored_k(self):
         cal = make_autocal({"auto_calibrate": True}, calibrator=True, ready=True)
