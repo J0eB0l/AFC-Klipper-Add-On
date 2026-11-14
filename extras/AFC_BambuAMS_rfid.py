@@ -1610,7 +1610,14 @@ class BambuSpoolman:
                         f"lane only -- run AFC_BAMBU_SCAN LANE={where} to link it")
         else:
             went = f"updated Spoolman spool {sid}"
-        self._u.logger.info(f"{self._u.name} {where}: {read}. Measured {amount}; {went}.")
+        line = f"{self._u.name} {where}: {read}. Measured {amount}; {went}."
+        if getattr(self._u.logger, "print_debug_console", False):
+            self._u.logger.info(line)
+            return
+        self._u.logger.debug(line)
+        left = (f"full ({grams} g)" if pct > 100
+                else f"about {pct}% left ({grams} g)")
+        self._u.logger.info(f"{self._u.name} {where}: {what if material else 'no tag'}, {left}")
 
     #: Volume of filament at the unit's own 100% reference, in cm3. Derived
     #: from reels of known weight, not measured directly; _grams_for uses it

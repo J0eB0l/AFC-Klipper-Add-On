@@ -29,6 +29,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from extras.AFC_BambuAMS import (DRY_TEMP_HARD_MAX, _AMS_MODELS, _BUFFER_CHIP_NAME, _HT_MODELS)
+from extras.AFC_BambuAMS_bridge import routine_info
 
 #: Every option the chain master consumes; anything else in the section is a
 #: chain-wide unit default (see _chain_defaults). A test checks __init__ against it.
@@ -5365,7 +5366,7 @@ class afcBridgeBox:
                             if loaded:
                                 if b not in drop_held:
                                     drop_held.add(b)
-                                    self.logger.info(
+                                    routine_info(self.logger,
                                         f"AFC_BridgeBox {self.name}: "
                                         f"{gone or b} (UID {b}) is offline but "
                                         f"AFC records "
@@ -6377,9 +6378,9 @@ class afcBridgeBox:
             self._persist_pin(uid, first, span, name, model or (
                 "ht" if pu["family"] == "ht" else "boxed"))
             pu["uid"] = uid
-            self.logger.info(f"AFC_BridgeBox {self.name}: saved {uid} on {name} "
-                             f"({self._lanes_text(first, span)}); it comes back there "
-                             f"after a restart.")
+            routine_info(self.logger, f"AFC_BridgeBox {self.name}: saved {uid} on {name} "
+                                      f"({self._lanes_text(first, span)}); it comes back there "
+                                      f"after a restart.")
 
     def _release_pool_unit(self, uid: str, why: Optional[str] = None) -> None:
         """
@@ -7648,10 +7649,10 @@ class afcBridgeBox:
             if uid not in self._missing_since:
                 self._missing_since[uid] = eventtime
                 name = getattr(self, "_name_map", {}).get(uid, uid)
-                self.logger.info(f"AFC_BridgeBox {self.name}: {name} ({uid}) is offline "
-                                 f"on a live chain -- if it stays gone "
-                                 f"{self.removal_grace:.0f}s it will be recorded as "
-                                 f"removed (takes effect at the next RESTART).")
+                routine_info(self.logger, f"AFC_BridgeBox {self.name}: {name} ({uid}) is offline "
+                                          f"on a live chain -- if it stays gone "
+                                          f"{self.removal_grace:.0f}s it will be recorded as "
+                                          f"removed (takes effect at the next RESTART).")
             since = self._missing_since[uid]
             if eventtime - since < self.removal_grace:
                 survivors.append(e)

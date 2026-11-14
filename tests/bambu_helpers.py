@@ -235,6 +235,9 @@ class BambuLogger:
     them exactly.
     """
 
+    #: AFC's debug switch; on, so the full Bambu logging is recorded.
+    print_debug_console = True
+
     def __init__(self) -> None:
         """Start with every record empty."""
         self.messages: List[LogLine] = []

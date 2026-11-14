@@ -222,6 +222,7 @@ except:
 try: from extras.AFC_BambuAMS_bridge import (
     BambuBridge,
     TcpPort,
+    routine_info,
     split_tcp_key,
     )
 except:
@@ -3181,7 +3182,7 @@ class afcBambuAMS(afcUnit):
                 if retrying:
                     self.logger.debug(msg)
                 else:
-                    self.logger.info(msg)
+                    routine_info(self.logger, msg)
                 return False
         afcBambuAMS._cap_open_pending(self, slot, asked=not insert)
         if self._is_ht():
@@ -4437,13 +4438,13 @@ class afcBambuAMS(afcUnit):
         bay = f"bay {slot + 1}" if isinstance(slot, int) else "its bay"
         sid = getattr(lane, "spool_id", None)
         if defaults:
-            self.logger.info(f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
-                             f"replaces the AFC defaults saved for this lane")
+            routine_info(self.logger, f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
+                                      f"replaces the AFC defaults saved for this lane")
         else:
             was = " ".join(str(v) for v in (
                 getattr(lane, "material", ""), getattr(lane, "color", ""))
                 if v)
-            self.logger.info(
+            routine_info(self.logger,
                 f"AFC bambu {self.name}: {lane.name} -- the tag in {bay} "
                 f"({info.get('material')}"
                 + (f" #{_colour_key(info.get('color'))}"
@@ -4837,7 +4838,7 @@ class afcBambuAMS(afcUnit):
                 f"{'it' if one else 'them'}, or run AFC_BAMBU_SCAN LANE="
                 + (stock[0] if one else "<lane>"))
         if parts:
-            self.logger.info(f"AFC bambu {self.name}: " + "; ".join(parts))
+            routine_info(self.logger, f"AFC bambu {self.name}: " + "; ".join(parts))
 
     def _settle_restored_bay(self, lane: Any, info: dict) -> None:
         """
@@ -7450,8 +7451,8 @@ class afcBambuAMS(afcUnit):
             except Exception:
                 pass
         try:
-            self.logger.info(f"AFC bambu {self.name}: stopped pushing {lane.name}'s "
-                             f"leftover: {why}")
+            routine_info(self.logger, f"AFC bambu {self.name}: stopped pushing {lane.name}'s "
+                                      f"leftover: {why}")
         except Exception:
             pass
 
@@ -8437,11 +8438,11 @@ class afcBambuAMS(afcUnit):
             quiet.add(slot)
             _ln = self._lane_for_slot(slot)
             _ln = getattr(_ln, "name", None) or "<lane>"
-            self.logger.info(f"AFC bambu {self.name}: spool in slot {slot} -- {_ln} goes on "
-                             f"lane defaults until it is read, and the SCAN is held: a lane "
-                             f"on this unit is loaded to the toolhead and a scan would move "
-                             f"filament on it. It scans itself when that lane comes out, or "
-                             f"run AFC_BAMBU_SCAN LANE={_ln} whenever you like")
+            routine_info(self.logger, f"AFC bambu {self.name}: spool in slot {slot} -- {_ln} goes on "
+                                      f"lane defaults until it is read, and the SCAN is held: a lane "
+                                      f"on this unit is loaded to the toolhead and a scan would move "
+                                      f"filament on it. It scans itself when that lane comes out, or "
+                                      f"run AFC_BAMBU_SCAN LANE={_ln} whenever you like")
             # Pull the new spool in the way a real printer does: drop the follower, prime to the
             # hub, re-engage. Never during a print.
             self._maybe_insert_pullin(slot)
@@ -8539,9 +8540,9 @@ class afcBambuAMS(afcUnit):
             self._pullin_until = 0.0
         r.register_callback(_reengage, now + 6.0)
 
-        self.logger.info(f"AFC bambu {self.name}: slot {slot} inserted while a lane is loaded "
-                         f"and idle -- dropping the follower, priming the bay in (motion only, "
-                         f"no scan/measure), then re-engaging the loaded lane. Scan deferred.")
+        routine_info(self.logger, f"AFC bambu {self.name}: slot {slot} inserted while a lane is loaded "
+                                  f"and idle -- dropping the follower, priming the bay in (motion only, "
+                                  f"no scan/measure), then re-engaging the loaded lane. Scan deferred.")
 
     def _start_tag_scan(self, slot: int, info: dict) -> None:
         """
@@ -8773,7 +8774,7 @@ class afcBambuAMS(afcUnit):
                 _why = (" -- nothing has read this bay yet. No scan was "
                         "attempted, so this says nothing about the reader or "
                         f"the spool; reseat it, or run AFC_BAMBU_SCAN LANE={lane.name}")
-            self.logger.info(
+            routine_info(self.logger,
                 f"AFC bambu {self.name}: "
                 + (f"no readable tag profile in slot {slot}" if scanned
                    else f"no tag on record for slot {slot}")
@@ -9258,11 +9259,11 @@ class afcBambuAMS(afcUnit):
             afcBambuAMS._apply_lane_defaults(self, lane, info)
             if not say:
                 return
-            self.logger.info(f"AFC bambu {self.name}: spool INSERTED in slot {slot} during "
-                             f"a print, and nothing has read it -- {lane.name} is on lane "
-                             f"defaults and linked to no spool until it is read. The unit "
-                             f"may read it on its own; to read it yourself, run "
-                             f"AFC_BAMBU_SCAN LANE={lane.name} once the print is done")
+            routine_info(self.logger, f"AFC bambu {self.name}: spool INSERTED in slot {slot} during "
+                                      f"a print, and nothing has read it -- {lane.name} is on lane "
+                                      f"defaults and linked to no spool until it is read. The unit "
+                                      f"may read it on its own; to read it yourself, run "
+                                      f"AFC_BAMBU_SCAN LANE={lane.name} once the print is done")
             try:
                 self._save_lane_vars()
             except Exception:
@@ -9364,7 +9365,7 @@ class afcBambuAMS(afcUnit):
                 or int(cur_w) == nominal):
                 lane.weight = w
             if changed:
-                self.logger.info(
+                routine_info(self.logger,
                     f"AFC bambu {self.name}: applied tag to {lane.name}: "
                     f"{getattr(lane, 'filament_name', '') or tag_material} "
                     f"{color_hex or ''}".rstrip())
@@ -9596,9 +9597,9 @@ class afcBambuAMS(afcUnit):
         self._dry_host_refusal = ""
         # So a load refused for drying can be traced. Bare test objects may lack a logger.
         try:
-            self.logger.info(f"AFC bambu {self.name}: adopting the unit's own dry cycle -- "
-                             f"its countdown moved {was}s -> {int(dr)}s, so a cycle this "
-                             f"host did not start is running ({int(dr)}s left)")
+            routine_info(self.logger, f"AFC bambu {self.name}: adopting the unit's own dry cycle -- "
+                                      f"its countdown moved {was}s -> {int(dr)}s, so a cycle this "
+                                      f"host did not start is running ({int(dr)}s left)")
         except Exception:
             pass
         return True
@@ -9994,7 +9995,7 @@ class afcBambuAMS(afcUnit):
                                        in _HT_MODELS)
                                   and getattr(self, "_auto_cali_slot", None) == pend):
                                 said = True
-                                self.logger.info(
+                                routine_info(self.logger,
                                     f"AFC bambu {self.name}: slot {pend} "
                                     f"one-edged again on the retry -- giving "
                                     f"up for this insert. AFC_BAMBU_CAPSCAN "
@@ -12607,9 +12608,9 @@ class afcBambuAMS(afcUnit):
             and attempts > 0
             and not loaded):
             attempts = 0
-            self.logger.info(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
-                             f"fault after its own retries, so there is no re-home retry; "
-                             f"reporting the failure now.")
+            routine_info(self.logger, f"AFC bambu {self.name}: {cur_lane.name} -- the AMS declared a "
+                                      f"fault after its own retries, so there is no re-home retry; "
+                                      f"reporting the failure now.")
         # A retry would feed past the path again, and the A1 leaves its own stall to its user.
         if (self._load_overfed is not None
             or getattr(self, "_lite_fault_err", None) is not None):
@@ -12645,10 +12646,10 @@ class afcBambuAMS(afcUnit):
                and recover < attempts):
             why = _not_listening()
             if why:
-                self.logger.info(f"AFC bambu {self.name}: {cur_lane.name} -- the AMS gave "
-                                 f"up AND {why}, so it is not listening; failing now "
-                                 f"instead of re-homing into a unit that cannot answer. "
-                                 f"{_RETRY_HINT}.")
+                routine_info(self.logger, f"AFC bambu {self.name}: {cur_lane.name} -- the AMS gave "
+                                          f"up AND {why}, so it is not listening; failing now "
+                                          f"instead of re-homing into a unit that cannot answer. "
+                                          f"{_RETRY_HINT}.")
                 break
             recover += 1
             # A re-home unstages the bay and a drying unit holds its preload, so every retry would
@@ -12661,8 +12662,8 @@ class afcBambuAMS(afcUnit):
             _how = ("retrying without the re-home -- the chamber is drying "
                     "and a park would unstage the bay" if _hot
                     else "re-homing AMS and retrying")
-            self.logger.info(f"AFC bambu {self.name}: load of {cur_lane.name} stalled; "
-                             f"{_how} (recover {recover}/{attempts})")
+            routine_info(self.logger, f"AFC bambu {self.name}: load of {cur_lane.name} stalled; "
+                                      f"{_how} (recover {recover}/{attempts})")
             self.stop()
             if not _hot:
                 self.rehome()  # ~3 s mode-0F/0E reset
@@ -12767,9 +12768,9 @@ class afcBambuAMS(afcUnit):
             and getattr(self, "_lite_fault_err", None) is not None):
             # A sensorless AMS Lite flagged a stall at the gears: clear it, hold the tray. The grip
             # check tells the gears from a stuck spool.
-            self.logger.info(f"AFC bambu {self.name}: the AMS Lite stopped {cur_lane.name} "
-                             f"itself ({self._lite_fault_words(self._lite_fault_err)}); "
-                             f"clearing it and checking that the extruder takes it")
+            routine_info(self.logger, f"AFC bambu {self.name}: the AMS Lite stopped {cur_lane.name} "
+                                      f"itself ({self._lite_fault_words(self._lite_fault_err)}); "
+                                      f"clearing it and checking that the extruder takes it")
             self.rehome()
             afc.reactor.pause(afc.reactor.monotonic() + LITE_CLEAR_S)
             self.select_lane(cur_lane)
@@ -12818,9 +12819,9 @@ class afcBambuAMS(afcUnit):
             while (cause is not None
                    and tries < GRIP_RETRIES):
                 tries += 1
-                self.logger.info(f"AFC bambu {self.name}: {cause} Backing it off "
-                                 f"{GRIP_BACK_MM:.0f}mm and feeding it again "
-                                 f"({tries}/{GRIP_RETRIES}).")
+                routine_info(self.logger, f"AFC bambu {self.name}: {cause} Backing it off "
+                                          f"{GRIP_BACK_MM:.0f}mm and feeding it again "
+                                          f"({tries}/{GRIP_RETRIES}).")
                 mark = self._grip_refeed(cur_lane, cur_extruder, feed_dist, timeout)
                 if mark is None:
                     cause = (f"{cur_lane.name} was backed off "
@@ -14048,11 +14049,11 @@ class afcBambuAMS(afcUnit):
                                            round(measured, 1))
             except Exception:
                 saved = False
-        self.logger.info(f"AFC bambu {self.name}: the AMS measured its own filament path at "
-                         f"{measured:.0f}mm (was {old:.0f}mm)"
-                         f"{' via ' + source if source else ''}. Adopting it"
-                         f"{' and saving it' if saved else ' for this session'} -- this "
-                         f"sizes the load give-up deadline.")
+        routine_info(self.logger, f"AFC bambu {self.name}: the AMS measured its own filament path at "
+                                  f"{measured:.0f}mm (was {old:.0f}mm)"
+                                  f"{' via ' + source if source else ''}. Adopting it"
+                                  f"{' and saving it' if saved else ' for this session'} -- this "
+                                  f"sizes the load give-up deadline.")
 
     def _ready_to_follow(self, lane: Any = None) -> bool:
         """
