@@ -2764,7 +2764,8 @@ class TestAfcBambuAMSCmdAFCBambuFaultReload:
         gcmd = unit.gcode.run("AFC_BAMBU_FAULT_RELOAD")
         assert scripts == ["CHANGE_TOOL LANE=lane13"]
         assert gcmd.messages == [TestAfcBambuAMSRetryFailedLoad.RETRYING]
-        assert unit._failed_load_lane is None
+        # Kept until a load arrives.
+        assert unit._failed_load_lane is lane
         assert unit.logger.messages == []
 
 
@@ -2795,9 +2796,16 @@ class TestAfcBambuAMSRetryFailedLoad:
         assert unit._retry_failed_load(gcmd) is True
         assert scripts == ["CHANGE_TOOL LANE=lane13"]
         assert gcmd.messages == [self.RETRYING]
-        # Cleared: a load that fails again sets it again.
-        assert unit._failed_load_lane is None
+        # Kept until a load arrives, so a retry AFC refuses can be run again.
+        assert unit._failed_load_lane is _lane
         assert unit.logger.messages == []
+
+    def test_a_refused_retry_can_be_run_again(self):
+        # AFC refused the first retry before the load ran ("Hub not clear").
+        unit, _lane, scripts = self._unit()
+        assert unit._retry_failed_load(FakeGcmd()) is True
+        assert unit._retry_failed_load(FakeGcmd()) is True
+        assert scripts == ["CHANGE_TOOL LANE=lane13"] * 2
 
     def test_nothing_failed_is_left_to_the_resume_reload(self):
         unit, _lane, scripts = self._unit()
@@ -2837,7 +2845,7 @@ class TestAfcBambuAMSRetryFailedLoad:
         assert gcmd.messages == [
             ("respond_info",
              "Bambu_AMS_HT_1: retrying the load of lane28...")]
-        assert other._failed_load_lane is None
+        assert other._failed_load_lane is other.lanes["lane28"]
         assert unit.logger.messages == other.logger.messages == []
 
     def test_a_print_state_read_that_raises_retries_nothing(self):
@@ -27436,12 +27444,16 @@ class TestAfcBambuAMSBoxedGrip:
         assert unit.afc.error.calls == []
         assert unit._load_full_path is False
 
-    def test_a_load_that_never_grips_fails_backed_off(self, monkeypatch):
+    def test_a_load_that_never_grips_is_reeled_into_the_bay(self, monkeypatch):
         unit, lane, bridge = self._unit(monkeypatch, pulls=[False, False],
                                         print_state="printing")
+        eject = Recorder(result=True)
+        unit.eject_lane = eject
         assert unit._unit_load_lane(lane) is False
-        # Backed off for the retry, and again so a reload starts clear.
-        assert bridge.sent.count(self.BACK) == 2
+        # Backed off once for the retry, then reeled all the way back, so the
+        # reload finds the hub clear.
+        assert bridge.sent.count(self.BACK) == 1
+        assert eject.calls == [((lane,), {})]
         assert [m[2] for m in unit.afc.e_moves].count("grip back off") == 2
         assert bridge.sent[-1] == self.STOP
         assert lane.status == AFCLaneState.ERROR
@@ -27449,19 +27461,34 @@ class TestAfcBambuAMSBoxedGrip:
         assert unit._resume_needs_reload is True
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, f"{self.UNFELT} Backing it off and feeding it again did "
-                    f"not help, so it was left backed off 50mm.{self.CHECK}"),
+             (lane, f"{self.UNFELT} Feeding it again did not help, so it was "
+                    f"reeled back into the bay.{self.CHECK}"),
              {"pause": True})]
 
-    def test_without_retries_it_fails_backed_off(self, monkeypatch):
+    def test_without_retries_it_is_reeled_into_the_bay(self, monkeypatch):
         unit, lane, bridge = self._unit(monkeypatch)
         monkeypatch.setattr(bambu_mod, "GRIP_RETRIES", 0)
+        unit.eject_lane = Recorder(result=True)
         assert unit._unit_load_lane(lane) is False
-        assert bridge.sent.count(self.BACK) == 1
+        assert self.BACK not in bridge.sent
         assert unit._failed_load_lane is lane
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
-             (lane, f"{self.UNFELT} It was backed off 50mm.{self.CHECK}"),
+             (lane, f"{self.UNFELT} It was reeled back into the bay."
+                    f"{self.CHECK}"),
+             {"pause": False})]
+
+    def test_a_reel_back_that_does_not_finish_says_so(self, monkeypatch):
+        unit, lane, _ = self._unit(monkeypatch)
+        monkeypatch.setattr(bambu_mod, "GRIP_RETRIES", 0)
+        unit.eject_lane = Recorder(raises=RuntimeError("link lost"))
+        assert unit._unit_load_lane(lane) is False
+        assert ("warning", "Bambu_AMS_1: reel-back of lane1 did not "
+                           "complete: link lost") in unit.logger.messages
+        assert unit.afc.error.calls == [
+            ("handle_lane_failure",
+             (lane, f"{self.UNFELT} It could not be reeled back into the "
+                    f"bay, so clear the path by hand.{self.CHECK}"),
              {"pause": False})]
 
     def test_a_refeed_that_never_reaches_the_sensor_fails(self, monkeypatch):
@@ -27482,13 +27509,15 @@ class TestAfcBambuAMSBoxedGrip:
         helper = _GoneAfterBackOff()
         unit, lane, bridge = self._unit(monkeypatch, sensor=helper)
         helper.unit = unit
+        unit.eject_lane = Recorder(result=True)
         assert unit._unit_load_lane(lane) is False
         assert bridge.sent.count(self.BACK) == 1
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
              (lane, f"lane1 was backed off 50mm because the extruder did not "
                     f"take it, and the feed did not bring it back to the "
-                    f"toolhead sensor within 7s.{self.CHECK}"),
+                    f"toolhead sensor within 7s. It was reeled back into the "
+                    f"bay.{self.CHECK}"),
              {"pause": False})]
 
 

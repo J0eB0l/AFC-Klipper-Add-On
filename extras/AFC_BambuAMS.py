@@ -2480,8 +2480,8 @@ class afcBambuAMS(afcUnit):
         """
         Load again the lane whose load last failed outside a print.
 
-        The failed load reeled a declared fault's filament back into the bay,
-        so this is a fresh load of the same lane, on whichever Bambu unit
+        The failed load reeled its filament back into the bay, so this is a
+        fresh load of the same lane, on whichever Bambu unit
         holds it. Never during a print: a paused print reloads through
         _reload_before_resume, which also resumes.
 
@@ -2497,9 +2497,10 @@ class afcBambuAMS(afcUnit):
             lane = getattr(unit, "_failed_load_lane", None)
             if lane is None:
                 continue
-            unit._failed_load_lane = None
             if getattr(lane, "tool_loaded", False):
+                unit._failed_load_lane = None
                 return True
+            # Kept until a load arrives, so a retry AFC refuses can be run again.
             gcmd.respond_info(f"{unit.name}: retrying the load of {lane.name}...")
             self.gcode.run_script_from_command(f"CHANGE_TOOL LANE={lane.name}")
             return True
@@ -11885,6 +11886,35 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
 
+    def _grip_reel_back(self, cur_lane: Any, cur_extruder: Any) -> bool:
+        """
+        Reel a lane the extruder never took all the way back into its bay.
+
+        The extruder reverses GRIP_BACK_MM alongside, as in _grip_back_off, so a
+        tip whose edge the gears caught comes out with it.
+
+        :param cur_lane: the lane the load gave up on
+        :param cur_extruder: its extruder
+        :return bool: True if the AMS reported the reel-back complete
+        """
+        cur_lane.disable_buffer()
+        self.set_feed_assist(cur_lane, False)
+        self._clear_latched_error(cur_lane, "the reel-back")
+        speed = float(getattr(cur_extruder, "tool_unload_speed", 0) or 0)
+        self.afc.move_e_pos(-GRIP_BACK_MM, speed or NOMINAL_MMPS, "grip back off",
+                            wait_tool=False)
+        try:
+            return self.eject_lane(cur_lane)
+        except Exception as e:
+            self.logger.warning(f"{self.name}: reel-back of {cur_lane.name} did not "
+                                f"complete: {e}")
+            return False
+        finally:
+            try:
+                self.afc.toolhead.wait_moves()
+            except Exception:
+                pass
+
     def _grip_refeed(self, cur_lane: Any, cur_extruder: Any, feed_dist: float,
                      timeout: float) -> Optional[Tuple[Optional[float], Optional[int]]]:
         """
@@ -12831,14 +12861,17 @@ class afcBambuAMS(afcUnit):
                     break
                 cause = self._boxed_grip_check(cur_lane, cur_extruder, mark)
             if cause is not None:
-                again = ""
-                if mark is not None:
-                    self._grip_back_off(cur_lane, cur_extruder)
-                    again = (" Backing it off and feeding it again did not "
-                             "help, so it was left backed off "
-                             f"{GRIP_BACK_MM:.0f}mm." if tries else
-                             f" It was backed off {GRIP_BACK_MM:.0f}mm.")
-                cause = (f"{cause}{again}\nCheck that the filament reaches "
+                # Reeled into the bay, as after a declared fault: a lane stopped part way back is still
+                # in the hub, and the retry's load refuses it ("Hub not clear").
+                if not self._grip_reel_back(cur_lane, cur_extruder):
+                    where = (" It could not be reeled back into the bay, so "
+                             "clear the path by hand.")
+                elif tries and mark is not None:
+                    where = (" Feeding it again did not help, so it was "
+                             "reeled back into the bay.")
+                else:
+                    where = " It was reeled back into the bay."
+                cause = (f"{cause}{where}\nCheck that the filament reaches "
                          f"the extruder gears and that they turn. {_RETRY_HINT}.")
         if cause is not None:
             self.stop()
