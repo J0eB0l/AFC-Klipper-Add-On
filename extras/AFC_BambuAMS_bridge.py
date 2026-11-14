@@ -669,7 +669,10 @@ _BRIDGE_EVENTS_KNOWN = frozenset((
     "htunit", "mute", "units", "variant", "baud",
     # ("unload" is bridge_unload()'s echo; it is unit/slot-addressed.)
     "parity", "replay", "unload", "relink", "rehome",
-    "capscan", "ht0fhold",
+    "capscan", "ht0fhold", "pathload",
+    # An insert the bridge did not scan because a lane on the chain is in a toolhead; the
+    # module skips the same insert itself and says so.
+    "insskip",
     "arrived", "txecho", "fw",
     # Scan-path echoes of host commands; unlisted, each would log a line and
     # could starve the MCU.
