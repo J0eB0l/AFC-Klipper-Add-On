@@ -758,6 +758,8 @@ class TestCheckExtruderTemp:
         obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
             heater_target_temp=150, actual_temp=148, target_material_temp=210
         )
+        # Hot extruder: leaving the heater alone is the intended path.
+        heater.can_extrude = True
         obj.function.is_printing.return_value = True
         obj.print_tool_temperatures = [230]
         lane.current_map = "custom_lane"
@@ -774,6 +776,7 @@ class TestCheckExtruderTemp:
         obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
             heater_target_temp=150, actual_temp=148, target_material_temp=235
         )
+        heater.can_extrude = True
         obj.function.is_printing.return_value = True
         obj.print_tool_temperatures = [245, 245]
         lane.current_map = "T2"
@@ -805,6 +808,7 @@ class TestCheckExtruderTemp:
         obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
             heater_target_temp=150, actual_temp=148, target_material_temp=210
         )
+        heater.can_extrude = True
         obj.function.is_printing.return_value = True
         obj.print_tool_temperatures = [230, 999]
         lane.current_map = "T-1"
@@ -823,6 +827,7 @@ class TestCheckExtruderTemp:
         obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
             heater_target_temp=150, actual_temp=148, target_material_temp=210
         )
+        heater.can_extrude = True
         obj.function.is_printing.return_value = True
         obj.print_tool_temperatures = {230}  # set: truthy but not subscriptable
         lane.current_map = "T0"
@@ -849,6 +854,7 @@ class TestCheckExtruderTemp:
         obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
             heater_target_temp=150, actual_temp=148, target_material_temp=210
         )
+        heater.can_extrude = True
         obj.function.is_printing.return_value = True
         obj.print_tool_temperatures = [230]
         lane.current_map = _RaisesAttributeError()
@@ -864,10 +870,12 @@ class TestCheckExtruderTemp:
         """A None entry in print_tool_temperatures (e.g. slicer had no data for
         that tool) still resolves via the index lookup, but the None result is
         not used and does NOT fall back to _get_default_material_temps while
-        printing -- it returns without touching the heater instead."""
+        printing with a hot extruder -- it returns without touching the heater
+        instead."""
         obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
             heater_target_temp=150, actual_temp=148, target_material_temp=210
         )
+        heater.can_extrude = True
         obj.function.is_printing.return_value = True
         obj.print_tool_temperatures = [None, 220]
         lane.current_map = "T0"
@@ -878,6 +886,103 @@ class TestCheckExtruderTemp:
         assert result is None
         infos = [m for lvl, m in obj.logger.messages if lvl == "info"]
         assert any(lane.name in m for m in infos)
+
+    # ── the same metadata gaps, with the extruder cold ───────────────────────
+    # Cold, returning would leave the toolchange to abort on min_extrude_temp
+    # with the lane part-unloaded, so the lane's material temperature is used.
+
+    def test_a_bad_index_on_a_cold_extruder_uses_the_lanes_material_temp(self):
+        """An index past the end of the list on a cold extruder heats to the
+        lane's material temperature."""
+        obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
+            heater_target_temp=150, actual_temp=148, target_material_temp=250
+        )
+        heater.can_extrude = False
+        obj.function.is_printing.return_value = True
+        obj.print_tool_temperatures = [230]
+        lane.current_map = "T5"
+        result = obj._check_extruder_temp(lane)
+        obj._get_default_material_temps.assert_called_once_with(lane)
+        pheaters.set_temperature.assert_called_once_with(heater, 250.0)
+        assert result is True
+
+    def test_a_non_numeric_map_on_a_cold_extruder_uses_the_lanes_material_temp(self):
+        """A map that does not parse falls back the same way as a bad index."""
+        obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
+            heater_target_temp=150, actual_temp=148, target_material_temp=250
+        )
+        heater.can_extrude = False
+        obj.function.is_printing.return_value = True
+        obj.print_tool_temperatures = [230]
+        lane.current_map = "custom_lane"
+        result = obj._check_extruder_temp(lane)
+        obj._get_default_material_temps.assert_called_once_with(lane)
+        pheaters.set_temperature.assert_called_once_with(heater, 250.0)
+        assert result is True
+
+    def test_a_none_entry_on_a_cold_extruder_uses_the_lanes_material_temp(self):
+        """A tool with no slicer temperature (None) falls back the same way."""
+        obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
+            heater_target_temp=150, actual_temp=148, target_material_temp=250
+        )
+        heater.can_extrude = False
+        obj.function.is_printing.return_value = True
+        obj.print_tool_temperatures = [None, 220]
+        lane.map = "T0"
+        result = obj._check_extruder_temp(lane)
+        obj._get_default_material_temps.assert_called_once_with(lane)
+        pheaters.set_temperature.assert_called_once_with(heater, 250.0)
+        assert result is True
+
+    def test_the_cold_fallback_logs_why_it_heated(self):
+        """The log names the failed lookup and the temperature used instead."""
+        obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
+            heater_target_temp=150, actual_temp=148, target_material_temp=250
+        )
+        heater.can_extrude = False
+        obj.function.is_printing.return_value = True
+        obj.print_tool_temperatures = [230]
+        lane.current_map = "Tx"
+        obj._check_extruder_temp(lane)
+        assert obj.logger.messages == [
+            ("info", "Could not resolve print_tool_temperatures index for lane lane1: "
+                     "invalid literal for int() with base 10: 'x'"),
+            ("info", "No print_tool_temperatures entry for lane lane1 and the extruder is "
+                     "too cold to extrude, heating to its material temperature so the "
+                     "toolchange can finish"),
+            ("info", "Setting extruder temperature to 250.0 and waiting for extruder to "
+                     "reach temperature"),
+        ]
+
+    def test_a_good_index_on_a_cold_extruder_still_uses_the_metadata(self):
+        """A lane the file covers takes the file's temperature, cold or not."""
+        obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
+            heater_target_temp=150, actual_temp=148, target_material_temp=999
+        )
+        heater.can_extrude = False
+        obj.function.is_printing.return_value = True
+        obj.print_tool_temperatures = [180, 220, 260]
+        lane.current_map = "T1"
+        result = obj._check_extruder_temp(lane)
+        obj._get_default_material_temps.assert_not_called()
+        pheaters.set_temperature.assert_called_once_with(heater, 220.0)
+        assert result is True
+
+    def test_disable_print_temp_check_reaches_a_cold_extruder(self):
+        """With disable_print_temp_check set, a cold extruder still gets the
+        lane's material temperature."""
+        obj, heater, extruder, pheaters, lane = _make_afc_for_check_extruder_temp(
+            heater_target_temp=150, actual_temp=148, target_material_temp=250,
+            disable_print_temp_check=True,
+        )
+        heater.can_extrude = False
+        obj.function.is_printing.return_value = True
+        obj.print_tool_temperatures = [230]
+        lane.current_map = "T5"
+        result = obj._check_extruder_temp(lane)
+        obj._get_default_material_temps.assert_called_once_with(lane)
+        pheaters.set_temperature.assert_called_once_with(heater, 250.0)
+        assert result is True
 
 
 # ── _cooldown_last_extruder ───────────────────────────────────────────────────
@@ -1568,6 +1673,14 @@ class TestChangeTool_LoadPath:
         obj.CHANGE_TOOL(cur_lane, restore_pos=False)
         obj.restore_pos.assert_not_called()
 
+    def test_restore_pos_not_called_while_paused(self):
+        """A change made during a pause keeps the pause's saved position for AFC_RESUME."""
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.function.is_paused.return_value = True
+        obj.CHANGE_TOOL(cur_lane)
+        obj.TOOL_LOAD.assert_called_once()
+        obj.restore_pos.assert_not_called()
+
     def test_restore_pos_suppressed_when_error_state_set_during_load(self):
         """If TOOL_LOAD sets error_state=True, restore_pos is not called."""
         obj, cur_lane, _ = _make_afc_for_change_tool()
@@ -1857,6 +1970,53 @@ class TestChangeTool_ExceptionHandling:
         obj.CHANGE_TOOL(cur_lane)
         call_kwargs = obj.error.AFC_error.call_args.kwargs
         assert call_kwargs.get("pause") is True
+
+    def _make_in_print(self, in_print=True):
+        obj, cur_lane = self._make_raising_fixture()
+        obj.function.in_print.side_effect = (
+            lambda return_file=False: (in_print, "pizza.gcode") if return_file else in_print)
+        return obj, cur_lane
+
+    MESSAGE = ("An unexpected error occurred during CHANGE_TOOL: {}. "
+               "Please check the logs and report this issue to developers.")
+    LOGS = [("info", "Tool Change - lane1 -> lane2"),
+            ("error", "Unexpected error during CHANGE_TOOL:\n")]
+
+    def test_an_exception_during_a_print_records_the_interrupted_change(self):
+        """A U1 head that fails to dock raises out of the change, and AFC_RESUME
+        must finish that change like one whose load returned False."""
+        obj, cur_lane = self._make_in_print()
+        obj.CHANGE_TOOL(cur_lane, purge_length=186.3)
+        assert obj.resume_toolchange == ("T0", "lane2", 186.3, "pizza.gcode")
+        obj.error.AFC_error.assert_called_once_with(
+            self.MESSAGE.format("simulated failure"), pause=True)
+        assert obj.logger.messages == self.LOGS
+
+    def test_an_exception_outside_a_print_records_nothing(self):
+        obj, cur_lane = self._make_in_print(in_print=False)
+        obj.resume_toolchange = ("T9", "lane9", 60.0, "old.gcode")
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        obj.function.in_print.assert_any_call(return_file=True)
+        obj.error.AFC_error.assert_called_once_with(
+            self.MESSAGE.format("simulated failure"), pause=False)
+        assert obj.logger.messages == self.LOGS
+
+    def test_the_error_text_loses_its_angle_brackets_and_final_period(self):
+        """Moonraker shows an error holding < or > as "Unknown"."""
+        obj, cur_lane = self._make_in_print()
+        obj.TOOL_LOAD.side_effect = KeyError("<AFCLane lane2> is unknown.")
+        obj.CHANGE_TOOL(cur_lane)
+        obj.error.AFC_error.assert_called_once_with(
+            self.MESSAGE.format("'(AFCLane lane2) is unknown.'"), pause=True)
+        assert obj.logger.messages == self.LOGS
+
+    def test_an_error_without_text_is_named_by_its_type(self):
+        obj, cur_lane = self._make_in_print()
+        obj.TOOL_LOAD.side_effect = ValueError()
+        obj.CHANGE_TOOL(cur_lane)
+        obj.error.AFC_error.assert_called_once_with(self.MESSAGE.format("ValueError"), pause=True)
+        assert obj.logger.messages == self.LOGS
 
 
 # ── cmd_CHANGE_TOOL: NEW_EXTRUDER_TEMP parameter parsing ─────────────────────
@@ -5022,6 +5182,19 @@ class TestSaveVars:
         assert data["system"]["bypass"] == {"enabled": False}
         assert data["system"]["extruders"]["extruder"]["lane_loaded"] == "lane1"
 
+    def test_listeners_add_to_the_snapshot_before_it_is_queued(self):
+        """afc:save_vars hands listeners the snapshot, so what they add is saved."""
+        obj = _make_afc_for_save_vars(prep_done=True)
+
+        def add_bay(data):
+            data["Pool_1"] = {"lane9": {"map": "T9"}}
+
+        obj.printer.register_event_handler("afc:save_vars", add_bay)
+        obj.save_vars()
+        data = obj._var_write_queue.put_nowait.call_args[0][0]
+        assert data["Pool_1"] == {"lane9": {"map": "T9"}}
+        assert data["Turtle_1"]["lane1"] == {"map": ["T0"]}
+
     def test_does_not_touch_disk_directly(self):
         """The actual write must happen on the background thread, not inline."""
         obj = _make_afc_for_save_vars(prep_done=True)
@@ -5249,6 +5422,192 @@ class TestJoinThreads:
         obj._var_write_thread.join.side_effect = lambda *a, **kw: order.append("join")
         obj.join_threads()
         assert order == ["put_nowait", "join"]
+
+
+# ── CHANGE_TOOL: remembering an interrupted tool change for AFC_RESUME ────────
+
+class TestChangeTool_ResumeToolchange:
+    """A failed unload or load during a print records the T(n) and lane
+    CHANGE_TOOL was loading, so AFC_RESUME can finish the change."""
+
+    CHANGE = ("info", "Tool Change - lane1 -> lane2")
+
+    def _make(self, in_print=True):
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        obj.function.in_print.side_effect = (
+            lambda return_file=False: (in_print, "pizza.gcode") if return_file else in_print)
+        return obj, cur_lane, current_lane
+
+    def test_failed_unload_records_the_lane(self):
+        obj, cur_lane, _ = self._make()
+        obj.TOOL_UNLOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane, purge_length=269.0)
+        assert obj.resume_toolchange == ("T0", "lane2", 269.0, "pizza.gcode")
+        obj.error.fix.assert_called_once()
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_failed_load_records_the_lane(self):
+        obj, cur_lane, _ = self._make()
+        obj.TOOL_LOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane, purge_length=60.0)
+        assert obj.resume_toolchange == ("T0", "lane2", 60.0, "pizza.gcode")
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_failed_load_outside_a_print_records_nothing(self):
+        obj, cur_lane, _ = self._make(in_print=False)
+        obj.TOOL_LOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_successful_load_clears_it(self):
+        obj, cur_lane, _ = self._make()
+        obj.resume_toolchange = ("T0", "lane2", 60.0, "pizza.gcode")
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == [self.CHANGE]
+
+    def test_print_state_error_records_nothing(self):
+        obj, cur_lane, _ = self._make()
+        obj.function.in_print.side_effect = RuntimeError("no print_stats")
+        obj.TOOL_UNLOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.resume_toolchange is None
+        obj.error.fix.assert_called_once()
+        assert obj.logger.messages == [
+            self.CHANGE,
+            ("debug", "Not keeping the tool change to lane2 for resume: no print_stats")]
+
+
+class TestChangeTool_CountChange:
+    """AFC_RESUME finishing a change passes count_change=False, since the
+    change was counted when it first ran."""
+
+    def _make(self):
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.number_of_toolchanges = 40
+        obj.current_toolchange = 10
+        return obj, cur_lane
+
+    def test_a_change_is_counted(self):
+        obj, cur_lane = self._make()
+        obj.CHANGE_TOOL(cur_lane)
+        assert obj.current_toolchange == 11
+        assert obj.logger.messages == [("info", "Tool Change - lane1 -> lane2"),
+                                       ("raw", "//      Change 11 out of 40")]
+
+    def test_a_finished_change_is_not_counted_again(self):
+        obj, cur_lane = self._make()
+        obj.CHANGE_TOOL(cur_lane, count_change=False)
+        assert obj.current_toolchange == 10
+        assert obj.logger.messages == [("info", "Tool Change - lane1 -> lane2")]
+
+
+class TestResetFileCallback:
+    def test_a_new_print_drops_the_unfinished_tool_change(self):
+        obj = _make_afc()
+        obj.error = MagicMock()
+        obj.save_vars = MagicMock()
+        obj.print_data_metadata = None
+        obj.resume_toolchange = ("T16", "lane28", 269.0, "pizza.gcode")
+        obj.current_toolchange = 12
+        obj._reset_file_callback()
+        assert obj.resume_toolchange is None
+        assert obj.current_toolchange == -1
+        obj.error.reset_failure.assert_called_once_with()
+        obj.gcode.run_script_from_command.assert_called_once_with("CLEAR_PAUSE")
+        assert obj.logger.messages == []
+
+
+class TestAfcInitResumeToolchange:
+    def test_nothing_to_finish_at_start(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter()))
+        assert obj.resume_toolchange is None
+
+
+class TestAfcInitPreResumeMacro:
+    def test_unset_by_default(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter()))
+        assert obj.pre_resume_macro is None
+
+    def test_reads_the_configured_macro(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter(),
+                             values={"pre_resume_macro": "SNAPMAKER_EXIT_DISCARD_BIN"}))
+        assert obj.pre_resume_macro == "SNAPMAKER_EXIT_DISCARD_BIN"
+
+
+class TestNoteInterruptedToolchange:
+    def _make(self):
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.logger.messages.clear()
+        return obj, cur_lane
+
+    def test_during_a_print_it_keeps_the_tool_lane_purge_and_file(self):
+        obj, cur_lane = self._make()
+        cur_lane.current_map = "T16"
+        obj.function.in_print.side_effect = None
+        obj.function.in_print.return_value = (True, "pizza.gcode")
+        obj._note_interrupted_toolchange(cur_lane, 269.0)
+        obj.function.in_print.assert_called_once_with(return_file=True)
+        assert obj.resume_toolchange == ("T16", "lane2", 269.0, "pizza.gcode")
+        assert obj.logger.messages == []
+
+    def test_outside_a_print_it_keeps_nothing(self):
+        obj, cur_lane = self._make()
+        obj.resume_toolchange = ("T9", "lane9", 60.0, "old.gcode")
+        obj.function.in_print.side_effect = None
+        obj.function.in_print.return_value = (False, None)
+        obj._note_interrupted_toolchange(cur_lane, 269.0)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == []
+
+    def test_a_print_state_error_keeps_nothing(self):
+        obj, cur_lane = self._make()
+        obj.resume_toolchange = ("T9", "lane9", 60.0, "old.gcode")
+        obj.function.in_print.side_effect = RuntimeError("no print_stats")
+        obj._note_interrupted_toolchange(cur_lane, None)
+        assert obj.resume_toolchange is None
+        assert obj.logger.messages == [
+            ("debug", "Not keeping the tool change to lane2 for resume: no print_stats")]
+
+class TestToolLoadZeroesEOnSnapmakerPause:
+    """A U1 keeps the unload's retract in printing_e_pos when the load runs
+    during a pause, so TOOL_LOAD zeroes E there and nowhere else."""
+
+    def _make(self, snapmaker, paused):
+        afc, lane, _ = TestToolLoadDisplayStatusLifecycle()._make()
+        afc.load_sequence = MagicMock(return_value=True)
+        afc.snapmaker_printer = snapmaker
+        afc.function.is_paused.return_value = paused
+        return afc, lane
+
+    def _g92_calls(self, afc):
+        return [c for c in afc.gcode.run_script_from_command.call_args_list
+                if c.args and c.args[0] == "G92 E0"]
+
+    def test_snapmaker_paused_zeroes_e_and_points_the_resume_at_the_head(self):
+        afc, lane = self._make(snapmaker=True, paused=True)
+        assert afc.TOOL_LOAD(lane)
+        assert len(self._g92_calls(afc)) == 1
+        afc.error.point_snapmaker_resume_at.assert_called_once_with(lane)
+        assert afc.logger.messages == [("info", "Loading lane1")]
+
+    def test_snapmaker_printing_leaves_e(self):
+        afc, lane = self._make(snapmaker=True, paused=False)
+        assert afc.TOOL_LOAD(lane)
+        assert self._g92_calls(afc) == []
+        afc.error.point_snapmaker_resume_at.assert_not_called()
+        assert afc.logger.messages == [("info", "Loading lane1")]
+
+    def test_other_printer_paused_leaves_e(self):
+        afc, lane = self._make(snapmaker=False, paused=True)
+        assert afc.TOOL_LOAD(lane)
+        assert self._g92_calls(afc) == []
+        afc.error.point_snapmaker_resume_at.assert_not_called()
+        assert afc.logger.messages == [("info", "Loading lane1")]
 
 
 class TestAFCLedColorValidation:

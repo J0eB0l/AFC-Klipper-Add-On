@@ -25,6 +25,7 @@ except ImportError:
     pass
 
 import extras.temperature_ace as temperature_ace_module  # noqa: E402
+import extras.temperature_bambu as temperature_bambu_module  # noqa: E402
 import extras.temperature_oams as temperature_oams_module  # noqa: E402
 from extras.temperature_afc import (  # noqa: E402
     TemperatureAFC,
@@ -75,6 +76,17 @@ class TestTemperatureAFCNew:
         monkeypatch.setattr(temperature_oams_module, "TemperatureOAMS", _StubSensor)
         printer = make_ace_printer()
         config = AceConfig("temperature_sensor t", printer, {"afc_type": "OpenAMS"})
+
+        result = TemperatureAFC(config)
+
+        assert isinstance(result, _StubSensor)
+        assert result.config is config
+
+    def test_bambu_unit_auto_detects_and_dispatches_to_temperature_bambu(self, monkeypatch):
+        """afc_type omitted: bambu_unit alone is enough to detect a Bambu AMS."""
+        monkeypatch.setattr(temperature_bambu_module, "TemperatureBambu", _StubSensor)
+        printer = make_ace_printer()
+        config = AceConfig("temperature_sensor t", printer, {"bambu_unit": "Bambu_AMS_1"})
 
         result = TemperatureAFC(config)
 
@@ -152,6 +164,12 @@ class TestDetectAfcType:
         config = AceConfig("temperature_sensor t", printer, {"ace_unit": "Ace_1"})
 
         assert TemperatureAFC._detect_afc_type(config) == "ACE"
+
+    def test_bambu_unit_present_detects_bambu(self):
+        printer = make_ace_printer()
+        config = AceConfig("temperature_sensor t", printer, {"bambu_unit": "Bambu_AMS_1"})
+
+        assert TemperatureAFC._detect_afc_type(config) == "Bambu"
 
     def test_i2c_mcu_present_detects_openams(self):
         printer = make_ace_printer()

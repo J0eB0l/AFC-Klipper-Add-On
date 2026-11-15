@@ -131,9 +131,13 @@ class AFCLane:
         self.multi_color: list  = []
         self.spool_vendor: str  = ""
         self.filament_name: str = ""
+        # OrcaSlicer's id for the spool's filament product, from the Spoolman
+        # filament's filament_id extra field; "" when it has none.
+        self.filament_id: str   = ""
         self.weight: float      = 0.
         self.auto_switch_triggered: bool = False
         self._material: str     = None
+        self.sub_type: str      = ""     # tag/Spoolman variant, e.g. "Matte"
         self.extruder_temp: Optional[int] = None
         self.bed_temp: Optional[int] = None
         self.td1_data           = {}
@@ -160,6 +164,9 @@ class AFCLane:
 
         self.afc_extruder_name    = config.get('extruder', None)                          # Extruder name(AFC_extruder) that belongs to this stepper, overrides extruder that is set in unit(AFC_BoxTurtle/NightOwl/etc) section.
         self.standalone_lane      = config.getboolean("standalone", False)
+        # A pooled lane exists from boot but joins no registry until a unit
+        # claims it live (AFC_BridgeBox activate_from_pool).
+        self.unassigned: bool     = config.getboolean("unassigned", False)
         self.remember_spool :bool = config.getboolean('remember_spool', None)             # remember_spool that is set in AFC_Stepper section, overrides remember_spool that is set in unit(AFC_BoxTurtle/NightOwl/etc) section.
         self.map: list            = config.getlist('cmd', [])                           # Keeping this in so it does not break others config that may have used this, use map instead
         # Saving to self._map so that if a user has it defined it will be reset back to this when
@@ -711,8 +718,11 @@ class AFCLane:
 
         # Register all lanes if their type is not HTLF or only register lanes that are HTLF and have AFC_lane
         # in the name so that HTLF stepper names do not get added since they are not a lane for this unit type
-        if (self.unit_obj.type not in EXCLUDE_TYPES
-            or (self.unit_obj.type in EXCLUDE_TYPES and "AFC_lane" in self.fullname)):
+        # A pooled lane resolves its objects here but stays out of every
+        # registry until claimed.
+        if (not self.unassigned
+            and (self.unit_obj.type not in EXCLUDE_TYPES
+                 or (self.unit_obj.type in EXCLUDE_TYPES and "AFC_lane" in self.fullname))):
             add_to_other_obj = True
             # Registering lane name in unit
             self.unit_obj.lanes[self.name] = self
@@ -1235,7 +1245,16 @@ class AFCLane:
             hook = getattr(self.unit_obj, 'prep_capture_td1', None)
             if hook is not None and hook(self) is not None:
                 return
-            if not self.hub_obj.state and self.afc.function.get_current_lane_obj() is None:
+            # With several toolheads, a lane loaded in another tool does not
+            # block this one: only this lane's own toolhead matters, and
+            # never mid-print.
+            extruder = getattr(self, "extruder_obj", None)
+            own_tool_clear = (extruder is not None
+                              and extruder.lane_loaded is None
+                              and not self.afc.function.is_printing())
+            if (not self.hub_obj.state
+                and (self.afc.function.get_current_lane_obj() is None
+                     or own_tool_clear)):
                 self.get_td1_data()
             else:
                 self.logger.info(f"Cannot get TD-1 data for {self.name}, either toolhead is loaded or hub shows filament in path")
@@ -1414,6 +1433,11 @@ class AFCLane:
 
                             self.status = AFCLaneState.NONE
                             self.logger.debug(f"Prep: Load Done-{self.name}")
+
+                            # Tip is at the load sensor with the bowden empty:
+                            # the one moment an RFID scan can spin the spool.
+                            # Fire-and-forget so a handler cannot cost the load.
+                            self.printer.send_event("afc:lane_prep_loaded", self)
 
                             # Verify that load state is still true as this would still trigger if prep sensor was triggered and then filament was removed
                             #   This is only really a issue when using direct_load and still using load sensor
@@ -1767,6 +1791,7 @@ class AFCLane:
         self.afc.spool.set_snapmaker_filament_params(self)
 
         self.unit_obj.lane_tool_loaded(self)
+        self.printer.send_event("afc:tool_loaded", self)
 
     def set_tool_unloaded(self, normal_toolchange: bool=False):
         """
@@ -2026,6 +2051,7 @@ class AFCLane:
                     "material"       : self.material,
                     "vendor_name"    : self.spool_vendor,
                     "name"           : self.filament_name,
+                    "filament_id"    : self.filament_id,
                     "bed_temp"       : self.bed_temp,
                     "nozzle_temp"    : self.extruder_temp,
                     "scan_time"      : scan_time,
@@ -2515,15 +2541,22 @@ class AFCLane:
         response["tool_loaded"] = self.tool_loaded
         response["loaded_to_hub"] = self.loaded_to_hub
         response["material"]=self.material
+        response["sub_type"] = getattr(self, "sub_type", "")
         if save_to_file:
             response["density"]=self.filament_density
             response["diameter"]=self.filament_diameter
             response["empty_spool_weight"]=self.empty_spool_weight
             response["need_purge"] = self.need_purge
+        else:
+            # Live status for the UIs, the same values the vars file saves above.
+            response["density"] = self.filament_density
+            response["diameter"] = self.filament_diameter
+            response["empty_spool_weight"] = self.empty_spool_weight
 
         response["remember_spool"]= bool(self.remember_spool)
         response["spool_id"]= int(self.spool_id) if self.spool_id else None
         response["color"]=self.color
+        response["filament_id"] = self.filament_id
         response["filament_name"] = self.filament_name
         response["spool_vendor"] = self.spool_vendor
         if not save_to_file:

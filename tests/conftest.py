@@ -542,6 +542,7 @@ class MockAFC:
         self.log_frame_data = True
         self.position_saved = False
         self.in_toolchange = False
+        self.resume_toolchange = None
         self.error_timeout = 600
         self.td1_defined = False
         self.td1_present = False
@@ -556,6 +557,7 @@ class MockAFC:
         self.long_moves_speed = 100.0
         self.long_moves_accel = 400.0
         self.z_hop = 0.5
+        self.pre_resume_macro = None
         self.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
         self.gcode_move = MagicMock()
         self.prep_done = False
@@ -663,6 +665,22 @@ class MockPrinter:
             self._objects[name] = val
         return val
 
+    def lookup_objects(self, module=None):
+        """
+        Real Klipper's (name, object) enumeration, which code that has to
+        FIND its collaborators rather than name them relies on.
+
+        Only the explicitly registered objects: the MagicMocks lookup_object
+        fabricates on demand are not real registrations and would show up
+        here as objects nobody added.
+        """
+        items = list(self._objects.items())
+        if module is None:
+            return items
+        prefix = module + " "
+        return [(n, o) for n, o in items
+                if n == module or n.startswith(prefix)]
+
     _NO_DEFAULT = object()
 
     def load_object(self, config, name, default=_NO_DEFAULT):
@@ -728,6 +746,15 @@ class MockConfig:
             error_str = f"Option '{option}' in section '{self.section}' must be specified"
             raise KlipperError(error_str)
         return default
+
+    def get_prefix_options(self, prefix):
+        opts = [k for k in self._values if k.startswith(prefix)]
+        try:
+            opts += [o for o in self.fileconfig.options(self.section)
+                     if o.startswith(prefix) and o not in opts]
+        except Exception:
+            pass
+        return opts
 
     def get(self, option, default=_MOCK_CONFIG_SENTINEL):
         try:

@@ -224,6 +224,7 @@ class AfcToolchanger(afcUnit):
         self._increase_unselect()
         self.afc.function.log_toolhead_pos("Before toolswap: ")
         # Save the current position before switching tools and subtract offsets
+        saved_position = list(self.afc.last_gcode_position[:3])
         for i in range(0, 3):
             self.afc.last_gcode_position[i] -= self.afc.gcode_move.base_position[i]
         # Perform a tool swap by selecting the appropriate extruder based on the lane's extruder object.
@@ -231,11 +232,17 @@ class AfcToolchanger(afcUnit):
         name = lane.extruder_obj.th_extruder_name
         tool_index = 0 if name == "extruder" else int(name.replace("extruder", ""))
 
-        if lane.extruder_obj.custom_tool_swap:
-            self.logger.info(f"Running custom select: {lane.extruder_obj.custom_tool_swap}")
-            self.afc.run_script(f"{lane.extruder_obj.custom_tool_swap}", gcmd)
-        else:
-            self.afc.run_script('SELECT_TOOL T={}'.format(tool_index), gcmd)
+        try:
+            if lane.extruder_obj.custom_tool_swap:
+                self.logger.info(f"Running custom select: {lane.extruder_obj.custom_tool_swap}")
+                self.afc.run_script(f"{lane.extruder_obj.custom_tool_swap}", gcmd)
+            else:
+                self.afc.run_script('SELECT_TOOL T={}'.format(tool_index), gcmd)
+        except Exception:
+            # A swap that raises never gets its offsets added back below, and the retry
+            # after the pause takes them off again, so put the saved position back
+            self.afc.last_gcode_position[:3] = saved_position
+            raise
         lane.extruder_obj.next_pickup = False
 
         if current_extruder:
@@ -252,8 +259,9 @@ class AfcToolchanger(afcUnit):
         if self.afc.afc_stats.average_tool_swap_time:
             self.afc.afc_stats.average_tool_swap_time.average_time(self.afc.afcDeltaTime.delta_time)
         lane.extruder_obj.status = self.afc.current_state = State.IDLE
-        # Update the base position and homing position after the tool swap.
-        self.afc.base_position   = list(self.afc.gcode_move.base_position)
+        # Update the base position and homing position after the tool swap. E keeps its saved
+        # base: restore_pos adds the E the swap moved, so taking it here counted it twice.
+        self.afc.base_position[:3] = self.afc.gcode_move.base_position[:3]
         self.afc.homing_position = list(self.afc.gcode_move.homing_position)
         # Update the last_gcode_position to reflect the new base position after the tool swap.
         for i in range(0, 3):

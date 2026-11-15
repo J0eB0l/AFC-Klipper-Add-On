@@ -30,3 +30,8 @@ class UnitSelection:
     toolhead_sensor: str = "Ramming"
     toolhead_sensor_pin: str = "Unknown"
     extruder: str = "extruder"
+    bridgebox_pool_ams: int = 4
+    bridgebox_pool_ht: int = 8
+    bridgebox_connection: str = "usb"
+    bridgebox_address: str = ""
+    bridgebox_serial: str = "auto"

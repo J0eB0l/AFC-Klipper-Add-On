@@ -56,9 +56,89 @@ try: from extras.AFC_unit import afcUnit
 except:
     error_str = ERROR_STR.format(import_lib="AFC_unit", trace=traceback.format_exc())
     raise error(error_str)
-# Uncomment below for real RFID integration
-apply_filament_defaults = None
-rgb_array_to_hex = None
+
+try:
+    from extras.AFC_RFID import (
+        rgb_array_to_hex, apply_filament_defaults,
+        sync_rfid_to_spoolman, get_auto_spoolman_create,
+        log_new_filament, log_new_spool,
+    )
+except Exception:
+    # AFC_RFID is optional. Provide self-contained fallbacks for the lane-info
+    # path; the Spoolman helpers stay None so their guarded paths no-op.
+    sync_rfid_to_spoolman = None
+    get_auto_spoolman_create = None
+    log_new_filament = None
+    log_new_spool = None
+
+    def rgb_array_to_hex(color_array: Any) -> str:
+        """
+        [r, g, b] -> '#rrggbb' (fallback when AFC_RFID isn't present).
+
+        :param color_array: [r, g, b] values
+        :return str: '#rrggbb', or '' when the input is not a usable colour
+        """
+        if isinstance(color_array, (list, tuple)) and len(color_array) >= 3:
+            try:
+                r, g, b = (int(color_array[0]), int(color_array[1]),
+                           int(color_array[2]))
+                return f"#{r & 0xFF:02x}{g & 0xFF:02x}{b & 0xFF:02x}"
+            except (TypeError, ValueError):
+                return ""
+        return ""
+
+    def apply_filament_defaults(lane: Any, slot_info: Any,
+                                color_converter: Optional[Any] = None,
+                                afc_defaults: Optional[dict] = None) -> None:
+        """
+        Apply the ACE's RFID material/color/temps to a lane when not already
+        set, a dependency-free copy of AFC_RFID.apply_filament_defaults so the
+        ACE can populate the lane (shows in Mainsail) with no AFC_RFID present.
+
+        :param lane: lane to populate
+        :param slot_info: the slot's inventory dict
+        :param color_converter: optional callable turning a raw colour into hex
+        :param afc_defaults: optional default material/colour to fill gaps
+        """
+        info = slot_info or {}
+        has_material = getattr(lane, "material", None) not in (None, "")
+        has_color = getattr(lane, "color", None) not in (None, "", "#000000")
+        has_ext_temp = getattr(lane, "extruder_temp", None) is not None
+        has_bed_temp = getattr(lane, "bed_temp", None) is not None
+
+        material = (info.get("material", "") or "")
+        if material.lower() == "unknown":
+            material = ""
+        color_hex = info.get("color_hex", "") or ""
+        if not color_hex and color_converter is not None:
+            raw = info.get("color", [0, 0, 0])
+            if raw != [0, 0, 0]:
+                color_hex = color_converter(raw)
+
+        if not has_material and material:
+            lane.material = material
+        if not has_color and color_hex:
+            lane.color = color_hex if color_hex.startswith("#") else "#" + color_hex
+        if not has_ext_temp and info.get("extruder_temp") is not None:
+            try:
+                lane.extruder_temp = float(info.get("extruder_temp"))
+            except (TypeError, ValueError):
+                pass
+        if not has_bed_temp and info.get("bed_temp") is not None:
+            try:
+                lane.bed_temp = float(info.get("bed_temp"))
+            except (TypeError, ValueError):
+                pass
+
+        if afc_defaults is not None:
+            if not getattr(lane, "material", None):
+                dm = afc_defaults.get("default_material_type")
+                if dm:
+                    lane.material = dm
+            if not getattr(lane, "color", None):
+                dc = afc_defaults.get("default_color")
+                if dc:
+                    lane.color = dc
 
 MODE_COMBINED = "combined"
 MODE_DIRECT = "direct"
@@ -1170,12 +1250,13 @@ class afcACE(afcUnit):
 
     def on_filament_insert(self, lane: AFCLane) -> None:
         """
-        ACE-specific insertion: refresh RFID inventory, apply spool defaults, sync to spoolman.
+        ACE-specific insertion: on a V1 ACE, refreshes the slot's RFID
+        inventory and applies the tag's material and color; restores a
+        staged/remembered spool id and runs the base insertion handling.
 
-        :param lane: Lane whose slot had filament inserted; its RFID inventory
-            is refreshed, filament defaults/Spoolman are applied, a freshly
-            staged or remembered spool id is restored, and the base
-            on_filament_insert is then called.
+        :param lane: Lane whose slot had filament inserted; a V1 ACE applies
+            its tag values, a freshly staged or remembered spool id is
+            restored, and the base on_filament_insert is then called.
         """
         slot = self._get_slot(lane.name)
         if slot >= self.SLOTS_PER_UNIT:
@@ -1476,7 +1557,8 @@ class afcACE(afcUnit):
             self._operation_active = prev
             self._prev_states_stale = True
 
-    def _feed_to_hub_probing(self, lane: AFCLane, slot: int, dist_hub: float) -> bool:
+    def _feed_to_hub_probing(self, lane: AFCLane, slot: int,
+                             dist_hub: float) -> Optional[bool]:
         """
         Feed the filament into the unit and on to the hub, giving an RFID
         integration a chance to read the tag *during* the load.
@@ -1487,10 +1569,16 @@ class afcACE(afcUnit):
         dist_hub - fed`) is then staged in a single move at full feed speed. With
         no listener this is just one `initial + dist_hub` feed.
 
+        The scan ends when the slot stops, which is also how the unit ends a
+        feed it gave up on (a jam), so the slot is checked for an error after
+        the scan and after the remainder feed.
+
         :param lane: lane being staged
         :param slot: 0-based ACE slot index for the lane
         :param dist_hub: lane-to-hub distance in mm
-        :return bool: False when the spool was removed mid-stage, else True
+        :return Optional[bool]: False when the spool was removed mid-stage,
+            None when the unit stopped the stage with a slot error (logged),
+            else True
         """
         if self._ace is None:
             return False
@@ -1506,13 +1594,18 @@ class afcACE(afcUnit):
         total = initial + dist_hub
         fed = max(float(ctx.get("fed") or 0.0), 0.0)
         removed = bool(ctx.get("removed"))
+        err = None
         try:
             # Bail out if the spool was pulled back out mid-stage; feeding an empty
             # slot trips the ACE's stuck-spool error.
             if (not removed
                 and self._slot_reports_empty(slot)):
                 removed = True
-            if not removed:
+            if (not removed
+                and ctx.get("active")):
+                err = self._slot_error(slot)
+            if (not removed
+                and err is None):
                 # Stage the remainder in one move at full feed speed. The scan read
                 # pauses for seconds and can leave the unit "busy", so wait ready.
                 remaining = total - fed
@@ -1520,6 +1613,7 @@ class afcACE(afcUnit):
                     self._wait_for_ace_ready(timeout=self.prep_ready_timeout)
                     self._ace.feed_filament(slot, remaining, self.feed_speed)
                     self._wait_for_feed_complete(slot, remaining, self.feed_speed)
+                    err = self._last_move_error
                     fed += remaining
         finally:
             try:
@@ -1532,7 +1626,30 @@ class afcACE(afcUnit):
             self.logger.debug(f"ACE prep_post_load: {lane.name} filament removed during staging, "
                               f"aborting (fed {fed:.0f}/{total:.0f}mm)")
             return False
+        if err is not None:
+            # The unit gave up on the feed: the filament is not at the hub.
+            hint = self._stall_hint(lane) if err == "feed_error" else ""
+            self.logger.error(f"ACE prep_post_load: {lane.name} not staged, slot {slot} "
+                              f"reported {err}{hint}")
+            return None
         return True
+
+    def _slot_error(self, slot_index: int) -> Optional[str]:
+        """
+        Poll the slot once and record any error it reports as the last move's.
+
+        :param slot_index: 0-based ACE slot index
+        :return Optional[str]: the error (e.g. "feed_error"), or None when the
+            slot has none or the unit can't be asked
+        """
+        self._last_move_error = None
+        try:
+            hw_status = self._ace.get_status(timeout=2.0)
+        except Exception:
+            return None
+        if self._slot_in_error(hw_status, slot_index):
+            self._note_move_error(hw_status, slot_index)
+        return self._last_move_error
 
     def prep_post_load(self, lane: AFCLane) -> None:
         """
@@ -1540,7 +1657,8 @@ class afcACE(afcUnit):
 
         Feeds dist_hub from the slot when load_to_hub is enabled and the slot
         is prepped but not yet staged, marking the lane loaded_to_hub and
-        optionally capturing TD-1 data. Retries the feed up to three times.
+        optionally capturing TD-1 data. Retries the feed up to three times,
+        but not after the unit stopped it with a slot error (a jam).
 
         :param lane: Lane to stage to the hub.
         """
@@ -1565,7 +1683,13 @@ class afcACE(afcUnit):
                     # Wait out the unit's own insert cycle, or it rejects the
                     # staging feed with error_2.
                     self._wait_for_ace_ready(timeout=self.prep_ready_timeout)
-                    if self._feed_to_hub_probing(lane, slot, lane.dist_hub) is False:
+                    staged = self._feed_to_hub_probing(lane, slot, lane.dist_hub)
+                    if staged is None:
+                        # The unit stopped the stage on a slot error (logged).
+                        # Retrying a jam only grinds it; the lane stays prepped
+                        # and unstaged, so its next load feeds the whole way.
+                        return
+                    if staged is False:
                         # Spool pulled back out mid-stage, don't mark it staged
                         # and don't retry; reset prep so a fresh insert stages clean.
                         lane.loaded_to_hub = False
@@ -4913,14 +5037,19 @@ class ACEConnection:
 
         Fast path on reconnect: re-check the last-resolved port first (one quick
         probe) so the common case doesn't run the full settle-window scan; only
-        fall back to the scan if that unit has moved/renumbered.
+        fall back to the scan if that unit has moved/renumbered. The last port
+        is only re-checked while it is still an ACE by id: once the unit is
+        gone, Linux hands its ttyACM number to the next USB serial device
+        plugged in, and probing it would open that device and send it ACE
+        frames on every retry.
 
         :param logger: logger to use from the worker thread
         :return str: the serial port to open
         """
         if not self._auto:
             return self._serial_port
-        if self._resolved_port:
+        if (self._resolved_port
+            and self._resolved_port in _ace_scan_candidates()):
             with contextlib.suppress(Exception):
                 if probe_ace_get_info_id(self._resolved_port, self._baud_rate) == self._ace_index:
                     return self._resolved_port

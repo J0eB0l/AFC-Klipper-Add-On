@@ -59,7 +59,7 @@ class TestReplayOfTheRecordedCases:
         assert missing_types.isdisjoint(registered_types)
         assert replayed, "no BoxTurtle fixtures were replayed"
         assert (FIXTURES / "message__BoxTurtle_4Lane__buffer-None.txt").exists()
-        assert len(pending) == 120  # replayed by test_install_flow_install.py
+        assert len(pending) == 125  # replayed by test_install_flow_install.py
         assert not unregistered
 
 

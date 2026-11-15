@@ -1792,6 +1792,8 @@ class TestACE2ConnectionResolveConnectPort:
         printer, conn = ace2_link()
         conn._auto = True
         conn._resolved_port = "/dev/ttyACM2"
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates",
+                            lambda: ["/dev/ttyACM2"])
         conn._ace_uid = None
 
         def boom(port, baud):
@@ -1813,6 +1815,8 @@ class TestACE2ConnectionResolveConnectPort:
         printer, conn = ace2_link()
         conn._auto = True
         conn._resolved_port = "/dev/ttyACM2"
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates",
+                            lambda: ["/dev/ttyACM2"])
         conn._ace_uid = None
         monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: None)
         monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
@@ -1828,6 +1832,8 @@ class TestACE2ConnectionResolveConnectPort:
         printer, conn = ace2_link()
         conn._auto = True
         conn._resolved_port = "/dev/ttyACM2"
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates",
+                            lambda: ["/dev/ttyACM2"])
         conn._ace_uid = None
         conn._bound_uid = (1, 2, 3)
         monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
@@ -1847,6 +1853,8 @@ class TestACE2ConnectionResolveConnectPort:
         printer, conn = ace2_link()
         conn._auto = True
         conn._resolved_port = "/dev/ttyACM2"
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates",
+                            lambda: ["/dev/ttyACM2"])
         conn._ace_uid = None
         assert conn._bound_uid is None
         monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
@@ -1859,6 +1867,8 @@ class TestACE2ConnectionResolveConnectPort:
         printer, conn = ace2_link()
         conn._auto = True
         conn._resolved_port = "/dev/ttyACM2"
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates",
+                            lambda: ["/dev/ttyACM2"])
         conn._ace_uid = (1, 2, 3)
         monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
         resolve_calls = []
@@ -1873,12 +1883,33 @@ class TestACE2ConnectionResolveConnectPort:
         printer, conn = ace2_link()
         conn._auto = True
         conn._resolved_port = "/dev/ttyACM2"
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates",
+                            lambda: ["/dev/ttyACM2"])
         conn._ace_uid = (9, 9, 9)
         monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid", lambda port, baud: (1, 2, 3))
         monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
                             lambda *a, **k: "/dev/ttyACM9")
 
         assert conn._resolve_connect_port() == "/dev/ttyACM9"
+
+    def test_cached_port_no_longer_an_ace2_is_not_probed(self, monkeypatch):
+        """The unit is gone and its ttyACM number now belongs to another USB
+        serial device (a BoxTurtle, say): the retry must not open it and send
+        it V2 frames, even with a pinned uid."""
+        printer, conn = ace2_link()
+        conn._auto = True
+        conn._resolved_port = "/dev/ttyACM2"
+        conn._ace_uid = (1, 2, 3)
+        monkeypatch.setattr(afc_ace2_module, "_ace2_scan_candidates", lambda: [])
+        probes = []
+        monkeypatch.setattr(afc_ace2_module, "probe_ace2_uid",
+                            lambda port, baud: probes.append(port) or (1, 2, 3))
+        monkeypatch.setattr(afc_ace2_module, "resolve_ace2_port",
+                            lambda *a, **k: None)
+
+        with pytest.raises(ACESerialError):
+            conn._resolve_connect_port()
+        assert probes == []
 
 
 class TestACE2ConnectionPreInfoHandshake:

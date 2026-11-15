@@ -38,6 +38,11 @@ except:
     err_str = ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc())
     raise error(err_str)
 
+try: from extras.AFC_functions import get_gcode_absolute_extrude, set_gcode_absolute_extrude
+except:
+    err_str = ERROR_STR.format(import_lib="AFC_functions", trace=traceback.format_exc())
+    raise error(err_str)
+
 class afcError:
     def __init__(self, config: ConfigWrapper) -> None:
         """
@@ -50,6 +55,10 @@ class afcError:
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.errorLog: dict[str, Any] = {}
         self.pause= False
+        # Coordinate and extrude modes from before AFC_PAUSE forced absolute mode
+        self.pause_modes: Optional[tuple[bool, bool]] = None
+        # True when AFC_PAUSE ran during a tool change, so the head may sit in the load area
+        self.pause_in_toolchange = False
 
     def handle_connect(self) -> None:
         """
@@ -262,6 +271,10 @@ class afcError:
         This function clears the error state of the AFC system, sets the in_toolchange flag to False,
         runs the resume script, and restores the toolhead position to the last saved position.
 
+        A tool change that failed part way during the print is finished first, and the print stays
+        paused if that load fails again. When the user's RESUME leaves the print paused, the saved
+        position is kept for the next resume.
+
         This is not a macro that should normally need to be called by the user.
 
         Usage
@@ -282,6 +295,9 @@ class afcError:
         # Save current pause state
         temp_is_paused = self.afc.function.is_paused()
 
+        if not self._finish_interrupted_toolchange():
+            return
+
         # Verify that printer is in absolute mode
         self.afc.function.check_absolute_mode("AFC_RESUME")
 
@@ -299,6 +315,14 @@ class afcError:
         resume_script = f"{self.AFC_RENAME_RESUME_NAME} {gcmd.get_raw_command_parameters()}"
         self.afc.run_script(resume_script, gcmd)
 
+        # The user's RESUME can refuse and leave the print paused (a Snapmaker U1
+        # does when its toolhead sensor reads empty). Keep the saved position and
+        # modes for the resume that does go through.
+        if self.afc.function.is_paused():
+            self.logger.info("AFC_RESUME: the print is still paused, keeping the saved "
+                             "position for the next resume")
+            return
+
         # The only time our resume should restore position is if there was an error that caused the pause
         if (self.afc.error_state
             or temp_is_paused
@@ -306,8 +330,26 @@ class afcError:
             self.set_error_state(False)
             # Restore position if the printer is homed, otherwise leave it where it is
             if self.afc.function.is_homed(for_move=True):
+                # The user's RESUME puts the head back where it paused, which during a tool
+                # change is the load area; leave it before moving back to the print
+                if (self.pause_in_toolchange
+                    and self.afc.pre_resume_macro):
+                    self.afc.run_script(self.afc.pre_resume_macro, gcmd)
                 self.afc.restore_pos(False)
             self.pause = False
+            self.pause_in_toolchange = False
+
+        # restore_pos may not run (a tool change during the pause already used the saved
+        # position), and the user's RESUME brings back the absolute modes AFC_PAUSE set
+        if self.pause_modes is not None:
+            absolute_coord, absolute_extrude = self.pause_modes
+            self.afc.gcode_move.absolute_coord = absolute_coord
+            set_gcode_absolute_extrude(self.afc.gcode_move, absolute_extrude)
+            self.pause_modes = None
+            self.logger.debug(
+                f"AFC_RESUME: restored absolute_coord {absolute_coord}, "
+                f"absolute_extrude {absolute_extrude}"
+            )
 
         self.logger.debug(
             f"RESUME-Error State: {self.afc.error_state}, "
@@ -315,6 +357,100 @@ class afcError:
             f"Position_saved {self.afc.position_saved}, "
             f"in toolchange: {self.afc.in_toolchange}"
         )
+
+    def _finish_interrupted_toolchange(self) -> bool:
+        """
+        Finish the tool change a failure interrupted, before the user's RESUME.
+
+        CHANGE_TOOL records the T(n) and lane it was loading when its unload or load
+        fails and the print pauses. The print file has already moved past that T(n),
+        so without this a plain RESUME prints with the old lane, or an empty toolhead.
+        A lane loaded by hand for that T(n) during the pause, or filament in the
+        bypass, needs nothing more.
+
+        :return bool: True to go on with the resume, False to stay paused
+        """
+        pending = self.afc.resume_toolchange
+        if pending is None:
+            return True
+        tool, lane_name, purge_length, filename = pending
+        in_print, print_file = self.afc.function.in_print(return_file=True)
+        # A SET_MAP during the pause moves the T(n) to another lane
+        lane = self.afc.lanes.get(self.afc.tool_cmds.get(tool, lane_name))
+        if (not in_print
+            or print_file != filename
+            or lane is None
+            or lane.tool_loaded
+            or self.afc.get_bypass_state()):
+            self.afc.resume_toolchange = None
+            return True
+
+        self.logger.info(f"AFC_RESUME: finishing the tool change to {lane.name}")
+        self._home_xy_if_lost()
+        self.set_error_state(False)
+        # The pause's own position is restored after the user's RESUME, and the
+        # change was counted when it first ran
+        self.afc.CHANGE_TOOL(lane, purge_length, restore_pos=False, count_change=False)
+        if self.afc.error_state or not lane.tool_loaded:
+            self.logger.error(f"AFC_RESUME: {lane.name} did not load, so the print stays "
+                              "paused. Clear the fault and resume again.")
+            return False
+        return True
+
+    def _home_xy_if_lost(self) -> None:
+        """
+        Home X and Y before finishing a tool change when only they are unhomed.
+
+        A Snapmaker U1 drops the X and Y homing when a head fails to dock, and the
+        park and pick that finish the change need them. Only a printer with auto_home
+        homes here, as in check_homed. Z is never homed mid print, so with it unhomed
+        as well the change's own homing check decides.
+        """
+        if not self.afc.auto_home:
+            return
+        curtime = self.afc.reactor.monotonic()
+        homed = self.afc.toolhead.get_kinematics().get_status(curtime)["homed_axes"]
+        if "z" in homed and ("x" not in homed or "y" not in homed):
+            self.logger.info("AFC_RESUME: homing X and Y before finishing the tool change")
+            self.afc.run_script("G28 X Y")
+            self.afc.toolhead.wait_moves()
+
+    def point_snapmaker_resume_at(self, lane: AFCLane) -> None:
+        """
+        Tell a Snapmaker U1's INNER_RESUME which head a load during a pause left to resume on.
+
+        INNER_PAUSE saves the extruder that was active at the pause, and INNER_RESUME
+        re-selects, heats and primes that one, which would swap a head loaded during the
+        pause (AFC_RESUME finishing an interrupted change, or a T(n) or TOOL_LOAD by hand)
+        back out. The resume temperature is the highest of the slicer's temperature for
+        the lane's T(n), the target INNER_PAUSE saved for that head and the heater's
+        target, so a load's material default never lowers the print's temperature.
+        Printers without the macro, Snapmaker or not, need nothing.
+
+        :param lane: Lane the load put in the head
+        """
+        if not self.afc.snapmaker_printer:
+            return
+        macro = self.printer.lookup_object("gcode_macro INNER_RESUME", None)
+        if macro is None:
+            return
+        index = lane.lane_extruder_index
+        candidates = [lane.extruder_obj.get_heater().target_temp,
+                      macro.variables.get(f"extruder{index}_temp", 0)]
+        try:
+            tool = int(str(lane.current_map).lstrip("T"))
+            if tool >= 0:
+                candidates.append(self.afc.print_tool_temperatures[tool])
+        except (ValueError, IndexError, TypeError):
+            pass
+        target = max(float(temp) for temp in candidates)
+        self.logger.debug(f"AFC_RESUME: INNER_RESUME now resumes on "
+                          f"{lane.extruder_obj.th_extruder_name} at {target:.0f}C")
+        for variable, value in (("last_extruder_index", index),
+                                ("last_extruder_temp", target),
+                                (f"extruder{index}_temp", target)):
+            self.afc.run_script(
+                f"SET_GCODE_VARIABLE MACRO=INNER_RESUME VARIABLE={variable} VALUE={value}")
 
     cmd_AFC_PAUSE_help = "Pauses print, raises z by z-hop amount, and then calls users pause macro"
     def cmd_AFC_PAUSE(self, gcmd: GCodeCommand) -> None:
@@ -337,8 +473,18 @@ class afcError:
         # Check to make sure printer is not already paused
         if not self.afc.function.is_paused():
             self.logger.debug("AFC_PAUSE: Pausing")
+            self.pause_in_toolchange = self.afc.in_toolchange
             # Save position
             self.afc.save_pos()
+            # The user's PAUSE saves its state after the switch to absolute mode below, so
+            # keep the print's own modes for AFC_RESUME to put back. A tool change that
+            # pauses part way has already switched to absolute mode, so take the modes
+            # its saved position holds from before that.
+            if self.afc.position_saved:
+                self.pause_modes = (self.afc.absolute_coord, self.afc.absolute_extrude)
+            else:
+                self.pause_modes = (self.afc.gcode_move.absolute_coord,
+                                    get_gcode_absolute_extrude(self.afc.gcode_move))
             # Need to pause as soon as possible to stop more gcode from executing, this needs to be done before movement in Z
             self.pause_resume.send_pause_command()
             # Verify that printer is in absolute mode
@@ -351,9 +497,15 @@ class afcError:
                 self.afc.move_z_pos(move_z_pos, "AFC_PAUSE")
             else:
                 self.logger.debug(f"AFC_PAUSE: not moving in z cur_pos:{self.afc.gcode_move.last_position} move_z_pos:{move_z_pos}")
-            # Call users PAUSE
-            renamed_pause_script = f"{self.AFC_RENAME_PAUSE_NAME} {gcmd.get_raw_command_parameters()}"
-            self.afc.run_script(renamed_pause_script, gcmd)
+            # Call users PAUSE. Some printers (a Snapmaker U1) refuse PAUSE outside a
+            # print; the error is already reported, so that refusal is only logged.
+            try:
+                renamed_pause_script = f"{self.AFC_RENAME_PAUSE_NAME} {gcmd.get_raw_command_parameters()}"
+                self.afc.run_script(renamed_pause_script, gcmd)
+            except self.afc.gcode.error as e:
+                if self.afc.function.in_print():
+                    raise
+                self.logger.debug(f"AFC_PAUSE: the printer refused PAUSE outside a print: {e}")
 
             timeout_to_use = max(self.error_timeout, self.idle_timeout_val)
             self.afc.run_script(f"SET_IDLE_TIMEOUT TIMEOUT={timeout_to_use}", gcmd)

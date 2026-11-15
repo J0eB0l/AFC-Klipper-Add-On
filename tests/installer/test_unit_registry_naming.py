@@ -342,8 +342,8 @@ NAMING_FIXTURES = [
 
 
 class TestReplayOfTheNamingFixtures:
-    def test_all_nineteen_naming_fixtures_are_replayed(self) -> None:
-        assert len(NAMING_FIXTURES) == 19
+    def test_all_twenty_naming_fixtures_are_replayed(self) -> None:
+        assert len(NAMING_FIXTURES) == 20
 
     @pytest.mark.parametrize(
         "name, mode, overrides", NAMING_FIXTURES, ids=[case[0] for case in NAMING_FIXTURES]
