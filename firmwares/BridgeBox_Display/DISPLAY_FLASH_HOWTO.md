@@ -11,7 +11,7 @@ AMS bus, so unplugging it, even mid-print, changes nothing on the printer.
 
 ## The files
 
-Both are version AFC-1.57, in this folder, `firmwares/BridgeBox_Display/`.
+Both are version AFC-1.59, in this folder, `firmwares/BridgeBox_Display/`.
 
 | file | flash at | keeps the saved WiFi and printer | use it for |
 |---|---|---|---|
@@ -109,6 +109,20 @@ next four.
 
 To move the panel to another network or printer, press **Log out** in the top
 bar and confirm. It forgets both and starts setup again.
+
+## Flash AMS
+
+**Settings > Flash AMS** updates a Bambu AMS unit's own firmware from the panel.
+It lists the units with their model and firmware, and marks one with a newer
+image out. Tap a unit, then one of the versions the printer offers for it, then
+**Flash** on the page that confirms it. The printer writes the image while
+Klipper keeps running, and the panel follows the update to its end. The update
+page has the same thing on its **AMS** card.
+
+Both need the AMS updater set up on the printer once: see
+[AMS_FLASH_HOWTO.md](../Bambu_AMS/AMS_FLASH_HOWTO.md) in `firmwares/Bambu_AMS/`.
+They refuse while a print is running or paused. If an update stops partway, the
+unit waits in its bootloader and the menu offers **Finish** for it.
 
 ## Updating
 
