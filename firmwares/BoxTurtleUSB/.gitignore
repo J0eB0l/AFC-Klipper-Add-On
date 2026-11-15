@@ -1,0 +1,5 @@
+.build/
+out/
+test/test_json
+test/sim/sim
+test/test_guard

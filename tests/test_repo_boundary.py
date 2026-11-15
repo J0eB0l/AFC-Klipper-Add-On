@@ -33,7 +33,8 @@ class TestRepoLayout:
 
     #: firmwares/ tools whose own tests may reach across: module name ->
     #: its path under the repo root.
-    TOOLS = {"ams_flash": pathlib.Path(PRIVATE, "Bambu_AMS", "ams_flash.py")}
+    TOOLS = {"ams_flash": pathlib.Path(PRIVATE, "Bambu_AMS", "ams_flash.py"),
+             "hub_katapult": pathlib.Path(PRIVATE, "BridgeHub", "hub_katapult.py")}
 
     HT_UID = "0123456789ABCDEF00003331"
     HT_UNIT = "Bambu_AMS_HT_1"

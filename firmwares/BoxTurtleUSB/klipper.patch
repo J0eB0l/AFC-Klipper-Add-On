@@ -1,0 +1,116 @@
+diff --git a/src/Kconfig b/src/Kconfig
+index 7041ee0..f807c78 100644
+--- a/src/Kconfig
++++ b/src/Kconfig
+@@ -45,6 +45,7 @@ source "src/pru/Kconfig"
+ source "src/ar100/Kconfig"
+ source "src/linux/Kconfig"
+ source "src/simulator/Kconfig"
++source "src/turtle/Kconfig"
+ 
+ # Generic configuration options for serial ports
+ config SERIAL
+diff --git a/src/generic/usb_cdc.c b/src/generic/usb_cdc.c
+index 9a31253..0c972a0 100644
+--- a/src/generic/usb_cdc.c
++++ b/src/generic/usb_cdc.c
+@@ -15,6 +15,9 @@
+ #include "generic/usbstd_cdc.h" // struct usb_cdc_header_descriptor
+ #include "sched.h" // sched_wake_task
+ #include "usb_cdc.h" // usb_notify_ep0
++#if CONFIG_TURTLE_STANDALONE
++#include "turtle/link.h" // turtle_link_rx
++#endif
+ 
+ // To debug a USB connection over UART, uncomment the two macros
+ // below, alter the board KConfig to "select USBSERIAL" on a serial
+@@ -44,6 +47,10 @@ usb_bulk_in_task(void)
+ {
+     if (!sched_check_wake(&usb_bulk_in_wake))
+         return;
++#if CONFIG_TURTLE_STANDALONE
++    transmit_pos += turtle_link_tx_fill(&transmit_buf[transmit_pos]
++                                        , sizeof(transmit_buf) - transmit_pos);
++#endif
+     uint_fast8_t tpos = transmit_pos, max_tpos = tpos;
+     if (!tpos)
+         return;
+@@ -60,6 +67,10 @@ usb_bulk_in_task(void)
+         usb_notify_bulk_in();
+     }
+     transmit_pos = needcopy;
++#if CONFIG_TURTLE_STANDALONE
++    // More lines may be waiting in the turtle ring.
++    usb_notify_bulk_in();
++#endif
+ }
+ DECL_TASK(usb_bulk_in_task);
+ 
+@@ -67,6 +78,10 @@ DECL_TASK(usb_bulk_in_task);
+ void
+ console_sendf(const struct command_encoder *ce, va_list args)
+ {
++#if CONFIG_TURTLE_STANDALONE
++    // No Klipper protocol on this link; the turtle code sends its own lines.
++    return;
++#endif
+     // Verify space for message
+     uint_fast8_t tpos = transmit_pos;
+     if (tpos + READP(ce->min_size) > sizeof(transmit_buf))
+@@ -117,7 +132,12 @@ usb_bulk_out_task(void)
+         usb_notify_bulk_out();
+     }
+     // Process a message block
++#if CONFIG_TURTLE_STANDALONE
++    pop_count = turtle_link_rx(receive_buf, rpos);
++    int_fast8_t ret = 1;
++#else
+     int_fast8_t ret = command_find_and_dispatch(receive_buf, rpos, &pop_count);
++#endif
+     if (ret) {
+         // Move buffer
+         uint_fast8_t needcopy = rpos - pop_count;
+@@ -138,8 +158,13 @@ DECL_TASK(usb_bulk_out_task);
+ 
+ #define CONCAT1(a, b) a ## b
+ #define CONCAT(a, b) CONCAT1(a, b)
++#if CONFIG_TURTLE_STANDALONE
++#define USB_STR_MANUFACTURER u"AFC"
++#define USB_STR_PRODUCT u"BoxTurtle"
++#else
+ #define USB_STR_MANUFACTURER u"Klipper"
+ #define USB_STR_PRODUCT CONCAT(u,CONFIG_MCU)
++#endif
+ #define USB_STR_SERIAL CONCAT(u,CONFIG_USB_SERIAL_NUMBER)
+ 
+ // String descriptors
+@@ -226,7 +251,13 @@ static const struct config_s {
+         .bNumEndpoints = 1,
+         .bInterfaceClass = USB_CLASS_COMM,
+         .bInterfaceSubClass = USB_CDC_SUBCLASS_ACM,
++#if CONFIG_TURTLE_STANDALONE
++        // No AT protocol: ModemManager's default (strict) filter then never
++        // probes the port, so it can't steal bytes after each plug-in.
++        .bInterfaceProtocol = 0,
++#else
+         .bInterfaceProtocol = USB_CDC_ACM_PROTO_AT_V25TER,
++#endif
+     },
+     .cdc_hdr = {
+         .bLength = sizeof(cdc_config_descriptor.cdc_hdr),
+diff --git a/src/stm32/Makefile b/src/stm32/Makefile
+index 3c158d5..87d460c 100644
+--- a/src/stm32/Makefile
++++ b/src/stm32/Makefile
+@@ -109,3 +109,11 @@ flash: $(OUT)klipper.bin lib/hidflash/hid-flash
+ serialflash: $(OUT)klipper.bin
+ 	@echo "  Flashing $< to $(FLASH_DEVICE) via stm32flash"
+ 	$(Q)stm32flash -w $< -v -g 0 $(FLASH_DEVICE)
++
++# BoxTurtle standalone firmware (boxturtle_fw overlay). Listed after the
++# board code so its init runs after timer_init, usb_init and watchdog_init.
++dirs-$(CONFIG_TURTLE_STANDALONE) += src/turtle
++src-$(CONFIG_TURTLE_STANDALONE) += turtle/json.c turtle/link.c \
++    turtle/events.c turtle/sensors.c turtle/leds.c turtle/proto.c \
++    turtle/motion.c turtle/tmc.c turtle/cmds.c turtle/spool.c \
++    turtle/jobs.c turtle/guard.c
