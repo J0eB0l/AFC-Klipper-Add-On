@@ -98,6 +98,8 @@ class afc:
         self.function: afcFunction = self.printer.load_object(config, 'AFC_functions')
         self.spool: AFCSpool = self.printer.load_object(config, 'AFC_spool')
         self.error: afcError = self.printer.load_object(config, 'AFC_error')
+        # Runs the installer for a panel; optional, since an older install has no link to it.
+        self.printer.load_object(config, 'AFC_installer', None)
 
         self.function.afc = self
         self.function.logger = self.logger
