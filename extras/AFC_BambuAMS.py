@@ -7916,9 +7916,10 @@ class afcBambuAMS(afcUnit):
 
     def _bridge_identity(self) -> dict:
         """
-        Which bridge this unit is on and what it runs, for a panel.
+        Which bridge this unit is on and what it runs, for a panel and the AMS updater.
 
-        :return dict: bridge_fw, bridge_wifi and bridge_port
+        :return dict: bridge_fw, bridge_wifi and bridge_port, which on serial_port: auto is the
+        board the chain found, once it has found one
         """
         bridge = getattr(self, "_bridge", None)
         try:
@@ -7927,8 +7928,12 @@ class afcBambuAMS(afcUnit):
             wifi = (info.get("link") == "wifi") if info else None
         except Exception:
             fw, wifi = None, None
-        return {"bridge_fw": fw, "bridge_wifi": wifi,
-                "bridge_port": getattr(self, "serial_port", None) or None}
+        port = getattr(self, "serial_port", None) or None
+        finder = _bridge_mod._AUTO_FINDERS.get(port)
+        if finder is not None:
+            # False: a status read never opens a port to look for one.
+            port = finder(False) or port
+        return {"bridge_fw": fw, "bridge_wifi": wifi, "bridge_port": port}
 
     def get_status(self, eventtime: Any = None) -> dict:
         """

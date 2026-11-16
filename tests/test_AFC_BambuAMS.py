@@ -20151,6 +20151,25 @@ class TestAfcBambuAMSBridgeIdentity:
             "bridge_fw": None, "bridge_wifi": None, "bridge_port": None}
         assert unit.logger.messages == []
 
+    @pytest.mark.parametrize("found,port", [
+        ("/dev/serial/by-id/usb-found", "/dev/serial/by-id/usb-found"),
+        (None, "auto:chain1"),
+    ], ids=["found", "not-found-yet"])
+    def test_auto_names_the_board_its_chain_found(self, monkeypatch, found, port):
+        # The AMS updater opens this port, and "auto:chain1" names none.
+        asked: List[bool] = []
+
+        def finder(probe: bool) -> Optional[str]:
+            asked.append(probe)
+            return found
+
+        monkeypatch.setattr(bambu_bridge_mod, "_AUTO_FINDERS", {"auto:chain1": finder})
+        unit = self._unit(monkeypatch, info={"fw": "AFC-2.93"}, port="auto:chain1")
+        assert unit._bridge_identity() == {
+            "bridge_fw": "AFC-2.93", "bridge_wifi": False, "bridge_port": port}
+        assert asked == [False]                 # a status read never probes
+        assert unit.logger.messages == []
+
     def test_a_bridge_that_cannot_answer_names_no_build(self, monkeypatch):
         unit = self._unit(monkeypatch, info={"fw": "AFC-2.82"})
         diag = Recorder(raises=RuntimeError("lock"))

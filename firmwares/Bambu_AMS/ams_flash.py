@@ -1236,7 +1236,8 @@ def _clean_key(v):
 def bridge_keys(settings):
     """
     {serial_port: tcp_key or None} for every Bambu bridge in the live config, read from
-    [AFC_BridgeBox ...] and [AFC_BambuAMS ...] sections.
+    [AFC_BridgeBox ...] and [AFC_BambuAMS ...] sections. serial_port: auto names no port, so
+    it is left out.
     """
     found, master = {}, {}
     for sec, opts in (settings or {}).items():
@@ -1244,7 +1245,7 @@ def bridge_keys(settings):
             continue
         opts = opts or {}
         port = str(opts.get("serial_port") or "").strip()
-        if not port:
+        if not port.startswith(("tcp://", "/")):
             continue
         key = _clean_key(opts.get("tcp_key"))
         if sec.startswith("afc_bridgebox") and key:
@@ -1265,7 +1266,7 @@ def bridge_from_settings(settings):
     if len(found) > 1:
         raise ValueError("more than one bridge in the config ("
                          + ", ".join(sorted(found)) + "); name the one to "
-                         "use with TARGET=<serial_port> on the command")
+                         "use with --target")
     if not found:
         return None, None
     return next(iter(found.items()))
@@ -1409,6 +1410,11 @@ def bridge_of(a, row: dict, settings) -> tuple:
     (port, link key) of the bridge a unit is on.
     """
     port = a.target or row["port"]
+    if str(port or "").lower().startswith("auto"):
+        # The config files can't say which board auto took.
+        error_str = (f"{row['name']}'s bridge is on serial_port: auto, and Klipper names no "
+                     f"USB port for it; name the port with --target")
+        raise Abort(error_str)
     if not port or not str(port).startswith(("tcp://", "/")):
         try:
             port = bridge_from_settings(settings)[0]

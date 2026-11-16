@@ -1927,6 +1927,13 @@ class TestBridgeKeys:
                     "afc_bridgebox chain1": {"serial_port": "tcp://h:8888"}}
         assert ams_flash.bridge_keys(settings) == {"tcp://h:8888": "k"}
 
+    def test_serial_port_auto_names_no_bridge(self) -> None:
+        # A chain on auto writes auto:<chain> into the unit sections it builds.
+        settings = {"afc_bridgebox chain0": {"serial_port": "auto"},
+                    "afc_bambuams bambu_ams_1": {"serial_port": "auto:chain0"},
+                    "afc_bridgebox chain1": {"serial_port": "/dev/made-up-1"}}
+        assert ams_flash.bridge_keys(settings) == {"/dev/made-up-1": None}
+
 
 class TestBridgeFromSettings:
     """bridge_from_settings: the one bridge in the live config."""
@@ -1959,7 +1966,12 @@ class TestBridgeFromSettings:
             ams_flash.bridge_from_settings(settings)
         assert str(raised.value) == (
             "more than one bridge in the config (/dev/ttyACM1, tcp://a:8888); name the "
-            "one to use with TARGET=<serial_port> on the command")
+            "one to use with --target")
+
+    def test_a_chain_on_auto_is_not_a_second_bridge(self) -> None:
+        settings = {"afc_bridgebox chain0": {"serial_port": "auto"},
+                    "afc_bambuams bambu_ams_1": {"serial_port": "auto:chain0"}}
+        assert ams_flash.bridge_from_settings(settings) == (None, None)
 
 
 class TestUnitRows:
@@ -2350,7 +2362,23 @@ class TestBridgeOf:
             self._of(cfg, None, settings)
         assert str(raised.value) == (
             "more than one bridge in the config (/dev/made-up-b, tcp://bridge-a.invalid:8888); "
-            "name the one to use with TARGET=<serial_port> on the command")
+            "name the one to use with --target")
+
+    @pytest.mark.parametrize("unit_port", ["auto:chain0", "AUTO"], ids=["auto-key", "auto"])
+    def test_a_unit_on_auto_is_never_guessed_from_the_config(self, cfg: Path, port: str,
+                                                             unit_port: str) -> None:
+        # A config file can name an old board, or another chain's.
+        (cfg / "old.cfg").write_text(f"serial_port: {port}\n")
+        settings = {"afc_bridgebox chain0": {"serial_port": "auto"},
+                    "afc_bambuams bambu_ams_1": {"serial_port": "auto:chain0"}}
+        with pytest.raises(ams_flash.Abort) as raised:
+            self._of(cfg, unit_port, settings)
+        assert str(raised.value) == (
+            "Bambu_AMS_1's bridge is on serial_port: auto, and Klipper names no USB port for "
+            "it; name the port with --target")
+
+    def test_a_target_given_wins_over_auto(self, cfg: Path, port: str) -> None:
+        assert self._of(cfg, "auto:chain0", {}, target=port) == (port, "")
 
     @pytest.mark.parametrize("settings", [None, {}], ids=["no-live-config", "no-bridge-there"])
     def test_without_a_live_bridge_the_port_comes_from_the_config_files(
