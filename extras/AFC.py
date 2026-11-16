@@ -1814,7 +1814,7 @@ class afc:
                     # is told the head this load went into.
                     if self.snapmaker_printer and self.function.is_paused():
                         self.run_script("G92 E0", gcmd)
-                        self.error.point_snapmaker_resume_at(cur_lane)
+                        self.error.point_snapmaker_resume_at(cur_lane, gcmd)
                     # Update lane and extruder state for tracking.
                     cur_extruder.lane_loaded = cur_lane.name
                     self.spool.set_active_spool(cur_lane.spool_id)

@@ -12,7 +12,7 @@
 from __future__ import annotations
 import threading
 import chelper
-from typing import Any, Callable, Dict, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Literal, Optional, Set, Tuple, TYPE_CHECKING, Union
 
 from extras.AFC_RFID import SpoolmanClient
 
@@ -391,23 +391,23 @@ class AFC_autocal:
                 self._set_lane_k(lane, k)
         return k
 
-    def _calibrate(self, cur_lane: Any, gcmd: Optional[GCodeCommand] = None,
+    def _calibrate(self, cur_lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
                    runner: Optional[Callable] = None) -> Optional[float]:
         """
         Run the calibration command, then store/apply/persist the new K.
 
         :param cur_lane: The lane to calibrate
-        :param gcmd: The gcode command for responses, or None
+        :param gcmd: The gcode command the calibration runs through and answers on
         :param runner: Callable used to run ``calibrate_gcode``
         :return Optional[float]: the measured K, or None if none produced
         """
         flow_cal = self.printer.lookup_object('flow_calibrator', None)
         if flow_cal is None:
             msg = "AFC_autocal: flow_calibrator not found"
-            if gcmd is not None:
-                gcmd.respond_info(msg)
-            else:
+            if gcmd == "callback":
                 self.logger.warning(msg)
+            else:
+                gcmd.respond_info(msg)
             return None
         # flow_calibrator keys _current_k by the Klipper extruder name, which differs from the
         # AFC_extruder name when `extruder_name` renames it.
@@ -453,13 +453,16 @@ class AFC_autocal:
             return
         # The gcode mutex is held mid-toolchange, so defer to the reactor where _do_tool_loaded can
         # use run_script once the load releases it.
-        self.reactor.register_callback(lambda et, lane=cur_lane: self._do_tool_loaded(lane))
+        self.reactor.register_callback(
+            lambda et, lane=cur_lane: self._do_tool_loaded(lane, "callback"))
 
-    def _do_tool_loaded(self, cur_lane: Any) -> None:
+    def _do_tool_loaded(self, cur_lane: Any,
+                        gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Deferred body of the tool-loaded handler.
 
         :param cur_lane: The lane object that was just loaded
+        :param gcmd: command context a calibration runs through
         """
         try:
             if (self.afc is None
@@ -475,7 +478,7 @@ class AFC_autocal:
                 return
             # Uncached: the Spoolman read is blocking HTTP, so run it off the reactor to avoid
             # "Timer too close".
-            self._fetch_k_async(cur_lane)
+            self._fetch_k_async(cur_lane, gcmd)
         except Exception as e:
             self.logger.warning(f"AFC_autocal: tool_loaded error: {e}")
 
@@ -573,11 +576,12 @@ class AFC_autocal:
                 self.logger.debug(f"AFC_autocal: staged K read failed: {e}")
             finally:
                 self.reactor.register_async_callback(
-                    lambda et: self._staged_k_ready(lane_name, sid, k, read_ok))
+                    lambda et: self._staged_k_ready(lane_name, sid, k, read_ok, "callback"))
 
         threading.Thread(target=worker, name="afc_autocal_stg", daemon=True).start()
 
-    def _staged_k_ready(self, lane_name: str, sid: int, k: Optional[float], read_ok: bool) -> None:
+    def _staged_k_ready(self, lane_name: str, sid: int, k: Optional[float], read_ok: bool,
+                        gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Runs on the reactor with the staged spool's K.
 
@@ -585,6 +589,7 @@ class AFC_autocal:
         :param sid: The normalized spool id the read was for
         :param k: The K read from Spoolman, or None
         :param read_ok: Whether the Spoolman read completed successfully
+        :param gcmd: command context the auto-load runs through
         """
         try:
             lane = self.afc.lanes.get(lane_name) if self.afc else None
@@ -606,15 +611,16 @@ class AFC_autocal:
             if not self._safe_to_calibrate():
                 return
             self.logger.info(f"{lane_name}: no flow K for this spool, loading it to measure one")
-            self.afc.run_script(f"CHANGE_TOOL LANE={lane_name}")
+            self.afc.run_script(f"CHANGE_TOOL LANE={lane_name}", gcmd)
         except Exception as e:
             self.logger.warning(f"AFC_autocal: staged load error: {e}")
 
-    def _fetch_k_async(self, cur_lane: Any) -> None:
+    def _fetch_k_async(self, cur_lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Read this lane's K from Spoolman in a worker thread, then hand the result to the reactor.
 
         :param cur_lane: The lane whose K to fetch
+        :param gcmd: command context a calibration started here runs through
         """
         lane_name = cur_lane.name
         if lane_name in self._k_fetch_inflight:
@@ -624,12 +630,12 @@ class AFC_autocal:
             # _calibrate_when_loaded waits for idle and skips during a print.
             self._apply_default_k(cur_lane)
             if self._can_calibrate():
-                self._calibrate_when_loaded(cur_lane)
+                self._calibrate_when_loaded(cur_lane, gcmd)
             return
         if not self.apply_stored_k:
             # Only auto_calibrate is on, and that needs idle, defer to _k_applied with k=None so it
             # takes the (idle-gated) calibrate path.
-            self._k_applied(lane_name, sid, None)
+            self._k_applied(lane_name, sid, None, gcmd)
             return
 
         self._k_fetch_inflight.add(lane_name)
@@ -652,17 +658,20 @@ class AFC_autocal:
                 self.logger.debug(f"AFC_autocal: async K read failed: {e}")
             finally:
                 # Hop back onto the reactor.
-                self.reactor.register_async_callback(lambda et: self._k_applied(lane_name, sid, k))
+                self.reactor.register_async_callback(
+                    lambda et: self._k_applied(lane_name, sid, k, "callback"))
 
         threading.Thread(target=worker, name="afc_autocal_k", daemon=True).start()
 
-    def _k_applied(self, lane_name: str, sid: int, k: Optional[float]) -> None:
+    def _k_applied(self, lane_name: str, sid: int, k: Optional[float],
+                   gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Runs on the reactor with the K read off-thread.
 
         :param lane_name: The name of the lane the read was for
         :param sid: The normalized spool id the read was for
         :param k: The K read from Spoolman, or None
+        :param gcmd: command context a calibration started here runs through
         """
         self._k_fetch_inflight.discard(lane_name)
         try:
@@ -682,7 +691,7 @@ class AFC_autocal:
             # prep-done, idle and past the startup grace.
             self._apply_default_k(lane)
             if self._can_calibrate():
-                self._calibrate_when_loaded(lane)
+                self._calibrate_when_loaded(lane, gcmd)
         except Exception as e:
             self.logger.warning(f"AFC_autocal: K apply error: {e}")
 
@@ -707,11 +716,13 @@ class AFC_autocal:
         except Exception:
             return False
 
-    def _calibrate_when_loaded(self, lane: Any, attempts: int = 0) -> None:
+    def _calibrate_when_loaded(self, lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
+                               attempts: int = 0) -> None:
         """
         Run the flow calibration once the printer settles to idle after the load.
 
         :param lane: The lane to calibrate
+        :param gcmd: command context the calibration runs through
         :param attempts: Retry counter for the bounded idle-wait chain
         """
         name = lane.name
@@ -736,7 +747,7 @@ class AFC_autocal:
                 if attempts < 240:
                     self.reactor.register_callback(
                         lambda et, ln=lane, a=attempts + 1:
-                            self._calibrate_when_loaded(ln, a),
+                            self._calibrate_when_loaded(ln, "callback", a),
                         self.reactor.monotonic() + 1.0)
                 else:
                     self.logger.debug(f"AFC autocal: {name} calibration gave up waiting to "
@@ -758,7 +769,7 @@ class AFC_autocal:
                                  f"this lane's tool to calibrate it")
                 return
             self.logger.info(f"{name}: measuring flow K")
-            self._calibrate(lane)
+            self._calibrate(lane, gcmd)
         except Exception as e:
             self._cal_pending.discard(name)
             self.logger.warning(f"AFC_autocal: deferred calibrate error: {e}")
@@ -897,7 +908,7 @@ class AFC_autocal:
         if cur_lane is None:
             gcmd.respond_info("AFC_autocal: no current lane")
             return
-        k = self._calibrate(cur_lane, gcmd=gcmd)
+        k = self._calibrate(cur_lane, gcmd)
         if k is not None:
             gcmd.respond_info(f"AFC_autocal: stored K={k:.6f} for {cur_lane.name}")
         else:

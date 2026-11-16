@@ -17,7 +17,10 @@ import os
 import secrets
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Set, Tuple, Union
+
+if TYPE_CHECKING:
+    from gcode import GCodeCommand
 
 from extras.AFC_BambuAMS import (DRY_TEMP_HARD_MAX, _AMS_MODELS, _BUFFER_CHIP_NAME, _HT_MODELS)
 from extras.AFC_BambuAMS_bridge import routine_info
@@ -372,11 +375,13 @@ def lane_in_toolhead(lane: Any, afc: Any = None) -> bool:
                for e in tools.values())
 
 
-def unset_tool_loaded(lane: Any, afc: Any = None) -> bool:
+def unset_tool_loaded(lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
+                      afc: Any = None) -> bool:
     """
     Clear AFC's record of ``lane`` as loaded to a toolhead, ahead of pooling it.
 
     :param lane: the lane about to be pooled
+    :param gcmd: command context the unsync from its extruder runs through
     :param afc: the AFC object; defaults to the lane's
     :return bool: True if there was a record to clear
     """
@@ -389,9 +394,9 @@ def unset_tool_loaded(lane: Any, afc: Any = None) -> bool:
         current = False
     try:
         if current:
-            afc.function.unset_lane_loaded(None)
+            afc.function.unset_lane_loaded(gcmd)
         else:
-            lane.unsync_to_extruder()
+            lane.unsync_to_extruder(gcmd=gcmd)
             ext = lane.extruder_obj
             # set_tool_unloaded() empties the lane's own extruder outright.
             if (ext is not None
@@ -2451,7 +2456,7 @@ class afcBridgeBox:
         freed_live = False
         if pu is not None:
             if pu.get("bound"):
-                self._release_pool_unit(pu["bound"], "AFC_BRIDGEBOX_FORGET")
+                self._release_pool_unit(pu["bound"], gcmd, "AFC_BRIDGEBOX_FORGET")
             pu["uid"] = None
             freed_live = bool(self.pool_ams or self.pool_ht)
         held = getattr(self, "_held", None) or {}
@@ -2763,7 +2768,7 @@ class afcBridgeBox:
         cleared = self._clear_bay_toolhead(cur) if unclaimed else []
         if cur is not None:
             if cur.get("bound"):
-                self._release_pool_unit(uid, "AFC_BRIDGEBOX_ASSIGN")
+                self._release_pool_unit(uid, gcmd, "AFC_BRIDGEBOX_ASSIGN")
             cur["uid"] = None
         target["uid"] = uid
         first_lane = int("".join(c for c in target["lanes"][0] if c.isdigit()))
@@ -2773,7 +2778,7 @@ class afcBridgeBox:
         claimed = False
         online = not target.get("bound") and self._uid_online_now(uid)
         if online:
-            if self._claim_pool_unit(uid, eff_model) is not None:
+            if self._claim_pool_unit(uid, eff_model, gcmd) is not None:
                 claimed = True
         # Online and unclaimed only because PREP has not run.
         waits = online and not claimed and not self._prep_settled()
@@ -2844,7 +2849,7 @@ class afcBridgeBox:
         dropped = False
         if pu is not None:
             if pu.get("bound"):
-                self._release_pool_unit(uid, "AFC_BRIDGEBOX_UNASSIGN")
+                self._release_pool_unit(uid, gcmd, "AFC_BRIDGEBOX_UNASSIGN")
                 dropped = True
             pu["uid"] = None
         self._drop_pin(uid)
@@ -4463,7 +4468,8 @@ class afcBridgeBox:
                         owned_before = any(
                             _norm_uid(pu.get("uid")) == u
                             for pu in self._pool_units)
-                        if (self._claim_pool_unit(u, model_by_uid.get(u, "boxed")) is not None
+                        if (self._claim_pool_unit(u, model_by_uid.get(u, "boxed"),
+                                                  "callback") is not None
                             and not owned_before
                             and not self._back_on_saved_bay(u)
                             and not self._is_printing()):
@@ -4545,7 +4551,7 @@ class afcBridgeBox:
                                           "and it is released on the next "
                                           "check.")
                                 continue
-                            self._release_pool_unit(b)
+                            self._release_pool_unit(b, "callback")
                             online_seen.pop(b, None)
                             run.pop(b, None)
                             rel_at[b] = eventtime
@@ -5441,11 +5447,13 @@ class afcBridgeBox:
                                       f"({self._lanes_text(first, span)}); it comes back there "
                                       f"after a restart.")
 
-    def _release_pool_unit(self, uid: str, why: Optional[str] = None) -> None:
+    def _release_pool_unit(self, uid: str, gcmd: Union[GCodeCommand, Literal["callback"]],
+                           why: Optional[str] = None) -> None:
         """
         Release the pool unit bound to ``uid``: the hot-unplug half.
 
         :param uid: the UID of the unit to release
+        :param gcmd: command context the toolhead record is cleared through
         :param why: the command releasing it; None for an unplug
         """
         uid = _norm_uid(uid)
@@ -5480,7 +5488,7 @@ class afcBridgeBox:
                         try: gcode.register_command(cmd, None)
                         except Exception: pass
                 try:
-                    if unset_tool_loaded(lane, afc):
+                    if unset_tool_loaded(lane, gcmd, afc):
                         cleared.append(lane.name)
                 except Exception: pass
                 try: deactivate_to_pool(lane)
@@ -5568,12 +5576,14 @@ class afcBridgeBox:
                               f"({e}); fabricated sections stay out of configfile.settings")
         return {}
 
-    def _claim_pool_unit(self, uid: str, model: str) -> Any:
+    def _claim_pool_unit(self, uid: str, model: str,
+                         gcmd: Union[GCodeCommand, Literal["callback"]]) -> Any:
         """
         Bind a free pool unit to ``uid`` and bring it fully online, live.
 
         :param uid: the new physical AMS's UID
         :param model: its generation tag (ht/ams1/ams2/boxed)
+        :param gcmd: command context a lane re-synced to its extruder runs through
         :return object: the claimed unit object, or None if none was free/possible
         """
         uid = _norm_uid(uid)
@@ -5673,7 +5683,7 @@ class afcBridgeBox:
         # Before claim(): the index adoption the claim starts sends it to the firmware.
         self._apply_model_measure(unit, model)
         self._claim_plans = self._claim_map_plans(activated, held)
-        if not unit.claim(uid, model):
+        if not unit.claim(uid, model, gcmd):
             self._claim_plans = {}
             for lane in activated:
                 try: deactivate_to_pool(lane)

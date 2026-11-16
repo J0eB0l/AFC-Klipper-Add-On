@@ -226,7 +226,7 @@ def _held_claim(held: Optional[Dict[str, Dict[str, Any]]], *,
         make_bambu_spoolman(unit, spoolman_url=spoolman)
     if held is not None:
         unit.hold_lanes(held)
-    assert unit.claim(_HELD_CLAIM_UID, model)
+    assert unit.claim(_HELD_CLAIM_UID, model, "callback")
     assert unit.logger.messages == [
         ("debug", f"{name}: chain index not resolved yet (UID "
                   f"{_HELD_CLAIM_UID}); holding this unit's registrations "
@@ -287,7 +287,7 @@ def _p2_held_claim(monkeypatch: pytest.MonkeyPatch,
         make_bambu_spoolman(unit, spoolman_url=spoolman)
     if held is not None:
         unit.hold_lanes(held)
-    assert unit.claim(_P2_HELD_UID, "boxed") is True
+    assert unit.claim(_P2_HELD_UID, "boxed", "callback") is True
     assert unit.logger.messages == [
         ("debug", f"AMS: chain index not resolved yet (UID "
                   f"{_P2_HELD_UID}); holding this unit's registrations "
@@ -5335,13 +5335,13 @@ class TestAfcBambuAMSPrimeScanBaseline:
         live_bridges()[master.serial_port] = bridge
         printer.connect()
         printer.afc.spoolman = spoolman
-        master._claim_pool_unit(self.HOT_UID, "ht")
+        master._claim_pool_unit(self.HOT_UID, "ht", "callback")
         unit = printer.lookup_object("AFC_BambuAMS Hot")
         lane = unit.lanes["lane32"]
         lane.spool_id, lane.material = spool_id, "PLA" if spool_id else ""
         lane.color, lane.weight = "#0086D6", 750.0
         unit.logger.messages.clear()
-        master._release_pool_unit(self.HOT_UID)
+        master._release_pool_unit(self.HOT_UID, "callback")
         # The release drops the lane's spool.
         assert (lane.spool_id, lane.material) == (None, None)
         assert (unit._bridge, unit.unit_uid) == (None, None)
@@ -5382,7 +5382,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
     def test_the_same_unit_gets_its_spool_back_through_spoolman(
             self, tmp_path, monkeypatch):
         master, unit, lane = self._replug(tmp_path, monkeypatch)
-        master._claim_pool_unit(self.HOT_UID, "ht")
+        master._claim_pool_unit(self.HOT_UID, "ht", "callback")
         # The master hands back what the unit's save wrote.
         assert self._held_of(unit) == {
             "spool_id": 136, "material": "PLA", "color": "#0086D6",
@@ -5407,7 +5407,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
                                                      monkeypatch):
         master, unit, lane = self._replug(tmp_path, monkeypatch,
                                           spoolman=None)
-        master._claim_pool_unit(self.HOT_UID, "ht")
+        master._claim_pool_unit(self.HOT_UID, "ht", "callback")
         unit.logger.messages.clear()
         self._prime(unit)
         assert (lane.spool_id, lane.material, lane.color, lane.weight) == (
@@ -5445,7 +5445,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
                                                         monkeypatch):
         master, unit, lane = self._replug(tmp_path, monkeypatch,
                                           spool_id=None)
-        master._claim_pool_unit(self.HOT_UID, "ht")
+        master._claim_pool_unit(self.HOT_UID, "ht", "callback")
         assert self._held_of(unit) == {
             "spool_id": None, "material": "", "color": "#0086D6",
             "weight": 750.0, "map": "T0"}
@@ -5839,7 +5839,7 @@ class TestAfcBambuAMSPrimeScanBaseline:
                                                        online=[False])
         printer.connect()
         master._scout_ready()
-        master._claim_pool_unit("AAAA", "boxed")
+        master._claim_pool_unit("AAAA", "boxed", "callback")
         unit = printer.lookup_object("AFC_BambuAMS Alpha")
         assert unit.logger.messages == [
             ("debug", "chain1: holding the saved lane records "
@@ -6130,7 +6130,7 @@ class TestAfcBambuAMSApplyHeldLanes:
         master = unit._master = self._Master(moved)
         if held is not None:
             unit.hold_lanes(held)
-        assert unit.claim(_HELD_CLAIM_UID, "boxed")
+        assert unit.claim(_HELD_CLAIM_UID, "boxed", "callback")
         return unit, sync, master
 
     def test_the_loaded_lane_is_restored_as_prep_restores_it(self,
@@ -6139,7 +6139,7 @@ class TestAfcBambuAMSApplyHeldLanes:
         lane = unit.lanes["lane24"]
         assert (lane.tool_loaded, unit.lanes["lane25"].tool_loaded) == (
             True, False)
-        assert sync.calls == [((), {})]
+        assert sync.calls == [((), {"gcmd": "callback"})]
         assert unit.afc.spool.calls == [
             ("set_snapmaker_filament_params", (lane,), {})]
         assert master.asked == ["lane24"]
@@ -6207,7 +6207,7 @@ class TestAfcBambuAMSApplyHeldLanes:
         sync = Recorder()
         monkeypatch.setattr(unit.lanes["lane24"], "sync_to_extruder", sync)
         unit.hold_lanes(self.LOADED)
-        assert unit.claim(_HELD_CLAIM_UID, "boxed")
+        assert unit.claim(_HELD_CLAIM_UID, "boxed", "callback")
         lane = unit.lanes["lane24"]
         assert current.calls == [((), {})]
         assert (lane.tool_loaded, sync.calls) == (True, [])
@@ -6220,7 +6220,7 @@ class TestAfcBambuAMSApplyHeldLanes:
         unit, sync, _master = self._claim(monkeypatch, None)
         assert unit._toolhead_records is None
         assert unit.lanes["lane24"].tool_loaded is True
-        assert sync.calls == [((), {})]
+        assert sync.calls == [((), {"gcmd": "callback"})]
         assert unit._toolhead_record_is_mine("lane24") is True
         assert unit.logger.messages == self.CLAIMED
 
@@ -6974,7 +6974,7 @@ class TestAfcBambuAMSClaim:
         # first look is keyed on these resets.
         unit = self._pool(monkeypatch)
         unit._stamp_looked = {0, 2}
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert unit._stamp_looked == set()
         assert unit.logger.messages == self._claimed_lines()
         unit.logger.messages.clear()
@@ -6992,7 +6992,7 @@ class TestAfcBambuAMSClaim:
         unit = self._pool(monkeypatch)
         assert unit._detector_timer is None
         now = unit.reactor.now
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         timer = unit._detector_timer
         assert timer in unit.reactor.timers
         assert timer.callback == unit._detector_tick
@@ -7001,7 +7001,7 @@ class TestAfcBambuAMSClaim:
         unit.logger.messages.clear()
         # A second claim does not register another one.
         unit.release()
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert unit._detector_timer is timer
         assert [t for t in unit.reactor.timers
                 if t.callback == unit._detector_tick] == [timer]
@@ -7017,7 +7017,7 @@ class TestAfcBambuAMSClaim:
             raise RuntimeError("no timers")
 
         monkeypatch.setattr(unit.reactor, "register_timer", _refuse)
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert (unit._detector_timer, unit._uid_watch_timer) == (None, None)
         assert unit.unit_uid == self.UID and unit.pool is False
         # The index lookup, scan priming and the follower restore are still queued, on callbacks.
@@ -7035,7 +7035,7 @@ class TestAfcBambuAMSClaim:
 
         monkeypatch.setattr(unit.reactor, "register_callback", _refuse)
         assert unit._scan_primed is False
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert unit._scan_primed is True
         assert unit.reactor.callbacks == []
         assert unit.logger.messages == self._claimed_lines()
@@ -7050,7 +7050,7 @@ class TestAfcBambuAMSClaim:
         lane = unit.lanes["lane15"]
         synced: List[Tuple[Any, ...]] = []
         monkeypatch.setattr(lane, "sync_to_extruder",
-                            lambda *args: synced.append(args))
+                            lambda *args, **kwargs: synced.append((args, kwargs)))
         if not named:
             def _unknown() -> Optional[str]:
                 """:raises RuntimeError: always"""
@@ -7060,9 +7060,9 @@ class TestAfcBambuAMSClaim:
                                 _unknown)
         unit.hold_lanes({"lane15": dict(_P2_REC, spool_id=None,
                                         tool_loaded=True)})
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert lane.tool_loaded is True
-        assert synced == ([()] if named else [])
+        assert synced == ([((), {"gcmd": "callback"})] if named else [])
         assert unit.afc.spool.calls == [
             ("set_snapmaker_filament_params", (lane,), {})]
         assert unit.logger.messages == self._claimed_lines()
@@ -7076,7 +7076,7 @@ class TestAfcBambuAMSClaim:
         monkeypatch.setattr(unit.afc.spool, "set_snapmaker_filament_params", None)
         unit.hold_lanes({"lane15": dict(_P2_REC, spool_id=None,
                                         tool_loaded=True)})
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert lane.tool_loaded is True
         assert unit.afc.spool.calls == []
         assert unit.logger.messages == self._claimed_lines()
@@ -7087,7 +7087,7 @@ class TestAfcBambuAMSClaim:
         unit.release()
         records = {"lane15": dict(_P2_REC)}
         unit.hold_lanes(records)
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert unit._held_lanes == records
         assert unit.logger.messages == self._claimed_lines()
 
@@ -7125,7 +7125,7 @@ class TestAfcBambuAMSClaim:
                             extras={"sub_type": "Basic"})])
         make_bambu_spoolman(unit, spoolman_url=_P2_SPOOLMAN_URL)
         unit.afc.spool = FakeAfcSpool()
-        assert unit.claim(self.UID, "ams1") is True
+        assert unit.claim(self.UID, "ams1", "callback") is True
         assert unit.logger.messages == self._claimed_lines()
         unit.logger.messages.clear()
         unit._slots = [slot_info(0, present=False), slot_info(1, present=False),
@@ -7189,7 +7189,7 @@ class TestAfcBambuAMSClaim:
         present = list(unit._prev_present)
         # Released, and claimed onto another AMS.
         unit.release()
-        assert unit.claim(self.OTHER_UID, "ams1") is True
+        assert unit.claim(self.OTHER_UID, "ams1", "callback") is True
         assert unit._spoolman_latched == set()
         assert unit._scanned_bays == set()
         assert unit._removed_bays == set() and unit._meas_departed == {}
@@ -7288,7 +7288,7 @@ class TestAfcBambuAMSRelease:
         unit = make_bambu_unit("AMS", printer=printer, model="boxed",
                                bridge=bridge, lanes=["lane15"],
                                values={"pool": True})
-        assert unit.claim(_P2_HELD_UID, "boxed") is True
+        assert unit.claim(_P2_HELD_UID, "boxed", "callback") is True
         assert bridge.listeners == [unit._on_status]
         unit.logger.messages.clear()
         unit.release()
@@ -8413,7 +8413,7 @@ class TestAfcBambuAMSRestoreLoadedFollower:
         if record_loaded:
             rec["tool_loaded"] = True
         unit.hold_lanes({"lane15": rec})
-        assert unit.claim(_P2_HELD_UID, "boxed") is True
+        assert unit.claim(_P2_HELD_UID, "boxed", "callback") is True
         assert unit._toolhead_records == ({"lane15"} if record_loaded
                                           else set())
         unit.reactor.run_callbacks(until=100.6)        # the index resolves
@@ -8481,7 +8481,7 @@ class TestAfcBambuAMSRestoreFollowerOnReturn:
             lanes=["lane13", "lane14", LaneSpec(
                 "lane15", 2, prep=True, load=True, loaded_to_hub=True,
                 tool_loaded=True), "lane16"])
-        assert unit.claim(_P2_HELD_UID, "boxed") is True
+        assert unit.claim(_P2_HELD_UID, "boxed", "callback") is True
         unit._bridge.sent.clear()
         unit.logger.messages.clear()
         assert unit.restore_follower_on_return(100.0) is False
@@ -10166,7 +10166,7 @@ class TestAfcBambuAMSUnitOnline:
         latest = {"units": [{"n": 0, "online": True}]}
         unit = self._unit(monkeypatch, pool=True)
         assert unit._unit_online(latest) is False
-        assert unit.claim("AAAA00000000000000000001", "ams2") is True
+        assert unit.claim("AAAA00000000000000000001", "ams2", "callback") is True
         unit.logger.messages.clear()
         assert unit._unit_online(latest) is True     # claimed, it reads
         assert unit.logger.messages == []
@@ -12247,7 +12247,7 @@ class TestAfcBambuAMSSyncLanes:
         bridge = bridge if bridge is not None else FakeBridge(
             uids=[cls.RECLAIM_UID])
         use_bridges(monkeypatch, {unit.serial_port: bridge})
-        assert unit.claim(cls.RECLAIM_UID, model) is True
+        assert unit.claim(cls.RECLAIM_UID, model, "callback") is True
         return bridge
 
     @SECTIONS
@@ -15650,7 +15650,7 @@ class TestAfcBambuAMSCheckRunoutDrain:
                         slots=[slot_info(0, present=not bay_empty)])
         unit._presence_ok = True
         if drain:
-            assert unit.unit_unload_lane(unit.lanes["lane4"]) is True
+            assert unit.unit_unload_lane(unit.lanes["lane4"], None, "callback") is True
             assert unit._runout_drain is unit.lanes["lane4"]
             unit._bridge.sent.clear()
             unit.logger.messages.clear()
@@ -15762,7 +15762,7 @@ class TestAfcBambuAMSCheckRunoutDrain:
             slots=[slot_info(0, present=False)])
         unit._presence_ok = True
         lane = unit.lanes["lane4"]
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._runout_drain is lane
         unit._bridge.sent.clear()
         unit.logger.messages.clear()
@@ -15793,7 +15793,7 @@ class TestAfcBambuAMSEndRunoutDrain:
                         lanes=[LaneSpec("lane4", 0, tool_loaded=True)],
                         slots=[slot_info(0, present=False)])
         unit._presence_ok = True
-        assert unit.unit_unload_lane(unit.lanes["lane4"]) is True
+        assert unit.unit_unload_lane(unit.lanes["lane4"], None, "callback") is True
         unit._bridge.sent.clear()
         unit.logger.messages.clear()
         return unit
@@ -16875,7 +16875,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
             "spool_id": 71, "material": "PLA", "color": "#3A7BD5",
             "weight": 612.5, "extruder_temp": 220.0, "bed_temp": 60.0}})
         unit._reset_lookup_state()
-        unit._apply_held_lanes()
+        unit._apply_held_lanes("callback")
         assert (lane.spool_id, lane.material, lane.weight) == (71, "PLA",
                                                                612.5)
         unit._reconcile_empty_bays()
@@ -16917,7 +16917,7 @@ class TestAfcBambuAMSReconcileEmptyBays:
         ask = Recorder(raises=RuntimeError("no toolhead yet"))
         monkeypatch.setattr(unit.afc.function, "get_current_lane", ask)
         unit.hold_lanes({"lane15": {"spool_id": 71, "material": "PLA"}})
-        unit._apply_held_lanes()
+        unit._apply_held_lanes("callback")
         assert ask.call_count == 1
         assert (lane.spool_id, lane.material) == (71, "PLA")
         assert unit.logger.messages == []
@@ -27592,7 +27592,7 @@ class TestAfcBambuAMSUnitUnloadLane:
 
     def test_a_stop_follows_the_retract(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == self.TO_RETRACT + [self.STOP]
         assert unit.afc.e_moves == self.E_MOVES
         assert unit.afc.error.messages == []
@@ -27601,7 +27601,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_the_stop_is_the_last_thing_said_to_the_unit(self, monkeypatch):
         # Anything after it would restart the polling it exists to end.
         unit, lane, _ = self._rig(monkeypatch)
-        assert unit.unit_unload_lane(lane) is True       # the lane's extruder
+        assert unit.unit_unload_lane(lane, None, "callback") is True       # the lane's extruder
         assert unit._bridge.sent[-1] == self.STOP
         assert lane.status == AFCLaneState.NONE
         assert lane.tool_loaded is False
@@ -27613,7 +27613,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_the_pre_retract_stop_is_still_there(self, monkeypatch):
         # A failed load can leave the AMS mid feed/retry, which swallows the retract.
         unit, lane, at_send = self._rig(monkeypatch)
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert [(cmd, moves) for cmd, moves, _f in at_send] == [
             ("select", 1), ("assist", 1), ("assist", 1), ("stop", 1),
             ("retract", 3),
@@ -27623,7 +27623,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_a_failed_unload_does_not_reach_the_stop(self, monkeypatch):
         # Filament still at the sensor is a lane failure.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent == (self.TO_RETRACT + self.REKICK
                                      + self.REKICK)
         assert unit.afc.error.calls == [
@@ -27637,7 +27637,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
         unit._runout_empty.add(lane.name)
         lane.loaded_to_hub = True
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == [self.SELECT, self.ASSIST_ON]
         assert unit.afc.e_moves == self.E_MOVES[:2]
         assert unit._runout_drain is lane
@@ -27656,7 +27656,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, _ = self._rig(monkeypatch, sensor=[True], present=False,
                                   model=model)
         unit._bridge.status = _p6_frame(ustate=7)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == [self.SELECT, self.REHOME, self.ASSIST_ON]
         assert unit._runout_drain is lane
         assert unit.afc.error.messages == []
@@ -27673,7 +27673,7 @@ class TestAfcBambuAMSUnitUnloadLane:
                                                             monkeypatch):
         unit, lane, _ = self._rig(monkeypatch)
         assert unit._bay_ran_out(lane) is False
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == self.TO_RETRACT + [self.STOP]
         assert unit._runout_drain is None
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
@@ -27683,7 +27683,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # Only a lane AFC records at the toolhead can hold a leftover.
         unit, lane, _ = self._rig(monkeypatch, present=False)
         lane.tool_loaded = False
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == self.TO_RETRACT + [self.STOP]
         assert unit._runout_drain is None
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
@@ -27692,7 +27692,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # Only a virtual hub's occupancy is refreshed by the unload.
         unit, lane, _ = self._rig(monkeypatch, virtual_hub=False)
         lane._load_state = True
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert lane._load_state is True
         assert lane.loaded_to_hub is True
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
@@ -27703,7 +27703,7 @@ class TestAfcBambuAMSUnitUnloadLane:
                                   virtual_hub=False)
         unit._runout_empty.add(lane.name)
         lane._load_state = True
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert lane._load_state is True
         assert lane.loaded_to_hub is False
         assert unit._runout_drain is lane
@@ -27714,7 +27714,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # No fault report means no verdict.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
         monkeypatch.setattr(unit._bridge, "last_fault", None)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent == (self.TO_RETRACT + self.REKICK
                                      + self.REKICK)
         assert unit.afc.error.calls == [
@@ -27726,7 +27726,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
         unit._runout_empty.add(lane.name)
         timers = list(unit.reactor.timers)
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit.reactor.callbacks == []
         assert unit.reactor.timers == timers
         assert unit._runout_drain is lane
@@ -27738,14 +27738,14 @@ class TestAfcBambuAMSUnitUnloadLane:
         # The unit declared before the first re-kick, so there is none.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True],
                                   fault=self.LATCH)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent == self.TO_RETRACT + [self.STOP]
         assert unit.logger.messages == [self.ISSUED, self.FAULT_ENDED]
 
     def test_a_quiet_unit_still_gets_both_re_kicks(self, monkeypatch):
         # No verdict, no reason to stop.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent.count(self.RETRACT) == 3
         assert unit.logger.messages == self._stuck_logs()
 
@@ -27753,7 +27753,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # The timeout is quoted.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True],
                                   fault=self.LATCH)
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit.afc.error.messages == [
             ("handle_lane_failure",
              self._gripped("[AMS_LED]TIMEOUT error 2"))]
@@ -27766,7 +27766,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             monkeypatch, sensor=[True],
             fault=(3, "[AMS_COMMON]state:6,tray_now:255,tray_exit:6 "
                       "[AMS_LINK]en:0,mode:7,idx:255,ref:0", 0.0))
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent.count(self.RETRACT) == 1
         assert unit.afc.error.messages == [
             ("handle_lane_failure", self._gripped(
@@ -27778,7 +27778,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # A latched unit streams a retract it will never finish.
         unit, lane, at_send = self._rig(monkeypatch, sensor=[True],
                                         fault=self.LATCH)
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert [(cmd, failed) for cmd, _m, failed in at_send[-2:]] == [
             ("retract", 0), ("stop", 0)]
         assert len(unit.afc.error.messages) == 1
@@ -27788,7 +27788,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             self, monkeypatch):
         # With nothing said the AMS may still be reeling: no stop after the last retract.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit._bridge.sent[-1] == self.RETRACT
         assert unit.afc.error.messages == [("handle_lane_failure",
                                             self.STUCK)]
@@ -27800,7 +27800,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, _ = self._rig(monkeypatch, sensor=[True],
                                   fault=self.LATCH)
         assert unit._fault_seen == 0
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit._fault_seen == 7
         assert unit.logger.messages == [self.ISSUED, self.FAULT_ENDED]
 
@@ -27809,7 +27809,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, _ = self._rig(monkeypatch, sensor=[True],
                                   fault=(2, "[AMS_SWITCH]bldc stall exit",
                                          0.0))
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent.count(self.RETRACT) == 3
         assert unit._fault_seen == 0
         assert unit.afc.error.messages == [("handle_lane_failure",
@@ -27821,7 +27821,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # The mark is taken before the first retract, so the load's jam is not read as the unload's
         # own.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True], pre=self.LATCH)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent.count(self.RETRACT) == 3
         assert unit._fault_seen == 0
         assert unit.afc.error.messages == [("handle_lane_failure",
@@ -27831,7 +27831,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_the_second_re_kick_can_still_succeed(self, monkeypatch):
         # Three sensor reads, two re-kicks: the third read is the one a range(2) loop never took.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True, True, False])
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == (self.TO_RETRACT + self.REKICK
                                      + self.REKICK + [self.STOP])
         assert unit.afc.error.messages == []
@@ -27841,7 +27841,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch, sensor=[True, False],
                                   fault=self.LATCH, print_state="printing")
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
              (lane, f"Unload failed: the filament "
@@ -27861,7 +27861,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             if frame["cmd"] == "retract":
                 br.status = _p6_frame(ustate=7)
         unit._bridge.on_send = stay_latched
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent == self.TO_RETRACT + [self.STOP, self.REHOME]
         assert unit.afc.error.messages == [("handle_lane_failure",
                                             self.STUCK)]
@@ -27881,7 +27881,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # The line reads E after the quick pull and the STN unload, before the concurrent retract
         # moved it on to -202.
         unit, lane, _ = self._rig(monkeypatch)
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit.afc.gcode_move.last_position[3] == -202.0
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
 
@@ -27891,7 +27891,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane, _ = self._rig(monkeypatch)
         lane.extruder_obj.tool_stn_unload = 45.0
         lane.extruder_obj.tool_unload_speed = 12.0
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit.afc.e_moves[2] == (
             -45.0, 12.0, "STN unload (concurrent with AMS reel)", False)
         assert unit.logger.messages == [
@@ -27906,7 +27906,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         monkeypatch.setattr(unit.afc, "gcode_move", None)
         monkeypatch.setattr(unit.afc, "move_e_pos",
                             lambda *a, **k: unit.afc.e_moves.append(a))
-        unit.unit_unload_lane(lane, lane.extruder_obj)
+        unit.unit_unload_lane(lane, lane.extruder_obj, "callback")
         assert unit.logger.messages == [
             ("debug", "Bambu_AMS_1: toolhead retract issued for "
                       "lane1: 100mm at 25mm/s from E=? (queued, overlaps the "
@@ -27917,7 +27917,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch)
         lane.extruder_obj.tool_stn_unload = 0.0
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit.afc.e_moves == [(-2, 25.0, "Quick Pull", False)]
         assert unit.logger.messages == [self.DEADLINE]
 
@@ -27931,7 +27931,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         bridge = unit._bridge
         _p6_at(unit, 100.05, lambda: bridge.tray_release.__setitem__(
             0, (1, tray)))
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         released = ("debug", "Bambu_AMS_1: move ended on the TRAY "
                              "RELEASE after 0.1s -- tray 0 -> none")
         assert unit.logger.messages == [self.ISSUED,
@@ -27943,7 +27943,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         bridge = unit._bridge
         _p6_at(unit, 100.05, lambda: setattr(
             bridge, "switch", (1, " AMS_CTRL_state_switch finish ")))
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit.reactor.now == pytest.approx(100.1)
         assert unit.logger.messages == [
             self.ISSUED,
@@ -27955,7 +27955,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_no_bridge_cannot_unload(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch)
         unit._bridge = None
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert lane.status == AFCLaneState.TOOLED       # untouched
         assert unit.afc.e_moves == []
         assert unit.logger.messages == [
@@ -27967,7 +27967,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             raise RuntimeError("extruder stalled")
         unit, lane, _ = self._rig(monkeypatch)
         monkeypatch.setattr(unit.afc, "move_e_pos", jammed)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._unload_in_progress is False
         assert unit.afc.error.messages == [
             ("handle_lane_failure", "Unload failed: "
@@ -27977,7 +27977,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_a_post_unload_macro_runs_after_the_reel(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch)
         unit.afc.post_unload_macro = "_AFTER_UNLOAD"
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit.gcode.scripts == ["_AFTER_UNLOAD"]
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
 
@@ -28006,7 +28006,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_an_ams_lite_retracts_past_the_sensor_not_the_bowden(
             self, monkeypatch):
         unit, lane = self._lite(monkeypatch, sensor=[False])
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert unit._bridge.sent == [self.SELECT, self.ASSIST_ON,
                                      self.ASSIST_OFF, self.STOP,
                                      self.LITE_RETRACT, self.STOP]
@@ -28026,7 +28026,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_an_ams_lite_that_never_clears_the_sensor_fails_the_lane(
             self, monkeypatch):
         unit, lane = self._lite(monkeypatch, sensor=[True])
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent == [self.SELECT, self.ASSIST_ON,
                                      self.ASSIST_OFF, self.STOP,
                                      self.LITE_RETRACT, self.STOP]
@@ -28042,7 +28042,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             self, monkeypatch):
         unit, lane = self._lite(monkeypatch, sensor=[False], splitter=True)
         lane.hub_obj.state = True
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
              (lane, "Unload failed: [AFC_hub "
@@ -28063,7 +28063,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # The switch upstream sees it too.
         unit, lane = self._lite(monkeypatch, sensor=[True], splitter=True)
         lane.hub_obj.state = True
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure", (lane, self.LITE_STUCK),
              {"pause": False})]
@@ -28092,7 +28092,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         bridge = unit._bridge
         _p6_at(unit, 100.05, lambda: bridge.tray_release.__setitem__(
             0, (1, tray)))
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         return unit, lane
 
     def test_a_release_with_the_sensor_held_says_the_ams_is_done(
@@ -28121,7 +28121,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         # Only an edge after the unload's own mark counts.
         unit, lane, _ = self._rig(monkeypatch, sensor=[True])
         unit._bridge.tray_release[0] = (5, 0)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure", (lane, self.STUCK), {"pause": False})]
         assert unit._reeled_home_lane is None
@@ -28134,7 +28134,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         moves = list(unit.afc.e_moves)
         lane.extruder_obj.fila_tool_start.runout_helper.script = [False]
         unit.logger.messages.clear()
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         # Nothing more is said to the AMS and the extruder does not move
         assert unit._bridge.sent == sent
         assert unit.afc.e_moves == moves
@@ -28153,7 +28153,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         moves = list(unit.afc.e_moves)
         unit.afc.error.calls.clear()
         unit.logger.messages.clear()
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit._bridge.sent == sent
         assert unit.afc.e_moves == moves
         assert unit.afc.error.calls == [
@@ -28182,7 +28182,7 @@ class TestAfcBambuAMSUnitUnloadLane:
     def test_a_buffered_unload_with_the_hub_clear_is_unloaded(
             self, monkeypatch):
         unit, lane = self._buffered(monkeypatch, hubv=0xB1)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert lane.tool_loaded is False
         assert unit.afc.error.messages == []
         assert unit.logger.messages == [self.ISSUED, self.DEADLINE]
@@ -28191,7 +28191,7 @@ class TestAfcBambuAMSUnitUnloadLane:
             self, monkeypatch):
         # Printer 3, 2026-10-26.
         unit, lane = self._buffered(monkeypatch, hubv=0xFD)
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
              (lane, "Unload failed: filament still at the "
@@ -28215,7 +28215,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit, lane = self._buffered(monkeypatch, hubv=0xFD)
         bridge = unit._bridge
         _p6_at(unit, 100.05, lambda: bridge.tray_release.__setitem__(0, (1, 0)))
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is False
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is False
         assert unit.afc.error.calls == [
             ("handle_lane_failure",
              (lane, "Unload: the AMS says it reeled it "
@@ -28230,7 +28230,7 @@ class TestAfcBambuAMSUnitUnloadLane:
         unit._slots[0] = slot_info(0, material="PLA", state="idle", hubv=0xB1)
         sent = list(bridge.sent)
         unit.logger.messages.clear()
-        assert unit.unit_unload_lane(lane, lane.extruder_obj) is True
+        assert unit.unit_unload_lane(lane, lane.extruder_obj, "callback") is True
         assert bridge.sent == sent
         assert lane.tool_loaded is False
         assert unit.logger.messages == [
@@ -28924,7 +28924,7 @@ class TestAfcBambuAMSFinishUnload:
 
     def test_the_lane_is_left_unloaded_and_staged(self, monkeypatch):
         unit, lane = self._unit(monkeypatch)
-        assert unit._finish_unload(lane) is True
+        assert unit._finish_unload(lane, "callback") is True
         assert lane.tool_loaded is False
         assert lane.extruder_obj.lane_loaded is None
         assert lane.status == AFCLaneState.NONE
@@ -28937,13 +28937,13 @@ class TestAfcBambuAMSFinishUnload:
     def test_the_post_unload_macro_runs(self, monkeypatch):
         unit, lane = self._unit(monkeypatch)
         unit.afc.post_unload_macro = "_AFC_POST_UNLOAD"
-        assert unit._finish_unload(lane) is True
+        assert unit._finish_unload(lane, "callback") is True
         assert unit.gcode.scripts == ["_AFC_POST_UNLOAD"]
         assert unit.logger.messages == []
 
     def test_a_hub_still_reading_filament_shows_occupied(self, monkeypatch):
         unit, lane = self._unit(monkeypatch, hubv=0xE8)
-        assert unit._finish_unload(lane) is True
+        assert unit._finish_unload(lane, "callback") is True
         assert lane._load_state is True
         assert unit.logger.messages == [
             ("warning", "Bambu_AMS_1: lane1 unloaded but bay 1's "
@@ -28953,7 +28953,7 @@ class TestAfcBambuAMSFinishUnload:
     def test_a_hub_switch_keeps_its_own_state(self, monkeypatch):
         # Its pin drives the lane's load state.
         unit, lane = self._unit(monkeypatch, hubv=0xE8, virtual_hub=False)
-        assert unit._finish_unload(lane) is True
+        assert unit._finish_unload(lane, "callback") is True
         assert lane._load_state is True
         assert unit.reactor.pauses == []
         assert unit.logger.messages == []
@@ -28961,14 +28961,14 @@ class TestAfcBambuAMSFinishUnload:
     def test_it_ends_the_lanes_reeled_home_unload(self, monkeypatch):
         unit, lane = self._unit(monkeypatch)
         unit._reeled_home_lane = "lane1"
-        assert unit._finish_unload(lane) is True
+        assert unit._finish_unload(lane, "callback") is True
         assert unit._reeled_home_lane is None
         assert unit.logger.messages == []
 
     def test_it_keeps_another_lanes_reeled_home_unload(self, monkeypatch):
         unit, lane = self._unit(monkeypatch)
         unit._reeled_home_lane = "lane2"
-        assert unit._finish_unload(lane) is True
+        assert unit._finish_unload(lane, "callback") is True
         assert unit._reeled_home_lane == "lane2"
         assert unit.logger.messages == []
 

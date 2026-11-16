@@ -328,7 +328,7 @@ class TestRepoLayout:
         # A claim on a unit with no bridge wired looks it up there too.
         late = self._pool_unit("Bambu_AMS_3", master.printer, port)
         late.logger.messages.clear()
-        assert late.claim(self.HT_UID, "ht") is True
+        assert late.claim(self.HT_UID, "ht", "callback") is True
         assert late._bridge is bridge
         assert table == {self.CHAIN_PORT: opened, port: bridge}
         assert late.logger.messages == [

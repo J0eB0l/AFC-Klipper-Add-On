@@ -1734,7 +1734,7 @@ class TestAFCDryerRequestDry:
         assert len(queued) == 1
         printer._afc.run_script.assert_not_called()
         queued[0](0.0)
-        printer._afc.run_script.assert_called_once_with(script)
+        printer._afc.run_script.assert_called_once_with(script, "callback")
 
     @staticmethod
     def _spy_ace_start(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[Any, ...]]:
@@ -1772,7 +1772,8 @@ class TestAFCDryerRequestDry:
         for callback in dryer_queued_callbacks(printer):
             callback(0.0)
         assert [c.args for c in printer._afc.run_script.call_args_list] == [
-            ("AFC_BAMBU_HEATER_STOP UNIT=AMS_2",), ("AFC_ACE_DRY_STOP UNIT=Ace2_1",)]
+            ("AFC_BAMBU_HEATER_STOP UNIT=AMS_2", "callback"),
+            ("AFC_ACE_DRY_STOP UNIT=Ace2_1", "callback")]
         assert panel.logger.messages == []
 
     def test_temp_is_clamped_to_the_units_ceiling(self):
@@ -1945,24 +1946,25 @@ class TestAFCDryerRunScript:
         panel.request_dry("AMS_2", "stop", 0, 0, 0)
         queued = printer._reactor.register_async_callback.call_args.args[0]
         queued(0.0)
-        printer._afc.run_script.assert_called_once_with("AFC_BAMBU_HEATER_STOP UNIT=AMS_2")
+        printer._afc.run_script.assert_called_once_with("AFC_BAMBU_HEATER_STOP UNIT=AMS_2",
+                                                        "callback")
         assert panel.logger.messages == [
             ("error", "afc_dryer: 'AFC_BAMBU_HEATER_STOP UNIT=AMS_2' failed: "
                       "klipper is shut down")]
 
     def test_the_script_runs_through_gcode(self):
         panel, printer = discovered_dryer_panel()
-        panel._run_script("AFC_BAMBU_HEATER_STOP UNIT=AMS_2")
+        panel._run_script("AFC_BAMBU_HEATER_STOP UNIT=AMS_2", "callback")
         printer._afc.run_script.assert_called_once_with(
-            "AFC_BAMBU_HEATER_STOP UNIT=AMS_2")
+            "AFC_BAMBU_HEATER_STOP UNIT=AMS_2", "callback")
         assert panel.logger.messages == []
 
     def test_a_failure_is_logged(self):
         panel, printer = discovered_dryer_panel()
         printer._afc.run_script.side_effect = RuntimeError("klipper is shut down")
-        panel._run_script("AFC_BAMBU_HEATER_STOP UNIT=AMS_2")
+        panel._run_script("AFC_BAMBU_HEATER_STOP UNIT=AMS_2", "callback")
         printer._afc.run_script.assert_called_once_with(
-            "AFC_BAMBU_HEATER_STOP UNIT=AMS_2")
+            "AFC_BAMBU_HEATER_STOP UNIT=AMS_2", "callback")
         assert panel.logger.messages == [
             ("error", "afc_dryer: 'AFC_BAMBU_HEATER_STOP UNIT=AMS_2' failed: "
                       "klipper is shut down")]
@@ -2349,7 +2351,7 @@ class TestHandlerDoPost:
         assert len(queued) == 1
         printer._afc.run_script.assert_not_called()
         queued[0](0.0)
-        printer._afc.run_script.assert_called_once_with(script)
+        printer._afc.run_script.assert_called_once_with(script, "callback")
         assert panel.logger.messages == []
 
     def test_omitted_fields_take_their_defaults(self):

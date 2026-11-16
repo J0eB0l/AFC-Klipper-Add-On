@@ -17,7 +17,10 @@ import string
 import threading
 import chelper
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
+
+if TYPE_CHECKING:
+    from gcode import GCodeCommand
 
 
 # Offered in the UI.
@@ -875,17 +878,18 @@ class AFCDryer:
         else:
             error_str = f"unknown action {action!r}"
             raise ValueError(error_str)
-        self.reactor.register_async_callback(lambda e, s=script: self._run_script(s))
+        self.reactor.register_async_callback(lambda e, s=script: self._run_script(s, "callback"))
         return script
 
-    def _run_script(self, script: str) -> None:
+    def _run_script(self, script: str, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Run a queued G-code on the reactor thread.
 
         :param script: the complete g-code command line
+        :param gcmd: command context the g-code runs through
         """
         try:
-            self.printer.lookup_object("AFC").run_script(script)
+            self.printer.lookup_object("AFC").run_script(script, gcmd)
         except Exception as e:
             self.logger.error(f"afc_dryer: {script!r} failed: {e}")
 

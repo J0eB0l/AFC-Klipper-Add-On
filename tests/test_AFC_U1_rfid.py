@@ -1249,14 +1249,14 @@ class TestAFCU1RFIDTriggerChannelUpdate:
 
     def test_returns_false_when_no_fd(self):
         reader = self._reader(None)
-        assert reader._trigger_channel_update(0) is False
+        assert reader._trigger_channel_update(0, "callback") is False
         assert reader._gcode.scripts == []
         assert reader.logger.messages == []
 
     def test_success_via_filament_dt_update(self):
         update = Recorder()
         reader = self._reader(U1KlipperObject(update_filament_info=update))
-        assert reader._trigger_channel_update(2) is True
+        assert reader._trigger_channel_update(2, "callback") is True
         assert reader._gcode.scripts == ["FILAMENT_DT_UPDATE CHANNEL=2"]
         assert update.calls == []
         assert reader.logger.messages == []
@@ -1267,7 +1267,7 @@ class TestAFCU1RFIDTriggerChannelUpdate:
         reader = self._reader(U1KlipperObject(update_filament_info=update,
                                               request_update=request),
                               busy=True)
-        assert reader._trigger_channel_update(3) is True
+        assert reader._trigger_channel_update(3, "callback") is True
         assert reader._gcode.scripts == ["FILAMENT_DT_UPDATE CHANNEL=3"]
         assert update.calls == [((3,), {})]
         assert request.calls == []
@@ -1277,7 +1277,7 @@ class TestAFCU1RFIDTriggerChannelUpdate:
     def test_fallback_to_request_update(self):
         request = Recorder()
         reader = self._reader(U1KlipperObject(request_update=request), busy=True)
-        assert reader._trigger_channel_update(4) is True
+        assert reader._trigger_channel_update(4, "callback") is True
         assert request.calls == [((4,), {})]
         assert reader.logger.messages == [
             ("warning", "U1 RFID: FILAMENT_DT_UPDATE failed ch4: m400")]
@@ -1288,7 +1288,7 @@ class TestAFCU1RFIDTriggerChannelUpdate:
         reader = self._reader(U1KlipperObject(update_filament_info=update,
                                               request_update=request),
                               busy=True)
-        assert reader._trigger_channel_update(5) is False
+        assert reader._trigger_channel_update(5, "callback") is False
         assert update.calls == [((5,), {})]
         assert request.calls == [((5,), {})]
         assert reader.logger.messages == [
@@ -1296,7 +1296,7 @@ class TestAFCU1RFIDTriggerChannelUpdate:
 
     def test_no_fallback_api_returns_false(self):
         reader = self._reader(U1KlipperObject(), busy=True)
-        assert reader._trigger_channel_update(6) is False
+        assert reader._trigger_channel_update(6, "callback") is False
         assert reader._gcode.scripts == ["FILAMENT_DT_UPDATE CHANNEL=6"]
         assert reader.logger.messages == [
             ("warning", "U1 RFID: FILAMENT_DT_UPDATE failed ch6: m400")]
@@ -1354,7 +1354,7 @@ class TestAFCU1RFIDPollCb:
         reader._scanner_channels = {0}
         reader.register_lane(U1Lane("lane1"), 1)
         assert reader._poll_cb(0.0) == 2.0
-        assert reader._trigger_channel_update.calls == [((0,), {})]
+        assert reader._trigger_channel_update.calls == [((0, "callback"), {})]
         assert reader._check_channel.calls == [((None, 0), {}),
                                                (("lane1", 1), {})]
         assert reader.logger.messages == []
@@ -1384,7 +1384,7 @@ class TestAFCU1RFIDPollCb:
         reader._scanner_channels = {0}
         reader._consecutive_failures = {0: 3}
         assert reader._poll_cb(0.0) == 2.0
-        assert reader._trigger_channel_update.calls == [((0,), {})]
+        assert reader._trigger_channel_update.calls == [((0, "callback"), {})]
         assert reader._consecutive_failures == {0: 0}
         assert reader.logger.messages == []
 
@@ -2837,7 +2837,7 @@ class TestAFCU1RFIDForceRead:
     def test_unknown_lane_returns(self):
         reads = self._Reads({"CARD_UID": U1_UID})
         reader = self._reader(reads)
-        reader.force_read("ghost")
+        reader.force_read("ghost", "callback")
         assert reader._last_uid == {0: U1_UID_OTHER}
         assert reader._gcode.scripts == []
         assert reads.calls == []
@@ -2846,7 +2846,7 @@ class TestAFCU1RFIDForceRead:
 
     def test_trigger_failure_warns(self):
         reader = self._reader(None)
-        reader.force_read("lane1")
+        reader.force_read("lane1", "callback")
         assert reader._last_uid == {0: None}
         assert reader._check_channel.calls == []
         assert reader.logger.messages == [
@@ -2856,7 +2856,7 @@ class TestAFCU1RFIDForceRead:
         tag = {"CARD_UID": U1_UID, "MAIN_TYPE": "PLA"}
         reads = self._Reads(None, tag)
         reader = self._reader(reads)
-        reader.force_read("lane1")
+        reader.force_read("lane1", "callback")
         # The forced re-read forgets the last UID, so the same spool reports.
         assert reader._last_uid == {0: None}
         assert reader._gcode.scripts == ["FILAMENT_DT_UPDATE CHANNEL=0"]
@@ -2868,7 +2868,7 @@ class TestAFCU1RFIDForceRead:
     def test_timeout_falls_back_to_final_check(self):
         reads = self._Reads(None, {"CARD_UID": 0})
         reader = self._reader(reads)
-        reader.force_read("lane1")
+        reader.force_read("lane1", "callback")
         assert reads.calls == [0, 0]
         assert len(reader.reactor.pauses) == 2
         assert reader._check_channel.calls == [(("lane1", 0), {})]

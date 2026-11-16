@@ -18,7 +18,10 @@ import re
 import struct
 import time
 import zlib
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Set, Tuple, Union
+
+if TYPE_CHECKING:
+    from gcode import GCodeCommand
 
 # Transport lives in AFC_BambuAMS_bridge so it can be tested without a printer.
 UF2_BLOCK        = 512
@@ -3268,10 +3271,12 @@ class afcBambuAMS(afcUnit):
             return True
         return saved.get("material") not in (None, "")
 
-    def _apply_held_lanes(self) -> None:
+    def _apply_held_lanes(self, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Put the records the master handed this claim onto its lanes, and give the lane AFC records
         in a toolhead what PREP gives it, as PREP does for every AFC lane at boot.
+
+        :param gcmd: command context a lane re-synced to its extruder runs through
         """
         held = getattr(self, "_held_lanes", None)
         self._dropped_links = {}
@@ -3288,7 +3293,7 @@ class afcBambuAMS(afcUnit):
                 afcBambuAMS._restore_claimed_lane_vars(self, lane, rec)
             except Exception as e:
                 self.logger.debug(f"{self.name}: claim restore {name}: {e}")
-        afcBambuAMS._restore_toolhead_lane(self)
+        afcBambuAMS._restore_toolhead_lane(self, gcmd)
 
     def _toolhead_record_is_mine(self, lane_name: str) -> bool:
         """
@@ -3342,10 +3347,12 @@ class afcBambuAMS(afcUnit):
                 f"loaded, but {why} {lane_name} is left unloaded. Unload "
                 f"that filament by hand and run {hint} to clear the record.")
 
-    def _restore_toolhead_lane(self) -> None:
+    def _restore_toolhead_lane(self, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Give a claimed lane that AFC records in a toolhead what PREP gives that lane at boot, moving
         no filament.
+
+        :param gcmd: command context the re-sync to the extruder runs through
         """
         afc = getattr(self, "afc", None)
         try:
@@ -3366,7 +3373,7 @@ class afcBambuAMS(afcUnit):
             lane.tool_loaded = True
             if name == current:
                 try:
-                    lane.sync_to_extruder()
+                    lane.sync_to_extruder(gcmd=gcmd)
                 except Exception:
                     pass
             params = getattr(getattr(afc, "spool", None), "set_snapmaker_filament_params", None)
@@ -4086,12 +4093,13 @@ class afcBambuAMS(afcUnit):
         self._held_lanes = {name: dict(rec)
                             for name, rec in (records or {}).items()}
 
-    def claim(self, uid: str, model: str) -> bool:
+    def claim(self, uid: str, model: str, gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
         """
         Bind this idle pool unit to a live UID and bring it onto the bus.
 
         :param uid: the physical AMS's 24-hex UID
         :param model: confirmed/assumed generation (ht/ams1/ams2/boxed)
+        :param gcmd: command context a lane re-synced to its extruder runs through
         :return bool: True if the unit is now live on the bridge
         """
         if not self.pool:
@@ -4143,7 +4151,7 @@ class afcBambuAMS(afcUnit):
         # As PREP does at boot.
         self._afc_owned = set()
         try:
-            afcBambuAMS._apply_held_lanes(self)
+            afcBambuAMS._apply_held_lanes(self, gcmd)
         except Exception as e:
             self.logger.warning(f"{self.name}: claim could not restore the saved "
                                 f"lane records: {e}")
@@ -8777,12 +8785,12 @@ class afcBambuAMS(afcUnit):
             # AFC's own macros own the cutter and the toolhead.
             try:
                 # UNSET_LANE_LOADED moves nothing and would leave the cut strand in the path.
-                self.afc.run_script(f"TOOL_UNLOAD LANE={_n}")
+                self.afc.run_script(f"TOOL_UNLOAD LANE={_n}", "callback")
                 unloaded = not getattr(self.lanes.get(_n), "tool_loaded", False)
                 # CHANGE_TOOL on a lane still loaded does nothing, and the resume below would then
                 # continue a print nothing was done for.
                 if unloaded:
-                    self.afc.run_script(f"CHANGE_TOOL LANE={_n}")
+                    self.afc.run_script(f"CHANGE_TOOL LANE={_n}", "callback")
             except Exception as e:
                 self.logger.warning(f"{self.name}: auto error recovery for {_n} "
                                     f"could not run ({e}); the lane is still paused and held. "
@@ -8835,7 +8843,7 @@ class afcBambuAMS(afcUnit):
             self._auto_resume_count = resumed + 1
             try:
                 # Queued, never inline from the follower's timer.
-                self.afc.run_script("RESUME")
+                self.afc.run_script("RESUME", "callback")
             except Exception as e:
                 self.logger.warning(f"{self.name}: {_n} is reloaded but the resume "
                                     f"failed ({e}); the print stays PAUSED. Press resume when "
@@ -11144,19 +11152,21 @@ class afcBambuAMS(afcUnit):
                           f"re-home (state {before} -> {after}), continuing with {what}")
         return True
 
-    def _unload_ran_out(self, cur_lane: Any, cur_extruder: Any) -> bool:
+    def _unload_ran_out(self, cur_lane: Any, cur_extruder: Any,
+                        gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
         """
         The unload of a lane that ran out, after the tip is cut or formed.
 
         :param cur_lane: the lane that ran out
         :param cur_extruder: its extruder
+        :param gcmd: command context the unload runs within
         :return bool: True; the toolhead side is done
         """
         afc = self.afc
         # A latched unit feeds nothing.
         self._clear_latched_error(cur_lane, "pushing the leftover out")
         self.set_feed_assist(cur_lane, True)
-        cur_lane.unsync_to_extruder()
+        cur_lane.unsync_to_extruder(gcmd=gcmd)
         if cur_extruder.tool_stn_unload > 0:
             afc.move_e_pos(cur_extruder.tool_stn_unload * -1, cur_extruder.tool_unload_speed,
                            "STN unload", wait_tool=True)
@@ -11175,14 +11185,14 @@ class afcBambuAMS(afcUnit):
         afc.save_vars()
         return True
 
-    def unit_unload_lane(self, cur_lane: Any, cur_extruder: Any = None,
-                         gcmd: Any = None) -> bool:
+    def unit_unload_lane(self, cur_lane: Any, cur_extruder: Any,
+                         gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
         """
         Full toolhead unload for a stepperless Bambu AMS lane.
 
         :param cur_lane: Lane to unload
-        :param cur_extruder: Extruder the lane is synced to (defaults to lane's)
-        :param gcmd: the command it runs within, or None; unused
+        :param cur_extruder: Extruder the lane is synced to (None uses the lane's)
+        :param gcmd: command context the unload runs within
         :return bool: True on success, False on failure
         """
         afc = self.afc
@@ -11200,7 +11210,7 @@ class afcBambuAMS(afcUnit):
                 return False
             self.logger.debug(f"{self.name}: the {sensor} is clear and the "
                               f"AMS already reeled {cur_lane.name} home, so it is unloaded")
-            return self._finish_unload(cur_lane)
+            return self._finish_unload(cur_lane, gcmd)
         if self._bridge is None:
             self.logger.warning(f"{self.name}: bridge not connected, cannot unload "
                                 f"{cur_lane.name}")
@@ -11217,21 +11227,21 @@ class afcBambuAMS(afcUnit):
             # do_tool_cut_tip_form gates on tool_cut/form_tip itself.
             afc.move_e_pos(-2, cur_extruder.tool_unload_speed, "Quick Pull", wait_tool=False)
             cur_lane.disable_buffer()
-            cur_lane.sync_to_extruder()
+            cur_lane.sync_to_extruder(gcmd=gcmd)
             cur_lane.select_lane()
             # The assist takes up the tip-forming retracts.
             if not runout_empty:
                 self._clear_latched_error(cur_lane, "tip forming")
                 self.set_feed_assist(cur_lane, True)
-            afc.do_tool_cut_tip_form(cur_lane, cur_extruder)
+            afc.do_tool_cut_tip_form(cur_lane, cur_extruder, gcmd=gcmd)
 
             if runout_empty:
-                return afcBambuAMS._unload_ran_out(self, cur_lane, cur_extruder)
+                return afcBambuAMS._unload_ran_out(self, cur_lane, cur_extruder, gcmd)
 
             # A unit still streaming mode 03 swallows the retract.
             self.set_feed_assist(cur_lane, False)
             self.stop()
-            cur_lane.unsync_to_extruder()
+            cur_lane.unsync_to_extruder(gcmd=gcmd)
 
             # A latched unit takes up nothing, so the filament buckles at the bay entry.
             self._clear_latched_error(cur_lane, "the toolhead retract")
@@ -11279,7 +11289,7 @@ class afcBambuAMS(afcUnit):
                            f"{self.get_lane_reset_command(cur_lane, 0.0)}.")
                     afc.error.handle_lane_failure(cur_lane, msg, pause=afc.function.in_print())
                     return False
-                return self._finish_unload(cur_lane)
+                return self._finish_unload(cur_lane, gcmd)
             self.retract(cur_lane, retract_dist)
             # The sensor check below decides whether the filament is home.
             self._wait_move(retract_dist, fault_mark=fault0, accept_switch_finish=True,
@@ -11374,7 +11384,7 @@ class afcBambuAMS(afcUnit):
                 return False
             # Or the unit answers "there is no tray" at ~2 Hz for ~34 s.
             self.stop()
-            return self._finish_unload(cur_lane)
+            return self._finish_unload(cur_lane, gcmd)
         except Exception as e:
             afc.error.handle_lane_failure(cur_lane,
                                           f"Unload failed: {e}",
@@ -11395,16 +11405,17 @@ class afcBambuAMS(afcUnit):
             return "Clear the toolhead, then resume."
         return "Clear the toolhead, then run the unload again."
 
-    def _finish_unload(self, cur_lane: Any) -> bool:
+    def _finish_unload(self, cur_lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
         """
         Close out an unload whose filament has left the toolhead.
 
         :param cur_lane: the lane unloaded
+        :param gcmd: command context the post-unload macro runs through
         :return bool: True
         """
         afc = self.afc
         if afc.post_unload_macro is not None:
-            afc.run_script(afc.post_unload_macro)
+            afc.run_script(afc.post_unload_macro, gcmd)
 
         if getattr(self, "_reeled_home_lane", None) == cur_lane.name:
             self._reeled_home_lane = None

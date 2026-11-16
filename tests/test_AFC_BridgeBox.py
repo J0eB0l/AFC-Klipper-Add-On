@@ -392,7 +392,7 @@ def _p3_claimed(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *,
         options.setdefault(key, value)
     master = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}",
                        online=(A,) if online else (), uids=(A,), **options)
-    master._claim_pool_unit(A, "boxed")
+    master._claim_pool_unit(A, "boxed", "callback")
     return master
 
 
@@ -603,7 +603,7 @@ class _P3BareUnit:
         self.lanes: Dict[str, Any] = {}
         self.claims: List[tuple] = []
 
-    def claim(self, uid: str, model: str) -> bool:
+    def claim(self, uid: str, model: str, gcmd: Any) -> bool:
         """
         :return bool: True; the claim is recorded in ``claims``
         """
@@ -1404,7 +1404,7 @@ class TestUnsetToolLoaded:
         self._load(active)
         afc = printer.afc
         afc.current_loading = "loading"
-        assert unset_tool_loaded(mine, afc) is True
+        assert unset_tool_loaded(mine, "callback", afc) is True
         assert (mine.tool_loaded, mine.loaded_to_hub) == (False, False)
         # set_tool_unloaded ran on the lane's own extruder.
         assert (e1.lane_loaded, mine.status) == (None, AFCLaneState.NONE)
@@ -1420,7 +1420,7 @@ class TestUnsetToolLoaded:
         self._load(active)
         afc = printer.afc
         afc.current_loading = "loading"
-        assert unset_tool_loaded(active) is True          # the lane's AFC
+        assert unset_tool_loaded(active, "callback") is True          # the lane's AFC
         assert (active.tool_loaded, active.loaded_to_hub) == (False, False)
         assert (e0.lane_loaded, active.status) == (None, AFCLaneState.NONE)
         # The UNSET_LANE_LOADED path.
@@ -1439,7 +1439,7 @@ class TestUnsetToolLoaded:
         self._load(other)
         mine.tool_loaded = True                   # a stale flag on its own
         mine.status = AFCLaneState.TOOLED
-        assert unset_tool_loaded(mine, printer.afc) is True
+        assert unset_tool_loaded(mine, "callback", printer.afc) is True
         assert mine.tool_loaded is False
         # set_tool_unloaded did not run: it would have emptied extruder.
         assert mine.status == AFCLaneState.TOOLED
@@ -1450,7 +1450,7 @@ class TestUnsetToolLoaded:
         printer, mine, _active, _e0, e1 = self._setup()
         self._load(mine)
         mine.extruder_obj = None
-        assert unset_tool_loaded(mine, printer.afc) is True
+        assert unset_tool_loaded(mine, "callback", printer.afc) is True
         assert (mine.tool_loaded, mine.loaded_to_hub) == (False, False)
         # No set_tool_unloaded.
         assert mine.status == AFCLaneState.TOOLED
@@ -1460,7 +1460,7 @@ class TestUnsetToolLoaded:
     def test_a_lane_not_in_a_toolhead_is_untouched(self):
         printer, lane, _active, _e0, _e1 = self._setup()
         assert lane_in_toolhead(lane, printer.afc) is False
-        assert unset_tool_loaded(lane, printer.afc) is False
+        assert unset_tool_loaded(lane, "callback", printer.afc) is False
         assert lane.loaded_to_hub is True       # staged spool left as it is
         assert lane.status == AFCLaneState.LOADED
         assert printer.afc.logger.messages == []
@@ -3783,10 +3783,11 @@ class TestAfcBridgeBoxInit:
             """
             self.master = master
 
-        def claim(self, uid: str, model: str) -> bool:
+        def claim(self, uid: str, model: str, gcmd: Any) -> bool:
             """
             :param uid: the unit claimed onto the bay
             :param model: its model
+            :param gcmd: the command, or "callback"
             :return bool: True, the claim took
             """
             self.unit_uid, self.ams_model, self.pool = uid, model, False
@@ -5528,7 +5529,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}, boxed:{B}",
                       online=(A, B))
         bay = _p3_bay(m, "Bambu_AMS_1")
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert bay["bound"] == A
         _p3_quiet(m)
         cmd = _p3_cmd(UID=A)
@@ -5557,7 +5558,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}, boxed:{B}",
                       online=(A, B))
         bay = _p3_bay(m, "Bambu_AMS_1")
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         m.printer.set_print_state("printing")
         assert _p3_refused(m, tmp_path, "FORGET", _p3_cmd(UID=A)) == (
             "AFC_BRIDGEBOX_FORGET: AAAA is on Bambu_AMS_1 and a print is "
@@ -5621,13 +5622,13 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
     def test_forget_drops_the_owner_and_the_held_records(
             self, tmp_path, monkeypatch, live):
         m = _p3_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         _p3_lane(m, "lane24").spool_id = 159
         if live:
             _p3_wire(m, (A, C))
         else:
-            m._release_pool_unit(A)
+            m._release_pool_unit(A, "callback")
             assert m._held["Alpha"]["uid"] == A
         drain_var_writes(m.printer)
         _p3_quiet(m)
@@ -5675,9 +5676,9 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
     def test_forgetting_a_floating_unit_says_its_records_went(
             self, tmp_path, monkeypatch):
         m = _p3_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         _p3_lane(m, "lane24").spool_id = 159
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(_p3_cmd(UID=A))
         _p3_quiet(m)
         cmd = _p3_cmd(UID=A)
@@ -5720,7 +5721,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
                           recorded=f"boxed:{C}", roster=f"boxed:{C}")
         assert _p3_bay(again, "Alpha")["uid"] == C
         assert again._held == {}
-        assert again._claim_pool_unit(C, "boxed") is not None
+        assert again._claim_pool_unit(C, "boxed", "callback") is not None
         assert _p3_lane(again, "lane24").spool_id is None
 
     def test_it_accepts_an_unrecorded_unit_that_holds_a_bay(
@@ -5943,7 +5944,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         bay = _p3_bay(m, "Bambu_AMS_4")
         assert bay["bound"] == G
         _p3_online(m, (A, B, C, H))
-        m._release_pool_unit(G)
+        m._release_pool_unit(G, "callback")
         assert (bay["uid"], bay["bound"]) == (None, None)
         assert m._owners()["Bambu_AMS_4"] == G
         _p3_quiet(m)
@@ -5973,7 +5974,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
                       recorded=f"boxed:{A}, boxed:{B}, boxed:{C}, ht:{H}")
         _p3_tick(m, 100, 101)
         _p3_online(m, (A, B, C, H))
-        m._release_pool_unit(G)
+        m._release_pool_unit(G, "callback")
         # Only the records held for the bay name G once its owner entry goes.
         owners = {b: u for b, u in m._owners().items() if u != G}
         m._bay_owner = owners
@@ -6165,7 +6166,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         # No [virtual_sdcard], so no print_stats.
         m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}, boxed:{B}",
                       online=(A, B))
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         printer = m.printer
         idle = self._Idle("Printing")
         monkeypatch.delitem(printer._objects, "print_stats")
@@ -6365,7 +6366,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxAssign:
 
     def test_assign_with_no_name_pops_the_picker(self, tmp_path, monkeypatch):
         m = _p3_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         assert _p3_bay(m, "Bravo")["bound"] == C
         _p3_quiet(m)
         cmd = _p3_cmd(UID=C)
@@ -6904,9 +6905,9 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
     def test_unassign_keeps_the_owner_and_the_held_records(self, tmp_path,
                                                           monkeypatch):
         m = _p3_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         _p3_lane(m, "lane24").spool_id = 159
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         _p3_quiet(m)
         cmd = _p3_cmd(UID=A)
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(cmd)
@@ -6952,7 +6953,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
                           roster=f"boxed:{A}, boxed:{C}")
         assert again._pins_at_boot.get(C) == "Alpha"
         assert {b: e["uid"] for b, e in again._held.items()} == {"Alpha": A}
-        assert again._claim_pool_unit(C, "boxed") is not None
+        assert again._claim_pool_unit(C, "boxed", "callback") is not None
         lane = _p3_lane(again, "lane24")
         assert (lane.spool_id, lane.material, lane.weight) == (None, None, 0.0)
         assert lane.map == ["T0"]
@@ -7265,7 +7266,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxUnassign:
         m = _p3_named(tmp_path, monkeypatch, online=(C,))
         afc = m.printer.afc
         lanes = _p3_bare_bay(m, monkeypatch, "Bravo")
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         lanes[0].tool_loaded = True
 
         def unknown() -> str:
@@ -7306,7 +7307,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxStatus:
     def test_status_lists_the_units_on_bays_and_counts_the_free_ones(
             self, tmp_path, monkeypatch):
         m = _p3_named(tmp_path, monkeypatch, online=(C,))
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         _p3_quiet(m)
         cmd = _p3_cmd()
         m.cmd_AFC_BRIDGEBOX_STATUS(cmd)
@@ -7344,7 +7345,7 @@ class TestAfcBridgeBoxStatusLines:
     @staticmethod
     def _chain(tmp_path, monkeypatch):
         m = _p3_named(tmp_path, monkeypatch, online=(C,))
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         _p3_quiet(m)
         return m
 
@@ -7421,7 +7422,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
     def test_bays_manager_lists_and_offers_unassign(self, tmp_path,
                                                     monkeypatch):
         m = _p3_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         cmd = self._bays(m)
         # Occupied bays get an Unassign button.
         assert _p3_console(m) == _p3_popup(
@@ -7443,7 +7444,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxBays:
     def test_a_live_unit_gets_no_unassign_button(self, tmp_path,
                                                  monkeypatch):
         m = _p3_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         m.cmd_AFC_BRIDGEBOX_ASSIGN(_p3_cmd(UID=C, NAME="Bravo"))
         _p3_online(m, (A,))
         m.printer.set_print_state("printing")
@@ -7931,7 +7932,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         m = self._ready(tmp_path, monkeypatch)
         unit = m.printer.lookup_object("AFC_BambuAMS Bambu_AMS_4")
 
-        def _fail(uid: str, model: str) -> bool:
+        def _fail(uid: str, model: str, gcmd: Any) -> bool:
             """The unit's claim failing."""
             raise RuntimeError("bus busy")
 
@@ -8367,7 +8368,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         gcode = m.printer.gcode
         lane = _p3_lane(m, "lane32")
         if not boot:
-            assert m._claim_pool_unit(H, "ht") is not None
+            assert m._claim_pool_unit(H, "ht", "callback") is not None
             afc.tool_cmds.pop(lane.map[0])
             gcode.register_command(lane.map[0], None)
             lane.map, lane.current_map = ["T45"], "T45"
@@ -8375,7 +8376,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
             gcode.register_command("T45", afc.CHANGE_TOOL)
             lane.spool_id, lane.material = 136, "PLA"
             lane.color, lane.weight = "#0086D6", 750.0
-            m._release_pool_unit(H)
+            m._release_pool_unit(H, "callback")
         assert m._held["Hot"]["uid"] == H
         assert m._bay_of_uid(H)["name"] == "Hot"
         m._state_set({m._learned_section(H): {"afc_bowden_length": "3632.0"}})
@@ -8384,7 +8385,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         unit.afc_bowden_length = unit.afc_unload_bowden_length = 3632.0
         afc.spoolman = "http://spoolman:7912"
         _p3_online(m, (A, J))
-        assert m._claim_pool_unit(J, "ht") is None     # every HT bay taken
+        assert m._claim_pool_unit(J, "ht", "callback") is None     # every HT bay taken
         m._missing_since[H] = 0.0
         drain_var_writes(m.printer)
         cmd = self._replaced(m, UID=J, OLD="Hot")
@@ -8825,7 +8826,7 @@ class TestAfcBridgeBoxPersistLearned:
         master = _p3_chain(tmp_path, monkeypatch, roster=f"ht:{H}",
                            pool_ht=1, online=(H,), uids=(H,), htmask=1)
         if claim:
-            assert master._claim_pool_unit(H, "ht") is not None
+            assert master._claim_pool_unit(H, "ht", "callback") is not None
         _p3_quiet(master)
         return master
 
@@ -9281,7 +9282,7 @@ class TestAfcBridgeBoxScoutReady:
                       "records of Alpha, Bravo for their units")]
         assert _p3_console(m) == []
         _p3_quiet(m)
-        assert m._claim_pool_unit(B, "boxed") is (
+        assert m._claim_pool_unit(B, "boxed", "callback") is (
             m.printer.lookup_object("AFC_BambuAMS Bravo"))
         lane = _p3_lane(m, "lane28")
         assert (lane.map, lane.current_map, lane.spool_id) == (
@@ -9354,7 +9355,7 @@ class TestAfcBridgeBoxScoutReady:
                       "records of Alpha, Bravo for their units")]
         assert _p3_console(m) == []
         _p3_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is (
+        assert m._claim_pool_unit(C, "boxed", "callback") is (
             m.printer.lookup_object("AFC_BambuAMS Bravo"))
         lane = _p3_lane(m, "lane28")
         assert (lane.map, lane.current_map, lane.spool_id) == (
@@ -9645,7 +9646,7 @@ class TestAfcBridgeBoxFillHeldBays:
         again = self._chain(tmp_path, monkeypatch)
         assert again._held == {"Alpha": {"uid": self.A,
                                          "lanes": self.VAR["Alpha"]}}
-        assert again._claim_pool_unit(self.A, "boxed") is not None
+        assert again._claim_pool_unit(self.A, "boxed", "callback") is not None
         assert again.logger.messages == [self.HOLDING] + self.CLAIMED
         assert again.printer.gcode.messages == []
         lane24 = self._lane(again, "lane24")
@@ -9682,7 +9683,7 @@ class TestAfcBridgeBoxFillHeldBays:
     def test_a_claimed_bay_is_saved_from_its_lanes(self, tmp_path,
                                                    monkeypatch):
         m = self._chain(tmp_path, monkeypatch, var=self.VAR)
-        assert m._claim_pool_unit(self.A, "boxed") is not None
+        assert m._claim_pool_unit(self.A, "boxed", "callback") is not None
         drain_var_writes(m.printer)
         self._lane(m, "lane24").material = "PETG"      # SET_MATERIAL
         _p4_quiet(m)
@@ -9707,10 +9708,10 @@ class TestAfcBridgeBoxFillHeldBays:
     def test_a_released_bay_is_saved_with_its_records(self, tmp_path,
                                                       monkeypatch):
         m = self._chain(tmp_path, monkeypatch, var=self.VAR)
-        assert m._claim_pool_unit(self.A, "boxed") is not None
+        assert m._claim_pool_unit(self.A, "boxed", "callback") is not None
         self._lane(m, "lane24").weight = 300.0
         drain_var_writes(m.printer)
-        m._release_pool_unit(self.A)
+        m._release_pool_unit(self.A, "callback")
         assert drain_var_writes(m.printer) == []
         _p4_quiet(m)
         m.printer.afc.save_vars()
@@ -9736,7 +9737,7 @@ class TestAfcBridgeBoxFillHeldBays:
         # Each lane's TcmdAssign saves while its bay-mates wait for their turn.
         m = self._chain(tmp_path, monkeypatch, var=self.VAR)
         _p4_quiet(m)
-        assert m._claim_pool_unit(self.A, "boxed") is not None
+        assert m._claim_pool_unit(self.A, "boxed", "callback") is not None
         snaps = drain_var_writes(m.printer)
         saved = {"lane24": ("T24", "T24"), "lane25": ("T25", "T25")}
         assert [{ln: (rec.get("map"), rec.get("current_map"))
@@ -9783,7 +9784,7 @@ class TestAfcBridgeBoxFillHeldBays:
     def test_a_bay_claimed_but_saved_empty_stays_empty(self, tmp_path,
                                                        monkeypatch):
         m = self._chain(tmp_path, monkeypatch, var=self.VAR)
-        assert m._claim_pool_unit(self.A, "boxed") is not None
+        assert m._claim_pool_unit(self.A, "boxed", "callback") is not None
         assert m._held["Alpha"]["uid"] == self.A
         _p4_quiet(m)
         data: Dict[str, Any] = {"Alpha": {}}
@@ -11665,7 +11666,7 @@ class TestAfcBridgeBoxScoutTick:
         assert master.units[0]["model"] == "ams2"
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "ams2", False, 50)
-        master._release_pool_unit(A24)
+        master._release_pool_unit(A24, "callback")
         assert unit.pool is True
         self._tick(master, 101.0)
         assert unit.pool is False
@@ -14502,7 +14503,7 @@ class TestAfcBridgeBoxScoutTick:
             self.lanes: Dict[str, Any] = {}
             self.claims: List[Tuple[str, str]] = []
 
-        def claim(self, uid: str, model: str) -> bool:
+        def claim(self, uid: str, model: str, gcmd: Any) -> bool:
             """:return bool: always claimed"""
             self.claims.append((uid, model))
             self.pool, self.unit_uid = False, uid
@@ -14610,7 +14611,7 @@ class TestAfcBridgeBoxPrompt:
     def test_a_stale_dismiss_timer_does_not_close_a_later_popup(
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch, ready=False)
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         reactor = m.printer.reactor
         m._prompt_new_unit(C)
         close1, when1 = reactor.callbacks[-1]
@@ -14670,7 +14671,7 @@ class TestAfcBridgeBoxPromptNewUnit:
             self, tmp_path, monkeypatch):
         # CCCC on the Bravo spare: Alpha is AAAA's, Hot is an HT bay.
         m = _p6_named(tmp_path, monkeypatch, ready=False)
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         _p6_quiet(m)
         m._prompt_new_unit(C)
         assert _p6_console(m) == _p6_popup(
@@ -14686,7 +14687,7 @@ class TestAfcBridgeBoxPromptNewUnit:
             self, tmp_path, monkeypatch):
         m = _p6_chain(tmp_path, monkeypatch, roster=f"boxed:{A}",
                       pool_ams=3, pool_ht=1, ready=False)
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         assert _p6_bay(m, "Bambu_AMS_2")["bound"] == C
         _p6_quiet(m)
         m._prompt_new_unit(C)
@@ -14718,8 +14719,8 @@ class TestAfcBridgeBoxPromptRemovedUnit:
             self, tmp_path, monkeypatch):
         # CCCC sat on the Bravo spare, which its release hands back to the pool.
         m = _p6_named(tmp_path, monkeypatch, ready=False)
-        assert m._claim_pool_unit(C, "boxed") is not None
-        m._release_pool_unit(C)
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
+        m._release_pool_unit(C, "callback")
         assert _p6_bay(m, "Bravo")["uid"] is None
         _p6_quiet(m)
         m._prompt_removed_unit(C, "Bravo")
@@ -14920,8 +14921,8 @@ class TestAfcBridgeBoxPumpPopups:
 
     def test_the_queue_shows_one_popup_per_hold(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch, ready=False)
-        assert m._claim_pool_unit(C, "boxed") is not None
-        assert m._claim_pool_unit(D, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
+        assert m._claim_pool_unit(D, "boxed", "callback") is not None
         m._queue_popup(("new", C))
         m._queue_popup(("new", D))
         _p6_quiet(m)
@@ -15035,7 +15036,7 @@ class TestAfcBridgeBoxRestoreReturned:
                                                        monkeypatch):
         # The claim's own restore is still due, so the unit engages nothing and sends nothing.
         m = _p6_named(tmp_path, monkeypatch)
-        unit = m._claim_pool_unit(A, "boxed")
+        unit = m._claim_pool_unit(A, "boxed", "callback")
         assert unit._loaded_restore_done is False
         bridge = live_bridges()[m.serial_port]
         bridge.sent.clear()
@@ -15052,7 +15053,7 @@ class TestAfcBridgeBoxRestoreReturned:
             self, tmp_path, monkeypatch):
         # The claim's own restore has run and AFC records lane24 loaded to the toolhead.
         m = _p6_named(tmp_path, monkeypatch)
-        unit = m._claim_pool_unit(A, "boxed")
+        unit = m._claim_pool_unit(A, "boxed", "callback")
         unit._id_resolved = True
         unit._loaded_restore_done = True
         m.printer.afc.tools["extruder"].lane_loaded = "lane24"
@@ -15091,7 +15092,7 @@ class TestAfcBridgeBoxRestoreReturned:
 
     def test_a_restore_that_fails_is_a_warning(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        unit = m._claim_pool_unit(A, "boxed")
+        unit = m._claim_pool_unit(A, "boxed", "callback")
 
         def _fail(since: float) -> bool:
             """:raises RuntimeError: the restore fails"""
@@ -15124,7 +15125,7 @@ class TestAfcBridgeBoxAnnounceEnrolled:
     def test_a_unit_on_a_spare_bay_is_promised_its_temperature_card(
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         assert _p6_bay(m, "Bravo")["spare"] is True
         _p6_quiet(m)
         m._announce_enrolled([f"boxed:{C}"])
@@ -15181,7 +15182,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
                 monkeypatch: pytest.MonkeyPatch) -> afcBridgeBox:
         """AAAA claimed onto Alpha, lane24 then given spool 159, PLA, blue."""
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         lane = _p6_lane(m, "lane24")
         lane.spool_id, lane.material, lane.color = 159, "PLA", "#0086D6"
         return m
@@ -15197,7 +15198,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         m = self._loaded(tmp_path, monkeypatch)
         unit = _p6_unit(m, "Alpha")
         _p6_quiet(m)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         held = m._held["Alpha"]
         assert held["uid"] == A
         assert sorted(held["lanes"]) == ["lane24", "lane25", "lane26",
@@ -15222,7 +15223,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         var = {"Alpha": {"lane24": _p6_rec("T24", spool_id=159,
                                            material="PETG")}}
         m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha")
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         lane = _p6_lane(m, "lane24")
         assert (lane.spool_id, lane.material) == (159, "PETG")
         afc = m.printer.afc
@@ -15233,7 +15234,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         afc.gcode.register_command("T7", afc.cmd_CHANGE_TOOL)
         lane.color, lane.weight = "#123456", 640.0
         _p6_quiet(m)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         rec = m._held["Alpha"]["lanes"]["lane24"]
         assert (rec["spool_id"], rec["material"]) == (159, "PETG")
         assert (rec["map"], rec["current_map"]) == ("T7", "T7")
@@ -15241,7 +15242,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         assert (lane.spool_id, lane.color, lane.map) == (None, "", [])
         assert _p6_log(m) == [self.RELEASED]
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert (lane.spool_id, lane.color, lane.weight, lane.map) == (
             159, "#123456", 640.0, ["T7"])
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
@@ -15254,14 +15255,14 @@ class TestAfcBridgeBoxReleasePoolUnit:
                                            weight=412.0),
                          "lane25": _p6_rec("T25", material="PETG")}}
         m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha")
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         drain_var_writes(m.printer)
         afc = m.printer.afc
         afc.tools["extruder"].lane_loaded = "lane24"
         lane = _p6_lane(m, "lane24")
         lane.tool_loaded = True
         _p6_quiet(m)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         held = m._held["Alpha"]["lanes"]
         assert (held["lane24"]["spool_id"], held["lane24"]["tool_loaded"]) == (
             159, True)
@@ -15292,7 +15293,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         lane = _p6_lane(m, "lane24")
         lane.tool_loaded = True
         _p6_quiet(m)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         assert (ext1.lane_loaded, afc.tools["extruder"].lane_loaded) == (
             None, None)
         assert lane.tool_loaded is False
@@ -15310,12 +15311,12 @@ class TestAfcBridgeBoxReleasePoolUnit:
                       var={"Alpha": {"lane24": _p6_rec("T3")}},
                       owners=f"{A}:Alpha")
         lane5 = _p6_other(m, "lane5", ["T24"])
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         afc = m.printer.afc
         assert (afc.tool_cmds["T3"], afc.tool_cmds["T24"]) == (
             "lane24", "lane5")
         _p6_quiet(m)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         assert afc.tool_cmds == {"T24": "lane5"}
         assert self._tools(m) == ["T24"]
         assert afc.gcode.ready_gcode_handlers["T24"] == afc.cmd_CHANGE_TOOL
@@ -15332,8 +15333,8 @@ class TestAfcBridgeBoxReleasePoolUnit:
         for name, uid in (("Bambu_AMS_2", C), ("Bambu_AMS_3", E)):
             _p6_bay(m, name)["uid"] = _p6_bay(m, name)["bound"] = uid
         _p6_quiet(m)
-        m._release_pool_unit(C)
-        m._release_pool_unit(E)
+        m._release_pool_unit(C, "callback")
+        m._release_pool_unit(E, "callback")
         assert (_p6_bay(m, "Bambu_AMS_2")["uid"],
                 _p6_bay(m, "Bambu_AMS_2")["bound"]) == (C, None)
         assert (_p6_bay(m, "Bambu_AMS_3")["uid"],
@@ -15352,7 +15353,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
             self, tmp_path, monkeypatch):
         m = self._loaded(tmp_path, monkeypatch)
         _p6_quiet(m)
-        m._release_pool_unit(A, why="UNASSIGN")
+        m._release_pool_unit(A, "callback", why="UNASSIGN")
         assert _p6_bay(m, "Alpha")["bound"] is None
         assert m._held["Alpha"]["uid"] == A
         assert _p6_log(m) == [(
@@ -15364,7 +15365,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
         m = self._loaded(tmp_path, monkeypatch)
         m._drop_held = {A, C}
         _p6_quiet(m)
-        m._release_pool_unit(C)
+        m._release_pool_unit(C, "callback")
         # Only the auto-drop hold of the uid itself goes.
         assert m._drop_held == {A}
         assert _p6_bay(m, "Alpha")["bound"] == A
@@ -15389,7 +15390,7 @@ class TestAfcBridgeBoxReleasePoolUnit:
             return real(eventtime, save_to_file=save_to_file)
         monkeypatch.setattr(lane25, "get_status", _status)
         _p6_quiet(m)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         assert asked == [True]
         assert sorted(m._held["Alpha"]["lanes"]) == ["lane24", "lane26",
                                                      "lane27"]
@@ -15488,7 +15489,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "boxed", False, 65)
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "ams2") is unit
+        assert m._claim_pool_unit(self.A24, "ams2", "callback") is unit
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "ams2", True, 50)
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1", "ams2")
@@ -15499,7 +15500,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             "AFC_BridgeBox ams2": {"dry_max_temp": "50"}})
         unit = _p6_unit(m, "Bambu_AMS_1")
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "boxed") is unit
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is unit
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "boxed", False, 65)
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
@@ -15513,15 +15514,15 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = _p6_chain(tmp_path, monkeypatch, pool_ams=1, sections={
             "AFC_BridgeBox ams2": {"heater": "False", "dry_max_temp": "50"}})
         unit = _p6_unit(m, "Bambu_AMS_1")
-        assert m._claim_pool_unit(self.A24, "boxed") is unit
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is unit
         assert (unit.has_heater, unit.dry_max_temp) == (False, 65)
         m._apply_model_live(self.A24, "ams2", 0)
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "ams2", False, 50)
-        m._release_pool_unit(self.A24)
+        m._release_pool_unit(self.A24, "callback")
         assert unit.pool is True
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "ams2") is unit
+        assert m._claim_pool_unit(self.A24, "ams2", "callback") is unit
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == (
             "ams2", False, 50)
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1", "ams2")
@@ -15541,7 +15542,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         built = (unit.ams_model, unit.has_heater, unit.dry_max_temp)
         assert built[:2] == (model, False)
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, model) is unit
+        assert m._claim_pool_unit(self.A24, model, "callback") is unit
         assert (unit.ams_model, unit.has_heater, unit.dry_max_temp) == built
         assert _p6_log(m) == _p6_claim_log(
             self.A24, name, model, 1 if model == "ht" else 4)
@@ -15556,16 +15557,16 @@ class TestAfcBridgeBoxClaimPoolUnit:
         at_claim: List[bool] = []
         real = unit.claim
 
-        def _claim(uid: str, model: str) -> bool:
+        def _claim(uid: str, model: str, gcmd: Any) -> bool:
             """Record measure_on_insert as claim() finds it."""
             at_claim.append(unit.measure_on_insert)
-            return real(uid, model)
+            return real(uid, model, gcmd)
         monkeypatch.setattr(unit, "claim", _claim)
-        assert m._claim_pool_unit(self.A24, "ams1") is unit
+        assert m._claim_pool_unit(self.A24, "ams1", "callback") is unit
         assert unit.measure_on_insert is False
-        m._release_pool_unit(self.A24)
+        m._release_pool_unit(self.A24, "callback")
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.B24, "ams2") is unit
+        assert m._claim_pool_unit(self.B24, "ams2", "callback") is unit
         assert unit.measure_on_insert is True
         assert _p6_log(m) == _p6_claim_log(self.B24, "Bambu_AMS_1", "ams2")
         # In place when each claim() ran.
@@ -15582,8 +15583,8 @@ class TestAfcBridgeBoxClaimPoolUnit:
                 _p6_bay(m, "Bambu_AMS_HT_2")["spare"]) == (False, True)
         known.measure_on_insert, spare.measure_on_insert = False, False
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "ht") is known
-        assert m._claim_pool_unit(self.B24, "ht") is spare
+        assert m._claim_pool_unit(self.A24, "ht", "callback") is known
+        assert m._claim_pool_unit(self.B24, "ht", "callback") is spare
         assert (known.measure_on_insert, spare.measure_on_insert) == (
             True, True)
         assert _p6_log(m) == (
@@ -15598,7 +15599,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         unit = _p6_unit(m, "Bambu_AMS_1")
         unit.measure_on_insert = False
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, model) is unit
+        assert m._claim_pool_unit(self.A24, model, "callback") is unit
         assert unit.measure_on_insert is True
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1", model)
 
@@ -15631,7 +15632,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = self._pool(tmp_path, monkeypatch, other_map=["T0"])
         afc = m.printer.afc
         other = afc.lanes["lane5"]
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is not None
         assert afc.tool_cmds == {"T0": "lane5", "T1": "lane24",
                                  "T2": "lane25", "T3": "lane26",
                                  "T4": "lane27"}
@@ -15654,7 +15655,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # A CHANGE_TOOL no lane uses is taken as it is, not registered again.
         unused = afc.cmd_CHANGE_TOOL
         afc.gcode.register_command("T4", unused)
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T4"], "lane25": ["T5"], "lane26": ["T6"],
             "lane27": ["T7"]}
@@ -15675,7 +15676,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         def _macro(gcmd: Any) -> None:
             """A user macro on T0."""
         afc.gcode.register_command("T0", _macro)
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is not None
         assert afc.gcode.ready_gcode_handlers["T0"] is _macro
         assert _p6_lane(m, "lane24").map == ["T1"]
         assert "_T0" not in afc.gcode.ready_gcode_handlers
@@ -15686,7 +15687,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # No bridge on the port: the unit's claim() fails.
         m = self._pool(tmp_path, monkeypatch, other_map=["T0"])
         del live_bridges()[m.serial_port]
-        assert m._claim_pool_unit(self.A24, "boxed") is None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is None
         afc = m.printer.afc
         assert afc.tool_cmds == {"T0": "lane5"}
         assert afc.lanes["lane5"].map == ["T0"]
@@ -15701,11 +15702,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
                                                       monkeypatch):
         # Claimed, then claimed again with no release in between.
         m = self._pool(tmp_path, monkeypatch)
-        unit = m._claim_pool_unit(self.A24, "boxed")
+        unit = m._claim_pool_unit(self.A24, "boxed", "callback")
         _p6_bay(m, "Bambu_AMS_1")["bound"] = None
         unit.pool = True
         _p6_quiet(m)
-        assert m._claim_pool_unit(self.A24, "boxed") is unit
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is unit
         assert m.printer.afc.tool_cmds["T0"] == "lane24"
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
         _p6_consistent(m)
@@ -15715,7 +15716,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # lane24 comes back carrying T3 in its map.
         m = self._pool(tmp_path, monkeypatch, other_map=["T3"])
         _p6_lane(m, "lane24").map = ["T3"]
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is not None
         afc = m.printer.afc
         assert afc.tool_cmds["T3"] == "lane5"
         assert afc.lanes["lane5"].map == ["T3"]
@@ -15730,7 +15731,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         afc = m.printer.afc
         _p6_lane(m, "lane24").map = ["T9"]
         afc.tool_cmds.update({"T9": "lane24", "T8": "lane25"})
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is not None
         assert afc.tool_cmds == {"T0": "lane24", "T1": "lane25",
                                  "T2": "lane26", "T3": "lane27"}
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
@@ -15750,7 +15751,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             tried.append("save")
             raise OSError("disk full")
         monkeypatch.setattr(afc, "save_vars", _save)
-        assert m._claim_pool_unit(self.A24, "boxed") is not None
+        assert m._claim_pool_unit(self.A24, "boxed", "callback") is not None
         assert tried == ["save"]
         assert _p6_bay(m, "Bambu_AMS_1")["bound"] == self.A24
         assert _p6_log(m) == _p6_claim_log(self.A24, "Bambu_AMS_1")
@@ -15761,14 +15762,14 @@ class TestAfcBridgeBoxClaimPoolUnit:
                                                   monkeypatch):
         # Alpha's T0-T3 stay AAAA's while it is unplugged.
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
-        m._release_pool_unit(A)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        m._release_pool_unit(A, "callback")
         assert "T0" not in m.printer.afc.tool_cmds
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Bravo")
         assert self._maps(m, "lane28", "lane31") == {"lane28": ["T4"],
                                                      "lane31": ["T7"]}
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T0"], "lane25": ["T1"], "lane26": ["T2"],
             "lane27": ["T3"]}
@@ -15784,9 +15785,9 @@ class TestAfcBridgeBoxClaimPoolUnit:
                                      "lane25": _p6_rec("T1")}},
                       owners=f"{A}:Alpha")
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Bravo")
         assert self._maps(m, "lane28") == {"lane28": ["T2"]}
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T0"], "lane25": ["T1"], "lane26": ["T6"],
             "lane27": ["T7"]}
@@ -15797,11 +15798,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_a_forgotten_units_tools_are_free_again(self, tmp_path,
                                                     monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
-        m._release_pool_unit(A)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        m._release_pool_unit(A, "callback")
         m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
         assert m._reserved_tools() == set()
-        assert m._claim_pool_unit(C, "boxed") is not None
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
         assert self._maps(m, "lane24") == {"lane24": ["T0"]}
         _p6_consistent(m)
 
@@ -15814,7 +15815,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # As for a unit no bay is saved for: nothing reserves its T#s.
         monkeypatch.setattr(m, "_reserved_tools", lambda: set())
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T1"], "lane25": ["T0"], "lane26": ["T2"],
             "lane27": ["T3"]}
@@ -15847,8 +15848,8 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_a_forget_sets_the_pack_for_the_next_start(self, tmp_path,
                                                        monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
-        m._release_pool_unit(A)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        m._release_pool_unit(A, "callback")
         assert m._state_get(SEC, "pack_tools") is None
         m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
         assert m._state_get(SEC, "pack_tools") == "1"
@@ -15862,7 +15863,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_the_next_start_packs_the_saved_tools_down(self, tmp_path,
                                                        monkeypatch):
         m = self._packing(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T1"], "lane25": ["T2"], "lane26": ["T3"],
             "lane27": ["T4"]}
@@ -15875,7 +15876,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_without_a_forget_the_saved_tools_stay(self, tmp_path,
                                                    monkeypatch):
         m = self._packing(tmp_path, monkeypatch, pack=False)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T4"], "lane25": ["T5"], "lane26": ["T6"],
             "lane27": ["T7"]}
@@ -15904,7 +15905,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             """A user macro on T1."""
         afc.gcode.register_command("T1", _macro)
         _p6_other(m, "lane6", ["T9"], config_map=["T3"])
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T2"], "lane25": ["T4"], "lane26": ["T5"],
             "lane27": ["T6"]}
@@ -15972,7 +15973,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             if pu["uid"] in (A, B, C, D):
                 pu["bound"] = pu["uid"]
         _p6_quiet(m)
-        assert m._claim_pool_unit(E, "boxed") is None
+        assert m._claim_pool_unit(E, "boxed", "callback") is None
         said = [(
             "warning",
             self.ALL_FOUR + " Bambu_AMS_4 (DDDD) is offline: if this AMS "
@@ -15982,7 +15983,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert _p6_log(m) == said
         assert (m._no_bay, m._no_bay_told) == ({E: "boxed"}, {E})
         # The watch retries each tick.
-        assert m._claim_pool_unit(E, "boxed") is None
+        assert m._claim_pool_unit(E, "boxed", "callback") is None
         assert _p6_log(m) == said
         assert _p6_bay(m, "Bambu_AMS_HT_2")["uid"] is None
 
@@ -15990,7 +15991,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                                                 monkeypatch):
         m = _p6_stuck(tmp_path, monkeypatch, online=(A, B, E))
         _p6_quiet(m)
-        assert m._claim_pool_unit(E, "boxed") is None
+        assert m._claim_pool_unit(E, "boxed", "callback") is None
         assert _p6_log(m) == [(
             "warning",
             self.ALL_FOUR + " Offline: Bambu_AMS_3 (CCCC), Bambu_AMS_4 "
@@ -16006,7 +16007,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # and E unlisted.
         m = _p6_stuck(tmp_path, monkeypatch, roster=FOUR_p6)
         _p6_quiet(m)
-        assert m._claim_pool_unit(E, "boxed") is None
+        assert m._claim_pool_unit(E, "boxed", "callback") is None
         assert _p6_log(m) == [(
             "warning",
             self.ALL_FOUR + " Bambu_AMS_4 (DDDD) is offline: if this AMS "
@@ -16028,7 +16029,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       pool_ht=2, ready=False)
         assert _p6_bay(m, "Bambu_AMS_HT_1")["lanes"] == ["lane32"]
         _p6_quiet(m)
-        assert m._claim_pool_unit(E, "boxed") is None
+        assert m._claim_pool_unit(E, "boxed", "callback") is None
         assert _p6_log(m) == [(
             "warning",
             "chain1: new AMS EEEE has no free bay: every AMS "
@@ -16067,7 +16068,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert _p6_bay(m, "Bambu_AMS_4")["lanes"] == ["lane36", "lane37",
                                                       "lane38", "lane39"]
         _p6_quiet(m)
-        assert m._claim_pool_unit(E, "boxed") is None
+        assert m._claim_pool_unit(E, "boxed", "callback") is None
         assert _p6_log(m) == [(
             "warning",
             "chain1: new AMS EEEE has no free bay: every AMS "
@@ -16086,7 +16087,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = _p6_chain(tmp_path, monkeypatch, recorded=f"boxed:{A}, ht:{H}",
                       pool_ams=1, pool_ht=0, ready=False)
         _p6_quiet(m)
-        assert m._claim_pool_unit(G, "ht") is None
+        assert m._claim_pool_unit(G, "ht", "callback") is None
         assert _p6_log(m) == [(
             "warning",
             "chain1: new HT GGGG has no free bay: every HT bay "
@@ -16117,11 +16118,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
         seen: List[Optional[Dict[str, Any]]] = []
         real = unit.claim
 
-        def _claim(uid: str, model: str) -> bool:
+        def _claim(uid: str, model: str, gcmd: Any) -> bool:
             """Record what the master handed over, then claim."""
             held = unit._held_lanes
             seen.append(None if held is None else dict(held))
-            return real(uid, model)
+            return real(uid, model, gcmd)
         monkeypatch.setattr(unit, "claim", _claim)
         return seen
 
@@ -16140,7 +16141,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         unit = _p6_unit(m, "Alpha")
         handed = self._handed(monkeypatch, unit)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is unit
+        assert m._claim_pool_unit(A, "boxed", "callback") is unit
         assert handed == [{"lane24": self.BOOT_VAR["Alpha"]["lane24"]}]
         lane = _p6_lane(m, "lane24")
         assert (lane.spool_id, lane.material, lane.map) == (159, "PLA",
@@ -16156,7 +16157,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         unit = _p6_unit(m, "Alpha")
         handed = self._handed(monkeypatch, unit)
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is unit
+        assert m._claim_pool_unit(C, "boxed", "callback") is unit
         assert handed == [{}]
         lane = _p6_lane(m, "lane24")
         assert (lane.spool_id, lane.material, lane.map) == (None, None,
@@ -16184,7 +16185,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             unit = _p6_unit(m, "Hot")
             handed = self._handed(monkeypatch, unit)
             _p6_quiet(m)
-            assert m._claim_pool_unit(H, "ht") is unit
+            assert m._claim_pool_unit(H, "ht", "callback") is unit
             lane = _p6_lane(m, "lane40")
             assert (lane.map, lane.current_map) == (["T7"], "T7")
             assert (lane.spool_id, lane.material) == (5, "PETG")
@@ -16232,7 +16233,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._state_get(SEC, "bay_owner") is None
         seen = self._owner_at_saves(monkeypatch, m)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert m._state_get(SEC, "bay_owner") == "AAAA:Alpha"
         # Four TcmdAssign saves and the claim's own: each one after it.
         assert seen == ["AAAA:Alpha"] * 5
@@ -16241,11 +16242,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_an_unchanged_owner_is_not_written_again(self, tmp_path,
                                                      monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
-        m._release_pool_unit(A)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        m._release_pool_unit(A, "callback")
         writes = self._state_writes(monkeypatch, m)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert writes == []
         assert m._state_get(SEC, "bay_owner") == "AAAA:Alpha"
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
@@ -16259,7 +16260,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         handed = self._handed(monkeypatch, unit)
         del live_bridges()[m.serial_port]
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is None
+        assert m._claim_pool_unit(A, "boxed", "callback") is None
         assert handed == [{"lane24": _p6_rec()}]
         assert unit._held_lanes == {}
         assert m._state_get(SEC, "bay_owner") is None
@@ -16277,12 +16278,12 @@ class TestAfcBridgeBoxClaimPoolUnit:
 
     def test_a_unit_is_the_owner_of_one_bay(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Bravo")
         assert m._state_get(SEC, "bay_owner") == "CCCC:Bravo"
-        m._release_pool_unit(C)
+        m._release_pool_unit(C, "callback")
         m.cmd_AFC_BRIDGEBOX_ASSIGN(FakeGcmd({"UID": C, "NAME": "Charlie"}))
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Charlie")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Charlie")
         assert m._state_get(SEC, "bay_owner") == "CCCC:Charlie"
         assert m._owners() == {"Charlie": C}
         assert _p6_log(m) == _p6_claim_log(C, "Charlie")
@@ -16290,11 +16291,11 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_a_unit_moved_back_gets_nothing_from_before_the_move(
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         _p6_lane(m, "lane24").spool_id = 159
         m.cmd_AFC_BRIDGEBOX_ASSIGN(FakeGcmd({"UID": A, "NAME": "Charlie"}))
         assert m._held["Alpha"]["lanes"]["lane24"]["spool_id"] == 159
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Charlie")
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Charlie")
         # Claimed onto Charlie: what was held for it on Alpha goes.
         assert m._held == {}
         _p6_lane(m, "lane32").spool_id = 777
@@ -16303,7 +16304,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         alpha = _p6_unit(m, "Alpha")
         handed = self._handed(monkeypatch, alpha)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is alpha
+        assert m._claim_pool_unit(A, "boxed", "callback") is alpha
         assert handed == [{}]
         assert _p6_lane(m, "lane24").spool_id is None
         assert m._held == {}
@@ -16319,7 +16320,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             afc.gcode.register_command(f"T{n}", afc.cmd_CHANGE_TOOL)
         seen = self._owner_at_saves(monkeypatch, m)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert afc.tool_cmds == {"T0": "lane24", "T1": "lane25",
                                  "T2": "lane26", "T3": "lane27"}
         assert seen == ["AAAA:Alpha"]
@@ -16329,13 +16330,13 @@ class TestAfcBridgeBoxClaimPoolUnit:
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
         writes = self._state_writes(monkeypatch, m, fail=True)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert writes == [m.state_file]
         assert m._state_get(SEC, "bay_owner") is None
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         writes = self._state_writes(monkeypatch, m)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert writes == [m.state_file]
         assert m._state_get(SEC, "bay_owner") == "AAAA:Alpha"
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
@@ -16352,7 +16353,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         unit = _p6_unit(m, "Bravo")
         handed = self._handed(monkeypatch, unit)
         _p6_quiet(m)
-        assert m._claim_pool_unit(D, "boxed") is unit
+        assert m._claim_pool_unit(D, "boxed", "callback") is unit
         assert handed == [{}]
         assert m._owners() == {"Bravo": D}
         assert m._bay_owner_pending is True
@@ -16366,7 +16367,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert again._held == {"Bravo": {"uid": E, "lanes": bravo["Bravo"]}}
         unit = _p6_unit(again, "Bravo")
         handed = self._handed(monkeypatch, unit)
-        assert again._claim_pool_unit(D, "boxed") is unit
+        assert again._claim_pool_unit(D, "boxed", "callback") is unit
         assert handed == [{}]
         assert _p6_lane(again, "lane28").map == ["T0"]
 
@@ -16376,22 +16377,22 @@ class TestAfcBridgeBoxClaimPoolUnit:
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
         alpha = _p6_unit(m, "Alpha")
-        assert m._claim_pool_unit(A, "boxed") is alpha
+        assert m._claim_pool_unit(A, "boxed", "callback") is alpha
         lane = _p6_lane(m, "lane24")
         lane.spool_id, lane.material, lane.color = 159, "PLA", "#0086D6"
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         handed = self._handed(monkeypatch, alpha)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is alpha
+        assert m._claim_pool_unit(A, "boxed", "callback") is alpha
         assert handed[-1]["lane24"]["spool_id"] == 159
         assert (lane.spool_id, lane.material, lane.color) == (159, "PLA",
                                                              "#0086D6")
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         m.cmd_AFC_BRIDGEBOX_UNASSIGN(FakeGcmd({"UID": A}))
         m.cmd_AFC_BRIDGEBOX_ASSIGN(FakeGcmd({"UID": C, "NAME": "Alpha"}))
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is alpha
+        assert m._claim_pool_unit(C, "boxed", "callback") is alpha
         assert handed[-1] == {}
         assert (lane.spool_id, lane.material, lane.color) == (None, None, "")
         assert _p6_log(m) == _p6_claim_log(C, "Alpha")
@@ -16400,18 +16401,18 @@ class TestAfcBridgeBoxClaimPoolUnit:
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
         bravo, charlie = _p6_unit(m, "Bravo"), _p6_unit(m, "Charlie")
-        assert m._claim_pool_unit(C, "boxed") is bravo
-        assert m._claim_pool_unit(D, "boxed") is charlie
+        assert m._claim_pool_unit(C, "boxed", "callback") is bravo
+        assert m._claim_pool_unit(D, "boxed", "callback") is charlie
         _p6_lane(m, "lane28").spool_id = 11
         _p6_lane(m, "lane32").spool_id = 22
-        m._release_pool_unit(C)
-        m._release_pool_unit(D)
+        m._release_pool_unit(C, "callback")
+        m._release_pool_unit(D, "callback")
         assert (_p6_bay(m, "Bravo")["uid"], _p6_bay(m, "Charlie")["uid"]) == (
             None, None)
         _p6_quiet(m)
         # Bravo is lower and free, but DDDD was last on Charlie.
-        assert m._claim_pool_unit(D, "boxed") is charlie
-        assert m._claim_pool_unit(C, "boxed") is bravo
+        assert m._claim_pool_unit(D, "boxed", "callback") is charlie
+        assert m._claim_pool_unit(C, "boxed", "callback") is bravo
         assert (_p6_bay(m, "Bravo")["bound"],
                 _p6_bay(m, "Charlie")["bound"]) == (C, D)
         assert (_p6_lane(m, "lane28").spool_id,
@@ -16423,7 +16424,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                                                        monkeypatch):
         m = _p6_named(tmp_path, monkeypatch, owners=f"{D}:Charlie")
         _p6_quiet(m)
-        assert m._claim_pool_unit(D, "boxed") is _p6_unit(m, "Charlie")
+        assert m._claim_pool_unit(D, "boxed", "callback") is _p6_unit(m, "Charlie")
         assert (_p6_bay(m, "Bravo")["uid"], _p6_bay(m, "Charlie")["uid"]) == (
             None, D)
         assert _p6_log(m) == _p6_claim_log(D, "Charlie")
@@ -16433,8 +16434,8 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # Alpha is AAAA's; Hot is an HT bay.
         m = _p6_named(tmp_path, monkeypatch, owners=f"{D}:Alpha, {E}:Hot")
         _p6_quiet(m)
-        assert m._claim_pool_unit(D, "boxed") is _p6_unit(m, "Bravo")
-        assert m._claim_pool_unit(E, "boxed") is _p6_unit(m, "Charlie")
+        assert m._claim_pool_unit(D, "boxed", "callback") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(E, "boxed", "callback") is _p6_unit(m, "Charlie")
         assert (_p6_bay(m, "Alpha")["uid"], _p6_bay(m, "Hot")["uid"]) == (
             A, None)
         assert _p6_log(m) == (_p6_claim_log(D, "Bravo")
@@ -16453,7 +16454,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         lane5 = _p6_other(m, "lane5", ["T0"])
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         lane24 = _p6_lane(m, "lane24")
         assert (lane24.map, lane24.current_map) == (["T3"], "T3")
         assert m.printer.afc.tool_cmds == {
@@ -16471,7 +16472,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         unit = _p6_unit(m, "Alpha")
         bridge = live_bridges().pop(m.serial_port)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is None
+        assert m._claim_pool_unit(A, "boxed", "callback") is None
         assert m.printer.afc.tool_cmds == {}
         assert _p6_log(m) == [(
             "warning",
@@ -16480,7 +16481,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             "restart.")]
         live_bridges()[m.serial_port] = bridge
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is unit
+        assert m._claim_pool_unit(A, "boxed", "callback") is unit
         assert self._maps(m, "lane24", "lane25") == {"lane24": ["T3"],
                                                      "lane25": ["T0"]}
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
@@ -16492,7 +16493,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                                      "lane25": _p6_rec("T0")}},
                       owners=f"{A}:Alpha")
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, "lane24", "lane25") == {"lane24": ["T1"],
                                                      "lane25": ["T0"]}
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
@@ -16507,7 +16508,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha, {B}:Bravo", **self.TWO)
         _p6_quiet(m)
         for uid in order:
-            assert m._claim_pool_unit(uid, "boxed") is not None
+            assert m._claim_pool_unit(uid, "boxed", "callback") is not None
         assert self._maps(m, "lane24", "lane28") == {"lane24": ["T4"],
                                                      "lane28": ["T0"]}
         bays = {A: "Alpha", B: "Bravo"}
@@ -16523,7 +16524,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         _p6_other(m, "lane5", ["T3"])
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T0"], "lane25": ["T1"], "lane26": ["T2"],
             "lane27": ["T4"]}
@@ -16551,7 +16552,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         stand_in = self._stand_in(m, pending=True)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         # The stand-in moves to the next T# after the claim's own lanes.
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T3"], "lane25": ["T0"], "lane26": ["T1"],
@@ -16572,7 +16573,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         stand_in = self._stand_in(m, pending=False)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, "lane24") == {"lane24": ["T0"]}
         assert stand_in.map == ["T3"]
         _p6_consistent(m)
@@ -16598,7 +16599,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         sent = self._pushes(monkeypatch, _p6_lane(m, "lane24"))
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert sent == [["T5"]]
 
     def test_a_multi_map_keeps_what_is_free(self, tmp_path, monkeypatch):
@@ -16608,7 +16609,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         _p6_other(m, "lane5", ["T40"])
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         lane24 = _p6_lane(m, "lane24")
         assert (lane24.map, lane24.current_map) == (["T3"], "T3")
         assert self._maps(m, "lane25") == {"lane25": ["T5"]}
@@ -16621,7 +16622,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_a_map_set_while_claimed_survives_a_replug(self, tmp_path,
                                                        monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         afc = m.printer.afc
         lane = _p6_lane(m, "lane25")
         afc.tool_cmds.pop("T1")
@@ -16629,9 +16630,9 @@ class TestAfcBridgeBoxClaimPoolUnit:
         lane.map, lane.current_map = ["T7"], "T7"
         afc.tool_cmds["T7"] = "lane25"
         afc.gcode.register_command("T7", afc.cmd_CHANGE_TOOL)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert (lane.map, lane.current_map) == (["T7"], "T7")
         assert "T1" not in afc.tool_cmds
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
@@ -16640,7 +16641,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
     def test_a_removed_last_tool_stays_removed_across_a_replug(
             self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         afc = m.printer.afc
         lane = _p6_lane(m, "lane25")
         # AFC_REMOVE_MAPPING MAPPING=T1, as AFC_spool does it.
@@ -16648,10 +16649,10 @@ class TestAfcBridgeBoxClaimPoolUnit:
         lane.map = [cmd for cmd in lane.map if cmd != "T1"]
         lane.current_map = ""
         afc.gcode.register_command("T1", None)
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         assert m._held["Alpha"]["lanes"]["lane25"]["map"] == "NONE"
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert (lane.map, lane.current_map) == (["NONE"], "")
         assert "T1" not in afc.tool_cmds
         assert "T1" not in afc.gcode.ready_gcode_handlers
@@ -16664,7 +16665,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       var={"Alpha": {"lane25": _p6_rec("NONE", "")}},
                       owners=f"{A}:Alpha")
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T0"], "lane25": ["NONE"], "lane26": ["T1"],
             "lane27": ["T2"]}
@@ -16678,7 +16679,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             "lane25": _p6_rec("NONE", ""),
             "lane27": _p6_rec("T1, T3", "T3")}}, owners=f"{A}:Alpha")
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T0"], "lane25": ["NONE"], "lane26": ["T2"],
             "lane27": ["T1", "T3"]}
@@ -16691,7 +16692,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         lane = _p6_lane(m, "lane24")
         assert lane._afc_prep_done is False
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert lane._afc_prep_done is True
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
 
@@ -16710,7 +16711,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         afc.tools["extruder"].lane_loaded = "lane24"
         lane5 = _p6_other(m, "lane5", ["T0"])
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         assert _p6_bay(m, "Alpha")["bound"] == A
         lane24 = _p6_lane(m, "lane24")
         # The records are on the lanes, the toolhead lane is restored, and the T# lane5 took stays
@@ -16742,7 +16743,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
             """A user macro on T0."""
         afc.gcode.register_command("T0", _macro)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert handlers["T0"] is _macro
         assert "_T0" not in handlers
         assert _p6_lane(m, "lane24").map == ["T1"]
@@ -16767,7 +16768,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         afc.gcode.register_command("T0", _macro)
         m.printer.lookup_object("idle_timeout").state = "Printing"
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert afc.gcode.ready_gcode_handlers["T0"] is _macro
         assert _p6_lane(m, "lane24").map == ["T1"]
 
@@ -16802,7 +16803,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                     "lane24", "lane25", "lane26", "lane27"}
             m.printer.afc.tools["extruder"].lane_loaded = "lane24"
             _p6_quiet(m)
-            assert m._claim_pool_unit(A, "boxed") is not None
+            assert m._claim_pool_unit(A, "boxed", "callback") is not None
             assert _p6_log(m) == _p6_claim_log(A, "Alpha")
             self._spools_on(m)
             assert _p6_lane(m, "lane24").tool_loaded is True
@@ -16832,7 +16833,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         afc.save_vars()                            # PREP's first save
         assert drain_var_writes(m.printer)[-1]["Alpha"] == (
             self.GUESS_VAR["Alpha"])
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Bravo")
         assert m._state_get(SEC, "bay_owner") == "AAAA:Alpha, CCCC:Bravo"
         drain_var_writes(m.printer)
         afc.save_vars()
@@ -16843,7 +16844,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert again._held["Alpha"] == {"uid": A,
                                         "lanes": self.GUESS_VAR["Alpha"]}
         _p6_quiet(again)
-        assert again._claim_pool_unit(A, "boxed") is not None
+        assert again._claim_pool_unit(A, "boxed", "callback") is not None
         assert _p6_lane(again, "lane24").spool_id == 159
         assert _p6_log(again) == _p6_claim_log(A, "Alpha")
 
@@ -16856,7 +16857,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       roster=f"boxed:{A}", var={"Charlie": {"lane32": rec}})
         assert m._held == {"Charlie": {"uid": C, "lanes": {"lane32": rec}}}
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Charlie")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Charlie")
         lane = _p6_lane(m, "lane32")
         assert (lane.map, lane.spool_id, lane.material) == (["T32"], 7,
                                                             "PETG")
@@ -16881,7 +16882,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = _p6_named(tmp_path, monkeypatch)
         self._two_tools(m)
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Bravo")
         assert _p6_lane(m, "lane28").tool_loaded is False
         claim = _p6_claim_log(C, "Bravo")
         assert _p6_log(m) == [(
@@ -16902,7 +16903,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         self._two_tools(m)
         assert m._held["Bravo"]["uid"] == D
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is _p6_unit(m, "Bravo")
+        assert m._claim_pool_unit(C, "boxed", "callback") is _p6_unit(m, "Bravo")
         assert _p6_lane(m, "lane28").tool_loaded is False
         claim = _p6_claim_log(C, "Bravo")
         assert _p6_log(m) == [(
@@ -16924,7 +16925,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha")
         drain_var_writes(m.printer)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         # lane27 saved no map.
         snaps = [s["Alpha"] for s in drain_var_writes(m.printer)]
@@ -16946,7 +16947,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         def _failed(bay: str) -> None:
             """CCCC's claim fails on ``bay``; it logs the unit's line."""
             _p6_quiet(m)
-            assert m._claim_pool_unit(C, "boxed") is None
+            assert m._claim_pool_unit(C, "boxed", "callback") is None
             assert _p6_log(m) == [(
                 "warning",
                 f"{bay}: claim found no live bridge on "
@@ -16977,7 +16978,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         else:
             _p6_unit(m, "Bambu_AMS_2").pool = False
         _p6_quiet(m)
-        assert m._claim_pool_unit(C, "boxed") is None
+        assert m._claim_pool_unit(C, "boxed", "callback") is None
         assert _p6_bay(m, "Bambu_AMS_2")["uid"] is None
         assert m._bay_of_uid(C) is None
         assert m.printer.afc.lanes == {}
@@ -16992,12 +16993,12 @@ class TestAfcBridgeBoxClaimPoolUnit:
                       owners=f"{A}:Alpha")
         unit = _p6_unit(m, "Alpha")
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is unit
+        assert m._claim_pool_unit(A, "boxed", "callback") is unit
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         assert unit._master is m
         assert (unit.pool, unit.unit_uid) == (False, A)
         assert _p6_lane(m, "lane24").spool_id == 159
-        m._release_pool_unit(A)
+        m._release_pool_unit(A, "callback")
         assert (unit.pool, unit.unit_uid) == (True, None)
 
     # ── a unit or lane missing what the claim reaches for ────────────────
@@ -17014,7 +17015,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         unit.hold_lanes = None
         m._held = {k: dict(v) for k, v in self.HELD.items()}
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is unit
+        assert m._claim_pool_unit(A, "boxed", "callback") is unit
         assert unit._held_lanes is None
         lane = _p6_lane(m, "lane24")
         assert (lane.spool_id, lane.material) == (None, None)
@@ -17032,7 +17033,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m._held = {k: dict(v) for k, v in self.HELD.items()}
         del live_bridges()[m.serial_port]
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is None
+        assert m._claim_pool_unit(A, "boxed", "callback") is None
         assert unit._held_lanes is None
         afc = m.printer.afc
         assert (afc.lanes, afc.tool_cmds) == ({}, {})
@@ -17052,7 +17053,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m._held = {k: dict(v) for k, v in self.HELD.items()}
         del live_bridges()[m.serial_port]
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is None
+        assert m._claim_pool_unit(A, "boxed", "callback") is None
         assert unit._held_lanes == {}
         assert _p6_log(m) == [(
             "warning",
@@ -17065,7 +17066,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = _p6_named(tmp_path, monkeypatch)
         del m.printer._objects["AFC_lane lane25"]
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is _p6_unit(m, "Alpha")
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         afc = m.printer.afc
         assert sorted(afc.lanes) == ["lane24", "lane26", "lane27"]
         assert afc.tool_cmds == {"T0": "lane24", "T1": "lane26",
@@ -17080,7 +17081,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         lane25 = _p6_lane(m, "lane25")
         sent = self._pushes(monkeypatch, lane25)
         _p6_quiet(m)
-        assert m._claim_pool_unit(A, "boxed") is not None
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert (lane24.map, lane24.current_map) == (["T0"], "T0")
         assert m.printer.afc.tool_cmds["T0"] == "lane24"
         # The lanes that have it are still pushed.
@@ -17156,7 +17157,7 @@ class TestAfcBridgeBoxCheckMovedLoaded:
     def test_the_new_owner_leaves_the_follower_off_and_the_user_is_told(
             self, tmp_path, monkeypatch):
         m = self._five_bays(tmp_path, monkeypatch, "lane40")
-        unit = m._claim_pool_unit(H, "ht")
+        unit = m._claim_pool_unit(H, "ht", "callback")
         assert unit is _p6_unit(m, "Bambu_AMS_HT_1")
         lane40 = _p6_lane(m, "lane40")
         bridge = live_bridges()[m.serial_port]
@@ -17224,7 +17225,7 @@ class TestAfcBridgeBoxReapplyModelOverride:
                       uids=(a24,), online=(a24,),
                       sections={"AFC_BridgeBox ams1": {
                           "measure_on_insert": "False"}})
-        unit = m._claim_pool_unit(a24, "boxed")
+        unit = m._claim_pool_unit(a24, "boxed", "callback")
         assert (unit._id_resolved, unit.measure_on_insert) == (False, True)
         bridge = live_bridges()[m.serial_port]
         bridge.sent.clear()
@@ -17362,7 +17363,7 @@ class TestAfcBridgeBoxGetStatus:
         live_bridges()[m.serial_port].status = {"units": [
             {"n": 0, "online": False}, {"n": 1, "online": False}]}
         _p6_tick(m, 100, 100)
-        m._release_pool_unit(C)
+        m._release_pool_unit(C, "callback")
         assert _p6_bay(m, "Bambu_AMS_3")["bound"] is None
         _p6_quiet(m)
         assert m.get_status()["tombstones"] == []

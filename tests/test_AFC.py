@@ -5590,9 +5590,10 @@ class TestToolLoadZeroesEOnSnapmakerPause:
 
     def test_snapmaker_paused_zeroes_e_and_points_the_resume_at_the_head(self):
         afc, lane = self._make(snapmaker=True, paused=True)
-        assert afc.TOOL_LOAD(lane)
+        gcmd = _build_gcmd()
+        assert afc.TOOL_LOAD(lane, gcmd=gcmd)
         assert len(self._g92_calls(afc)) == 1
-        afc.error.point_snapmaker_resume_at.assert_called_once_with(lane)
+        afc.error.point_snapmaker_resume_at.assert_called_once_with(lane, gcmd)
         assert afc.logger.messages == [("info", "Loading lane1")]
 
     def test_snapmaker_printing_leaves_e(self):

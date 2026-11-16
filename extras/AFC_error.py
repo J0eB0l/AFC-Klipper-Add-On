@@ -12,7 +12,7 @@ import inspect
 
 from configparser import Error as error
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 if TYPE_CHECKING:
     from klippy import Printer
@@ -295,7 +295,7 @@ class afcError:
         # Save current pause state
         temp_is_paused = self.afc.function.is_paused()
 
-        if not self._finish_interrupted_toolchange():
+        if not self._finish_interrupted_toolchange(gcmd):
             return
 
         # Verify that printer is in absolute mode
@@ -358,7 +358,8 @@ class afcError:
             f"in toolchange: {self.afc.in_toolchange}"
         )
 
-    def _finish_interrupted_toolchange(self) -> bool:
+    def _finish_interrupted_toolchange(self,
+                                       gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
         """
         Finish the tool change a failure interrupted, before the user's RESUME.
 
@@ -368,6 +369,7 @@ class afcError:
         A lane loaded by hand for that T(n) during the pause, or filament in the
         bypass, needs nothing more.
 
+        :param gcmd: command context the change is run through
         :return bool: True to go on with the resume, False to stay paused
         """
         pending = self.afc.resume_toolchange
@@ -386,18 +388,18 @@ class afcError:
             return True
 
         self.logger.info(f"AFC_RESUME: finishing the tool change to {lane.name}")
-        self._home_xy_if_lost()
+        self._home_xy_if_lost(gcmd)
         self.set_error_state(False)
         # The pause's own position is restored after the user's RESUME, and the
         # change was counted when it first ran
-        self.afc.CHANGE_TOOL(lane, purge_length, restore_pos=False, count_change=False)
+        self.afc.CHANGE_TOOL(lane, purge_length, restore_pos=False, count_change=False, gcmd=gcmd)
         if self.afc.error_state or not lane.tool_loaded:
             self.logger.error(f"AFC_RESUME: {lane.name} did not load, so the print stays "
                               "paused. Clear the fault and resume again.")
             return False
         return True
 
-    def _home_xy_if_lost(self) -> None:
+    def _home_xy_if_lost(self, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Home X and Y before finishing a tool change when only they are unhomed.
 
@@ -405,6 +407,8 @@ class afcError:
         park and pick that finish the change need them. Only a printer with auto_home
         homes here, as in check_homed. Z is never homed mid print, so with it unhomed
         as well the change's own homing check decides.
+
+        :param gcmd: command context the homing is run through
         """
         if not self.afc.auto_home:
             return
@@ -412,10 +416,11 @@ class afcError:
         homed = self.afc.toolhead.get_kinematics().get_status(curtime)["homed_axes"]
         if "z" in homed and ("x" not in homed or "y" not in homed):
             self.logger.info("AFC_RESUME: homing X and Y before finishing the tool change")
-            self.afc.run_script("G28 X Y")
+            self.afc.run_script("G28 X Y", gcmd)
             self.afc.toolhead.wait_moves()
 
-    def point_snapmaker_resume_at(self, lane: AFCLane) -> None:
+    def point_snapmaker_resume_at(self, lane: AFCLane,
+                                  gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Tell a Snapmaker U1's INNER_RESUME which head a load during a pause left to resume on.
 
@@ -428,6 +433,7 @@ class afcError:
         Printers without the macro, Snapmaker or not, need nothing.
 
         :param lane: Lane the load put in the head
+        :param gcmd: command context the variables are set through
         """
         if not self.afc.snapmaker_printer:
             return
@@ -450,7 +456,7 @@ class afcError:
                                 ("last_extruder_temp", target),
                                 (f"extruder{index}_temp", target)):
             self.afc.run_script(
-                f"SET_GCODE_VARIABLE MACRO=INNER_RESUME VARIABLE={variable} VALUE={value}")
+                f"SET_GCODE_VARIABLE MACRO=INNER_RESUME VARIABLE={variable} VALUE={value}", gcmd)
 
     cmd_AFC_PAUSE_help = "Pauses print, raises z by z-hop amount, and then calls users pause macro"
     def cmd_AFC_PAUSE(self, gcmd: GCodeCommand) -> None:

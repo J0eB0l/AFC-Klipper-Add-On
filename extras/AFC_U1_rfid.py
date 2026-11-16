@@ -12,10 +12,11 @@ import json
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
+    from gcode import GCodeCommand
     from extras.AFC import afc
     from extras.AFC_lane import AFCLane
 
@@ -514,11 +515,13 @@ class AFC_U1_RFID:
         if self._poll_timer is not None:
             self.reactor.update_timer(self._poll_timer, self.reactor.NEVER)
 
-    def _trigger_channel_update(self, channel: int) -> bool:
+    def _trigger_channel_update(self, channel: int,
+                                gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
         """
         Trigger a fresh read from hardware for a scanner channel.
 
         :param channel: U1 filament_detect channel index.
+        :param gcmd: command context FILAMENT_DT_UPDATE runs through.
         :return bool: True on success, False on failure.
         """
         fd = self._filament_detect
@@ -527,7 +530,7 @@ class AFC_U1_RFID:
         # Prefer FILAMENT_DT_UPDATE: it reads the channel and fires the notify
         # callback, whereas update_filament_info() refreshes without notifying.
         try:
-            self.afc.run_script(f"FILAMENT_DT_UPDATE CHANNEL={channel}")
+            self.afc.run_script(f"FILAMENT_DT_UPDATE CHANNEL={channel}", gcmd)
             return True
         except Exception as e:
             self.logger.warning(f"U1 RFID: FILAMENT_DT_UPDATE failed ch{channel}: {e}")
@@ -563,7 +566,7 @@ class AFC_U1_RFID:
             return eventtime + POLL_INTERVAL
 
         for ch in self._scanner_channels:
-            if not self._trigger_channel_update(ch):
+            if not self._trigger_channel_update(ch, "callback"):
                 self._consecutive_failures[ch] = \
                     self._consecutive_failures.get(ch, 0) + 1
                 if self._consecutive_failures[ch] == _MAX_CONSECUTIVE_FAILURES:
@@ -1175,17 +1178,19 @@ class AFC_U1_RFID:
         except Exception as e:
             self.logger.warning(f"U1 RFID: notification error: {e}")
 
-    def force_read(self, lane_name: str) -> None:
+    def force_read(self, lane_name: str,
+                   gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
         """
         Force an RFID re-read for a specific lane.
 
         :param lane_name: Name of the lane to re-read.
+        :param gcmd: command context the re-read runs through.
         """
         channel = self._lane_channel_map.get(lane_name)
         if channel is None:
             return
         self._last_uid[channel] = None
-        if not self._trigger_channel_update(channel):
+        if not self._trigger_channel_update(channel, gcmd):
             self.logger.warning(f"U1 RFID: force_read failed to trigger update for {lane_name}")
             return
         deadline = self.reactor.monotonic() + _FORCE_READ_TIMEOUT

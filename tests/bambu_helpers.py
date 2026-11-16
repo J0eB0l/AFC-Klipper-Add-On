@@ -931,9 +931,9 @@ class BambuAFC(MockAFC):
     def run_script(self, script: str, gcmd: Any = None) -> None:
         """
         AFC's run_script as Klipper runs it: a command holds the gcode mutex, so a script run with
-        its gcmd goes through run_script_from_command.
+        its gcmd goes through run_script_from_command; "callback" takes the mutex test.
         """
-        if gcmd is not None:
+        if gcmd is not None and gcmd != "callback":
             self.gcode.run_script_from_command(script)
         else:
             MockAFC.run_script(self, script, gcmd)
@@ -1005,10 +1005,11 @@ class BambuAFC(MockAFC):
         if wait_tool:
             self.toolhead.wait_moves()
 
-    def do_tool_cut_tip_form(self, cur_lane: Any, cur_extruder: Any) -> None:
+    def do_tool_cut_tip_form(self, cur_lane: Any, cur_extruder: Any, gcmd: Any) -> None:
         """
         :param cur_lane: the lane being unloaded
         :param cur_extruder: its extruder; both recorded in cut_tip_forms
+        :param gcmd: the unload's command, or "callback"
         """
         self.cut_tip_forms.append((cur_lane, cur_extruder))
 
