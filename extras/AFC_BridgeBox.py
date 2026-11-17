@@ -3411,7 +3411,7 @@ class afcBridgeBox:
             pass
         return None
 
-    _DEFAULT_STATE = "~/printer_data/config/AFC/AFC_BridgeBox.cfg"
+    _DEFAULT_STATE = "~/printer_data/config/AFC/AFC_BridgeBox_1.cfg"
     _STATE_MARK = "#~# --- AFC_BridgeBox managed state -- everything below is auto-written ---"
     _STATE_PREFIX = "#~# "
 

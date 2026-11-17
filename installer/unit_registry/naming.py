@@ -32,7 +32,8 @@ def lowest_free_name(ctx: Context, sel: UnitSelection, unit: Optional[UnitType])
     """
     The default name for an additional unit: the lowest free `<prefix>_N`.
 
-    "Free" means no matching unit file exists yet in the AFC config directory.
+    "Free" means no matching unit file exists yet in the AFC config directory, or
+    whatever else the unit type counts as installed (`additional_name_taken`).
 
     :param ctx: installer context
     :param sel: the user's unit choices
@@ -43,10 +44,10 @@ def lowest_free_name(ctx: Context, sel: UnitSelection, unit: Optional[UnitType])
     number = 1
     while True:
         if unit is not None:
-            probe = unit.additional_probe_file(prefix, number, sel)
+            taken = unit.additional_name_taken(ctx, prefix, number, sel)
         else:
-            probe = f"AFC_{prefix}_{number}.cfg"
-        if not (ctx.afc_config_dir / probe).is_file():
+            taken = (ctx.afc_config_dir / f"AFC_{prefix}_{number}.cfg").is_file()
+        if not taken:
             return f"{prefix}_{number}"
         number += 1
 

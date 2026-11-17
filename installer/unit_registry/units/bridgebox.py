@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Pattern, Tuple
+from typing import List, Pattern, Set, Tuple
 
 from installer.config_editor.document import ConfigDocument
 from installer.platform_core.console import NC, RED, Console, Prompter
@@ -29,11 +29,14 @@ _PORT_PATTERNS = (
 MAX_AMS = 4
 MAX_HT = 8
 _TCP_PORT = 8888
-_TEMPLATE = "AFC_BridgeBox.cfg"
+_TEMPLATE = "AFC_BridgeBox_1.cfg"
 _FIRST_CHAIN = "Chain_1"
+_DEFAULT_CHAIN = re.compile(r"Chain_([0-9]+)")
 _ADDRESS = re.compile(r"[A-Za-z0-9.-]+(:[0-9]+)?")
 _DEV_PATH = re.compile(r"/dev/[A-Za-z0-9._:/+-]+")
 _NUMBER = re.compile(r"[0-9]+")
+# An uncommented chain section; its name is the first group.
+_CHAIN_SECTION = re.compile(r"^\[AFC_BridgeBox\s+([^\s\]]+)\s*\]", re.MULTILINE)
 
 _LineEdit = Tuple[Pattern[str], str]
 
@@ -291,6 +294,37 @@ class SerialOption(UnitOption):
         return f"USB serial port: {sel.bridgebox_serial}"
 
 
+def chain_file(name: str) -> str:
+    """
+    The file a chain is written to: ``AFC_BridgeBox_<N>.cfg`` for ``Chain_<N>``, else
+    ``AFC_BridgeBox_<name>.cfg``.
+
+    :param name: the chain's name
+    :return str: file name inside the AFC config directory
+    """
+    match = _DEFAULT_CHAIN.fullmatch(name)
+    return f"AFC_BridgeBox_{match.group(1) if match else name}.cfg"
+
+
+def installed_chains(ctx: Context) -> Set[str]:
+    """
+    The chains already in the AFC config: every uncommented ``[AFC_BridgeBox <name>]``.
+
+    A chain's section can sit in any file there, not only the one the installer writes.
+
+    :param ctx: installer context
+    :return Set[str]: the section names
+    """
+    names: Set[str] = set()
+    for path in sorted(ctx.afc_config_dir.glob("*.cfg")):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        names.update(_CHAIN_SECTION.findall(text))
+    return names
+
+
 class BridgeBox(UnitType):
     """
     A BridgeBox chain: stock Bambu Lab AMS, AMS 2 Pro and AMS HT units on one RS-485 bus.
@@ -338,7 +372,7 @@ class BridgeBox(UnitType):
         :param prompter: used when a destination file already exists
         :param sel: the user's unit choices
         """
-        unit_file = ctx.afc_config_dir / f"AFC_{sel.unit_name}.cfg"
+        unit_file = ctx.afc_config_dir / chain_file(sel.unit_name)
         safe_copy(ctx, console, prompter, ctx.afc_path / "templates" / _TEMPLATE, unit_file)
         edits: List[_LineEdit] = [
             (re.compile(rf"\[AFC_BridgeBox {_FIRST_CHAIN}\]"), f"[AFC_BridgeBox {sel.unit_name}]"),
@@ -355,9 +389,23 @@ class BridgeBox(UnitType):
         :param sel: the user's unit choices
         :return str: file name inside the AFC config directory
         """
-        if number == 1:
-            return _TEMPLATE
-        return f"AFC_{prefix}_{number}.cfg"
+        return chain_file(f"{prefix}_{number}")
+
+    def additional_name_taken(
+        self, ctx: Context, prefix: str, number: int, sel: UnitSelection
+    ) -> bool:
+        """
+        A chain is taken when its file exists or its section is already in the AFC config.
+
+        :param ctx: installer context
+        :param prefix: name prefix, ``Chain``
+        :param number: candidate number
+        :param sel: the user's unit choices
+        :return bool: True when the chain name is in use
+        """
+        if super().additional_name_taken(ctx, prefix, number, sel):
+            return True
+        return f"{prefix}_{number}" in installed_chains(ctx)
 
     def buffer_target(self, ctx: Context, sel: UnitSelection) -> BufferTarget:
         """
@@ -367,16 +415,11 @@ class BridgeBox(UnitType):
         :param sel: the user's unit choices
         :return BufferTarget: the chain file and section
         """
-        if sel.is_additional_unit:
-            name = sel.unit_name
-            chain_file = ctx.afc_config_dir / f"AFC_{name}.cfg"
-        else:
-            name = _FIRST_CHAIN
-            chain_file = ctx.afc_config_dir / _TEMPLATE
+        name = sel.unit_name if sel.is_additional_unit else _FIRST_CHAIN
         return BufferTarget(
             unit_name=name,
             unit_section_prefix="AFC_BridgeBox",
-            extruder_file=chain_file,
+            extruder_file=ctx.afc_config_dir / chain_file(name),
             section_name=name,
         )
 

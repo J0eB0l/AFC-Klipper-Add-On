@@ -1,6 +1,6 @@
 === VARS ===
 buffer_unit_name=Chain_1
 buffer_unit_section_prefix=AFC_BridgeBox
-buffer_extruder_file=AFC_BridgeBox.cfg
+buffer_extruder_file=AFC_BridgeBox_1.cfg
 buffer_section_name=Chain_1
 buffer_prebaked_header=

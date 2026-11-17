@@ -1,5 +1,5 @@
 === FILES ===
---- AFC_Chain_2.cfg ---
+--- AFC_BridgeBox_2.cfg ---
 # Stock Bambu Lab AMS units through a BridgeBox, as one pooled chain.
 #
 # Klipper talks to the BridgeBox over USB or WiFi. The BridgeBox is not an
@@ -9,7 +9,7 @@
 # in later get their lanes, T#s and panel entry with no restart.
 #
 # Before the first boot:
-#   1. Copy this file to AFC/AFC_BridgeBox.cfg in your Klipper config
+#   1. Copy this file to AFC/AFC_BridgeBox_1.cfg in your Klipper config
 #      folder, where AFC's [include AFC/*.cfg] loads it.
 #   2. Set extruder below. That extruder needs a toolhead sensor (see the
 #      extruder note).
@@ -133,7 +133,7 @@ auto_drop: True
 # ---- State file ----
 # Where the #~# lines are kept. Default: the file that holds this section
 # (found in your config folder), else
-# ~/printer_data/config/AFC/AFC_BridgeBox.cfg.
+# ~/printer_data/config/AFC/AFC_BridgeBox_1.cfg.
 #state_file:
 
 # ---- Buffer ----
@@ -205,7 +205,7 @@ auto_drop: True
 #
 #   AFC_BRIDGEBOX_ASSIGN  move a unit to another bay
 #   AFC_BRIDGEBOX_FORGET  retire a unit and free its bay
---- end AFC_Chain_2.cfg ---
+--- end AFC_BridgeBox_2.cfg ---
 --- AFC_Turtle_1.cfg ---
 placeholder
 --- end AFC_Turtle_1.cfg ---

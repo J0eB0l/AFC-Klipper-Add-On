@@ -26,7 +26,7 @@ from tests.installer.fakes import PrinterTree, RecordingConsole, ScriptedPrompte
 from tests.installer.unit_rows import additional_rows, install_rows
 
 BRIDGEBOX = "BridgeBox"
-TEMPLATE = "AFC_BridgeBox.cfg"
+TEMPLATE = "AFC_BridgeBox_1.cfg"
 
 
 def make_ctx(tree: PrinterTree) -> Context:
@@ -129,12 +129,12 @@ class TestAdditionalChain:
     ) -> None:
         sel = selection(unit_name="Chain_2", is_additional_unit=True, bridgebox_pool_ams=1)
         ctx = install(printer_tree, sel, additional=True)
-        assert files(ctx) == ["AFC_Chain_2.cfg"]
-        text = (ctx.afc_config_dir / "AFC_Chain_2.cfg").read_text()
+        assert files(ctx) == ["AFC_BridgeBox_2.cfg"]
+        text = (ctx.afc_config_dir / "AFC_BridgeBox_2.cfg").read_text()
         assert "\n[AFC_BridgeBox Chain_2]\n" in text
         assert "\n[AFC_BridgeBox Chain_1]\n" not in text
         assert "# [AFC_BridgeBox Chain_1] below" in text, "comments are left alone"
-        lines = settings(ctx, "AFC_Chain_2.cfg")
+        lines = settings(ctx, "AFC_BridgeBox_2.cfg")
         assert "pool_ams: 1" in lines
 
     def test_the_first_chains_unit_names_are_commented_out(
@@ -142,7 +142,7 @@ class TestAdditionalChain:
     ) -> None:
         sel = selection(unit_name="Chain_2", is_additional_unit=True)
         ctx = install(printer_tree, sel, additional=True)
-        text = (ctx.afc_config_dir / "AFC_Chain_2.cfg").read_text()
+        text = (ctx.afc_config_dir / "AFC_BridgeBox_2.cfg").read_text()
         template = (printer_tree.afc_path / "templates" / TEMPLATE).read_text()
         for key in ("ams_names", "ht_names"):
             original = [line for line in template.splitlines() if line.startswith(f"{key}:")]
@@ -167,7 +167,7 @@ class TestExtruderChoice:
         sel = selection(unit_name="Chain_2", is_additional_unit=True)
         target = BridgeBox().buffer_target(ctx, sel)
         assert target == (
-            "Chain_2", "AFC_BridgeBox", ctx.afc_config_dir / "AFC_Chain_2.cfg", "Chain_2", ""
+            "Chain_2", "AFC_BridgeBox", ctx.afc_config_dir / "AFC_BridgeBox_2.cfg", "Chain_2", ""
         )
 
     def test_the_chosen_extruder_is_written_into_the_chain(
@@ -179,7 +179,7 @@ class TestExtruderChoice:
             "[AFC_extruder Tool1]\nextruder_name: extruder1\n"
         )
         apply_unit_extruder(ctx, RecordingConsole(), ScriptedPrompter([]), sel)
-        lines = settings(ctx, "AFC_Chain_2.cfg")
+        lines = settings(ctx, "AFC_BridgeBox_2.cfg")
         assert "extruder: Tool1" in lines
         assert "extruder: extruder" not in lines
 
@@ -202,8 +202,37 @@ class TestChainNames:
     def test_the_next_free_chain_file_is_offered(self, printer_tree: PrinterTree) -> None:
         ctx = make_ctx(printer_tree)
         self.write(ctx, TEMPLATE)
-        self.write(ctx, "AFC_Chain_2.cfg")
+        self.write(ctx, "AFC_BridgeBox_2.cfg")
         assert additional_default_name(ctx, selection()) == "Chain_3"
+
+    def test_a_chain_section_in_any_file_takes_its_name(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        # An older install's file names: AFC_BridgeBox.cfg, AFC_Chain_<N>.cfg.
+        self.write(ctx, "AFC_Chain_1.cfg", "[AFC_BridgeBox Chain_1]\nserial_port: auto\n")
+        assert additional_default_name(ctx, selection()) == "Chain_2"
+
+    def test_sections_and_files_both_count(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        self.write(ctx, TEMPLATE)
+        self.write(ctx, "AFC_other.cfg", "[AFC_BridgeBox Chain_2 ]\n")
+        assert additional_default_name(ctx, selection()) == "Chain_3"
+
+    def test_commented_sections_and_backups_do_not_count(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        self.write(ctx, "AFC_x.cfg", "#[AFC_BridgeBox Chain_1]\n# [AFC_BridgeBox Chain_1] below\n")
+        self.write(ctx, "AFC_Chain_1.cfg.bak", "[AFC_BridgeBox Chain_1]\n")
+        assert additional_default_name(ctx, selection()) == "Chain_1"
+
+    def test_chain_files_are_numbered_after_the_chain(self) -> None:
+        assert bridgebox.chain_file("Chain_1") == "AFC_BridgeBox_1.cfg"
+        assert bridgebox.chain_file("Chain_12") == "AFC_BridgeBox_12.cfg"
+        assert bridgebox.chain_file("Garage") == "AFC_BridgeBox_Garage.cfg"
+
+    def test_installed_chains_skips_what_it_cannot_read(self, printer_tree: PrinterTree) -> None:
+        ctx = make_ctx(printer_tree)
+        self.write(ctx, "AFC_y.cfg", "[AFC_BridgeBox Chain_4]\n[AFC_BridgeBox Bambu_AMS_1]\n")
+        (ctx.afc_config_dir / "folder.cfg").mkdir()
+        assert bridgebox.installed_chains(ctx) == {"Chain_4", "Bambu_AMS_1"}
 
     def test_the_additional_screen_offers_that_name(self, printer_tree: PrinterTree) -> None:
         unit = unit_for(BRIDGEBOX)

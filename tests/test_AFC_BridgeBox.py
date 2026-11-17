@@ -2325,7 +2325,7 @@ class TestAfcBridgeBoxInit:
     def test_unfindable_section_falls_back_to_the_default_path(self, tmp_path):
         m = _bbx_boot(tmp_path, roster="", state_file=None)
         assert m.state_file == str(
-            pathlib.Path.home() / "printer_data/config/AFC/AFC_BridgeBox.cfg")
+            pathlib.Path.home() / "printer_data/config/AFC/AFC_BridgeBox_1.cfg")
         assert m.printer.loaded == []
         _bbx_quiet(m.printer)
 

@@ -186,6 +186,20 @@ class UnitType(ABC):
         """
         return f"AFC_{prefix}_{number}.cfg"
 
+    def additional_name_taken(
+        self, ctx: Context, prefix: str, number: int, sel: UnitSelection
+    ) -> bool:
+        """
+        Is unit `<prefix>_<number>` already installed? By default: does its probe file exist?
+
+        :param ctx: installer context
+        :param prefix: name prefix, e.g. `Turtle`
+        :param number: candidate number
+        :param sel: the user's unit choices
+        :return bool: True when the name is taken
+        """
+        return (ctx.afc_config_dir / self.additional_probe_file(prefix, number, sel)).is_file()
+
     def name_prefix(self, sel: UnitSelection) -> str:
         """
         The prefix additional units of this type are named after.
