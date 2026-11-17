@@ -18,7 +18,8 @@ def del_var_file(ctx: Context, console: Console, prompter: Prompter) -> str:
     Only a (case insensitive, trimmed) `y` confirms. End of input stops the installer.
     The returned text keeps its trailing newline.
 
-    :param ctx: installer context
+    :param ctx: installer context, `files_updated_or_installed` is set when the file
+        is removed
     :param console: where the warning goes
     :param prompter: where the answer comes from
     :return str: the status message for the menu
@@ -36,5 +37,6 @@ def del_var_file(ctx: Context, console: Console, prompter: Prompter) -> str:
     var_file = ctx.afc_config_dir / "AFC.var.unit"
     if var_file.is_file():
         var_file.unlink()
+        ctx.files_updated_or_installed = True
         return "Removed old AFC.var.unit file.\n"
     return "No AFC.var.unit file found to remove.\n"

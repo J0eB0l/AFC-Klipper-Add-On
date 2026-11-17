@@ -64,6 +64,8 @@ class TestInstallAdditional:
         state.selection.installation_type = "HTLF"
         act.install_additional(state)
         assert calls == [(state.ctx, parts["console"], parts["prompter"], state.selection)]
+        # Quitting afterwards restarts Klipper, as after a first install.
+        assert state.ctx.files_updated_or_installed is True
 
     def test_an_unknown_type_does_nothing(self, tmp_path: Path) -> None:
         act, state, parts = make(tmp_path)
@@ -71,6 +73,7 @@ class TestInstallAdditional:
         act.install_additional(state)
         assert parts["console"].messages == []
         assert parts["runner"].calls == []
+        assert state.ctx.files_updated_or_installed is False
 
 
 class TestUpdate:

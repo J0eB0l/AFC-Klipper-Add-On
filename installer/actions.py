@@ -51,11 +51,13 @@ class RealActions:
         """
         Copy the files for an additional unit (the menu wires up its buffer afterwards).
 
-        :param state: menu state
+        :param state: menu state, `ctx.files_updated_or_installed` is set once a unit
+            is added
         """
         unit = unit_for(state.selection.installation_type)
         if unit is not None:
             unit.install_additional(state.ctx, self._console, self._prompter, state.selection)
+            state.ctx.files_updated_or_installed = True
 
     def update(self, state: MenuState) -> None:
         """

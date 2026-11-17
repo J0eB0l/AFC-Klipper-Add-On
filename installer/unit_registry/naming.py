@@ -147,7 +147,8 @@ def rename_unit_prompt(ctx: Context, console: Console, prompter: Prompter) -> st
     """
     The utilities menu's "rename existing unit": ask for both names, then rename.
 
-    :param ctx: installer context
+    :param ctx: installer context, `files_updated_or_installed` is set when the unit
+        is renamed
     :param console: where messages go
     :param prompter: where answers come from
     :return str: the status message for the menu
@@ -164,6 +165,7 @@ def rename_unit_prompt(ctx: Context, console: Console, prompter: Prompter) -> st
     if not _regular_files_named(ctx.afc_config_dir, f"AFC_{old}.cfg"):
         return f"Unit {old} not found, please enter a valid unit name."
     replace_unit_name(ctx, old, new)
+    ctx.files_updated_or_installed = True
     return f"Renaming unit {old} to {new}"
 
 

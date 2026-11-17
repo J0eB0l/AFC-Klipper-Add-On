@@ -174,6 +174,7 @@ class TestDelVarFile:
         message, console, prompter = self.run(ctx, ["y"])
         assert message == "Removed old AFC.var.unit file.\n"
         assert not (ctx.afc_config_dir / "AFC.var.unit").exists()
+        assert ctx.files_updated_or_installed is True
         assert prompter.prompts == ["Do you want to proceed? (y/n): "]
         assert console.messages == [(
             "OTHER",
@@ -182,8 +183,10 @@ class TestDelVarFile:
         )]
 
     def test_a_missing_file_is_reported(self, tmp_path: Path) -> None:
-        message = self.run(self.ctx_with(tmp_path, False), ["y"])[0]
+        ctx = self.ctx_with(tmp_path, False)
+        message = self.run(ctx, ["y"])[0]
         assert message == "No AFC.var.unit file found to remove.\n"
+        assert ctx.files_updated_or_installed is False
 
     @pytest.mark.parametrize("answer", ["n", "", "yes", "no", "maybe"])
     def test_anything_but_y_cancels_and_keeps_the_file(
@@ -192,6 +195,7 @@ class TestDelVarFile:
         ctx = self.ctx_with(tmp_path, True)
         assert self.run(ctx, [answer])[0] == "Operation cancelled by user.\n"
         assert (ctx.afc_config_dir / "AFC.var.unit").exists()
+        assert ctx.files_updated_or_installed is False
 
     def test_the_answer_is_case_insensitive_and_trimmed(self, tmp_path: Path) -> None:
         ctx = self.ctx_with(tmp_path, True)

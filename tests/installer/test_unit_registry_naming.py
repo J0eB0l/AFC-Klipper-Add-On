@@ -211,6 +211,7 @@ class TestRenameUnitPrompt:
         ]
         assert (ctx.afc_config_dir / "AFC_Turtle_2.cfg").read_text() == "[AFC_BoxTurtle Turtle_2]\n"
         assert (ctx.afc_config_dir / "mcu" / "Turtle_2.cfg").is_file()
+        assert ctx.files_updated_or_installed is True
 
     def test_a_unit_that_does_not_exist_is_reported_and_nothing_changes(
         self, printer_tree: PrinterTree
@@ -219,6 +220,7 @@ class TestRenameUnitPrompt:
         message = rename_unit_prompt(ctx, RecordingConsole(), ScriptedPrompter(["Ghost", "New"]))
         assert message == "Unit Ghost not found, please enter a valid unit name."
         assert (ctx.afc_config_dir / "AFC_Turtle_1.cfg").is_file()
+        assert ctx.files_updated_or_installed is False
 
     def test_a_differently_cased_file_is_found_and_renamed(
         self, printer_tree: PrinterTree
