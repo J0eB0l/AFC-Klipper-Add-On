@@ -363,6 +363,9 @@ class afcACE(afcUnit):
         self._prev_states_stale = False
         self._prev_slot_states: dict[str, bool] = {}
         self._hub_load_suppressed: set[str] = set()
+        # Lanes kept loaded in their toolhead while their slot reads empty
+        # outside a print, so the hold is logged once.
+        self._held_in_tool: set[str] = set()
         self._last_move_error: Optional[str] = None
         self._hw_status_time: Optional[float] = None
         self._temp_info_time: Optional[float] = None
@@ -990,6 +993,22 @@ class afcACE(afcUnit):
             slot_ready = slot_status == "ready"
             slot_transient = slot_status in ("shifting", "feeding", "unwinding")
 
+            # Outside a print AFC's record wins: a lane loaded in its toolhead
+            # stays loaded while its slot reads empty (a rebooting ACE reports
+            # every slot empty for a while), and since its last reading stays
+            # ready, nothing is re-staged when the slot reads ready again.
+            # During a print an empty slot is still a runout.
+            if (not slot_ready
+                and not slot_transient
+                and self._lane_in_toolhead(lane)
+                and not self.check_runout(lane)):
+                if lane.name not in self._held_in_tool:
+                    self._held_in_tool.add(lane.name)
+                    self.logger.info(f"ACE: {lane.name} slot reads {slot_status or 'empty'} but "
+                                     f"AFC has it loaded in its toolhead, keeping it loaded")
+                continue
+            self._held_in_tool.discard(lane.name)
+
             if not slot_transient:
                 # Vivid-style: slot "ready" means filament inserted -> prep_state.
                 lane.prep_state = slot_ready
@@ -1019,9 +1038,7 @@ class afcACE(afcUnit):
                 and not slot_transient
                 and prep_done
                 and lane.status == AFCLaneState.NONE):
-                if (lane.tool_loaded
-                    and hasattr(lane, 'extruder_obj')
-                    and lane.extruder_obj.lane_loaded == lane.name):
+                if self._lane_in_toolhead(lane):
                     self.logger.info(f"ACE: {lane.name} restoring TOOLED state from saved vars")
                     lane.loaded_to_hub = True
                     self._set_hub_state(lane, True)
@@ -1059,6 +1076,20 @@ class afcACE(afcUnit):
 
             if not slot_transient:
                 self._prev_slot_states[lane.name] = slot_ready
+
+    @staticmethod
+    def _lane_in_toolhead(lane: AFCLane) -> bool:
+        """
+        Whether AFC records the lane as loaded in its toolhead.
+
+        :param lane: Lane to check.
+        :return bool: True when the lane is tool loaded and is its extruder's
+            loaded lane.
+        """
+        extruder = getattr(lane, "extruder_obj", None)
+        return bool(lane.tool_loaded
+                    and extruder is not None
+                    and extruder.lane_loaded == lane.name)
 
     def _dispatch_load_runout(self, lane: AFCLane, eventtime: float, load_state: bool) -> None:
         """

@@ -1908,6 +1908,60 @@ class TestAfcACESyncSlotStates:
         assert unit._prev_slot_states == {"lane0": False}
         assert unit.logger.messages == []
 
+    HELD = ("info", "ACE: lane0 slot reads empty but AFC has it loaded in its toolhead, "
+                    "keeping it loaded")
+
+    def test_tooled_lane_held_while_its_slot_reads_empty_outside_a_print(self):
+        unit, lane, runout = self._unit(prev_ready=True, tool_loaded=True, current="lane0")
+        # The hold goes by AFC's record alone, not the toolhead sensor.
+        lane.extruder_obj.tool_start_state = False
+
+        for _ in range(3):
+            unit._sync_slot_states(self._hw("empty"))
+
+        assert runout.calls == []
+        assert lane.tool_loaded is True
+        assert lane.prep_state is True
+        assert lane.loaded_to_hub is True
+        assert unit._prev_slot_states == {"lane0": True}
+        assert unit.logger.messages == [self.HELD]
+
+    def test_held_lane_not_restaged_when_its_slot_reads_ready_again(self):
+        unit, lane, runout = self._unit(prev_ready=True, tool_loaded=True, current="lane0")
+
+        unit._sync_slot_states(self._hw("empty"))
+        unit._sync_slot_states(self._hw("ready"))
+
+        assert runout.calls == []
+        assert lane.loaded_to_hub is True
+        assert unit._held_in_tool == set()
+        assert unit._prev_slot_states == {"lane0": True}
+
+        unit._sync_slot_states(self._hw("empty"))
+        assert unit.logger.messages == [self.HELD, self.HELD]
+
+    def test_tooled_lane_still_runs_out_during_a_print(self):
+        unit, lane, runout = self._unit(prev_ready=True, tool_loaded=True, current="lane0",
+                                        printing=True)
+        unit.printer.reactor.now = 150.0
+
+        unit._sync_slot_states(self._hw("empty"))
+
+        assert runout.calls == [((150.0, False), {})]
+        assert lane.prep_state is False
+        assert unit._prev_slot_states == {"lane0": False}
+        assert unit.logger.messages == []
+
+    def test_lane_its_extruder_does_not_hold_runs_out(self):
+        unit, lane, runout = self._unit(prev_ready=True, tool_loaded=True, current="lane0")
+        lane.extruder_obj.lane_loaded = "lane5"
+        unit.printer.reactor.now = 150.0
+
+        unit._sync_slot_states(self._hw("empty"))
+
+        assert runout.calls == [((150.0, False), {})]
+        assert unit.logger.messages == []
+
     def test_unit_busy_suppresses_removal(self):
         unit, lane, runout = self._unit(prev_ready=True)
         unit._hub_load_suppressed = {"lane0"}
