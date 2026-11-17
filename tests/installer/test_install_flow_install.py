@@ -126,7 +126,10 @@ class TestApplyBoxturtleRename:
         apply_boxturtle_rename(ctx, UnitSelection(installation_type=itype, unit_name=name))
         return ctx
 
-    @pytest.mark.parametrize("itype", ["BoxTurtle (4-Lane)", "BoxTurtle (8-Lane)"])
+    @pytest.mark.parametrize(
+        "itype",
+        ["BoxTurtle (4-Lane)", "BoxTurtle (8-Lane)", "BoxTurtle (USB) Serial Driver"],
+    )
     def test_a_custom_name_replaces_turtle_1_in_every_file(
         self, tmp_path: Path, itype: str
     ) -> None:

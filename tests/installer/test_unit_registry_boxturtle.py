@@ -1,9 +1,14 @@
-from typing import Dict, List, Tuple
+import json
+from pathlib import Path
+from typing import Dict, List, Sequence, Tuple
 
 import pytest
 
+from installer.platform_core.console import NC, RED
 from installer.platform_core.context import Context
+from installer.platform_core.errors import InstallerExit
 from installer.unit_registry import registry
+from installer.unit_registry.buffers import apply_unit_buffer
 from installer.unit_registry.base import BufferTarget, UnitType
 from installer.unit_registry.registry import (
     UNIT_TYPES,
@@ -15,6 +20,13 @@ from installer.unit_registry.registry import (
     unit_for,
 )
 from installer.unit_registry.selection import UnitSelection
+from installer.unit_registry.units import boxturtle
+from installer.unit_registry.units.boxturtle import (
+    ChipSerialOption,
+    list_turtle_serials,
+    next_lane_number,
+    turtle_owners,
+)
 from tests.installer.fakes import PrinterTree, RecordingConsole, ScriptedPrompter
 from tests.installer.unit_driver import (
     FIXTURES,
@@ -294,9 +306,10 @@ class TestAdditionalDefaultName:
 
 class TestRegistry:
     def test_boxturtle_types_lead_the_menu_order(self) -> None:
-        assert [u.display_name for u in UNIT_TYPES][:2] == [
+        assert [u.display_name for u in UNIT_TYPES][:3] == [
             "BoxTurtle (4-Lane)",
             "BoxTurtle (8-Lane)",
+            "BoxTurtle (USB) Serial Driver",
         ]
 
     def test_keys_are_unique_and_identifier_safe(self) -> None:
@@ -368,3 +381,277 @@ class TestAdditionalBufferRules:
             "FPS_PSF",
         )
         assert force_additional_buffer_default("Nope") is False
+
+
+USB = "BoxTurtle (USB) Serial Driver"
+
+
+class TestBoxTurtleUSB:
+    def test_copies_the_hardware_file_and_the_named_unit_file_but_no_mcu_file(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        run_unit(printer_tree, USB, UnitSelection(installation_type=USB, unit_name="Bob_7"),
+                 additional=False)
+        cfg = make_ctx(printer_tree).afc_config_dir
+        templates = printer_tree.afc_path / "templates"
+        assert list((cfg / "mcu").iterdir()) == []
+        assert (cfg / "AFC_Hardware.cfg").read_bytes() == (
+            templates / "AFC_Hardware-AFC.cfg"
+        ).read_bytes()
+        assert (cfg / "AFC_Bob_7.cfg").read_bytes() == (
+            templates / "AFC_Turtle_USB_1.cfg"
+        ).read_bytes()
+
+    def test_an_additional_unit_is_renamed_and_gets_no_mcu_file(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        run_unit(printer_tree, USB, UnitSelection(installation_type=USB, unit_name="Side_Car"),
+                 additional=True)
+        cfg = make_ctx(printer_tree).afc_config_dir
+        text = (cfg / "AFC_Side_Car.cfg").read_text()
+        assert "Turtle_1" not in text
+        assert "[AFC_BoxTurtleUSB Side_Car]" in text
+        assert "unit: Side_Car:1" in text
+        assert list((cfg / "mcu").iterdir()) == []
+        assert not (cfg / "AFC_Hardware.cfg").exists()
+
+    def test_a_buffer_on_a_klipper_mcu_is_named_on_the_unit(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        sel = UnitSelection(installation_type=USB, unit_name="Turtle_1")
+        run_unit(printer_tree, USB, sel, additional=False)
+        ctx = make_ctx(printer_tree)
+        apply_unit_buffer(ctx, RecordingConsole(), ScriptedPrompter(["PA0"]), sel, "FPS_PSF")
+        text = (ctx.afc_config_dir / "AFC_Turtle_1.cfg").read_text()
+        unit_section = text.split("[AFC_BoxTurtleUSB Turtle_1]\n", 1)[1].split("\n\n", 1)[0]
+        assert "buffer: Turtle_1" in unit_section
+        assert "[AFC_buffer Turtle_1]" in text
+
+    def test_the_internal_buffer_leaves_the_unit_file_as_copied(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        sel = UnitSelection(installation_type=USB, unit_name="Turtle_1")
+        run_unit(printer_tree, USB, sel, additional=False)
+        ctx = make_ctx(printer_tree)
+        apply_unit_buffer(ctx, RecordingConsole(), ScriptedPrompter([]), sel, "Internal")
+        assert (ctx.afc_config_dir / "AFC_Turtle_1.cfg").read_bytes() == (
+            printer_tree.afc_path / "templates" / "AFC_Turtle_USB_1.cfg"
+        ).read_bytes()
+
+    def test_buffer_target_is_the_units_own_file_and_section(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        ctx = make_ctx(printer_tree)
+        unit = unit_for(USB)
+        assert unit is not None
+        assert unit.buffer_target(ctx, UnitSelection(unit_name="Bob_2")) == BufferTarget(
+            unit_name="Bob_2",
+            unit_section_prefix="AFC_BoxTurtleUSB",
+            extruder_file=ctx.afc_config_dir / "AFC_Bob_2.cfg",
+            section_name="Bob_2",
+        )
+
+    def test_message_points_at_the_firmware_and_the_unit_file(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        ctx = make_ctx(printer_tree)
+        unit = unit_for(USB)
+        assert unit is not None
+        assert unit.message(ctx, UnitSelection(unit_name="Bob_2")) == (
+            "\n- Flash firmwares/BoxTurtleUSB/boxturtle.bin on the AFC-Lite, then check hub, "
+            "extruder and each lane's dist_hub in the "
+            f"{ctx.afc_config_dir}/AFC_Bob_2.cfg file\n  "
+        )
+
+    def test_choosing_it_starts_with_the_internal_turtleneck(self) -> None:
+        unit = unit_for(USB)
+        assert unit is not None
+        sel = UnitSelection(buffer_type="Unknown")
+        unit.on_select(sel)
+        assert sel.buffer_type == "Internal"
+
+    def test_the_buffer_cycle_runs_through_the_klipper_buffers_and_back(self) -> None:
+        unit = unit_for(USB)
+        assert unit is not None
+        sel = UnitSelection(buffer_type="Internal")
+        seen = []
+        for _ in range(6):
+            unit.cycle_buffer(sel)
+            seen.append(sel.buffer_type)
+        assert seen == [
+            "TurtleNeck", "TurtleNeckV2", "TurtleNeck2Remastered", "Compensator", "FPS_PSF",
+            "Internal",
+        ]
+
+    @pytest.mark.parametrize("start", ["None", "Unknown"])
+    def test_a_buffer_outside_the_cycle_goes_to_internal(self, start: str) -> None:
+        unit = unit_for(USB)
+        assert unit is not None
+        sel = UnitSelection(buffer_type=start)
+        unit.cycle_buffer(sel)
+        assert sel.buffer_type == "Internal"
+
+    def test_an_additional_unit_starts_with_its_own_internal_buffer(self) -> None:
+        assert additional_buffer_supported(USB) is True
+        assert additional_buffer_default(USB) == "Internal"
+        assert force_additional_buffer_default(USB) is True
+        assert additional_buffer_options(USB) == (
+            "Internal", "TurtleNeck", "TurtleNeckV2", "TurtleNeck2Remastered", "Compensator",
+            "FPS_PSF",
+        )
+
+
+SERIAL = "0E0010000B51333235363331"
+
+
+def usb_unit_file(tree: PrinterTree, sel: UnitSelection, additional: bool) -> str:
+    run_unit(tree, USB, sel, additional=additional)
+    return (make_ctx(tree).afc_config_dir / f"AFC_{sel.unit_name}.cfg").read_text()
+
+
+def lanes_of(text: str) -> List[str]:
+    return [line for line in text.splitlines() if line.startswith("[AFC_lane ")]
+
+
+class TestBoxTurtleUSBBoard:
+    def test_auto_leaves_serial_uid_commented_out(self, printer_tree: PrinterTree) -> None:
+        text = usb_unit_file(printer_tree, UnitSelection(installation_type=USB), False)
+        assert "#serial_uid: <chip serial>" in text
+        assert "hotswap: True" in text
+
+    @pytest.mark.parametrize("additional", [False, True])
+    def test_a_picked_board_is_named_by_its_chip_serial(
+        self, printer_tree: PrinterTree, additional: bool
+    ) -> None:
+        sel = UnitSelection(installation_type=USB, unit_name="Turtle_2", turtle_serial=SERIAL)
+        text = usb_unit_file(printer_tree, sel, additional)
+        assert f"\nserial_uid: {SERIAL} # with auto, the board this unit takes\n" in text
+        assert "<chip serial> #" not in text
+        assert "serial_port: auto" in text
+
+
+class TestBoxTurtleUSBLaneNumbers:
+    def test_with_no_lanes_yet_they_start_at_1(self, printer_tree: PrinterTree) -> None:
+        sel = UnitSelection(installation_type=USB, unit_name="Turtle_2")
+        text = usb_unit_file(printer_tree, sel, True)
+        assert lanes_of(text) == [f"[AFC_lane lane{n}]" for n in (1, 2, 3, 4)]
+
+    def test_they_follow_the_lanes_already_there(self, printer_tree: PrinterTree) -> None:
+        cfg = make_ctx(printer_tree).afc_config_dir
+        cfg.mkdir(parents=True)
+        (cfg / "AFC_Turtle_1.cfg").write_text(
+            "[AFC_lane lane8]\n[AFC_lane lane11]\n#[AFC_lane lane40]\n[AFC_stepper lane9]\n")
+        (cfg / "AFC_Other.cfg").write_text("  [AFC_hybrid_stepper lane12]  \n[AFC_hub lane99x]\n")
+        sel = UnitSelection(installation_type=USB, unit_name="Turtle_2")
+        text = usb_unit_file(printer_tree, sel, True)
+        assert lanes_of(text) == [f"[AFC_lane lane{n}]" for n in (13, 14, 15, 16)]
+        assert "unit: Turtle_2:1" in text and "unit: Turtle_2:4" in text
+
+    def test_the_unit_file_itself_is_left_out(self, printer_tree: PrinterTree) -> None:
+        cfg = make_ctx(printer_tree).afc_config_dir
+        cfg.mkdir(parents=True)
+        (cfg / "AFC_Turtle_1.cfg").write_text("[AFC_lane lane4]\n")
+        assert next_lane_number(cfg, cfg / "AFC_Turtle_1.cfg") == 1
+        assert next_lane_number(cfg, cfg / "AFC_Turtle_2.cfg") == 5
+
+
+@pytest.fixture
+def turtles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> List[str]:
+    """Two USB BoxTurtles and one other board under a fake /dev/serial/by-id."""
+    by_id = tmp_path / "by-id"
+    by_id.mkdir()
+    for name in (f"usb-AFC_BoxTurtle_{SERIAL}-if00", "usb-AFC_BoxTurtle_1F00AA-if00",
+                 "usb-AFC_BoxTurtle_-if00", "usb-Klipper_stm32_1234-if00"):
+        (by_id / name).write_text("")
+    monkeypatch.setattr(boxturtle, "SERIAL_BY_ID", by_id)
+    return [SERIAL, "1F00AA"]
+
+
+def activate(tree: PrinterTree, sel: UnitSelection, answers: Sequence[str]):  # type: ignore
+    console, prompter = RecordingConsole(), ScriptedPrompter(answers)
+    message = ChipSerialOption().activate(make_ctx(tree), console, prompter, sel)
+    return message, console, prompter
+
+
+class TestChipSerialOption:
+    def test_lists_the_boxturtles_sorted_and_skips_other_boards(self, turtles: List[str]) -> None:
+        assert list_turtle_serials() == turtles
+
+    def test_no_directory_means_no_boards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(boxturtle, "SERIAL_BY_ID", tmp_path / "missing")
+        assert list_turtle_serials() == []
+
+    def test_the_list_shows_auto_first_and_each_boards_unit(
+        self, printer_tree: PrinterTree, turtles: List[str]
+    ) -> None:
+        cfg = make_ctx(printer_tree).afc_config_dir
+        cfg.mkdir(parents=True)
+        (cfg / "AFC.var.turtle").write_text(json.dumps({"Turtle_1": SERIAL}))
+        sel = UnitSelection(installation_type=USB)
+        message, console, prompter = activate(printer_tree, sel, ["2"])
+        assert [text for _, text in console.messages] == [
+            "A. auto: the first BoxTurtle plugged in that no other unit has, kept from then on.",
+            f"1. {SERIAL} (Turtle_1)",
+            "2. 1F00AA",
+        ]
+        assert prompter.prompts == [
+            "BoxTurtle for this unit (A, a number, or its chip serial; Enter keeps auto): "]
+        assert (message, sel.turtle_serial) == ("BoxTurtle serial: 1F00AA", "1F00AA")
+
+    @pytest.mark.parametrize("answer", ["A", "a"])
+    def test_a_is_auto(self, printer_tree: PrinterTree, turtles: List[str], answer: str) -> None:
+        sel = UnitSelection(turtle_serial=SERIAL)
+        message, _, _ = activate(printer_tree, sel, [answer])
+        assert (message, sel.turtle_serial) == ("BoxTurtle serial: auto", "auto")
+
+    def test_a_typed_serial_is_taken(self, printer_tree: PrinterTree, turtles: List[str]) -> None:
+        sel = UnitSelection()
+        message, _, _ = activate(printer_tree, sel, [" 2A0011223344 "])
+        assert (message, sel.turtle_serial) == ("BoxTurtle serial: 2A0011223344", "2A0011223344")
+
+    def test_enter_keeps_the_board(self, printer_tree: PrinterTree, turtles: List[str]) -> None:
+        sel = UnitSelection(turtle_serial=SERIAL)
+        message, _, _ = activate(printer_tree, sel, [""])
+        assert (message, sel.turtle_serial) == (f"BoxTurtle serial: {SERIAL}", SERIAL)
+
+    @pytest.mark.parametrize("answer", ["0", "3", "x", "ABC123", "0E00-1000-0B51"])
+    def test_anything_else_is_refused(
+        self, printer_tree: PrinterTree, turtles: List[str], answer: str
+    ) -> None:
+        sel = UnitSelection()
+        message, _, _ = activate(printer_tree, sel, [answer])
+        assert message == f"{RED}Enter A, a number from the list, or a chip serial.{NC}"
+        assert sel.turtle_serial == "auto"
+
+    def test_end_of_input_stops_the_installer(
+        self, printer_tree: PrinterTree, turtles: List[str]
+    ) -> None:
+        with pytest.raises(InstallerExit):
+            activate(printer_tree, UnitSelection(), [])
+
+    def test_value_is_the_board(self) -> None:
+        assert ChipSerialOption().value(UnitSelection(turtle_serial=SERIAL)) == SERIAL
+
+
+class TestTurtleOwners:
+    def test_saved_boards_and_serial_uids_name_their_units(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        ctx = make_ctx(printer_tree)
+        cfg = ctx.afc_config_dir
+        cfg.mkdir(parents=True)
+        (cfg / "AFC.var.turtle").write_text(json.dumps({"Turtle_1": "AA11", "Turtle_9": 5}))
+        (cfg / "AFC_Turtle_2.cfg").write_text(
+            "[AFC_BoxTurtleUSB Turtle_2]\nserial_uid: BB22  # mine\n"
+            "[AFC_hub Turtle_2]\nserial_uid: CC33\n"
+            "[AFC_BoxTurtleUSB Turtle_3]\n#serial_uid: DD44\nserial_uid = EE55\n")
+        assert turtle_owners(ctx) == {"AA11": "Turtle_1", "BB22": "Turtle_2", "EE55": "Turtle_3"}
+
+    @pytest.mark.parametrize("text", ["{", '["AA11"]'])
+    def test_a_bad_saved_file_is_skipped(self, printer_tree: PrinterTree, text: str) -> None:
+        ctx = make_ctx(printer_tree)
+        ctx.afc_config_dir.mkdir(parents=True)
+        (ctx.afc_config_dir / "AFC.var.turtle").write_text(text)
+        assert turtle_owners(ctx) == {}

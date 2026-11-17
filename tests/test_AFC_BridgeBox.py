@@ -10,7 +10,7 @@ import pathlib
 import sys
 import tempfile
 import types
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pytest
 
@@ -30,8 +30,10 @@ from extras.AFC_BridgeBox import (
     assign_pool_tcmd,
     BridgeBoxOverrideHolder,
     deactivate_to_pool,
+    held_tools,
     lane_in_toolhead,
     load_config_prefix,
+    next_free_tool,
     unset_tool_loaded,
 )
 from extras.AFC_lane import AFCLane, AFCLaneState
@@ -870,6 +872,16 @@ def _p6_other(master: afcBridgeBox, name: str, maps: Sequence[str],
         afc.tool_cmds[cmd] = name
         afc.gcode.register_command(cmd, afc.cmd_CHANGE_TOOL)
     return lane
+
+
+class _OtherHotSwapUnit:
+    """Another hot swap unit type, keeping T#s for its unplugged unit."""
+
+    def __init__(self, held: Set[str]) -> None:
+        self.held = held
+
+    def hotswap_held_tools(self) -> Set[str]:
+        return set(self.held)
 
 
 def _p6_consistent(master: afcBridgeBox) -> None:
@@ -15806,6 +15818,20 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert self._maps(m, "lane24") == {"lane24": ["T0"]}
         _p6_consistent(m)
 
+    def test_a_claim_skips_the_tools_another_hot_swap_unit_keeps(self, tmp_path,
+                                                                 monkeypatch):
+        # A USB BoxTurtle slot whose board is unplugged keeps T0 and T2.
+        m = _p6_named(tmp_path, monkeypatch)
+        m.printer.add_object("AFC_BoxTurtleUSB Turtle_1",
+                             _OtherHotSwapUnit({"T0", "T2"}))
+        _p6_quiet(m)
+        assert m._reserved_tools() == {"T0", "T2"}
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T1"], "lane25": ["T3"], "lane26": ["T4"],
+            "lane27": ["T5"]}
+        _p6_consistent(m)
+
     def test_a_bay_mate_never_takes_a_saved_tool(self, tmp_path,
                                                  monkeypatch):
         # The lanes with saved maps get theirs first, whatever their slot.
@@ -15872,6 +15898,21 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert m._state_get(SEC, "pack_tools") is None
         assert _p6_log(m) == [self.PACKED] + _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
+
+    def test_the_pack_leaves_another_hot_swap_units_tools(self, tmp_path,
+                                                          monkeypatch):
+        m = self._packing(tmp_path, monkeypatch)
+        m.printer.add_object("AFC_BoxTurtleUSB Turtle_1", _OtherHotSwapUnit({"T2"}))
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        assert self._maps(m, *self.BAY) == {
+            "lane24": ["T1"], "lane25": ["T3"], "lane26": ["T4"],
+            "lane27": ["T5"]}
+
+    def test_a_saved_record_that_is_not_a_lane_keeps_no_tool(self, tmp_path,
+                                                             monkeypatch):
+        m = self._packing(tmp_path, monkeypatch, pack=False)
+        m._held["Alpha"]["lanes"]["lane99"] = "T9"
+        assert m.hotswap_held_tools() == {"T4", "T5", "T6", "T7"}
 
     def test_without_a_forget_the_saved_tools_stay(self, tmp_path,
                                                    monkeypatch):
@@ -18036,3 +18077,61 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForgetBoard:
             "respond_info", "chain1: forgot its BridgeBox. "
                             "RESTART, and the chain takes the next free "
                             "BridgeBox it finds on USB.")]
+
+
+class TestHeldTools:
+    class _Printer:
+        def __init__(self, objs: List[Tuple[str, Any]]) -> None:
+            self.objs = objs
+
+        def lookup_objects(self) -> List[Tuple[str, Any]]:
+            return self.objs
+
+    class _Broken:
+        def hotswap_held_tools(self) -> Set[str]:
+            raise RuntimeError("gone")
+
+    def test_every_hot_swap_unit_counts(self):
+        printer = self._Printer([("a", _OtherHotSwapUnit({"T1"})),
+                                 ("b", _OtherHotSwapUnit({"T2", "T3"})),
+                                 ("c", types.SimpleNamespace(hotswap_held_tools={"T9"})),
+                                 ("d", object())])
+        assert held_tools(printer) == {"T1", "T2", "T3"}
+
+    def test_skip_leaves_out_a_class(self):
+        printer = self._Printer([("a", _OtherHotSwapUnit({"T1"}))])
+        assert held_tools(printer, skip=_OtherHotSwapUnit) == set()
+        assert held_tools(printer, skip=afcBridgeBox) == {"T1"}
+
+    def test_a_unit_that_fails_is_left_out(self):
+        printer = self._Printer([("a", self._Broken()), ("b", _OtherHotSwapUnit({"T4"}))])
+        assert held_tools(printer) == {"T4"}
+
+    def test_a_printer_that_cannot_list_its_objects(self):
+        printer = types.SimpleNamespace(lookup_objects=None)
+        assert held_tools(printer) == set()
+
+
+class TestNextFreeTool:
+    @staticmethod
+    def _afc(lanes: Optional[Dict[str, Any]] = None,
+             handlers: Optional[Dict[str, Any]] = None) -> Any:
+        def change_tool(gcmd: Any) -> None:
+            pass
+        return types.SimpleNamespace(
+            lanes=lanes or {}, tool_cmds={}, cmd_CHANGE_TOOL=change_tool,
+            gcode=types.SimpleNamespace(ready_gcode_handlers=handlers or {}))
+
+    def test_the_lowest_tool_nothing_has(self):
+        lane = types.SimpleNamespace(map=["T1"], _map=["T2"])
+        afc = self._afc(lanes={"lane1": lane}, handlers={"T3": lambda gcmd: None})
+        assert next_free_tool(afc, {"T0"}) == "T4"
+
+    def test_afcs_own_tool_command_is_free(self):
+        afc = self._afc()
+        afc.gcode.ready_gcode_handlers = {"T0": afc.cmd_CHANGE_TOOL}
+        assert next_free_tool(afc, set()) == "T0"
+
+    def test_none_free(self):
+        assert next_free_tool(self._afc(), {f"T{n}" for n in range(99)}) is None
+

@@ -39,7 +39,9 @@ from installer.unit_registry.extruders import apply_unit_extruder, find_printer_
 from installer.unit_registry.registry import unit_for
 from installer.unit_registry.selection import UnitSelection
 
-_BOXTURTLE_TYPES = ("BoxTurtle (4-Lane)", "BoxTurtle (8-Lane)")
+_BOXTURTLE_TYPES = (
+    "BoxTurtle (4-Lane)", "BoxTurtle (8-Lane)", "BoxTurtle (USB) Serial Driver"
+)
 
 
 @dataclass

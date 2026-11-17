@@ -296,6 +296,58 @@ def _plan_lane_map(afc: Any, lname: str, rec: Dict[str, Any], warn: Callable[[st
     return kept, (current if current in kept else kept[0])
 
 
+def held_tools(printer: Any, skip: Optional[type] = None) -> Set[str]:
+    """
+    The T#s every hot swap unit keeps for a unit that is unplugged now (BridgeBox bays, USB
+    BoxTurtle slots), so no other unit is given one: the first unit to take a T# keeps it.
+
+    :param printer: the printer
+    :param skip: leave out objects of this class (they count their own)
+    :return set: the T# names
+    """
+    out: Set[str] = set()
+    try:
+        objs = printer.lookup_objects()
+    except Exception:
+        objs = []
+    for _name, obj in objs:
+        if (skip is not None
+            and isinstance(obj, skip)):
+            continue
+        held = getattr(obj, "hotswap_held_tools", None)
+        if callable(held):
+            try: out.update(held())
+            except Exception: pass
+    return out
+
+
+def next_free_tool(afc: Any, held: Set[str]) -> Optional[str]:
+    """
+    The lowest T# no lane, hot swap unit or other macro has, for a lane a hot swap claim brings in
+    with no saved map.
+
+    :param afc: the AFC object
+    :param held: the T#s kept for unplugged units (see held_tools)
+    :return str: the T# name, or None when none of T0-T98 is free
+    """
+    handlers = _tcmd_handlers(afc)
+    taken = set(held)
+    for ln in (getattr(afc, "lanes", None) or {}).values():
+        taken.update(getattr(ln, "map", None) or [])
+        taken.update(getattr(ln, "_map", None) or [])
+    for n in range(99):
+        cmd = f"T{n}"
+        if (cmd in taken
+            or _tcmd_holder(afc, cmd) is not None):
+            continue
+        handler = handlers.get(cmd)
+        if (handler is not None
+            and not _tcmd_is_ours(afc, handler)):
+            continue
+        return cmd
+    return None
+
+
 def assign_pool_tcmd(lane: Any, afc: Any = None) -> None:
     """
     Give a claimed pool lane its T# command without registering it twice.
@@ -6006,31 +6058,33 @@ class afcBridgeBox:
                     out.append(holder)
         return out
 
-    def _reserved_tools(self) -> Set[str]:
+    def hotswap_held_tools(self) -> Set[str]:
         """
-        The T#s saved for known units that are not claimed now.
+        The T#s this chain saves for its known units that are not claimed now (see held_tools).
 
         :return set: the T# names
         """
         out: Set[str] = set()
-        try:
-            chains = [obj for _name, obj
-                      in self.printer.lookup_objects(self._BASE_SECTION)
-                      if isinstance(obj, afcBridgeBox)]
-        except Exception:
-            chains = []
-        for chain in chains or [self]:
-            held = getattr(chain, "_held", None) or {}
-            for pu in getattr(chain, "_pool_units", None) or []:
-                entry = held.get(pu.get("name")) or {}
-                if (pu.get("bound") is not None
-                    or not chain._bay_held(pu)
-                    or _norm_uid(entry.get("uid")) != _norm_uid(pu.get("uid"))):
-                    continue
-                for rec in (entry.get("lanes") or {}).values():
-                    if isinstance(rec, dict):
-                        out.update(_parse_map(rec.get("map")))
+        held = getattr(self, "_held", None) or {}
+        for pu in getattr(self, "_pool_units", None) or []:
+            entry = held.get(pu.get("name")) or {}
+            if (pu.get("bound") is not None
+                or not self._bay_held(pu)
+                or _norm_uid(entry.get("uid")) != _norm_uid(pu.get("uid"))):
+                continue
+            for rec in (entry.get("lanes") or {}).values():
+                if isinstance(rec, dict):
+                    out.update(_parse_map(rec.get("map")))
         return out
+
+    def _reserved_tools(self) -> Set[str]:
+        """
+        The T#s saved for known units of any hot swap type that are not claimed now.
+
+        :return set: the T# names
+        """
+        # A chain Klipper does not list still counts its own.
+        return held_tools(self.printer) | self.hotswap_held_tools()
 
     _PACK_KEY = "pack_tools"
 
@@ -6069,6 +6123,8 @@ class afcBridgeBox:
         for lane in (getattr(afc, "lanes", None) or {}).values():
             taken.update(getattr(lane, "map", None) or [])
             taken.update(getattr(lane, "_map", None) or [])
+        # Other hot swap types keep their unplugged units' T#s.
+        taken.update(held_tools(self.printer, skip=afcBridgeBox))
         tools = {cmd for rec in recs for cmd in _parse_map(rec.get("map"))}
         moves = _pack_tools(tools - taken, taken)
         for rec in recs:
@@ -6103,22 +6159,7 @@ class afcBridgeBox:
         :param afc: the AFC object
         :return str: the T# name, or None when none of T0-T98 is free
         """
-        handlers = _tcmd_handlers(afc)
-        taken = self._reserved_tools()
-        for ln in (getattr(afc, "lanes", None) or {}).values():
-            taken.update(getattr(ln, "map", None) or [])
-            taken.update(getattr(ln, "_map", None) or [])
-        for n in range(99):
-            cmd = f"T{n}"
-            if (cmd in taken
-                or _tcmd_holder(afc, cmd) is not None):
-                continue
-            handler = handlers.get(cmd)
-            if (handler is not None
-                and not _tcmd_is_ours(afc, handler)):
-                continue
-            return cmd
-        return None
+        return next_free_tool(afc, self._reserved_tools())
 
     def _clear_standalone(self, lanes: list) -> None:
         """

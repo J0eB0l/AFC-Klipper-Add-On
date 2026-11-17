@@ -147,6 +147,7 @@ class TestDefaultName:
         "key,expected",
         [
             ("BoxTurtle_4Lane", "Turtle_1"), ("BoxTurtle_8Lane", "Turtle_1"),
+            ("BoxTurtle_USB", "Turtle_1"),
             ("NightOwl", "NightOwl_1"), ("HTLF", "HTLF_1"), ("Claymore", "Claymore_1"),
             ("QuattroBox", "QuattroBox_1"), ("OpenAMS", "AMS_1"), ("ViViD", "Vivid_1"),
             ("EMU", "EMU_1"), ("BridgeBox", "Chain_1"),
@@ -163,6 +164,8 @@ class TestUnitOptionLists:
         [
             ("BoxTurtle_4Lane", ["BoxTurtle Name"], ["BoxTurtle Name"]),
             ("BoxTurtle_8Lane", ["BoxTurtle Name"], ["BoxTurtle Name"]),
+            ("BoxTurtle_USB", ["BoxTurtle Name", "BoxTurtle serial"],
+             ["BoxTurtle Name", "BoxTurtle serial"]),
             ("NightOwl", ["NightOwl Board Type"], ["NightOwl Name", "NightOwl Board Type"]),
             ("HTLF", ["HTLF Name", "HTLF Board Type"], ["HTLF Name", "HTLF Board Type"]),
             ("Claymore", ["Claymore Name", "Claymore Board Type"],

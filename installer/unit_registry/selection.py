@@ -35,3 +35,4 @@ class UnitSelection:
     bridgebox_connection: str = "usb"
     bridgebox_address: str = ""
     bridgebox_serial: str = "auto"
+    turtle_serial: str = "auto"

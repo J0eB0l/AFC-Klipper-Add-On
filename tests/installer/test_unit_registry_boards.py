@@ -57,9 +57,10 @@ def files(ctx: Context) -> List[str]:
 class TestRegistryOrder:
     def test_the_board_aware_types_follow_boxturtle_in_menu_order(self) -> None:
         names = [u.display_name for u in UNIT_TYPES]
-        assert names[:5] == [
+        assert names[:6] == [
             "BoxTurtle (4-Lane)",
             "BoxTurtle (8-Lane)",
+            "BoxTurtle (USB) Serial Driver",
             NIGHTOWL,
             HTLF,
             CLAYMORE,
