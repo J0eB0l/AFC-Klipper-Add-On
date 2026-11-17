@@ -2382,7 +2382,9 @@ class TestAfcACECheckRunout:
 
 
 class TestAfcACEOnFilamentInsert:
-    def test_restores_saved_spool_and_stages(self):
+    def test_restores_saved_spool_and_stages(self, monkeypatch):
+        # No tag to apply, so only the restore branch can call _set_values.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
         unit = ace_p1_unit(LaneSpec("lane0", prep=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = 5
@@ -2427,7 +2429,9 @@ class TestAfcACEOnFilamentInsert:
         assert lane._afc_staged_spool_id is None
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
-    def test_a_staged_spool_is_restored_without_remember_spool(self):
+    def test_a_staged_spool_is_restored_without_remember_spool(self, monkeypatch):
+        # No tag to apply, so only the restore branch can call _set_values.
+        monkeypatch.setattr(afc_ace_module, "apply_filament_defaults", None)
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
         lane = unit.lanes["lane0"]
         lane.spool_id = 5
@@ -2545,7 +2549,7 @@ class TestAfcACEOnFilamentInsert:
         unit.on_filament_insert(lane)
 
         assert apply_defaults.calls == [((lane, unit._slot_inventory[0]), {
-            "color_converter": None,
+            "color_converter": afc_ace_module.rgb_array_to_hex,
             "afc_defaults": {"default_material_type": None, "default_color": None}})]
         assert unit.logger.messages == [("debug", "ACE Ace_1: slot 0 get_filament_info -> {}")]
 
@@ -3119,6 +3123,75 @@ class TestAfcACEFeedToHubProbing:
         assert [method for method, _ in wire.moves()] == ["feed_filament"]
         assert unit.logger.messages == []
 
+    STALL_LOG = ("warning", "ACE Ace_1: slot 3 reported feed_error")
+    NOT_STAGED = ("error", "ACE prep_post_load: lane3 not staged, slot 3 reported "
+                           "feed_error\nThe ACE reported a feed error: its encoder saw "
+                           "lane3's filament stop moving in the tube. Check for a kink, a "
+                           "damaged spot on the filament or a blockage, clear it, then load "
+                           "again.")
+
+    def test_scan_stopped_by_a_jam_stages_nothing_more(self):
+        unit, lane, wire = self._unit()
+
+        def begin(staged: Any, ctx: Dict[str, Any]) -> None:
+            """
+            A scan whose feed the unit gave up on; like the real scan, it
+            counts the whole window as fed once the slot stops.
+
+            :param staged: lane being staged
+            :param ctx: the stage context to fill in
+            """
+            unit._ace.feed_filament(3, 300.0, 50.0)
+            ctx.update(active=True, initial=100.0, fed=300.0)
+        unit.printer.register_event_handler("afc_ace:stage_probe_begin", begin)
+        wire.stall(True)
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is None
+        assert wire.moves() == [("feed_filament", {"index": 3, "length": 300.0,
+                                                   "speed": 50.0})]
+        assert [event for event, _ in unit.printer.events] == [
+            "afc_ace:stage_probe_begin", "afc_ace:stage_probe_end"]
+        assert unit.logger.messages == [self.STALL_LOG, self.NOT_STAGED]
+
+    @pytest.mark.parametrize("scan, feed", [
+        (None, 200.0),
+        ("tag read", 150.0)])
+    def test_jam_in_the_remainder_feed_stages_nothing_more(self, scan, feed):
+        begin = self._scan(fed=150.0, done=True) if scan else None
+        unit, lane, wire = self._unit(begin)
+        wire.stall(True)
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is None
+        assert wire.moves() == [self._feed(feed)]
+        assert unit.logger.messages == [self.STALL_LOG, self.NOT_STAGED]
+
+    def test_other_slot_error_after_the_scan_has_no_stall_hint(self):
+        unit, lane, wire = self._unit(self._scan(fed=300.0), slot_status="stuck_error")
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is None
+        assert wire.moves() == []
+        assert unit.logger.messages == [
+            ("warning", "ACE Ace_1: slot 3 reported stuck_error"),
+            ("error", "ACE prep_post_load: lane3 not staged, slot 3 reported stuck_error")]
+
+    def test_status_poll_failing_after_the_scan_stages_anyway(self):
+        unit, lane, wire = self._unit(self._scan(fed=300.0, done=True))
+        unit._ace.set_reply("get_status", RuntimeError("status down"))
+
+        result = unit._feed_to_hub_probing(lane, 3, dist_hub=200.0)
+
+        assert result is True
+        # One poll for a pulled spool, one for a slot error; both gave up.
+        assert unit._ace.commands == [("get_status", {})] * 2
+        assert wire.moves() == []
+        assert unit.logger.messages == []
+
     def test_listener_errors_are_logged_and_the_stage_goes_on(self):
         unit, lane, wire = self._unit(Recorder(raises=RuntimeError("scan down")))
         unit.printer.register_event_handler(
@@ -3193,6 +3266,21 @@ class TestAfcACEPrepPostLoad:
         # prep_state started True (LaneSpec prep=True); the abort path clears it.
         assert lane.prep_state is False
         assert unit.afc.save_vars.call_count == 1
+        assert unit.logger.messages == []
+
+    def test_slot_error_leaves_lane_unstaged_without_retrying(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        unit._feed_to_hub_probing = Recorder(result=None)
+
+        unit.prep_post_load(lane)
+
+        assert unit._feed_to_hub_probing.call_count == 1
+        assert lane.loaded_to_hub is False
+        # Still prepped, so its next load feeds from the slot the whole way.
+        assert lane.prep_state is True
+        assert unit.afc.save_vars.call_count == 0
+        assert unit._operation_active is False
         assert unit.logger.messages == []
 
     def test_td1_capture_runs_after_staging_when_configured(self):
@@ -5432,19 +5520,18 @@ class TestAfcACECmdAFCACERFIDRescan:
         unit._ace.set_reply("get_filament_info", *replies)
         return unit, lane
 
-    def test_v1_recognized_tag_clears_the_lane_values(self):
-        # apply_filament_defaults is disabled (module-level None, see top of
-        # AFC_ACE.py), so the recognized tag only clears the lane's old values.
+    def test_v1_recognized_tag_replaces_the_lane_values_in_place(self):
         unit, lane = self._unit(self.PETG)
         gcmd = make_gcmd(LANE="lane1")
 
         unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
-        assert (lane.material, lane.color) == ("", "")
-        assert (lane.extruder_temp, lane.bed_temp) == (None, None)
+        assert (lane.material, lane.color) == ("PETG", "#ff0000")
+        # The middle of each tag range.
+        assert (lane.extruder_temp, lane.bed_temp) == (240.0, 75.0)
         assert unit._ace.commands == [("get_filament_info", {"index": 0})]
         assert unit.afc.save_vars.call_count == 1
-        assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic ? "]
+        assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
         assert unit.logger.messages == self.PETG_LOGS
 
     def test_v1_recognized_tag_applies_filament_defaults_when_available(self, monkeypatch):
@@ -5456,7 +5543,7 @@ class TestAfcACECmdAFCACERFIDRescan:
         unit.cmd_AFC_ACE_RFID_RESCAN(gcmd)
 
         assert apply_defaults.calls == [
-            ((lane, unit._slot_inventory[0]), {"color_converter": None})]
+            ((lane, unit._slot_inventory[0]), {"color_converter": afc_ace_module.rgb_array_to_hex})]
 
     def test_v1_waits_out_recognizing(self):
         unit, lane = self._unit({"rfid": 3}, {"rfid": 3}, self.PETG)
@@ -5467,8 +5554,8 @@ class TestAfcACECmdAFCACERFIDRescan:
         assert unit._ace.commands == [("get_filament_info", {"index": 0})] * 3
         # Two half-second waits.
         assert unit.printer.reactor.now == 101.0
-        assert lane.material == ""
-        assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic ? "]
+        assert lane.material == "PETG"
+        assert gcmd.responses == ["ACE Ace_1: read lane1's tag: Anycubic PETG #ff0000"]
         assert unit.logger.messages == [
             ("debug", "ACE Ace_1: slot 0 get_filament_info -> {'rfid': 3}"),
             ("info", "ACE Ace_1: slot 0 RFID read, sku='' brand='' type='' rfid=3 "
@@ -9085,6 +9172,8 @@ class TestACEConnectionResolveConnectPort:
     def test_auto_fast_path_reuses_a_still_matching_resolved_port(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
         conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates",
+                            lambda: ["/dev/ttyACM3", "/dev/ttyACM9"])
         monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
                             Recorder(result=2))
         full_scan = Recorder()
@@ -9096,6 +9185,8 @@ class TestACEConnectionResolveConnectPort:
     def test_auto_fast_path_falls_back_when_the_probe_mismatches(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
         conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates",
+                            lambda: ["/dev/ttyACM3", "/dev/ttyACM9"])
         monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
                             Recorder(result=1))
         monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
@@ -9106,12 +9197,28 @@ class TestACEConnectionResolveConnectPort:
     def test_auto_fast_path_falls_back_when_the_probe_raises(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
         conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates",
+                            lambda: ["/dev/ttyACM3", "/dev/ttyACM9"])
         monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id",
                             Recorder(raises=RuntimeError("boom")))
         monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
                             Recorder(result="/dev/ttyACM3"))
 
         assert conn._resolve_connect_port() == "/dev/ttyACM3"
+
+    def test_auto_fast_path_skips_a_resolved_port_that_is_no_longer_an_ace(self, monkeypatch):
+        # The unit is gone and its ttyACM number now belongs to another USB
+        # serial device: the retry must not open that device.
+        conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=2)
+        conn._resolved_port = "/dev/ttyACM9"
+        monkeypatch.setattr(afc_ace_module, "_ace_scan_candidates", lambda: [])
+        probe = Recorder(result=2)
+        monkeypatch.setattr(afc_ace_module, "probe_ace_get_info_id", probe)
+        monkeypatch.setattr(afc_ace_module, "resolve_ace_port_by_index",
+                            Recorder(result="/dev/ttyACM3"))
+
+        assert conn._resolve_connect_port() == "/dev/ttyACM3"
+        assert probe.calls == []
 
     def test_auto_scan_finding_nothing_raises(self, monkeypatch):
         conn = ace_p2_connection(serial_port="auto", connected=False, ace_index=3)

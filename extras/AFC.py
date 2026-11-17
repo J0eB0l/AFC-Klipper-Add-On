@@ -98,6 +98,8 @@ class afc:
         self.function: afcFunction = self.printer.load_object(config, 'AFC_functions')
         self.spool: AFCSpool = self.printer.load_object(config, 'AFC_spool')
         self.error: afcError = self.printer.load_object(config, 'AFC_error')
+        # Runs the installer for a panel; optional, since an older install has no link to it.
+        self.printer.load_object(config, 'AFC_installer', None)
 
         self.function.afc = self
         self.function.logger = self.logger
@@ -150,6 +152,9 @@ class afc:
         # tool position when tool change was requested
         self.change_tool_pos = None
         self.in_toolchange = False
+        # (T(n), lane name, purge length, print file) of a tool change that failed
+        # part way, so AFC_RESUME can finish it
+        self.resume_toolchange: Optional[tuple] = None
         self.tool_start = None
 
         # Save/resume pos variables
@@ -239,6 +244,9 @@ class afc:
 
         self.post_load_macro        = config.get("post_load_macro", None)
         self.post_unload_macro      = config.get("post_unload_macro", None)
+        # Run by AFC_RESUME before the move back to the print when the pause came during a tool
+        # change, so a head paused in the load area (a U1 discard bin) clears it first
+        self.pre_resume_macro       = config.get("pre_resume_macro", None)
 
         self.form_tip               = config.getboolean("form_tip", False)          # Set to True to tip forming when unloading lanes
         self.form_tip_cmd           = config.get('form_tip_cmd', None)              # Macro to use when tip forming. Change macro name if you would like to use your own tip forming macro
@@ -309,7 +317,10 @@ class afc:
         self.debug                  = config.getboolean('debug', False)             # Setting to True turns on more debugging to show on console
         self.log_frame_data         = config.getboolean('log_frame_data', True)
         self.testing                = config.getboolean('testing', False)           # Set to true for testing only so that failure states can be tested without stats being reset
-        self.enable_multiple_mapping = config.getboolean("enable_multiple_mapping",False)
+        # Accept "afc_enable_multiple_mapping" too: an unread [AFC] option halts Klipper.
+        self.enable_multiple_mapping = (
+            config.getboolean("enable_multiple_mapping", False)
+            or config.getboolean("afc_enable_multiple_mapping", False))
         self.manual_home_has_probe_pos_param: bool = False
         self.manual_home_requires_gcmd: bool = False
 
@@ -661,6 +672,8 @@ class afc:
         self.in_print_timer = self.reactor.register_timer( self.in_print_reactor_timer, self.reactor.monotonic() + 5 )
         self.error.reset_failure()
         self.run_script("CLEAR_PAUSE")
+        # A new print never finishes the tool change an earlier one left
+        self.resume_toolchange = None
         self.number_of_toolchanges = 0
         self.current_toolchange    = -1
         self.print_tool_temperatures = []
@@ -783,8 +796,10 @@ class afc:
             and (self.disable_print_temp_check or not self.print_tool_temperatures)):
             return
 
+        # The guard above only covers a hot extruder, so the flag is checked here too.
         if (self.function.is_printing()
-            and self.print_tool_temperatures):
+            and self.print_tool_temperatures
+            and not self.disable_print_temp_check):
             using_min_value = False
             target_temp = None
             try:
@@ -807,9 +822,18 @@ class afc:
                     f"Could not resolve print_tool_temperatures index for lane {cur_lane.name}: {e}"
                 )
                 # Returning instead of trying to lookup from default material
-                return
+                if self.heater.can_extrude:
+                    return
 
-            if target_temp is None:
+            if target_temp is None and not self.heater.can_extrude:
+                # Too cold to extrude: use the lane's material temperature so the
+                # toolchange does not abort half unloaded.
+                self.logger.info(
+                    f"No print_tool_temperatures entry for lane {cur_lane.name} and the "
+                    f"extruder is too cold to extrude, heating to its material temperature "
+                    f"so the toolchange can finish")
+                target_temp, using_min_value = self._get_default_material_temps(cur_lane)
+            elif target_temp is None:
                 self.logger.info(f"No print_tool_temperatures entry for lane {cur_lane.name}")
                 # Returning instead of trying to lookup from default material,
                 # don't want to modify extruder temperature to temperatures that could be wrong
@@ -1380,6 +1404,10 @@ class afc:
                 extruder_entry = str["system"]["extruders"][cur_extruder.name]
                 extruder_entry['virtual_tool_start'] = bool(cur_extruder.tool_start_state)
 
+        # Lets another module add what it saves for a unit's lanes (BridgeBox pool bays no
+        # unit is claimed onto)
+        self.printer.send_event("afc:save_vars", str)
+
         # Handing off to the background writer thread so a slow disk doesn't
         # block the reactor; queue.put_nowait never blocks the caller here
         self._var_write_queue.put_nowait(str)
@@ -1780,6 +1808,15 @@ class afc:
                                                purge_length=purge_length, gcmd=gcmd)
 
                     cur_lane.enable_fault_detection()
+                    # A Snapmaker U1 counts extruder moves in printing_e_pos only while
+                    # printing, so a load during a pause leaves the unload's retract in
+                    # it and the U1's RESUME pulls the new filament back that far.
+                    # G92 E0 zeroes it; the resume restores the print's E position.
+                    # That RESUME also goes back to the head active at the pause, so it
+                    # is told the head this load went into.
+                    if self.snapmaker_printer and self.function.is_paused():
+                        self.run_script("G92 E0", gcmd)
+                        self.error.point_snapmaker_resume_at(cur_lane, gcmd)
                     # Update lane and extruder state for tracking.
                     cur_extruder.lane_loaded = cur_lane.name
                     self.spool.set_active_spool(cur_lane.spool_id)
@@ -2653,22 +2690,44 @@ class afc:
         else:
             self.error.AFC_error(f"Error trying to lookup lane for {Tcmd}")
 
+    def _note_interrupted_toolchange(self, cur_lane: AFCLane,
+                                     purge_length: Optional[float]) -> None:
+        """
+        Remember the T(n) and lane a failed tool change was loading, so that
+        AFC_RESUME can finish the change once the fault is cleared. Only kept
+        during a print; a new print clears it (_reset_file_callback).
+
+        :param cur_lane: Lane the tool change was loading
+        :param purge_length: Purge length the tool change was asked for
+        """
+        try:
+            in_print, filename = self.function.in_print(return_file=True)
+            self.resume_toolchange = ((cur_lane.current_map, cur_lane.name, purge_length, filename)
+                                      if in_print else None)
+        except Exception as e:
+            self.resume_toolchange = None
+            self.logger.debug(f"Not keeping the tool change to {cur_lane.name} for resume: {e}")
+
     def CHANGE_TOOL(self, cur_lane: AFCLane, purge_length: Optional[float]=None,
                     restore_pos: bool=True, new_extruder_temp: Optional[float]=None,
-                    gcmd: Optional[GCodeCommand]=None) -> None:
+                    count_change: bool=True, gcmd: Optional[GCodeCommand]=None) -> None:
         """
-        Perform a tool change: unload the currently loaded lane (if any) and
-        load `cur_lane`, heating/cooling extruders and handling infinite
-        runout along the way.
+        Change to the given lane: unload the lane that is loaded, then load this one.
+        A failed unload or load during a print is recorded so that AFC_RESUME can
+        finish the change. A change made while the print is paused leaves the head
+        where the load parked it and keeps the pause's saved position for AFC_RESUME,
+        since the user's RESUME returns to the Z that AFC_PAUSE raised.
 
-        :param cur_lane: lane to change into
-        :param purge_length: amount of filament to poop, passed through to TOOL_LOAD
-        :param restore_pos: set False to skip restoring the toolhead position after loading
-        :param new_extruder_temp: temperature to heat the new extruder to before loading
+        :param cur_lane: Lane to change to
+        :param purge_length: Purge length for the load, None for the default
+        :param restore_pos: Set False to leave the toolhead where the load left it
+        :param new_extruder_temp: Temperature to heat the next extruder to
+        :param count_change: Set False when finishing a change already counted
         :param gcmd: command context to run macros through, if any
         """
         try:
             self.afcDeltaTime.set_start_time()
+            paused = self.function.is_paused()
             # Check if the bypass filament sensor detects filament; if so, abort the tool change.
             if self._check_bypass(unload=False, gcmd=gcmd):
                 return
@@ -2714,7 +2773,10 @@ class afc:
                 if cur_lane._afc_prep_done:
                     # Log the tool change operation for debugging or informational purposes.
                     self.logger.info("Tool Change - {} -> {}".format(self.current, cur_lane.name))
-                    if not self.error_state and self.number_of_toolchanges != 0 and self.current_toolchange != self.number_of_toolchanges:
+                    if (count_change
+                        and not self.error_state
+                        and self.number_of_toolchanges != 0
+                        and self.current_toolchange != self.number_of_toolchanges):
                         self.current_toolchange += 1
                         self.logger.raw("//      Change {} out of {}".format(self.current_toolchange, self.number_of_toolchanges))
 
@@ -2734,6 +2796,7 @@ class afc:
                             # Error happened, reset toolchanges without error count
                             # and increase unload error count
                             self.afc_stats.increase_unload_error_count(self)
+                            self._note_interrupted_toolchange(cur_lane, purge_length)
                             return
 
                         if (force_unload
@@ -2777,7 +2840,8 @@ class afc:
                 # Load the new lane and restore the toolhead position if successful.
                 if (self.TOOL_LOAD(cur_lane, purge_length, set_start_time=False, gcmd=gcmd)
                     and not self.error_state):
-                    if restore_pos:
+                    self.resume_toolchange = None
+                    if restore_pos and not paused:
                         self.restore_pos()
                     total_time = self.afcDeltaTime.log_total_time("Total change time:")
                     self.afc_stats.average_toolchange_time.average_time(total_time)
@@ -2787,6 +2851,7 @@ class afc:
                     # Error happened, reset toolchanges without error count
                     # and increase load error count
                     self.afc_stats.increase_load_error_count(self)
+                    self._note_interrupted_toolchange(cur_lane, purge_length)
             else:
                 # Calling handle activate extruder just to make sure lanes are synced as tool
                 # could have been changed with KTC SELECT_TOOL and lane might not be synced
@@ -2798,11 +2863,18 @@ class afc:
                     self.current_toolchange += 1
         # Copilot yes this is a bare exception, ignore please since this is being done on purpose
         # to make sure all exceptions are catched
-        except Exception:
+        except Exception as exc:
             trace = traceback.format_exc()
             self.logger.error("Unexpected error during CHANGE_TOOL:\n", traceback=trace)
+            # An error raised from inside the change (a toolchanger's park or pick, a
+            # unit's load) interrupts it just as a failed unload or load does
+            self._note_interrupted_toolchange(cur_lane, purge_length)
+            # Angle brackets in the text would make Moonraker show the error as "Unknown"
+            reason = (str(exc).replace("<", "(").replace(">", ")").rstrip(".")
+                      or type(exc).__name__)
             self.error.AFC_error(
-                "An unexpected error occurred during CHANGE_TOOL. Please check the logs and report this issue to developers.",
+                f"An unexpected error occurred during CHANGE_TOOL: {reason}. "
+                "Please check the logs and report this issue to developers.",
                 pause=self.function.in_print()
             )
         finally:

@@ -7,7 +7,8 @@
 # Shared "aht2x" Fluidd/Mainsail sensor_type alias for AFC temperature sensors.
 # Only this module ever registers "aht2x", so multiple AFC unit types don't
 # clobber each other's factory for it. Backing class is auto-detected from
-# ace_unit or i2c_mcu/i2c_bus; afc_type is only needed if that's ambiguous.
+# ace_unit, i2c_mcu/i2c_bus or bambu_unit; afc_type is only needed if that's
+# ambiguous.
 
 from __future__ import annotations
 
@@ -23,12 +24,14 @@ AFC_TYPE_FACTORIES = {
     "ACE": ("extras.temperature_ace", "TemperatureACE"),
     "ACE2": ("extras.temperature_ace", "TemperatureACE"),
     "OpenAMS": ("extras.temperature_oams", "TemperatureOAMS"),
+    "Bambu": ("extras.temperature_bambu", "TemperatureBambu"),
 }
 
 # Config options used to auto-detect afc_type when it's omitted.
 DETECTION_OPTIONS = {
     "ACE": ("ace_unit",),
     "OpenAMS": ("i2c_mcu", "i2c_bus"),
+    "Bambu": ("bambu_unit",),
 }
 
 
@@ -46,7 +49,7 @@ class TemperatureAFC:
         the result since it isn't an instance of this class.
 
         :param config: ConfigWrapper for the [temperature_sensor <name>] section.
-        :return Any: a TemperatureACE or TemperatureOAMS instance.
+        :return Any: a TemperatureACE, TemperatureOAMS or TemperatureBambu instance.
         """
         afc_type = config.get("afc_type", None)
         if afc_type is not None:
@@ -62,8 +65,8 @@ class TemperatureAFC:
             if factory is None:
                 valid = ", ".join(sorted(set(AFC_TYPE_FACTORIES)))
                 error_str = (f"[{config.get_name()}] sensor_type: aht2x could not determine "
-                            f"which AFC unit type this sensor belongs to; add ace_unit or "
-                            f"i2c_mcu/i2c_bus, or set afc_type to one of: {valid}")
+                            f"which AFC unit type this sensor belongs to; add ace_unit, "
+                            f"i2c_mcu/i2c_bus or bambu_unit, or set afc_type to one of: {valid}")
                 raise config.error(error_str)
         module_name, class_name = factory
         module = __import__(module_name, fromlist=[class_name])

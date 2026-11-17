@@ -1,0 +1,6619 @@
+# AFC BambuAMS chain master: one section that fabricates the rest.
+#
+# Copyright (C) 2026 J0eB0l
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+#
+# Fabricates each unit's [AFC_BambuAMS], [AFC_lane] and [AFC_hub] sections from the roster and the
+# chain's extruder/buffer, as AFC_utils.add_filament_switch does.
+
+from __future__ import annotations
+
+import configparser
+import copy
+import json
+import math
+import os
+import secrets
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Set, Tuple, Union
+
+if TYPE_CHECKING:
+    from gcode import GCodeCommand
+
+from extras.AFC_BambuAMS import (DRY_TEMP_HARD_MAX, _AMS_MODELS, _BUFFER_CHIP_NAME, _HT_MODELS)
+from extras.AFC_BambuAMS_bridge import routine_info
+
+#: Every option the chain master consumes.
+_MASTER_OPTIONS = frozenset({
+    "serial_port", "tcp_key", "extruder", "unit_prefix", "removal_grace",
+    "buffer_chip_name", "buffer", "buffer_type", "lane_base", "pool_ams",
+    "pool_ht",
+    "ams_names", "ht_names", "auto_drop", "release_grace", "release_settle",
+    "enroll_grace", "claim_grace", "flap_claim_grace", "flap_window",
+    "afc_bowden_length", "td1_bowden_length", "dry_max_temp", "auto_vars_file",
+    "state_file", "roster", "hotplug_poll", "connection", "wifi_ssid",
+    "wifi_password",
+})
+
+_STRUCTURAL_KEYS = frozenset(
+    {"serial_port", "tcp_key", "unit_uid", "unit", "hub", "extruder", "buffer",
+     "buffer_chip_name", "ams_model", "switch_pin", "sensor_type",
+     "bambu_unit"})
+
+#: Measured bowden lengths, saved per unit UID so they follow the physical unit.
+_LEARNED_KEYS = ("afc_bowden_length", "afc_unload_bowden_length")
+
+# `boxed` is a 0x0700 unit of unconfirmed generation.
+
+#: Lane count per roster model tag: an HT has one bay, every boxed unit four.
+_SLOTS_BY_MODEL = {m: (1 if m in _HT_MODELS else 4) for m in _AMS_MODELS}
+
+#: A Bambu bus addresses at most 4 boxed units.
+_MAX_AMS_BAYS = 4
+
+
+def _norm_model(name: Optional[str]) -> str:
+    """
+    A model tag as written, trimmed and lower-cased.
+
+    :param name: a model tag, possibly None
+    :return str: the normalised tag (unknown names are left as they are)
+    """
+    return (name or "").strip().lower()
+
+
+def _norm_uid(uid: Optional[str]) -> str:
+    """
+    A unit uid trimmed and upper-cased.
+
+    :param uid: a unit uid, possibly None
+    :return str: the normalised uid, "" for None
+    """
+    return (uid or "").strip().upper()
+
+
+def _pool_laneno(pu: Dict[str, Any]) -> int:
+    """
+    Sort key: the first lane number of a pool unit.
+
+    :param pu: pool unit record
+    :return int: lane number, large when unnumbered
+    """
+    ds = "".join(c for c in (pu.get("lanes") or ["0"])[0] if c.isdigit())
+    return int(ds) if ds else 1 << 30
+
+
+def _learned_length(value: Any) -> Optional[float]:
+    """
+    A stored or configured bowden length, when it can be one.
+
+    :param value: the value as written
+    :return float: the length in mm, or None when it is not a positive, finite number
+    """
+    try:
+        mm = float(str(value).strip())
+    except ValueError:
+        return None
+    return mm if math.isfinite(mm) and mm > 0 else None
+
+#: `boxed` gets no heater until its generation is confirmed.
+_HEATED_MODELS = {m for m, spec in _AMS_MODELS.items() if spec[0]}
+
+_DRY_CEILING = {m: _AMS_MODELS[m][3] for m in _HEATED_MODELS}
+
+
+def _dry_ceiling(chain_max: int, model: str) -> int:
+    """
+    The drying ceiling a heated model gets from its chain.
+
+    :param chain_max: the chain's dry_max_temp, 0 when unset
+    :param model: a heated model
+    :return int: the ceiling in degrees C
+    """
+    own = _DRY_CEILING[model]
+    return min(chain_max, own) if chain_max else own
+
+_HT_MODELS_BB = set(_HT_MODELS)
+
+
+# Pool lanes are [AFC_lane]s with `unassigned: True`, kept out of every registry at connect.
+
+def activate_from_pool(lane: Any) -> None:
+    """
+    Register a pooled lane into the registries AFC_lane.handle_connect skipped.
+
+    :param lane: the pool lane being claimed
+    """
+    from extras.AFC_lane import EXCLUDE_TYPES
+    lane.unassigned = False
+    if not (lane.unit_obj.type not in EXCLUDE_TYPES
+            or (lane.unit_obj.type in EXCLUDE_TYPES
+                and "AFC_lane" in lane.fullname)):
+        return
+    lane.unit_obj.lanes[lane.name] = lane
+    lane.afc.lanes[lane.name] = lane
+    if (lane.hub_obj is not None
+        and not lane.is_direct_hub()):
+        try: lane.hub_obj.lanes[lane.name] = lane
+        except Exception: pass
+    if lane.extruder_obj is not None:
+        lane.extruder_obj.lanes[lane.name] = lane
+        try: lane.extruder_obj.check_lanes()
+        except Exception: pass
+    if lane.buffer_obj is not None:
+        try: lane.buffer_obj.lanes[lane.name] = lane
+        except Exception: pass
+        # get_status publishes the name.
+        if lane.buffer_name is None:
+            lane.buffer_name = lane.buffer_obj.name
+    # CHANGE_TOOL unloads first only for a PREP-marked target, and PREP skipped this lane while it
+    # was pooled, so mark it here once PREP has run.
+    if getattr(getattr(lane, "afc", None), "prep_done", False):
+        try: lane.set_afc_prep_done()
+        except Exception: pass
+
+
+def _tcmd_handlers(afc: Any) -> Dict[str, Any]:
+    """
+    The g-code command handlers Klipper has registered.
+
+    :param afc: the AFC object
+    :return dict: command name -> handler
+    """
+    return getattr(getattr(afc, "gcode", None), "ready_gcode_handlers", None) or {}
+
+
+def _tcmd_is_ours(afc: Any, handler: Any) -> bool:
+    """
+    Whether a registered g-code handler is AFC's CHANGE_TOOL.
+
+    :param afc: the AFC object
+    :param handler: a registered handler, or None
+    :return bool: True when ``handler`` is AFC's CHANGE_TOOL
+    """
+    change_tool = getattr(afc, "cmd_CHANGE_TOOL", None)
+    # Compare the underlying function.
+    ours = getattr(change_tool, "__func__", change_tool)
+    return (ours is not None
+            and handler is not None
+            and getattr(handler, "__func__", handler) is ours)
+
+
+def _tcmd_holder(afc: Any, cmd: str) -> Optional[str]:
+    """
+    The lane that holds a T#: the one AFC's tool table names, while that lane is in afc.lanes and
+    its map still lists the T#.
+
+    :param afc: the AFC object
+    :param cmd: the T# command
+    :return str: the holding lane's name, or None
+    """
+    owner = (getattr(afc, "tool_cmds", None) or {}).get(cmd)
+    lane = (getattr(afc, "lanes", None) or {}).get(owner) if owner else None
+    if (lane is None
+        or cmd not in (getattr(lane, "map", None) or [])):
+        return None
+    return owner
+
+
+def _tcmd_free(afc: Any, lname: str, cmd: str, take_macros: bool = True) -> bool:
+    """
+    Whether lane ``lname`` may register ``cmd`` without taking it from anything.
+
+    :param afc: the AFC object
+    :param lname: the lane that wants the T#
+    :param cmd: the T# command
+    :param take_macros: False keeps a macro's T# even with force_assign_map
+    :return bool: True when the T# is free for this lane
+    """
+    holder = _tcmd_holder(afc, cmd)
+    if (holder is not None
+        and holder != lname):
+        return False
+    handler = _tcmd_handlers(afc).get(cmd)
+    if (handler is None
+        or _tcmd_is_ours(afc, handler)):
+        return True
+    return take_macros and bool(getattr(afc, "force_assign_map", False))
+
+
+def _parse_map(value: Any) -> List[str]:
+    """
+    A saved lane map as a list of T# commands.
+
+    :param value: the saved map
+    :return list: the T# commands, in saved order
+    """
+    if isinstance(value, str):
+        items: List[Any] = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = []
+    out: List[str] = []
+    for item in items:
+        cmd = str(item).strip()
+        if (cmd
+            and cmd.upper() != "NONE"
+            and cmd not in out):
+            out.append(cmd)
+    return out
+
+
+def _lane_number(lname: Optional[str]) -> Optional[int]:
+    """
+    The number a lane's name carries.
+
+    :param lname: a lane name
+    :return int: its lane number, or None for a lane with no number
+    """
+    ds = "".join(c for c in (lname or "") if c.isdigit())
+    return int(ds) if ds else None
+
+
+def _pack_tools(tools: Set[str], taken: Set[str]) -> Dict[str, str]:
+    """
+    Where each T# moves when a set of them packs down.
+
+    :param tools: the T#s to pack, none of them taken
+    :param taken: the T#s that stay where they are
+    :return dict: old T# -> new T#, for the ones that move
+    """
+    nums = sorted(int(t[1:]) for t in tools
+                  if t[:1] == "T" and t[1:].isdigit())
+    free = (f"T{n}" for n in range(99) if f"T{n}" not in taken)
+    return {f"T{n}": new for n, new in zip(nums, free) if f"T{n}" != new}
+
+
+def _plan_lane_map(afc: Any, lname: str, rec: Dict[str, Any], warn: Callable[[str], None],
+                   take_macros: bool = True) -> Tuple[List[str], str]:
+    """
+    The saved T# map a claimed Bambu lane comes back with.
+
+    :param afc: the AFC object
+    :param lname: the lane's name
+    :param rec: its saved record ({} when there is none)
+    :param warn: called with each warning line
+    :param take_macros: whether force_assign_map may take a macro's T#
+    :return tuple: (map, current_map); the map is empty when the record saved none or none of it is
+    free, and the claim then gives the lane the next unused T# (see afcBridgeBox._next_tool)
+    """
+    saved = _parse_map(rec.get("map")) if rec else []
+    if not saved:
+        return (["NONE"], "") if rec and rec.get("map") else ([], "")
+    kept: List[str] = []
+    for cmd in saved:
+        if _tcmd_free(afc, lname, cmd, take_macros):
+            kept.append(cmd)
+        else:
+            warn(f"{lname}: saved {cmd} is held by "
+                 f"{_tcmd_holder(afc, cmd) or 'a macro'} -- not restored")
+    if not kept:
+        return [], ""
+    current = rec.get("current_map")
+    return kept, (current if current in kept else kept[0])
+
+
+def assign_pool_tcmd(lane: Any, afc: Any = None) -> None:
+    """
+    Give a claimed pool lane its T# command without registering it twice.
+
+    :param lane: the claimed pool lane
+    :param afc: the AFC object, or None to use the lane's own
+    """
+    afc = afc if afc is not None else lane.afc
+    handlers = _tcmd_handlers(afc)
+    maps = [m for m in (getattr(lane, "map", None) or []) if m != "NONE"]
+    if (maps
+        and all(_tcmd_is_ours(afc, handlers.get(m)) for m in maps)):
+        for m in maps:
+            afc.tool_cmds[m] = lane.name
+        if not lane.current_map:
+            lane.current_map = maps[0]
+        return
+    afc.function.TcmdAssign(lane)
+
+
+def deactivate_to_pool(lane: Any) -> None:
+    """
+    Reverse activate_from_pool: return the lane to the inert pool state.
+
+    :param lane: the pool lane being released
+    """
+    for reg in (getattr(lane.unit_obj, "lanes", None), lane.afc.lanes,
+                getattr(lane.hub_obj, "lanes", None), getattr(lane.extruder_obj, "lanes", None),
+                getattr(lane.buffer_obj, "lanes", None)):
+        try:
+            if isinstance(reg, dict):
+                reg.pop(lane.name, None)
+        except Exception:
+            pass
+    lane.map = []
+    lane._map = []
+    lane.current_map = ""
+    lane.spool_id = None
+    lane._material = None
+    lane.color = ""
+    lane.weight = 0.
+    for attr, blank in (("multi_color", []), ("sub_type", ""), ("spool_vendor", ""),
+                        ("filament_name", ""), ("filament_id", ""), ("extruder_temp", None),
+                        ("bed_temp", None), ("runout_lane", None), ("td1_data", {}),
+                        ("need_purge", False)):
+        try:
+            setattr(lane, attr, blank)
+        except Exception:
+            pass
+    # The tare, density and diameter go back to what the lane's config gives it.
+    cfg = getattr(lane, "_config", None)
+    for key, dflt in (("empty_spool_weight", 190.), ("filament_density", 1.24),
+                      ("filament_diameter", 1.75)):
+        try:
+            if cfg is not None:
+                setattr(lane, key, cfg.getfloat(key, dflt))
+        except Exception:
+            pass
+    # _load_state: the public name is a read-only property.
+    lane._load_state = False
+    lane.unassigned = True
+
+
+def lane_in_toolhead(lane: Any, afc: Any = None) -> bool:
+    """
+    Whether AFC records ``lane`` as loaded to a toolhead.
+
+    :param lane: the lane to check
+    :param afc: the AFC object; defaults to the lane's
+    :return bool: True if the lane or any extruder says it is in a toolhead
+    """
+    if getattr(lane, "tool_loaded", False):
+        return True
+    afc = afc if afc is not None else getattr(lane, "afc", None)
+    tools = getattr(afc, "tools", None) or {}
+    return any(getattr(e, "lane_loaded", None) == lane.name
+               for e in tools.values())
+
+
+def unset_tool_loaded(lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
+                      afc: Any = None) -> bool:
+    """
+    Clear AFC's record of ``lane`` as loaded to a toolhead, ahead of pooling it.
+
+    :param lane: the lane about to be pooled
+    :param gcmd: command context the unsync from its extruder runs through
+    :param afc: the AFC object; defaults to the lane's
+    :return bool: True if there was a record to clear
+    """
+    afc = afc if afc is not None else getattr(lane, "afc", None)
+    if not lane_in_toolhead(lane, afc):
+        return False
+    try:
+        current = afc.function.get_current_lane() == lane.name
+    except Exception:
+        current = False
+    try:
+        if current:
+            afc.function.unset_lane_loaded(gcmd)
+        else:
+            lane.unsync_to_extruder(gcmd=gcmd)
+            ext = lane.extruder_obj
+            # set_tool_unloaded() empties the lane's own extruder outright.
+            if (ext is not None
+                and getattr(ext, "lane_loaded", None) in (None, lane.name)):
+                lane.set_tool_unloaded()
+    except Exception:
+        pass
+    lane.tool_loaded = False
+    lane.loaded_to_hub = False
+    for ext in (getattr(afc, "tools", None) or {}).values():
+        if getattr(ext, "lane_loaded", None) == lane.name:
+            ext.lane_loaded = None
+    return True
+
+
+class _ChildCommand:
+    """
+    A running command's gcmd with parameters of its own, for handing to another command's handler.
+    """
+
+    def __init__(self, parent: Any, **params: Any) -> None:
+        """
+        Wrap the running command with the parameters another handler should see.
+
+        :param parent: the running command's gcmd
+        :param params: the parameters the other handler reads
+        """
+        self._parent = parent
+        self._params = {k: str(v) for k, v in params.items()}
+
+    def get(self, name: str, default: Any = None, parser: Any = str, **_kw: Any) -> Any:
+        """
+        Read a parameter, as gcmd.get does.
+
+        :param name: parameter name
+        :param default: returned when the parameter is not given
+        :param parser: converts the given value
+        :param _kw: gcmd.get's range options, ignored
+        :return object: the parsed value, or ``default``
+        """
+        value = self._params.get(name)
+        return default if value is None else parser(value)
+
+    def get_int(self, name: str, default: Any = None, **kw: Any) -> Any:
+        """
+        Read a parameter as an int, as gcmd.get_int does.
+
+        :param name: parameter name
+        :param default: returned when the parameter is not given
+        :param kw: gcmd.get_int's range options, passed on and ignored
+        :return object: the value as an int, or ``default``
+        """
+        return self.get(name, default, parser=int, **kw)
+
+    def get_float(self, name: str, default: Any = None, **kw: Any) -> Any:
+        """
+        Read a parameter as a float, as gcmd.get_float does.
+
+        :param name: parameter name
+        :param default: returned when the parameter is not given
+        :param kw: gcmd.get_float's range options, passed on and ignored
+        :return object: the value as a float, or ``default``
+        """
+        return self.get(name, default, parser=float, **kw)
+
+    def get_command_parameters(self) -> Dict[str, str]:
+        """
+        The parameters this command was given.
+
+        :return dict: the parameters given here
+        """
+        return dict(self._params)
+
+    def __getattr__(self, attr: str) -> Any:
+        """
+        Fall back to the running command for anything else.
+
+        :param attr: any other gcmd attribute
+        :return object: the parent's attribute
+        """
+        return getattr(self._parent, attr)
+
+
+class _SweptSection:
+    """
+    Stands in for a leftover auto_vars section klippy parsed at this start (see _sweep_orphans).
+    """
+
+
+# One chain at a time looks for a board, so two cannot take the same one.
+_AUTO_LOCK = threading.Lock()
+
+
+class afcBridgeBox:
+    """
+    The chain master: parses the roster and fabricates unit sections.
+    """
+
+    def __init__(self, config: Any) -> None:
+        """
+        Set up the chain master: transport, roster, pool units and commands.
+
+        :param config: the [AFC_BridgeBox <name>] section
+        """
+        self.printer = config.get_printer()
+        self.name = config.get_name().split()[-1]
+        self.serial_port = config.get("serial_port")
+        # The key belongs to the link, so every unit on one bridge shares it.
+        self._tcp_key_raw = config.get("tcp_key", None)
+        from extras.AFC_BambuAMS_bridge import split_tcp_key
+        self.tcp_key, self._tcp_key_store = split_tcp_key(self._tcp_key_raw)
+        self.extruder = config.get("extruder")
+        # Persisted state lives in a #~# block in the file that holds this section, unless
+        # state_file names another.
+        sf = config.get("state_file", None)
+        self.state_file = (os.path.expanduser(sf) if sf
+                           else (self._locate_own_file()
+                                 or os.path.expanduser(self._DEFAULT_STATE)))
+        # auto takes the board this chain saved, else the first free one on USB (see _find_board).
+        self._auto = str(self.serial_port).strip().lower() == "auto"
+        self._auto_board: Optional[str] = None
+        self._auto_probed: Dict[str, float] = {}
+        self._auto_said = False
+        self._board_forgotten = False
+        if self._auto:
+            self._resolve_auto_port()
+        # A USB serial_port moves to WiFi once the board has joined a network.
+        self.connection = config.getchoice("connection", {"usb": "usb", "wifi": "wifi"}, "usb")
+        # For anyone the setup hotspot does not work for.
+        self.wifi_ssid = self._wifi_text(config, "wifi_ssid", 1, 32)
+        self._wifi_password = (self._wifi_text(config, "wifi_password", 8, 63)
+                               or "")
+        self._register_wifi()
+        self.unit_prefix = self._resolve_unit_prefix(config)
+        # Seconds a rostered unit must stay absent before its removal is recorded.
+        self.removal_grace = config.getfloat("removal_grace", 120.0, minval=0.0)
+        # uid -> when its absence began (see _track_absence).
+        self._missing_since: Dict[str, float] = {}
+        # UIDs forgotten while online.
+        self._forget_suppressed: set = set()
+        self._no_bay_told: Set[str] = set()
+        # Model tag of each on-wire uid with no free bay, and the uids already offered a bay.
+        self._no_bay: Dict[str, str] = {}
+        self._replace_offered: Set[str] = set()
+        # {bay: {"uid", "lanes": {lane: record}}} for the unit last claimed onto each pool bay (see
+        # _capture_boot_records).
+        self._held: Dict[str, Dict[str, Any]] = {}
+        self._bay_owner: Optional[Dict[str, str]] = None
+        self._bay_owner_pending = False
+        self._pins_at_boot: Dict[str, str] = {}
+        self._ready_at: Optional[float] = None
+        self._prep_wait = self._PREP_WAIT
+        # Chip names are printer-wide, so only the first chain defaults to bambu_buffer.
+        chip_set = config.get("buffer_chip_name", None)
+        earlier = self._earlier_chains()
+        self.buffer_chip_name = chip_set or (
+            f"{_BUFFER_CHIP_NAME}_{self.name}" if earlier
+            else _BUFFER_CHIP_NAME)
+        # "bambu" adds the odometer gate so the buffer can stand in for a toolhead sensor.
+        self.buffer_type = config.get("buffer_type", "bambu")
+        self.buffer = config.get("buffer", None)
+        self._fabricate_buffer = self.buffer is None
+        if self._fabricate_buffer:
+            # Adopt an [AFC_buffer] already on this chip: a second section on the pin halts klippy.
+            adopted = self._find_chip_buffer(config)
+            # When no chain above builds anything, bambu_buffer is only a scout stub chip, so a
+            # buffer on it belongs to this chain.
+            if (not adopted
+                and not chip_set
+                and earlier
+                and not any(getattr(m, "_fabricated_names", None) for m in earlier)):
+                adopted = self._find_chip_buffer(config, _BUFFER_CHIP_NAME)
+                if adopted:
+                    self.buffer_chip_name = _BUFFER_CHIP_NAME
+            if adopted:
+                self.buffer = adopted
+                self._fabricate_buffer = False
+            else:
+                self.buffer = f"{self.unit_prefix}_Buffer"
+        # 0 = the next lane number after every declared lane, computed once and remembered.
+        self.lane_base = config.getint("lane_base", 0)
+        self._lane_base_set = bool(self.lane_base)
+        # Spare units fabricated at boot (Klipper's object graph is frozen after parse) that a UID
+        # on the chain claims live.
+        self._pool_ams_asked = config.getint("pool_ams", 4, minval=0)
+        self.pool_ams = min(self._pool_ams_asked, _MAX_AMS_BAYS)
+        self.pool_ht = config.getint("pool_ht", 8, minval=0)
+        # Optional unit names by family and enrollment order (see _given_names).
+        self.ams_names = [n.strip() for n in
+                          (config.get("ams_names", "") or "").split(",")
+                          if n.strip()]
+        self.ht_names = [n.strip() for n in
+                         (config.get("ht_names", "") or "").split(",")
+                         if n.strip()]
+        # Release a claimed unit whose online flag stays false for release_grace.
+        self.auto_drop = config.getboolean("auto_drop", False)
+        # A brief online read does not reset the clock.
+        self.release_grace = config.getfloat("release_grace", 10.0, minval=2.0)
+        # So a flapping phantom online flag cannot cancel a pending release.
+        self.release_settle = config.getfloat("release_settle", 5.0, minval=0.0)
+        # So a phantom online flag cannot re-record a just-forgotten unit.
+        self.enroll_grace = config.getfloat("enroll_grace", 15.0, minval=0.0)
+        # Within flap_window of a release a unit must stay online flap_claim_grace before it claims,
+        # so a flapping link cannot keep re-claiming.
+        self.claim_grace = config.getfloat("claim_grace", 0.0, minval=0.0)
+        self.flap_claim_grace = config.getfloat("flap_claim_grace", 15.0, minval=0.0)
+        self.flap_window = config.getfloat("flap_window", 120.0, minval=0.0)
+        self.hotplug_poll = config.getfloat("hotplug_poll", 1.0, minval=0.5)
+        self.afc_bowden_length = config.getfloat("afc_bowden_length", 2100.0)
+        self.td1_bowden_length = config.getfloat("td1_bowden_length", 850.0)
+        # AFC_BambuAMS reads it with getint.
+        raw_dry = config.getint("dry_max_temp", 0)
+        self.dry_max_temp = max(0, raw_dry)
+        self._dry_note = (
+            f"{self.name}: dry_max_temp is {raw_dry}, below 0, "
+            f"so it is ignored and each heated unit dries up to its model's "
+            f"own ceiling. Remove it or set a positive value to silence this."
+            if raw_dry < 0 else "")
+        self.auto_vars_file = os.path.expanduser(config.get(
+            "auto_vars_file", "~/printer_data/config/AFC/AFC_auto_vars.cfg"))
+        # No roster option and no roster file means scout mode.
+        self._register_commands()
+        self._migrate_legacy_state()
+        # Any master option not consumed is a chain-wide unit default (master < model < unit).
+        self._chain_defaults: Dict[str, str] = {}
+        try:
+            for opt in config.get_prefix_options(""):
+                if (opt in _MASTER_OPTIONS
+                    or opt in _STRUCTURAL_KEYS):
+                    continue
+                self._chain_defaults[opt] = config.get(opt)
+        except Exception:
+            pass
+        # self.logger is only assigned at connect.
+        roster_raw = (config.get("roster", None) or "").strip()
+        self._roster_source = "option"
+        if not roster_raw:
+            roster_raw = self._state_get(self._BASE_SECTION + " " + self.name, "roster") or ""
+            self._roster_source = "file"
+        if not roster_raw:
+            self._roster_source = "scout"
+            if not (self.pool_ams or self.pool_ht):
+                self.units: List[Dict[str, Any]] = []
+                # An [AFC_buffer] on bambu_buffer:fps needs the pin chip, so register it on a shim
+                # that reads "no data".
+                try:
+                    self._register_scout_chip(config)
+                except Exception:
+                    pass
+                # The last chain in the config sweeps auto_vars (see _sweep_orphans).
+                self._fabricated_names: Set[str] = set()
+                try:
+                    autov = self._read_ini(self.auto_vars_file)
+                    if (autov is not None
+                        and self._sweep_orphans(config, autov)):
+                        self._write_auto_vars(autov)
+                except Exception:
+                    pass
+                self.printer.register_event_handler("klippy:ready", self._scout_ready)
+                return
+
+        if not self.lane_base:
+            self.lane_base = self._resolve_lane_base(config)
+        # Kept after removal so survivors never renumber and a returning unit gets its lanes back.
+        self._lane_map: Dict[str, Tuple[int, int]] = self._load_lane_map()
+        self._name_map: Dict[str, str] = self._load_name_map()
+        self._pins_at_boot = dict(self._name_map)
+        self._lanes_at_boot = dict(self._lane_map)
+        self._maps_dirty = False
+
+        if self._roster_source == "scout":
+            roster: List[Dict[str, Any]] = []
+        else:
+            try:
+                roster = self._parse_roster(roster_raw)
+            except ValueError as e:
+                where = (f"state file {self.state_file}"
+                         if self._roster_source == "file" else "roster:")
+                error_str = f"[AFC_BridgeBox {self.name}] {where}: {e}"
+                raise config.error(error_str)
+
+        self.units: List[Dict[str, Any]] = roster
+        self._learned_notes: List[Tuple[bool, str]] = []
+        names_before = dict(self._name_map)
+        self._declared_lanes = self._declared_lane_numbers(config)
+        self._later_lanes = self._later_chain_lanes(config)
+        names_at, lanes_at = dict(self._name_map), dict(self._lane_map)
+        try:
+            sections = self._roster_sections(roster)
+            # A stored base another unit's lane or T# has grown into moves up past them.
+            step = self._renumber_step(config)
+            if step:
+                was = {pu["name"]: list(pu["lanes"])
+                       for pu in self._pool_units}
+                self._name_map = names_at
+                self._lane_map = {uid: (first + step, span)
+                                  for uid, (first, span) in lanes_at.items()}
+                self._lanes_at_boot = dict(self._lane_map)
+                self.lane_base += step
+                self._resolved_base = self.lane_base
+                sections = self._roster_sections(roster)
+                self._renumber_records(config, step, was, lanes_at)
+        except ValueError as e:
+            error_str = f"[AFC_BridgeBox {self.name}] {e}"
+            raise config.error(error_str)
+        self._flush_maps()
+        self._migrate_name_learned(names_before)
+        sections = self._fold_and_sweep(config, sections)
+
+        # A bay name clashing with another AFC unit is refused before a duplicate-lane crash.
+        foreign = self._foreign_unit_names(config)
+        for section, _keys in sections:
+            if (section.startswith("AFC_BambuAMS ")
+                and section.split(" ", 1)[1] in foreign):
+                nm = section.split(" ", 1)[1]
+                error_str = (f"[AFC_BridgeBox {self.name}] pool bay name {nm!r} collides "
+                             f"with an existing AFC unit of the same name -- rename that "
+                             f"ams_names / ht_names entry to something unique. AFC "
+                             f"identifies units by name, so a duplicate double-registers "
+                             f"that unit's lanes and stops Klipper from starting.")
+                raise config.error(error_str)
+            existing = self.printer.lookup_object(section, None)
+            if existing is not None:
+                error_str = self._collision_error(section)
+                raise config.error(error_str)
+
+        fileconfig = configparser.RawConfigParser()
+        for section, keys in sections:
+            fileconfig.add_section(section)
+            for k, v in keys.items():
+                fileconfig.set(section, k, str(v))
+
+        import configfile
+        # configfile.settings is built from this dict, and Mainsail/Fluidd read sensor_type there.
+        tracking = self._live_access_tracking(config)
+        for section, _keys in sections:
+            wrapper = configfile.ConfigWrapper(self.printer, fileconfig, tracking, section)
+            self.printer.load_object(wrapper, section)
+        # After the fabrication loop, so the first unit owns the bridge.
+        self.printer.register_event_handler("klippy:ready", self._scout_ready)
+        self.printer.register_event_handler("afc:save_vars", self._handle_save_vars)
+
+    @staticmethod
+    def _parse_roster(raw: str) -> List[Dict[str, Any]]:
+        """
+        `model:uid, model:uid, ...` -> [{"model", "uid"}], validated.
+
+        :param raw: the roster option's text
+        :return list: one dict per unit, in roster order
+        """
+        units: List[Dict[str, Any]] = []
+        seen: set = set()
+        for entry in [e.strip() for e in raw.split(",") if e.strip()]:
+            model, sep, uid = entry.partition(":")
+            model = model.strip().lower()
+            uid = _norm_uid(uid)
+            if (not sep
+                or not uid):
+                error_str = f"roster entry {entry!r} is not <model>:<unit_uid>"
+                raise ValueError(error_str)
+            if model not in _SLOTS_BY_MODEL:
+                error_str = (f"roster entry {entry!r}: unknown model {model!r} "
+                             f"(one of {sorted(_SLOTS_BY_MODEL)})")
+                raise ValueError(error_str)
+            if uid in seen:
+                error_str = f"roster lists uid {uid} twice"
+                raise ValueError(error_str)
+            seen.add(uid)
+            units.append({"model": model, "uid": uid})
+        if not units:
+            error_str = "roster is empty -- nothing to fabricate"
+            raise ValueError(error_str)
+        return units
+
+    def _roster_sections(self, roster: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Every section the roster implies, in load order.
+
+        :param roster: parsed roster entries
+        :return list: (section name, {key: value}) pairs
+        """
+        sections: List[Tuple[str, Dict[str, Any]]] = []
+        self._pool_units: List[Dict[str, Any]] = []
+        # Fixed-band layout.
+        bays: List[Dict[str, Any]] = []
+        for u in roster:
+            slots = _SLOTS_BY_MODEL[u["model"]]
+            fam = "ht" if u["model"] in _HT_MODELS_BB else "ams"
+            bays.append({"family": fam, "slots": slots, "uid": u["uid"], "model": u["model"],
+                         "spare": False})
+        have_ams = sum(1 for b in bays if b["family"] == "ams")
+        have_ht = sum(1 for b in bays if b["family"] == "ht")
+        self._layout_notes: List[str] = []
+        # Pass 1b: rostered uids keep valid saved names in roster order, the rest draw a free name,
+        # spares last.
+        rostered = {b["uid"] for b in bays}
+        tombs = {nm for u, nm in self._name_map.items() if u not in rostered}
+        pooled = bool(self.pool_ams or self.pool_ht)
+        used: Dict[str, Optional[str]] = {}
+        for b in bays:
+            nm = self._name_map.get(b["uid"])
+            rank = self._rank_of(b["family"], nm) if nm else None
+            if (nm
+                and rank is not None
+                and nm not in used):
+                b["name"], b["rank"] = nm, rank
+                used[nm] = b["uid"]
+
+        def _draw_name(family: str, skip: Set[str]) -> Optional[Tuple[str, int]]:
+            """
+            The first name in a family neither held nor skipped.
+
+            :param family: unit family (HT or AMS)
+            :param skip: further names to pass over
+            :return tuple: (name, rank), None when every AMS rank is taken
+            """
+            i = 0
+            while (family == "ht"
+                   or i < _MAX_AMS_BAYS):
+                nm = self._name_for_index(family, i)
+                if (nm not in used
+                    and nm not in skip):
+                    return nm, i
+                i += 1
+            return None
+
+        def _lanes_rank(b: Dict[str, Any], skip: Set[str]) -> Optional[Tuple[str, int]]:
+            """
+            The AMS name whose rank the unit's recorded lanes sit at, when nothing holds it.
+
+            :param b: a rostered bay still to be named
+            :param skip: names to pass over
+            :return tuple: (name, rank); None for an HT, for a unit with no recorded lanes or lanes
+            off the four AMS bays, and when the name is held or skipped
+            """
+            had = self._lane_map.get(b["uid"])
+            if (b["family"] != "ams"
+                or not had):
+                return None
+            r, off = divmod(had[0] - self.lane_base, 4)
+            if (off
+                or not 0 <= r < _MAX_AMS_BAYS):
+                return None
+            nm = self._name_for_index("ams", r)
+            return None if nm in used or nm in skip else (nm, r)
+
+        # The band the last start to reach ready built (see _scout_ready).
+        try:
+            ready_band = int(self._state_get(
+                self._BASE_SECTION + " " + self.name, "ams_band")
+                             or "")
+        except ValueError:
+            ready_band = _MAX_AMS_BAYS
+
+        def _ht_band(b: Dict[str, Any]) -> int:
+            """
+            The AMS bays a rostered HT's recorded lanes sit past: an HT of rank r sits on lane_base
+            + band * 4 + r.
+
+            :param b: a rostered HT bay, named
+            :return int: that band, at most four and at most the band the last start built; 0 for an
+            HT with no recorded lanes, one that drew a new name, or lanes that do not sit past whole
+            AMS bays
+            """
+            had = self._lane_map.get(b["uid"])
+            if (not had
+                or "was" in b):
+                return 0
+            n = int(had[0]) - int(self.lane_base) - int(b["rank"])
+            if (n < 0
+                or n % 4):
+                return 0
+            return min(n // 4, _MAX_AMS_BAYS, ready_band)
+
+        # The AMS bays the roster fills, its named AMS already reach, or a named HT's recorded lanes
+        # sit past.
+        reach = max([min(have_ams, _MAX_AMS_BAYS)]
+                    + [b["rank"] + 1 for b in bays
+                       if b["family"] == "ams" and "name" in b]
+                    + [_ht_band(b) for b in bays
+                       if b["family"] == "ht" and "name" in b])
+        # A unit with recorded lanes draws before a uid first seen.
+        for b in sorted((x for x in bays if "name" not in x),
+                        key=lambda x: x["uid"] not in self._lane_map):
+            skip = set() if pooled else tombs
+            got = _lanes_rank(b, skip)
+            if got is None:
+                got = _draw_name(b["family"], skip)
+                if (not pooled
+                    and b["family"] == "ams"
+                    and (got is None or (have_ht and got[1] >= reach))):
+                    got = _draw_name(b["family"], set())
+            saved = self._name_map.get(b["uid"])
+            if saved:
+                b["was"] = (saved, used.get(saved))
+            b["name"], b["rank"] = got if got else (None, None)
+            if got:
+                used[got[0]] = b["uid"]
+                self._name_map[b["uid"]] = got[0]
+                self._maps_dirty = True
+        # Kept with its old name for the texts that name it (see _prompt_replace_unit).
+        waiting = [b for b in bays if b["name"] is None]
+        bays = [b for b in bays if b["name"] is not None]
+        self._unbayed = {b["uid"]: (b["was"][0] if b.get("was") else None)
+                         for b in waiting}
+        for b in waiting:
+            had_name = self._name_map.pop(b["uid"], None) is not None
+            b["had"] = self._lane_map.pop(b["uid"], None)
+            if (had_name
+                or b["had"]):
+                self._maps_dirty = True
+        for b in bays:
+            if self._drop_name_holders(self._name_map, self._lane_map, b["name"], rostered):
+                self._maps_dirty = True
+        built_ams = sum(1 for b in bays if b["family"] == "ams")
+        spare_specs = ([("ams", 4)] * max(0, self.pool_ams - built_ams)
+                       + [("ht", 1)] * max(0, self.pool_ht - have_ht))
+        for fam, slots in spare_specs:
+            got = _draw_name(fam, set())
+            if got is None:
+                continue
+            bays.append({"family": fam, "slots": slots, "uid": None,
+                         "model": "ht" if fam == "ht" else "boxed", "spare": True, "name": got[0],
+                         "rank": got[1]})
+            used[got[0]] = None
+        # Pass 1c: AMS rank r -> lane_base + r*4, HT rank r -> ht_base + r.
+        need = max([self.pool_ams]
+                   + [b["rank"] + 1 for b in bays if b["family"] == "ams"])
+        held = [b for b in bays if b["family"] == "ht"
+                                   and not b["spare"]
+                                   and _ht_band(b) > need]
+        band = max([need] + [_ht_band(b) for b in held])
+        if held:
+            taken = getattr(self, "_declared_lanes", None) or set()
+            later = {n: c for n, c in
+                     (getattr(self, "_later_lanes", None) or {}).items()
+                     if n not in taken}
+            clash = sorted(n for n in (self.lane_base + band * 4 + b["rank"]
+                                       for b in bays if b["family"] == "ht")
+                           if n in taken or n in later)
+            self._layout_notes.append(self._band_note(held, band, need, clash, later))
+            if clash:
+                band = need
+        self._ams_band = band
+        ht_base = self.lane_base + band * 4
+        for b in bays:
+            if b["family"] == "ht":
+                b["lane"] = ht_base + b["rank"]
+            else:
+                b["lane"] = self.lane_base + b["rank"] * 4
+            if not b["spare"]:
+                b["had"] = self._lane_map.get(b["uid"])
+                self._lane_map[b["uid"]] = (b["lane"], b["slots"])
+                self._maps_dirty = True
+        self._lane_moves = self._moved_lanes(bays, waiting)
+        for b in bays:
+            note = self._layout_note(b)
+            if note:
+                self._layout_notes.append(note)
+        self._name_notes = [
+            f"{self.name}: {note}"
+            for note in (self._name_note(b["family"], b["rank"])
+                         for b in sorted(bays, key=lambda x: x["lane"]))
+            if note]
+        # The ready note tells a waiting AMS once.
+        holders = [(x["name"], x["uid"])
+                   for x in sorted(bays, key=lambda x: x["lane"])
+                   if x["family"] == "ams" and not x["spare"]]
+        for b in waiting:
+            self._layout_notes.append(
+                f"{self.name}: AMS {b['uid']} is recorded but "
+                f"has no bay: "
+                + self._all_ams_bays_held(b["uid"], holders, live=False)
+                + (f" Its record as {b['was'][0]} is dropped."
+                   if b.get("was") else ""))
+            self._no_bay_told.add(b["uid"])
+        # Pass 1d: no lane may belong to two bays.
+        by_lane = sorted(bays, key=lambda x: x["lane"])
+        for i, a in enumerate(by_lane):
+            for b in by_lane[i + 1:]:
+                if b["lane"] >= a["lane"] + a["slots"]:
+                    break
+                error_str = self._overlap_error(a, b)
+                raise ValueError(error_str)
+        for b in sorted(bays, key=lambda x: x["lane"]):
+            name, lane_no, slots = b["name"], b["lane"], b["slots"]
+            unit_keys: Dict[str, Any] = {
+                "serial_port": self.serial_port,
+                "ams_model": b["model"],
+                "extruder": self.extruder,
+                "hub": name,
+                "auto_error_recovery": True,
+                "measure_on_insert": True,
+                "buffer": self.buffer,
+                "buffer_chip_name": self.buffer_chip_name,
+                "pool": True,
+            }
+            if not b["spare"]:
+                unit_keys["unit_uid"] = b["uid"]
+            # The section takes str() of each value, so a "None" key reads as configured.
+            if self.tcp_key:
+                unit_keys["tcp_key"] = self._tcp_key_raw
+            if b["model"] in _HEATED_MODELS:
+                unit_keys["heater"] = True
+                unit_keys["dry_max_temp"] = _dry_ceiling(self.dry_max_temp, b["model"])
+            sections.append((f"{self._UNIT_SECTION} {name}", unit_keys))
+            for slot in range(slots):
+                sections.append((f"AFC_lane lane{lane_no + slot}",
+                                 {"unit": f"{name}:{slot + 1}",
+                                  "unassigned": True}))
+            sections.append((f"AFC_hub {name}", {
+                "switch_pin": "virtual",
+                "afc_bowden_length": self.afc_bowden_length,
+                "afc_unload_bowden_length": self.afc_bowden_length,
+                "td1_bowden_length": self.td1_bowden_length,
+            }))
+            # A spare gets no temperature card, so it shows nothing until claimed.
+            if not b["spare"]:
+                sections.append((f"temperature_sensor {name}", {
+                    "sensor_type": "aht2x",
+                    "bambu_unit": name,
+                    "min_temp": 0,
+                    "max_temp": 90,
+                }))
+            self._pool_units.append({
+                "name": name,
+                "lanes": [f"lane{lane_no + slot}" for slot in range(slots)],
+                "family": b["family"],
+                "uid": b["uid"],
+                "bound": None,
+                "spare": b["spare"],
+            })
+        if self._fabricate_buffer:
+            # Last: the buffer's adc_pin needs a unit's chip.
+            sections.append((f"AFC_buffer {self.buffer}", {
+                "type": self.buffer_type,
+                "adc_pin": f"{self.buffer_chip_name}:fps",
+                "deadband": 0.48,
+                "filament_error_sensitivity": 0,
+            }))
+        return sections
+
+    _BASE_SECTION = "AFC_BridgeBox"
+    #: Prefix of the unit sections this module fabricates (not _BASE_SECTION).
+    _UNIT_SECTION = "AFC_BambuAMS"
+
+    def _find_chip_buffer(self, config: Any, chip: Optional[str] = None) -> Optional[str]:
+        """
+        The name of an existing [AFC_buffer] on this chain's chip, if any.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :param chip: another chip name to look for instead
+        :return str: the buffer's name as written, or None
+        """
+        try:
+            import re as _re
+            fc = getattr(config, "fileconfig", None)
+            for sec in (fc.sections() if fc else []):
+                m = _re.match(r"(?i)afc_buffer\s+(\S+)$", sec)
+                if not m:
+                    continue
+                pin = dict(fc.items(sec)).get("adc_pin", "")
+                if pin.strip().lower().startswith((chip or self.buffer_chip_name).lower() + ":"):
+                    return m.group(1)
+        except Exception:
+            pass
+        return None
+
+    def _override_sections(self, config: Any) -> Dict[str, Dict[str, str]]:
+        """
+        Operator overrides from serial_port-less [AFC_BridgeBox ...] sections.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return dict: fabricated section name (or "model:<tag>") -> {k: v}
+        """
+        out: Dict[str, Dict[str, str]] = {}
+        written: Dict[str, List[str]] = {}
+        self._override_written = written
+        try:
+            import re as _re
+            fc = getattr(config, "fileconfig", None)
+            for sec in (fc.sections() if fc else []):
+                m = _re.match(r"(?i)afc_bridgebox\s+(.+)$", sec)
+                if not m:
+                    continue
+                kv = dict(fc.items(sec))
+                if kv.get("serial_port"):
+                    continue
+                target = m.group(1).strip()
+                canon = _norm_model(target)
+                if canon in _SLOTS_BY_MODEL:
+                    target = "model:" + canon
+                elif " " not in target:
+                    target = f"AFC_BambuAMS {target}"
+                out.setdefault(target, {}).update(kv)
+                written.setdefault(target, []).append(sec)
+        except Exception:
+            pass
+        return out
+
+    def _resolve_unit_prefix(self, config: Any) -> str:
+        """
+        The prefix of the chain's default unit names: option > stored > computed.
+
+        :param config: this section's wrapper
+        :return str: the prefix
+        """
+        prefix = config.get("unit_prefix", None)
+        if prefix:
+            return prefix
+        stored = self._state_get(self._BASE_SECTION + " " + self.name, "unit_prefix")
+        if stored:
+            return stored
+        taken = (any(getattr(m, "unit_prefix", None) == "Bambu_AMS"
+                     and getattr(m, "_fabricated_names", None)
+                     for m in self._earlier_chains())
+                 or any((opts.get("unit_prefix")
+                         or saved.get("unit_prefix")) == "Bambu_AMS"
+                        for _name, opts, saved
+                        in self._later_chain_sections(config)))
+        prefix = "Bambu_AMS_" + self.name if taken else "Bambu_AMS"
+        self._resolved_prefix = prefix
+        return prefix
+
+    def _resolve_lane_base(self, config: Any) -> int:
+        """
+        The auto lane base: stored if ever resolved, else computed.
+
+        :param config: this section's wrapper
+        :return int: the base to allocate fabricated lanes from
+        """
+        stored = self._state_get(self._BASE_SECTION + " " + self.name, "lane_base")
+        if stored:
+            try:
+                base = int(stored)
+            except Exception:
+                base = -1
+            if base >= 0:
+                self._base_stored = True
+                return base
+        base = 0
+        try:
+            nums = self._declared_lane_numbers(config)
+            if nums:
+                base = max(nums) + 1
+        except Exception:
+            pass
+        self._resolved_base = base
+        return base
+
+    def _var_unit_path(self, config: Any) -> str:
+        """
+        Where AFC keeps its lane records: its VarFile plus ``.unit``.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return str: the path
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        path = getattr(afc, "VarFile", None)
+        fc = getattr(config, "fileconfig", None)
+        if (not path
+            and fc is not None
+            and fc.has_option("AFC", "VarFile")):
+            path = fc.get("AFC", "VarFile")
+        return os.path.expanduser(path or "../printer_data/config/AFC/AFC.var") + ".unit"
+
+    def _read_var_unit(self, config: Any) -> Dict[str, Any]:
+        """
+        AFC.var.unit as last saved.
+
+        :param config: this section's wrapper
+        :return dict: unit name -> lane name -> record, plus "system"; {} when the file is missing
+        or unreadable
+        """
+        try:
+            with open(self._var_unit_path(config)) as fh:
+                data = json.load(fh)
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _renumber_step(self, config: Any) -> int:
+        """
+        How far a stored lane_base must move for this chain's lanes to sit past every other unit's
+        again.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return int: the lanes to move up by, 0 for none
+        """
+        if not getattr(self, "_base_stored", False):
+            return 0
+        mine = {n for pu in self._pool_units
+                for n in map(_lane_number, pu["lanes"]) if n is not None}
+        others = self._declared_lane_numbers(config)
+        if not mine & others:
+            return 0
+        return max(others) + 1 - self.lane_base
+
+    def _renumber_records(self, config: Any, step: int, was: Dict[str, List[str]],
+                          lanes_at: Dict[str, Tuple[int, int]]) -> None:
+        """
+        Move what is saved under this chain's old lane names to the new ones (see _renumber_step),
+        before anything reads it this start.
+
+        :param config: this section's wrapper
+        :param step: the lanes moved up by
+        :param was: bay name -> its lanes before the move
+        :param lanes_at: the lane map before the move
+        """
+        nums = {n for lanes in was.values()
+                for n in map(_lane_number, lanes) if n is not None}
+        for first, span in lanes_at.values():
+            nums |= set(range(first, first + span))
+        if not nums:
+            return
+        ren = {f"lane{n}": f"lane{n + step}" for n in nums}
+        bays = (set(was) | set(self._name_map.values())
+                | set(self._load_bay_owner()[0]))
+        data = self._read_var_unit(config)
+        if data:
+            for unit, recs in data.items():
+                if (not isinstance(recs, dict)
+                    or unit == "system"):
+                    continue
+                if unit in bays:
+                    recs = data[unit] = {ren.get(ln, ln): dict(rec)
+                                         if isinstance(rec, dict) else rec
+                                         for ln, rec in recs.items()}
+                for rec in recs.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("runout_lane") in ren:
+                        rec["runout_lane"] = ren[rec["runout_lane"]]
+            system = data.get("system")
+            if isinstance(system, dict):
+                if system.get("current_load") in ren:
+                    system["current_load"] = ren[system["current_load"]]
+                for ext in (system.get("extruders") or {}).values():
+                    if (isinstance(ext, dict)
+                        and ext.get("lane_loaded") in ren):
+                        ext["lane_loaded"] = ren[ext["lane_loaded"]]
+            path = self._var_unit_path(config)
+            try:
+                with open(path + ".tmp", "w") as fh:
+                    fh.write(json.dumps(data, indent=4))
+                os.replace(path + ".tmp", path)
+            except Exception:
+                pass
+        cp = self._read_state()
+        autov = self._read_ini(self.auto_vars_file)
+        fc = getattr(config, "fileconfig", None)
+        parsed: Dict[str, Dict[str, str]] = {}
+        moving: Dict[str, Dict[str, str]] = {}
+        for n in sorted(nums):
+            old = f"AFC_lane lane{n}"
+            items = dict(cp.items(old)) if cp.has_section(old) else {}
+            cp.remove_section(old)
+            if (autov is not None
+                and autov.has_section(old)
+                and not (fc is not None
+                         and fc.has_section(old)
+                         and not self._learned_only(fc, autov, old))):
+                parsed[old] = dict(autov.items(old))
+                items.update(parsed[old])     # auto_vars newest, wins last
+                autov.remove_section(old)
+            if items:
+                moving[f"AFC_lane lane{n + step}"] = items
+        for name, items in moving.items():
+            if cp.has_section(name):
+                self._note_learned(f"[{name}] in {os.path.basename(self.state_file)} is "
+                                   f"another chain's, so the values learned for the lane "
+                                   f"that moved onto it are dropped")
+                continue
+            cp.add_section(name)
+            for k, v in items.items():
+                cp.set(name, k, v)
+        chain = self._BASE_SECTION + " " + self.name
+        if not cp.has_section(chain):
+            cp.add_section(chain)
+        cp.set(chain, "lane_base", str(self.lane_base))
+        for k, v in self._ser_maps(self._lane_map, self._name_map).items():
+            cp.set(chain, k, v)
+        self._write_state(cp)
+        if parsed:
+            self._write_auto_vars(autov)
+        built = {f"AFC_lane {ln}" for pu in self._pool_units
+                 for ln in pu["lanes"]}
+        for old, keys in parsed.items():
+            self._stand_in(config, old, keys, hold=old not in built)
+        lo, hi = min(nums), max(nums)
+        old, new = ((f"lane{lo}", f"lane{lo + step}") if lo == hi else
+                    (f"lane{lo}-lane{hi}", f"lane{lo + step}-lane{hi + step}"))
+        self._note_learned(f"Other units now hold lane numbers among this chain's lanes, so "
+                           f"its lanes moved up past the highest of those "
+                           f"({self.lane_base - 1}): {old} became {new}, with their saved "
+                           f"lane records, T# maps and learned values.")
+
+    def _loaded_lane_numbers(self) -> List[int]:
+        """
+        The laneN numbers of every lane object the printer already holds.
+
+        :return list: lane numbers, empty when the printer cannot be asked
+        """
+        import re as _re
+        nums: List[int] = []
+        try:
+            for family in ("AFC_lane", "AFC_stepper"):
+                for name, obj in self.printer.lookup_objects(family):
+                    if isinstance(obj, _SweptSection):
+                        continue
+                    m = _re.match(r"(?i)\S+\s+lane(\d+)$", name)
+                    if m:
+                        nums.append(int(m.group(1)))
+        except Exception:
+            pass
+        return nums
+
+    def _declared_lane_numbers(self, config: Any) -> Set[int]:
+        """
+        The laneN numbers that exist outside this chain: the [AFC_lane] / [AFC_stepper] sections of
+        the config, case-insensitively, and the lanes the printer already holds (see
+        _loaded_lane_numbers).
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return set: lane numbers
+        """
+        import re as _re
+        nums = set(self._loaded_lane_numbers())
+        fc = getattr(config, "fileconfig", None)
+        if fc is None:
+            return nums
+        autov = self._read_ini(self.auto_vars_file)
+        try:
+            for sec in fc.sections():
+                m = _re.match(r"(?i)afc_(?:lane|stepper)\s+lane(\d+)$", sec)
+                if (m
+                    and not self._learned_only(fc, autov, sec)):
+                    nums.add(int(m.group(1)))
+        except Exception:
+            pass
+        return nums
+
+    @staticmethod
+    def _learned_only(fc: Any, autov: Optional[configparser.RawConfigParser], sec: str) -> bool:
+        """
+        Whether auto_vars alone carries a section of the merged config: a value AFC learned and
+        filed under the section's name, which is no section of its own.
+
+        :param fc: the merged fileconfig
+        :param autov: auto_vars as read; None when absent
+        :param sec: the section name
+        :return bool: True when every option the section has is auto_vars'
+        """
+        return bool(autov is not None
+                    and autov.has_section(sec)
+                    and not set(dict(fc.items(sec)))
+                    - set(dict(autov.items(sec))))
+
+    def _earlier_chains(self) -> List["afcBridgeBox"]:
+        """
+        The chain masters loaded before this one.
+
+        :return list: earlier masters, empty when the printer cannot be asked
+        """
+        try:
+            return [obj for _name, obj
+                    in self.printer.lookup_objects(self._BASE_SECTION)
+                    if isinstance(obj, afcBridgeBox)]
+        except Exception:
+            return []
+
+    def _later_chains(self, config: Any) -> List[str]:
+        """
+        The chain masters the config declares below this one.
+
+        :param config: this section's wrapper (its fileconfig sees the merged user config)
+        :return list: their chain names, empty when the config cannot say
+        """
+        fc = getattr(config, "fileconfig", None)
+        if fc is None:
+            return []
+        loaded = {self.name} | {m.name for m in self._earlier_chains()}
+        prefix = self._BASE_SECTION + " "
+        try:
+            return [sec.split()[-1] for sec in fc.sections()
+                    if sec.startswith(prefix)
+                       and sec.split()[-1] not in loaded
+                       and dict(fc.items(sec)).get("serial_port")]
+        except Exception:
+            return []
+
+    def _collision_error(self, section: str) -> str:
+        """
+        The refusal for a fabricated section whose name the printer already holds.
+
+        :param section: the fabricated section name
+        :return str: the error text
+        """
+        head = f"[AFC_BridgeBox {self.name}] would fabricate [{section}]"
+        other = next((m.name for m in self._earlier_chains()
+                      if section in (getattr(m, "_fabricated_names", None)
+                                     or ())), None)
+        if other is None:
+            return head + " but it already exists in the config -- remove one"
+        head += f", but [AFC_BridgeBox {other}] above it in the config already builds it"
+        kind = section.split(" ", 1)[0]
+        if kind == "AFC_lane":
+            if getattr(self, "_lane_base_set", False):
+                where = "set by lane_base: in this section"
+            elif hasattr(self, "_resolved_base"):
+                where = "computed past the lanes loaded before this chain"
+            else:
+                where = (f"saved in the #~# block of {self.state_file}, "
+                         f"used while lane_base: is unset or 0")
+            return (head + f": this chain's lane_base {self.lane_base} "
+                    f"({where}) falls inside that chain's lanes. Set "
+                    f"lane_base: in one chain's section past the other "
+                    f"chain's last lane.")
+        if kind == "AFC_buffer":
+            return head + ". Give one chain its own buffer: name."
+        return (head + ". Give one chain its own unit_prefix, or its own ams_names / ht_names.")
+
+    def _later_chain_lanes(self, config: Any) -> Dict[int, str]:
+        """
+        The lanes the chains below this one in the config build, as far as their sections and saved
+        state say before they load.
+
+        :param config: this section's wrapper
+        :return dict: lane number -> the name of the later chain building it
+        """
+        out: Dict[int, str] = {}
+        for name, opts, saved in self._later_chain_sections(config):
+            try:
+                base = (int(opts.get("lane_base") or 0)
+                        or int(saved.get("lane_base") or 0))
+                if base <= 0:
+                    continue
+                tags = [e.split(":")[0].strip().lower() for e in
+                        (opts.get("roster")
+                         or saved.get("roster")
+                         or "").split(",") if ":" in e]
+                n_ht = sum(1 for t in tags if t in _HT_MODELS)
+                band = min(max(int(opts.get("pool_ams", 4)),
+                               len(tags) - n_ht,
+                               int(saved.get("ams_band") or 0)),
+                           _MAX_AMS_BAYS)
+                lanes = set(range(base, base + band * 4
+                                  + max(int(opts.get("pool_ht", 8)), n_ht)))
+            except Exception:
+                continue
+            for entry in (saved.get("lane_map") or "").split(","):
+                try:
+                    _uid, start, count = entry.split(":")
+                    first, span = int(start), int(count)
+                except Exception:
+                    continue
+                if (span in _SLOTS_BY_MODEL.values()
+                    and first >= 0):
+                    lanes |= set(range(first, first + span))
+            for n in lanes:
+                out.setdefault(n, name)
+        return out
+
+    def _later_chain_sections(self,
+                              config: Any) -> List[Tuple[str, Dict[str, str], Dict[str, str]]]:
+        """
+        What the config and the saved state say about each chain below this one, before it loads
+        (see _later_chains).
+
+        :param config: this section's wrapper
+        :return list: (chain name, its section's options, its saved state section), in config order;
+        a chain whose section cannot be read is left out
+        """
+        fc = getattr(config, "fileconfig", None)
+        if fc is None:
+            return []
+        out: List[Tuple[str, Dict[str, str], Dict[str, str]]] = []
+        for name in self._later_chains(config):
+            sec = self._BASE_SECTION + " " + name
+            try:
+                opts = dict(fc.items(sec))
+                path = opts.get("state_file")
+                path = (os.path.expanduser(path) if path
+                        else self._locate_own_file(name)
+                        or os.path.expanduser(self._DEFAULT_STATE))
+                cp = self._read_state(path)
+                saved = dict(cp.items(sec)) if cp.has_section(sec) else {}
+            except Exception:
+                continue
+            out.append((name, opts, saved))
+        return out
+
+    def _foreign_unit_names(self, config: Any) -> set:
+        """
+        Unit names that existing AFC_lane / AFC_stepper sections in the config already belong to
+        (their `unit:` field, before the ':slot').
+
+        :param config: this section's wrapper (its fileconfig sees the merged user config)
+        :return set: foreign unit names
+        """
+        import re as _re
+        fc = getattr(config, "fileconfig", None)
+        names: set = set()
+        if fc is None:
+            return names
+        for sec in fc.sections():
+            if not _re.match(r"(?i)afc_(?:lane|stepper)\s+\S+$", sec):
+                continue
+            try:
+                unit = dict(fc.items(sec)).get("unit", "") or ""
+            except Exception:
+                unit = ""
+            unit = unit.split(":")[0].strip()
+            if unit:
+                names.add(unit)
+        return names
+
+    def _load_lane_map(self) -> Dict[str, Tuple[int, int]]:
+        """
+        The persisted uid -> (first lane, span) map, tombstones included.
+
+        :return dict: uid -> (first lane number, lane count)
+        """
+        raw = self._state_get(self._BASE_SECTION + " " + self.name, "lane_map") or ""
+        spans = set(_SLOTS_BY_MODEL.values())
+        out: Dict[str, Tuple[int, int]] = {}
+        for entry in [e.strip() for e in raw.split(",") if e.strip()]:
+            try:
+                uid, start, span = entry.split(":")
+                first, count = int(start), int(span)
+            except Exception:
+                continue
+            if (count not in spans
+                or first < 0):
+                continue
+            out[_norm_uid(uid)] = (first, count)
+        return out
+
+    def _load_name_map(self) -> Dict[str, str]:
+        """
+        The persisted uid -> unit name map: the lane map's twin, entries kept and dropped alongside
+        it, serialized as `name_map: UID:Name, ...`.
+
+        :return dict: uid -> fabricated unit name
+        """
+        raw = self._state_get(self._BASE_SECTION + " " + self.name, "name_map") or ""
+        out: Dict[str, str] = {}
+        for entry in [e.strip() for e in raw.split(",") if e.strip()]:
+            uid, sep, name = entry.partition(":")
+            if (sep
+                and uid.strip()
+                and name.strip()):
+                out[_norm_uid(uid)] = name.strip()
+        return out
+
+    def _load_bay_owner(self) -> Tuple[Dict[str, str], bool]:
+        """
+        The persisted bay -> uid map of which unit each pool bay was last claimed onto, serialized
+        as `bay_owner: UID:Bay, ...`.
+
+        :return tuple: (bay -> uid, whether the key exists at all)
+        """
+        raw = self._state_get(self._BASE_SECTION + " " + self.name, "bay_owner")
+        out: Dict[str, str] = {}
+        for entry in [e.strip() for e in (raw or "").split(",") if e.strip()]:
+            uid, sep, bay = entry.partition(":")
+            if (sep
+                and uid.strip()
+                and bay.strip()):
+                out[bay.strip()] = _norm_uid(uid)
+        return out, raw is not None
+
+    def _owners(self) -> Dict[str, str]:
+        """
+        The bay owner map, read from the state the first time it is asked for.
+
+        :return dict: bay -> uid of the unit last claimed onto it
+        """
+        owners = getattr(self, "_bay_owner", None)
+        if owners is None:
+            owners = self._bay_owner = self._load_bay_owner()[0]
+        return owners
+
+    def _ser_bay_owner(self, owners: Dict[str, str]) -> str:
+        """
+        Serialize the bay owner map for the state block.
+
+        :param owners: bay -> uid
+        :return str: the state-block value, entries in lane order
+        """
+        first = {pu["name"]: _pool_laneno(pu)
+                 for pu in getattr(self, "_pool_units", None) or []}
+        return ", ".join(f"{owners[bay]}:{bay}" for bay in sorted(
+            owners, key=lambda b: (first.get(b, 1 << 30), b)))
+
+    def _set_bay_owner(self, bay: str, uid: str) -> None:
+        """
+        Record that ``uid`` is claimed onto ``bay``, and persist it (see _persist_bay_owner).
+
+        :param bay: the pool bay's name
+        :param uid: the claimed unit's uid
+        """
+        new = {b: u for b, u in self._owners().items() if u != uid}
+        new[bay] = uid
+        self._bay_owner = new
+        self._held = {b: e for b, e in (getattr(self, "_held", None)
+                                        or {}).items()
+                      if b == bay or _norm_uid(e.get("uid")) != uid}
+        self._persist_bay_owner()
+
+    def _persist_bay_owner(self) -> None:
+        """
+        Write bay_owner to the state block when it differs from what is there.
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        if (afc is not None
+            and not getattr(afc, "prep_done", True)):
+            self._bay_owner_pending = True
+            return
+        self._bay_owner_pending = False
+        owners = self._owners()
+        if self._load_bay_owner()[0] == owners:
+            return
+        self._state_set({self._BASE_SECTION + " " + self.name:
+                         {"bay_owner": self._ser_bay_owner(owners)}})
+
+    def _keep_guessed_owners(self) -> None:
+        """
+        Write bay_owner before a pin changes or a unit is forgotten, while the state block has no
+        bay_owner key yet.
+        """
+        try:
+            if self._load_bay_owner()[1]:
+                return
+            self._state_set({self._BASE_SECTION + " " + self.name:
+                             {"bay_owner": self._ser_bay_owner(
+                                 self._file_owners())}})
+        except Exception:
+            pass
+
+    def _file_owners(self) -> Dict[str, str]:
+        """
+        The owner of each bay whose lane records AFC.var.unit holds.
+
+        :return dict: bay -> uid
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        if (afc is None
+            or getattr(afc, "prep_done", True)):
+            return dict(self._owners())
+        return {bay: _norm_uid(entry.get("uid")) for bay, entry in
+                (getattr(self, "_held", None) or {}).items()
+                if entry.get("uid")}
+
+    def _given_names(self) -> Tuple[List[str], List[str], Dict[Tuple[str, int], str],
+                                    Dict[Tuple[str, str], Tuple[int, str]]]:
+        """
+        The names of the four AMS ranks and of the ht_names indices, each given to one bay only.
+
+        :return tuple: (the names of AMS ranks 0-3, the names of the ht_names indices, (family,
+        index) -> a console line for each of those bays named neither by its entry nor by its
+        default, (family, entry) -> (the entry's index, what it gave way to) for each entry that
+        gave way)
+        """
+        key = (self.unit_prefix, tuple(self.ams_names), tuple(self.ht_names))
+        cached = getattr(self, "_given_cache", None)
+        if (cached is not None
+            and cached[0] == key):
+            return (list(cached[1]), list(cached[2]), dict(cached[3]), dict(cached[4]))
+        n_ams = min(len(self.ams_names), _MAX_AMS_BAYS)
+        n_ht = len(self.ht_names)
+        ams = [f"{self.unit_prefix}_{i + 1}" for i in range(_MAX_AMS_BAYS)]
+        ht = [f"{self.unit_prefix}_HT_{j + 1}" for j in range(n_ht)]
+        stem = f"{self.unit_prefix}_HT_"
+        ams_past = {ams[i]: f"the default name of AMS bay {i + 1}"
+                    for i in range(n_ams, _MAX_AMS_BAYS)}
+
+        def _ht_past(name: str) -> Optional[str]:
+            """
+            Whether a name is the default of an HT index past ht_names.
+
+            :param name: a name
+            :return str: what gives it when it is such a default, None otherwise
+            """
+            num = name[len(stem):] if name.startswith(stem) else ""
+            if (num.isdecimal()
+                and num == str(int(num))
+                and int(num) > n_ht):
+                return f"the default name of HT bay {num}"
+            return None
+
+        def _free(name: str) -> str:
+            """
+            A default name no bay has yet.
+
+            :param name: a default name
+            :return str: it, else the first of name_2, name_3, ... no bay has
+            """
+            got, k = name, 2
+            while (got in given
+                   or got in ams_past
+                   or _ht_past(got)):
+                got, k = f"{name}_{k}", k + 1
+            return got
+
+        given: Dict[str, str] = {}
+        gave: Dict[Tuple[str, str], Tuple[int, str]] = {}
+        waiting = []
+        for fam, key_name, entries, out in (("ht", "ht_names", self.ht_names, ht),
+                                            ("ams", "ams_names", self.ams_names[:n_ams], ams)):
+            for i, entry in enumerate(entries):
+                giver = (given.get(entry)
+                         or (ams_past.get(entry) if fam == "ht"
+                             else _ht_past(entry)))
+                if giver is None:
+                    out[i] = entry
+                    given[entry] = f"{key_name} entry {i + 1}"
+                else:
+                    gave.setdefault((fam, entry), (i, giver))
+                    waiting.append((fam, key_name, out, i, entry, giver))
+        notes: Dict[Tuple[str, int], str] = {}
+        for i in range(n_ams, _MAX_AMS_BAYS):
+            default = ams[i]
+            what = ams_past.pop(default)
+            ams[i] = _free(default)
+            if ams[i] != default:
+                notes[("ams", i)] = (f"the default name of AMS bay {i + 1} ({default}) is "
+                                     f"{given[default]}, so AMS bay {i + 1} is named {ams[i]}.")
+            given[ams[i]] = what
+        for fam, key_name, out, i, entry, giver in waiting:
+            label = "HT" if fam == "ht" else "AMS"
+            out[i] = _free(f"{stem}{i + 1}" if fam == "ht"
+                           else f"{self.unit_prefix}_{i + 1}")
+            given[out[i]] = f"the name of {label} bay {i + 1}"
+            notes[(fam, i)] = (f"{key_name} entry {i + 1} ({entry}) is also {giver}, so "
+                               f"{label} bay {i + 1} is named {out[i]} -- give each bay a "
+                               f"name of its own.")
+        self._given_cache = (key, list(ams), list(ht), dict(notes), dict(gave))
+        return ams, ht, notes, gave
+
+    def _name_for_index(self, family: str, i: int) -> str:
+        """
+        The name of the i-th bay of a family (0-based): the operator's ams_names / ht_names entry if
+        one is set for that index, else the Bambu_AMS_# / Bambu_AMS_HT_# default, and never a name
+        another bay has (see _given_names): an HT default an ht_names entry holds takes the first of
+        <default>_2, <default>_3, ... no bay has.
+
+        :param family: "ams" or "ht"
+        :param i: the bay's 0-based rank within its family
+        :return str: the bay name
+        """
+        ams, ht, _notes, _gave = self._given_names()
+        if family == "ht":
+            if i < len(ht):
+                return ht[i]
+            default = f"{self.unit_prefix}_HT_{i + 1}"
+            name, k = default, 2
+            while (name in ht
+                   or name in ams):
+                name, k = f"{default}_{k}", k + 1
+            return name
+        if i < len(ams):
+            return ams[i]
+        return (self.ams_names[i] if i < len(self.ams_names)
+                else f"{self.unit_prefix}_{i + 1}")
+
+    def _name_note(self, family: str, i: int) -> Optional[str]:
+        """
+        The console line for a bay named neither by its own entry nor its default.
+
+        :param family: "ams" or "ht"
+        :param i: a built bay's 0-based rank within its family
+        :return str: the line, or None for any other bay
+        """
+        ams, ht, notes, _gave = self._given_names()
+        if ((family, i) in notes
+            or family != "ht"
+            or i < len(ht)):
+            return notes.get((family, i))
+        default = f"{self.unit_prefix}_HT_{i + 1}"
+        name = self._name_for_index("ht", i)
+        if name == default:
+            return None
+        holder = (f"ht_names entry {ht.index(default) + 1}" if default in ht
+                  else "the name of an AMS bay")
+        return (f"the default name of HT bay {i + 1} ({default}) is {holder}, "
+                f"so HT bay {i + 1} is named {name}.")
+
+    @staticmethod
+    def _drop_name_holders(name_map: Dict[str, str], lane_map: Dict[str, Tuple[int, int]],
+                           name: str, keep: set) -> List[str]:
+        """
+        Drop every uid outside ``keep`` recorded with ``name`` from both maps.
+
+        :param name_map: uid -> unit name, edited in place
+        :param lane_map: uid -> (first lane, span), edited in place
+        :param name: the unit name being taken
+        :param keep: uids that keep their entries
+        :return list: the uids dropped
+        """
+        gone = [u for u, n in name_map.items() if n == name and u not in keep]
+        for u in gone:
+            name_map.pop(u, None)
+            lane_map.pop(u, None)
+        return gone
+
+    def _name_index(self, family: str, name: str) -> Optional[int]:
+        """
+        The first index _name_for_index gives ``name`` at: the bay the list entries and defaults
+        give it to (see _given_names), then an AMS entry past the fourth, else the number in its
+        Bambu_AMS_# / Bambu_AMS_HT_# default (suffixed or not), which only names the indices past
+        the list.
+
+        :param family: "ams" or "ht"
+        :param name: a unit name
+        :return int: the 0-based index, None when no index gives that name
+        """
+        ams, ht, _notes, _gave = self._given_names()
+        given = ht if family == "ht" else ams
+        if name in given:
+            return given.index(name)
+        names = self.ht_names if family == "ht" else self.ams_names
+        for i in range(len(given), len(names)):
+            if names[i] == name:
+                return i
+        stem = (f"{self.unit_prefix}_HT_" if family == "ht"
+                else f"{self.unit_prefix}_")
+        num = name[len(stem):].split("_")[0] if name.startswith(stem) else ""
+        if (num.isdecimal()
+            and int(num) > len(names)
+            and self._name_for_index(family, int(num) - 1) == name):
+            return int(num) - 1
+        return None
+
+    def _rank_of(self, family: str, name: str) -> Optional[int]:
+        """
+        The rank a saved unit name stands for.
+
+        :param family: "ams" or "ht"
+        :param name: a saved unit name
+        :return int: the rank, None when the family is never given that name
+        """
+        i = self._name_index(family, name)
+        if (i is None
+            or (family == "ams" and i >= _MAX_AMS_BAYS)):
+            return None
+        return i
+
+    @staticmethod
+    def _lanes_text(start: int, span: int) -> str:
+        """
+        Describe a lane range.
+
+        :param start: first lane number
+        :param span: lane count
+        :return str: "laneN-laneM", or "laneN" for one lane
+        """
+        hi = start + span - 1
+        return f"lane{start}" if span == 1 else f"lane{start}-lane{hi}"
+
+    def _layout_note(self, b: Dict[str, Any]) -> Optional[str]:
+        """
+        The console note for a rostered unit whose name or lanes differ from what the state file
+        records for it.
+
+        :param b: its built bay, carrying "had": the recorded (first lane, span) or None, and, when
+        it drew a new name, "was": (the recorded name, the uid that holds that name or None)
+        :return str: the note naming the uid, both names and both lane spans; None when neither
+        changed
+        """
+        fam = "HT" if b["family"] == "ht" else "AMS"
+        had: Optional[Tuple[int, int]] = b.get("had")
+        now = self._lanes_text(b["lane"], b["slots"])
+        moved = had is not None and tuple(had) != (b["lane"], b["slots"])
+        if "was" not in b:
+            if (had is None
+                or not moved):
+                return None
+            return (f"{self.name}: {fam} {b['uid']} "
+                    f"({b['name']}) keeps its name, and its lanes changed: "
+                    f"{self._lanes_text(*had)} -> {now}.")
+        saved, holder = b["was"]
+        key = "ht_names" if b["family"] == "ht" else "ams_names"
+        gave = self._given_names()[3].get((b["family"], saved))
+        if holder:
+            why = f"which {holder} also holds"
+        elif (b["family"] == "ams"
+              and self._name_index("ams", saved) is not None):
+            why = f"past the {_MAX_AMS_BAYS} AMS bays a Bambu bus addresses"
+        elif gave:
+            why = f"whose {key} entry {gave[0] + 1} gives way to {gave[1]}"
+        else:
+            why = f"which no {key} entry or default name gives an {fam}"
+            names = self.ht_names if b["family"] == "ht" else self.ams_names
+            stem = (f"{self.unit_prefix}_HT_" if b["family"] == "ht"
+                    else f"{self.unit_prefix}_")
+            num = saved[len(stem):] if saved.startswith(stem) else ""
+            if (num.isdecimal()
+                and 1 <= int(num) <= len(names)):
+                why += f" ({key} replaces the first {len(names)} default names)"
+        if (had is not None
+            and moved):
+            lanes = f"its lanes changed: {self._lanes_text(*had)} -> {now}"
+        elif had is not None:
+            lanes = f"its lanes stay {now}"
+        else:
+            lanes = f"its lanes are now {now}"
+        return (f"{self.name}: {fam} {b['uid']} was recorded "
+                f"as {saved}, {why}. It is now {b['name']}, and {lanes}. "
+                f"Lane records saved under {saved} (spool, material, colour, "
+                f"T# map) do not carry over to {b['name']}; a tagged spool is "
+                f"read again from its tag. Its learned bowden lengths stay with the unit.")
+
+    def _band_note(self, held: List[Dict[str, Any]], band: int, need: int, clash: List[int],
+                   later: Optional[Dict[int, str]] = None) -> str:
+        """
+        The console note for recorded HTs whose lanes sit past the AMS bays pool_ams and the
+        recorded AMS need.
+
+        :param held: those HT bays, named and ranked; the lane map still holds their recorded lanes
+        :param band: the band their lanes sit past
+        :param need: the band pool_ams and the recorded AMS need
+        :param clash: HT lane numbers at ``band`` that exist outside this chain or that a later
+        chain builds, empty when none does
+        :param later: lane number -> the later chain building it, for the lanes no section outside
+        this chain declares
+        :return str: the note
+        """
+        one = len(held) == 1
+        hts = ", ".join(f"HT {b['uid']} ({b['name']}) on "
+                        f"{self._lanes_text(*self._lane_map[b['uid']])}"
+                        for b in held)
+        its = "its" if one else "their"
+        if clash:
+            by = (later or {}).get(clash[0])
+            why = (f"[AFC_BridgeBox {by}] further down the config builds "
+                   f"lane{clash[0]}" if by else
+                   f"[AFC_lane lane{clash[0]}] already exists outside this "
+                   f"chain")
+            return (f"{self.name}: {hts} cannot keep {its} "
+                    f"lanes: {why}. The AMS band is {need} bays, what "
+                    f"pool_ams and the recorded AMS need, and the HT lanes follow it.")
+        moves = [(b, self.lane_base + band * 4 + b["rank"]) for b in held]
+        moves = [(b, at) for b, at in moves
+                 if self._lane_map[b["uid"]][0] != at]
+        if moves:
+            text = (f"{self.name}: {hts} hold{'s' if one else ''} "
+                    f"the AMS band at {band} bays although pool_ams and the "
+                    f"recorded AMS need only {need}. "
+                    + ", ".join(
+                        f"{b['name']} moves to "
+                        f"{self._lanes_text(at, self._lane_map[b['uid']][1])}"
+                        for b, at in moves)
+                    + f", past those {band} bays.")
+        else:
+            text = (f"{self.name}: {hts} keep{'s' if one else ''} "
+                    f"{its} lanes, so the AMS band stays {band} bays although "
+                    f"pool_ams and the recorded AMS need only {need}.")
+        if (self.pool_ams
+            or self.pool_ht):
+            text += f" Set pool_ams: {band} to silence this."
+        uid = f"UID={held[0]['uid']}" if one else "UID=<uid> for each"
+        return (text + f" AFC_BRIDGEBOX_FORGET CHAIN={self.name} {uid} lets "
+                f"the band shrink to {need} at the next RESTART, and erases "
+                f"what {'it' if one else 'they'} learned.")
+
+    def _moved_lanes(self, bays: List[Dict[str, Any]],
+                     waiting: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """
+        The lanes a rostered unit's state records that another bay, or none, holds in this layout.
+
+        :param bays: every bay built, lanes set, rostered ones carrying "had": their recorded (first
+        lane, span) or None
+        :param waiting: rostered AMS left without a bay, carrying "had"
+        :return dict: lane name -> {"uid", "name", "family" of the unit the state records on it;
+        "now": the name of the bay holding it, or None}
+        """
+        owner: Dict[int, Dict[str, Any]] = {}
+        for b in bays:
+            for n in range(b["lane"], b["lane"] + b["slots"]):
+                owner.setdefault(n, b)
+        moves: Dict[str, Dict[str, Any]] = {}
+        for b in [x for x in bays if not x["spare"]] + waiting:
+            had = b.get("had")
+            if not had:
+                continue
+            for n in range(had[0], had[0] + had[1]):
+                nb = owner.get(n)
+                if nb is b:
+                    continue
+                moves.setdefault(f"lane{n}", {"uid": b["uid"], "family": b["family"],
+                                              "name": b["was"][0] if "was" in b else b.get("name"),
+                                              "now": nb["name"] if nb else None})
+        return moves
+
+    def _all_ams_bays_held(self, uid: str, holders: List[Tuple[str, str]], live: bool) -> str:
+        """
+        What an AMS that finds all four AMS bays held can do about it.
+
+        :param uid: the AMS with no bay
+        :param holders: (name, uid) of the units holding the AMS bays; a unit not yet named has name
+        ""
+        :param live: whether the chain is running, so the holders that are offline (the ones this
+        AMS can be replacing) are named
+        :return str: the sentences that follow "has no bay: "
+        """
+        def _unit(name: str, u: str) -> str:
+            """
+            Label a unit by name and uid.
+
+            :param name: a unit name, "" when it has none
+            :param u: its uid
+            :return str: "name (uid)", or the uid alone
+            """
+            return f"{name} ({u})" if name else u
+
+        text = (f"all {_MAX_AMS_BAYS} AMS bays belong to other units "
+                f"({', '.join(_unit(*h) for h in holders)}), and a Bambu bus "
+                f"addresses at most {_MAX_AMS_BAYS} AMS, so neither pool_ams nor RESTART adds one.")
+        offline = ([h for h in holders if not self._uid_online_now(h[1])]
+                   if live else [])
+        if len(offline) == 1:
+            one = "it"
+            forget = (f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} "
+                      f"UID={offline[0][1]}"
+                      + self._loaded_clause(self._bay_of_uid(offline[0][1])))
+            text += f" {_unit(*offline[0])} is offline: if this AMS replaces it, "
+        else:
+            one = "that unit"
+            forget = f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID=<that unit's uid>"
+            if offline:
+                text += f" Offline: {', '.join(_unit(*h) for h in offline)}."
+            text += " If this AMS replaces one of them, "
+        pooled = bool(self.pool_ams or self.pool_ht)
+        if self._unlisted(uid):
+            its = "its" if one == "it" else "that unit's"
+            return (text + f"replace {its} entry in roster: with "
+                    f"{self._roster_entry(uid)}, run {forget}, and RESTART.")
+        text += (f"{forget} frees that bay "
+                 + ("and this AMS claims it live" if pooled
+                    else "for it at the next RESTART"))
+        if self._roster_source == "option":
+            text += f"; remove {one} from roster: too"
+        text += "."
+        text += self._replace_text(uid, [
+            pu for pu in (self._bay_of_uid(h[1]) for h in offline)
+            if pu is not None and pu.get("family") == "ams"])
+        if (not pooled
+            and self.removal_grace
+            and self._roster_source != "option"):
+            text += (f" An AMS offline on a live chain for "
+                     f"{self.removal_grace:.0f}s is removed from the recorded "
+                     f"roster, which frees its bay at the next RESTART too.")
+        return text
+
+    def _overlap_error(self, a: Dict[str, Any], b: Dict[str, Any]) -> str:
+        """
+        The refusal for two bays whose lanes overlap, naming both.
+
+        :param a: one bay (name, uid, family, rank, lane, slots, spare)
+        :param b: the bay whose lanes start inside a's
+        :return str: the error text
+        """
+        def _span(x: Dict[str, Any]) -> str:
+            """
+            Describe a bay's lanes.
+
+            :param x: a bay
+            :return str: "laneN" or "laneN-laneM"
+            """
+            lo, hi = x["lane"], x["lane"] + x["slots"] - 1
+            return f"lane{lo}" if lo == hi else f"lane{lo}-lane{hi}"
+        head = f"bays {a['name']} ({_span(a)}) and {b['name']} ({_span(b)}) overlap"
+        uids = [x["uid"] for x in (a, b) if not x["spare"]]
+        if not uids:
+            return f"{head}."
+        return (f"{head}: their lanes follow from the unit names the #~# "
+                f"block of {self.state_file} records for "
+                f"{' and '.join(uids)}. AFC_BRIDGEBOX_FORGET and "
+                f"AFC_BRIDGEBOX_UNASSIGN need Klipper running, so remove the "
+                f"name_map and lane_map entries of {' or '.join(uids)} there "
+                f"by hand and RESTART; that unit then draws a free bay.")
+
+    @staticmethod
+    def _ser_maps(lane_map: Dict[str, Tuple[int, int]], name_map: Dict[str, str]) -> Dict[str, str]:
+        """
+        Serialize the lane and name maps for the state block.
+
+        :param lane_map: uid -> (first lane, span)
+        :param name_map: uid -> unit name
+        :return dict: both maps as their state-block key/value strings
+        """
+        lanes = ", ".join(
+            f"{uid}:{start}:{span}"
+            for uid, (start, span) in sorted(lane_map.items(),
+                                             key=lambda kv: kv[1][0]))
+        names = ", ".join(
+            f"{uid}:{name_map[uid]}"
+            for uid in sorted(name_map,
+                              key=lambda u: lane_map.get(u, (1 << 30,))))
+        return {"lane_map": lanes, "name_map": names}
+
+    def _flush_maps(self) -> None:
+        """
+        Persist the lane and name maps when fabrication just grew them.
+        """
+        if not getattr(self, "_maps_dirty", False):
+            return
+        self._state_set({self._BASE_SECTION + " " + self.name:
+                         self._ser_maps(self._lane_map, self._name_map)})
+        self._maps_dirty = False
+
+    def _register_mux(self, name: str, handler: Any, desc: str) -> None:
+        """
+        Register one CHAIN-muxed command.
+
+        :param name: the command name
+        :param handler: its handler
+        :param desc: its help text
+        """
+        gcode = self.printer.lookup_object("gcode", None)
+        if gcode is None:
+            return
+        gcode.register_mux_command(name, "CHAIN", self.name, handler, desc=desc)
+        try:
+            gcode.register_mux_command(name, "CHAIN", None, handler, desc=desc)
+        except Exception:
+            pass
+
+    def _register_commands(self) -> None:
+        """
+        Register the master's operator commands (CHAIN-muxed).
+        """
+        self._register_mux("AFC_BRIDGEBOX_FORGET", self.cmd_AFC_BRIDGEBOX_FORGET,
+                           "Release a departed unit's lane numbers and unit name for reuse "
+                           "and erase its learned values and saved lane records: "
+                           "AFC_BRIDGEBOX_FORGET [CHAIN=<chain>] "
+                           "UID=<uid> (or NAME=<unit name>) [FORCE=1]. With no argument, "
+                           "pops a picker of every recorded unit with a Forget button each.")
+        self._register_mux("AFC_BRIDGEBOX_ASSIGN", self.cmd_AFC_BRIDGEBOX_ASSIGN,
+                           "Pin a detected unit's UID onto a named pool bay, live: "
+                           "AFC_BRIDGEBOX_ASSIGN [CHAIN=<chain>] UID=<uid> NAME=<bay name> "
+                           "[FORCE=1] (or UID=<uid> alone to pop the bay picker). Refuses an "
+                           "occupied bay or one saved for another unit -- UNASSIGN it first "
+                           "-- with roster: set, a uid it does not list, and moving a unit "
+                           "off a bay with a lane AFC records as loaded to the toolhead "
+                           "(FORCE=1 clears that record).")
+        self._register_mux("AFC_BRIDGEBOX_UNASSIGN", self.cmd_AFC_BRIDGEBOX_UNASSIGN,
+                           "Unlink a UID from its pool bay (keeps learned values), live: "
+                           "AFC_BRIDGEBOX_UNASSIGN [CHAIN=<chain>] UID=<uid> "
+                           "(or NAME=<bay name>) [FORCE=1]")
+        self._register_mux("AFC_BRIDGEBOX_BAYS", self.cmd_AFC_BRIDGEBOX_BAYS,
+                           "Pop the bay manager: every pool bay, its occupant, an Unassign "
+                           "button for each occupied bay, and a Replace button for a unit "
+                           "waiting for a bay -- AFC_BRIDGEBOX_BAYS [CHAIN=<chain>]")
+        self._register_mux("AFC_BRIDGEBOX_RESET_WIFI", self.cmd_AFC_BRIDGEBOX_RESET_WIFI,
+                           "Wipe the BridgeBox's WiFi network and link key, for a move to "
+                           "another printer or network; it restarts with its setup hotspot: "
+                           "AFC_BRIDGEBOX_RESET_WIFI [CHAIN=<chain>]")
+        self._register_mux("AFC_BRIDGEBOX_FORGET_BOARD", self.cmd_AFC_BRIDGEBOX_FORGET_BOARD,
+                           "Forget the BridgeBox a chain on serial_port: auto saved, for a "
+                           "replacement board; the next start takes the next free one: "
+                           "AFC_BRIDGEBOX_FORGET_BOARD [CHAIN=<chain>]")
+        gcode = self.printer.lookup_object("gcode", None)
+        if gcode is not None:
+            try:
+                gcode.register_command(
+                    "AFC_BRIDGEBOX_STATUS", self.cmd_AFC_BRIDGEBOX_STATUS,
+                    desc="Show every BridgeBox chain in one list: its board, "
+                         "link, extruder, and each unit with its lanes, T#s "
+                         "and spools: AFC_BRIDGEBOX_STATUS")
+            except Exception:
+                pass
+        self._register_mux("AFC_BRIDGEBOX_REPLACE", self.cmd_AFC_BRIDGEBOX_REPLACE,
+                           "Forget an offline unit and put a new unit on its bay, live: "
+                           "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> "
+                           "OLD=<old uid or bay name> [FORCE=1]. Without OLD, pops a picker "
+                           "of the bays held for offline units.")
+
+    def cmd_AFC_BRIDGEBOX_STATUS(self, gcmd: Any) -> None:
+        """
+        List every BridgeBox chain on the printer, in config order: its board, how it is linked, its
+        extruder, and each unit on a bay with its lanes, their T#s and spools.
+        """
+        chains = [obj for _name, obj
+                  in self.printer.lookup_objects(self._BASE_SECTION)
+                  if isinstance(obj, afcBridgeBox)] or [self]
+        lines: List[str] = []
+        for chain in chains:
+            lines += chain._status_lines()
+        gcmd.respond_info("BridgeBox chains:\n" + "\n".join(lines))
+
+    def _status_lines(self) -> List[str]:
+        """
+        This chain's part of AFC_BRIDGEBOX_STATUS.
+
+        :return list: the chain's head line, then one line per unit on a bay and one counting the
+        free bays
+        """
+        bridge = self._chain_bridge()
+        info = (getattr(bridge, "_info", None) or {}) if bridge else {}
+        board = " ".join(f"{k} {info[k]}" for k in ("chip", "fw")
+                         if info.get(k)) or "board"
+        port = str(self.serial_port or "")
+        wifi = getattr(bridge, "wifi", None) if bridge else None
+        if (wifi is not None
+            and getattr(wifi, "on_wifi", False)):
+            link = f"WiFi {wifi.addr}"
+        elif port.lower().startswith("tcp://"):
+            link = f"WiFi {port}"
+        elif port.startswith("auto:"):
+            link = "USB, no board found yet"
+        else:
+            link = f"USB {os.path.basename(port)}"
+        connected = (bridge is not None
+                     and bridge.is_connected())
+        state = "connected" if connected else "not connected"
+        lines = [f"{self.name}: {self.extruder or 'no extruder'}, {board}, {link}, {state}"]
+        free = {"AMS": 0, "HT": 0}
+        for pu in sorted(getattr(self, "_pool_units", None) or [], key=_pool_laneno):
+            fam = "HT" if pu.get("family") == "ht" else "AMS"
+            uid = _norm_uid(pu.get("uid"))
+            if not uid:
+                free[fam] += 1
+                continue
+            lanes = []
+            for lname in pu.get("lanes") or []:
+                lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+                maps = ",".join(m for m in (getattr(lane, "map", None) or [])
+                                if m != "NONE") or "no T#"
+                spool = getattr(lane, "spool_id", None)
+                lanes.append(f"{lname} {maps}"
+                             + (f" spool {spool}" if spool else ""))
+            where = "online" if pu.get("bound") else "offline"
+            lines.append(f"  {pu['name']} [{fam}] {uid} {where}: "
+                         + ("; ".join(lanes) or "no lanes"))
+        counts = [f"{n} {fam}" for fam, n in free.items() if n]
+        if counts:
+            lines.append(f"  free bays: {', '.join(counts)}")
+        elif not getattr(self, "_pool_units", None):
+            lines.append("  no pool bays (pool_ams / pool_ht)")
+        return lines
+
+    def cmd_AFC_BRIDGEBOX_RESET_WIFI(self, gcmd: Any) -> None:
+        """
+        Wipe the BridgeBox's WiFi network and link key, and forget the address and key this chain
+        saved for it.
+        """
+        if self._is_printing():
+            error_str = (f"AFC_BRIDGEBOX_RESET_WIFI: not during a print, the "
+                         f"BridgeBox of {self.name} restarts")
+            raise gcmd.error(error_str)
+        bridge = self._chain_bridge()
+        if (bridge is None
+            or not bridge.is_connected()):
+            error_str = (f"AFC_BRIDGEBOX_RESET_WIFI: no link to the BridgeBox "
+                         f"of {self.name}. Plug it into this printer's USB and run it again.")
+            raise gcmd.error(error_str)
+        bridge.send({"cmd": "wifi", "clear": 1})
+        bridge.send({"cmd": "reset"})
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        sec = f"{self._BASE_SECTION} {self.name}"
+        updates: Dict[str, Dict[str, str]] = {sec: {}}
+        if self._state_get(sec, "wifi_addr"):
+            updates[sec]["wifi_addr"] = ""
+        link = _bridge_mod._WIFI_LINKS.get(str(self.serial_port))
+        if link is not None:
+            key = self.tcp_key or secrets.token_hex(16)
+            if not self.tcp_key:
+                updates[sec]["wifi_key"] = key
+            link.forget(key)
+        if updates[sec]:
+            self._state_set(updates)
+        if (link is not None
+            and link.usb_path):
+            then = " With its USB cable in, Klipper moves to its new address by itself."
+        elif link is not None:
+            then = " If the address its setup page shows has changed, put it in serial_port."
+        else:
+            then = ""
+        gcmd.respond_info(
+            f"{self.name}: the BridgeBox's WiFi and link key "
+            f"are wiped and it is restarting with its bb-bridge setup "
+            f"hotspot. Set up its WiFi again from a phone." + then)
+
+    def cmd_AFC_BRIDGEBOX_FORGET_BOARD(self, gcmd: Any) -> None:
+        """
+        Forget the BridgeBox a chain on serial_port: auto saved, and its WiFi address, for a
+        replacement board.
+        """
+        if not self._auto:
+            error_str = (f"AFC_BRIDGEBOX_FORGET_BOARD: {self.name} uses "
+                         f"serial_port: {self.serial_port}, not auto")
+            raise gcmd.error(error_str)
+        self._board_forgotten = True
+        self._state_set({f"{self._BASE_SECTION} {self.name}":
+                         {"usb_port": "", "wifi_addr": ""}})
+        gcmd.respond_info(f"{self.name}: forgot its BridgeBox. RESTART, and "
+                          f"the chain takes the next free BridgeBox it finds on USB.")
+
+    def cmd_AFC_BRIDGEBOX_FORGET(self, gcmd: Any) -> None:
+        """
+        The deliberate half of removal: erase a unit's tombstones.
+        """
+        uid = _norm_uid(gcmd.get("UID", ""))
+        name = (gcmd.get("NAME", "") or "").strip()
+        sec = self._BASE_SECTION + " " + self.name
+        lane_map = self._load_lane_map()
+        name_map = self._load_name_map()
+        if (not uid
+            and not name):
+            roster_raw = self._state_get(sec, "roster") or ""
+            order = [_norm_uid(e.partition(":")[2])
+                     for e in roster_raw.split(",")
+                     if e.partition(":")[2].strip()]
+            known, seen = [], set()
+            for u in order + list(name_map) + list(lane_map):
+                u = _norm_uid(u)
+                if (u
+                    and u not in seen):
+                    seen.add(u)
+                    known.append(u)
+            lines, buttons = [], []
+            for u in known:
+                nm = name_map.get(u) or "(unnamed)"
+                live = "  -- LIVE (drops now)" if self._uid_online_now(u) \
+                    else ""
+                lines.append(f"{nm}  [{u[:8]}…]{live}")
+                if len(buttons) < self._MAX_BAY_BUTTONS:
+                    buttons.append((f"Forget {nm}",
+                                    f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID={u}", "error"))
+            if not lines:
+                lines = ["No recorded units to forget."]
+            self._prompt("Forget a Bambu AMS unit", lines, buttons, timeout=180.0)
+            gcmd.respond_info(
+                f"{self.name}: forget picker -- "
+                + (", ".join(name_map.get(u) or u[:8] for u in known)
+                   or "nothing recorded"))
+            return
+        if (not uid
+            and name):
+            hits = [u for u, n in name_map.items() if n == name]
+            if not hits:
+                error_str = (f"AFC_BRIDGEBOX_FORGET: no recorded unit named {name!r} "
+                             f"(known: {', '.join(sorted(name_map.values())) or 'none'})")
+                raise gcmd.error(error_str)
+            uid = hits[0]
+        if not uid:
+            error_str = "AFC_BRIDGEBOX_FORGET: give UID=<unit_uid> or NAME=<unit name>"
+            raise gcmd.error(error_str)
+        cp = self._read_state()
+        roster_raw = (dict(cp.items(sec)).get("roster") or ""
+                      if cp.has_section(sec) else "")
+        entries = [e.strip() for e in roster_raw.split(",") if e.strip()]
+        in_roster = any(_norm_uid(e.partition(":")[2]) == uid
+                        for e in entries)
+        record = self._learned_section(uid)
+        # A unit claimed onto a spare and pulled before it was recorded has nothing saved, but still
+        # holds that bay, or once released is still named as the bay's last owner, with lane records
+        # kept for it.
+        if (uid not in lane_map
+            and uid not in name_map
+            and not in_roster
+            and not cp.has_section(record)
+            and self._bay_of_uid(uid) is None
+            and uid not in self._owners().values()
+            and not any(_norm_uid(e.get("uid")) == uid for e in
+                        (getattr(self, "_held", None) or {}).values())):
+            error_str = f"AFC_BRIDGEBOX_FORGET: nothing recorded for uid {uid}"
+            raise gcmd.error(error_str)
+        # Refuse here, before anything is erased, if a lane of the unit's bay is still in a
+        # toolhead, claimed or not.
+        pu = next((p for p in getattr(self, "_pool_units", [])
+                   if _norm_uid(p.get("uid")) == uid), None)
+        unclaimed: List[str] = []
+        if (pu is not None
+            and pu.get("bound")):
+            self._refuse_toolhead_release(gcmd, "AFC_BRIDGEBOX_FORGET", pu["bound"])
+        elif pu is not None:
+            unclaimed = self._refuse_unclaimed_release(gcmd, "AFC_BRIDGEBOX_FORGET", pu,
+                                                       f"forgets {uid}")
+        # Mid-print a live FORGET refuses without FORCE for a claimed unit.
+        online_now = self._uid_online_now(uid)
+        if (pu is not None
+            and pu.get("bound")
+            and self._is_printing()
+            and not gcmd.get_int("FORCE", 0)):
+            error_str = (f"AFC_BRIDGEBOX_FORGET: {uid} is on {pu['name']} and a print "
+                         f"is active -- dropping its lanes now would disrupt the "
+                         f"print. Finish the print, or FORCE=1 to forget it anyway")
+            raise gcmd.error(error_str)
+        cleared = self._clear_bay_toolhead(pu) if unclaimed else []
+        # Tell the bridge too, or a gone unit reads its own re-assert back and flaps online.
+        self._bridge_forget(uid)
+        unit_name = name_map.pop(uid, None)
+        start_span = lane_map.pop(uid, None)
+        if not cp.has_section(sec):
+            cp.add_section(sec)
+        if roster_raw:
+            cp.set(sec, "roster", ", ".join(
+                e for e in entries
+                if _norm_uid(e.partition(":")[2]) != uid))
+        for k, v in self._ser_maps(lane_map, name_map).items():
+            cp.set(sec, k, v)
+        # With no bay_owner key yet, the next start would guess the owners again, and could give
+        # this unit's bay and records to another (see _keep_guessed_owners).
+        owners, present = self._load_bay_owner()
+        if not present:
+            owners = self._file_owners()
+        if (uid in owners.values()
+            or not present):
+            cp.set(sec, "bay_owner", self._ser_bay_owner(
+                {b: u for b, u in owners.items() if u != uid}))
+        if unit_name in name_map.values():
+            unit_name = None
+        if start_span:
+            others = {n for s0, k in lane_map.values()
+                      for n in range(s0, s0 + k)}
+            lanes = [n for n in range(start_span[0], sum(start_span))
+                     if n not in others]
+        else:
+            lanes = []
+        doomed = [record]
+        if unit_name:
+            doomed += [f"{self._UNIT_SECTION} {unit_name}", f"AFC_hub {unit_name}",
+                       f"temperature_sensor {unit_name}"]
+        doomed += [f"AFC_lane lane{n}" for n in lanes]
+        by_name = f"{self._UNIT_SECTION} {unit_name}" if unit_name else None
+        erased = (cp.has_section(record)
+                  or bool(by_name and cp.has_section(by_name)))
+        for section in doomed:
+            if cp.has_section(section):
+                cp.remove_section(section)
+        self._write_state(cp)
+        autov = self._read_ini(self.auto_vars_file)
+        if (autov is not None
+            and by_name):
+            erased = erased or autov.has_section(by_name)
+        if (autov is not None
+            and any(autov.has_section(s) for s in doomed)):
+            for section in doomed:
+                if autov.has_section(section):
+                    autov.remove_section(section)
+            try:
+                with open(self.auto_vars_file, "w") as fp:
+                    fp.write("# This file is autogenerated and updated when "
+                             "variables are not in your normal AFC config files\n\n")
+                    autov.write(fp)
+            except Exception:
+                pass
+        # The in-memory maps sync so a unit appearing later cannot collide with the freed range.
+        if hasattr(self, "_lane_map"):
+            self._lane_map.pop(uid, None)
+            self._name_map.pop(uid, None)
+        self._drop_watch_state(uid)
+        # With a pool the next unit of the family claims the slot live.
+        freed_live = False
+        if pu is not None:
+            if pu.get("bound"):
+                self._release_pool_unit(pu["bound"], gcmd, "AFC_BRIDGEBOX_FORGET")
+            pu["uid"] = None
+            freed_live = bool(self.pool_ams or self.pool_ht)
+        held = getattr(self, "_held", None) or {}
+        dropped = [e for e in held.values() if _norm_uid(e.get("uid")) == uid]
+        had_records = bool(dropped)
+        self._bay_owner = {b: u for b, u in self._owners().items()
+                           if u != uid}
+        self._held = {b: e for b, e in held.items()
+                      if _norm_uid(e.get("uid")) != uid}
+        if any(_parse_map(rec.get("map"))
+               for entry in dropped
+               for rec in (entry.get("lanes") or {}).values()
+               if isinstance(rec, dict)):
+            self._state_set({sec: {self._PACK_KEY: 1}})
+        # Saved now, so AFC.var.unit does not keep them until some later save.
+        if had_records:
+            afc = self.printer.lookup_object("AFC", None)
+            try:
+                if afc is not None:
+                    afc.save_vars()
+            except Exception:
+                pass
+        if online_now:
+            self._forget_suppressed.add(uid)
+        gone = " and ".join(what for what, on in (
+            ("learned values", erased), ("saved lane records", had_records))
+            if on)
+        gone = f"{gone} erased" if gone else ""
+        freed = []
+        if lanes:
+            lo, hi = lanes[0], lanes[-1]
+            freed.append(f"lane{lo}" if lo == hi else f"lanes {lo}-{hi}")
+        if unit_name:
+            freed.append(f"the name {unit_name}")
+        gcmd.respond_info(
+            f"{self.name}: forgot {uid}"
+            + (f" -- {' and '.join(freed)} freed for reuse" if freed else "")
+            + ((", " if freed else " -- ") + gone if gone else "")
+            + (f" -- cleared {', '.join(cleared)} from the toolhead"
+               if cleared else "")
+            + (" -- slot freed to the pool LIVE; the next same-family unit "
+               "claims it with no reboot." if freed_live
+               else " -- its bay is free now, but with no pool nothing claims "
+                    "it: AFC_BRIDGEBOX_ASSIGN another unit onto it while that "
+                    "unit is online, or RESTART." if pu is not None
+               else ". Applies at the next RESTART." if freed or in_roster
+               else ".")
+            + (" It is still on the wire, so re-enroll is suppressed until you "
+               "physically pull it -- a re-plug then enrolls it fresh."
+               if online_now else "")
+            + (" NOTE: your roster: option still lists this uid -- remove "
+               "it there too, the option overrides the recorded roster."
+               if self._roster_source == "option"
+               and uid in {x["uid"] for x in self.units} else ""))
+        self._close_prompt()
+
+    def _drop_watch_state(self, uid: str) -> None:
+        """
+        Drop what the chain watch tracks for a forgotten uid this session: its absence clock, the
+        release-side online clocks (a stale one would release a re-plugged unit on its first offline
+        read), its waiting state, any popup queued for it, and its enrollment line if a failed tick
+        left it unsaid.
+
+        :param uid: the forgotten uid
+        """
+        self._missing_since.pop(uid, None)
+        for attr in ("_last_online", "_online_run"):
+            clock = getattr(self, attr, None)
+            if clock is not None:
+                clock.pop(uid, None)
+        self._no_bay.pop(uid, None)
+        self._no_bay_told.discard(uid)
+        (getattr(self, "_unbayed", None) or {}).pop(uid, None)
+        self._replace_offered.discard(uid)
+        q = getattr(self, "_popup_queue", None)
+        if q:
+            q[:] = [e for e in q if e[1] != uid]
+        pending = getattr(self, "_announce_pending", None)
+        if pending:
+            pending[:] = [e for e in pending
+                          if _norm_uid(e.partition(":")[2]) != uid]
+
+    def _model_for_uid(self, uid: str) -> Optional[str]:
+        """
+        The roster model tag recorded for a uid.
+
+        :param uid: 24-hex unit uid
+        :return str: ht/ams1/ams2/boxed, or None if it is not enrolled yet
+        """
+        uid = _norm_uid(uid)
+        sec = self._BASE_SECTION + " " + self.name
+        recorded = None
+        for e in (self._state_get(sec, "roster") or "").split(","):
+            m, _sep, u = e.partition(":")
+            if _norm_uid(u) == uid:
+                recorded = m.strip().lower()
+                break
+        for u in self.units:
+            if _norm_uid(u.get("uid")) == uid:
+                if (_norm_model(u["model"]) == "boxed"
+                    and recorded in ("ams1", "ams2")):
+                    return recorded
+                return u["model"]
+        return recorded
+
+    def _unlisted(self, uid: str) -> bool:
+        """
+        Whether a set roster: option leaves this uid out.
+
+        :param uid: a unit uid
+        :return bool: True when a roster: option is set and does not list the uid
+        """
+        return (self._roster_source == "option"
+                and _norm_uid(uid) not in {_norm_uid(u.get("uid"))
+                                           for u in self.units})
+
+    def _recorded_uids(self) -> set:
+        """
+        The uids that get a bay of their own at restart.
+
+        :return set: the roster: option's uids when it is set, else the recorded roster's
+        """
+        if getattr(self, "_roster_source", None) == "option":
+            return {_norm_uid(u.get("uid")) for u in self.units}
+        raw = self._state_get(f"{self._BASE_SECTION} {getattr(self, 'name', '')}", "roster") or ""
+        return {_norm_uid(e.partition(":")[2]) for e in raw.split(",")
+                if e.partition(":")[2].strip()}
+
+    def _bay_held(self, pu: Dict[str, Any]) -> bool:
+        """
+        Whether a bay is saved for the uid on it.
+
+        :param pu: pool unit record
+        :return bool: True when the bay's uid is saved on it
+        """
+        uid = _norm_uid(pu.get("uid"))
+        return (bool(uid)
+                and getattr(self, "_name_map", {}).get(uid) == pu.get("name")
+                and uid in self._recorded_uids())
+
+    def _name_holder(self, name: str, uid: str, recorded: Optional[set] = None) -> Optional[str]:
+        """
+        The recorded uid, other than ``uid``, the name map saves ``name`` for.
+
+        :param name: a bay name
+        :param uid: the uid asking for it
+        :param recorded: the recorded uids; read when not given
+        :return str: the holder's uid, or None
+        """
+        recorded = self._recorded_uids() if recorded is None else recorded
+        uid = _norm_uid(uid)
+        return next((u for u, n in getattr(self, "_name_map", {}).items()
+                     if n == name and u != uid and u in recorded), None)
+
+    def _roster_entry(self, uid: str) -> str:
+        """
+        The roster: entry for a uid, `<model>:<uid>`.
+
+        :param uid: a unit uid
+        :return str: its roster: entry
+        """
+        uid = _norm_uid(uid)
+        model = self._model_for_uid(uid)
+        if not model:
+            bay = self._bay_of_uid(uid)
+            name = getattr(self, "_name_map", {}).get(uid)
+            ht = (bay.get("family") == "ht" if bay is not None
+                  else bool(name) and self._rank_of("ht", name) is not None)
+            model = "ht" if ht else "boxed"
+        return f"{model}:{uid}"
+
+    def _persist_pin(self, uid: str, first_lane: int, span: int, name: str, model: str) -> None:
+        """
+        Persist a uid -> bay pin so it survives a restart: write the lane and name maps, and enroll
+        the uid in the recorded roster if it is not there yet.
+
+        :param uid: the unit's uid
+        :param first_lane: the bay's first lane number
+        :param span: 1 (HT) or 4 (AMS)
+        :param name: the bay name the uid now owns
+        :param model: the uid's roster model tag, for a fresh roster entry
+        """
+        self._keep_guessed_owners()
+        sec = self._BASE_SECTION + " " + self.name
+        lane_map = self._load_lane_map()
+        name_map = self._load_name_map()
+        # A spare can wear a name still recorded for a uid outside the roster (see
+        # _roster_sections).
+        self._drop_name_holders(name_map, lane_map, name, {uid})
+        lane_map[uid] = (first_lane, span)
+        name_map[uid] = name
+        cp = self._read_state()
+        if not cp.has_section(sec):
+            cp.add_section(sec)
+        for k, v in self._ser_maps(lane_map, name_map).items():
+            cp.set(sec, k, v)
+        entries = [e.strip() for e in (
+            self._state_get(sec, "roster") or "").split(",") if e.strip()]
+        if not any(_norm_uid(e.partition(":")[2]) == uid for e in entries):
+            entries.append(f"{model}:{uid}")
+            cp.set(sec, "roster", ", ".join(entries))
+        self._write_state(cp)
+        self._drop_name_holders(self._name_map, self._lane_map, name, {uid})
+        self._lane_map[uid] = (first_lane, span)
+        self._name_map[uid] = name
+        # A deliberate re-add lifts any live-forget suppression.
+        if hasattr(self, "_forget_suppressed"):
+            self._forget_suppressed.discard(uid)
+
+    def _drop_pin(self, uid: str) -> None:
+        """
+        Remove a uid's lane/name pin from the persisted maps (its roster enrolment and learned
+        values are kept), and sync the in-memory maps.
+
+        :param uid: the unit's uid
+        """
+        self._keep_guessed_owners()
+        sec = self._BASE_SECTION + " " + self.name
+        lane_map = self._load_lane_map()
+        name_map = self._load_name_map()
+        lane_map.pop(uid, None)
+        name_map.pop(uid, None)
+        cp = self._read_state()
+        if cp.has_section(sec):
+            for k, v in self._ser_maps(lane_map, name_map).items():
+                cp.set(sec, k, v)
+            self._write_state(cp)
+        self._lane_map.pop(uid, None)
+        self._name_map.pop(uid, None)
+
+    def cmd_AFC_BRIDGEBOX_ASSIGN(self, gcmd: Any) -> None:
+        """
+        Pin a detected unit's UID onto a chosen named pool bay, live.
+        """
+        uid = _norm_uid(gcmd.get("UID", ""))
+        name = (gcmd.get("NAME", "") or "").strip()
+        if (uid
+            and not name):
+            # No target named: pop the bay picker a fresh plug-in raises.
+            if (self._bay_of_uid(uid) is None
+                and uid in self._no_bay):
+                family = "ht" if self._no_bay[uid] in _HT_MODELS_BB else "ams"
+                fam = family.upper()
+                built = any(pu.get("family") == family
+                            for pu in getattr(self, "_pool_units", []))
+                error_str = (
+                    f"AFC_BRIDGEBOX_ASSIGN: {uid} is on the chain, but "
+                    + (f"every {fam} bay is taken" if built
+                       else f"chain {self.name} has no {fam} bay")
+                    + (f" -- AFC_BRIDGEBOX_REPLACE CHAIN={self.name} "
+                       f"UID={uid} gives it the bay of a unit that is offline"
+                       if self._roster_source != "option"
+                       and self._held_offline(family) else ""))
+                raise gcmd.error(error_str)
+            if self._bay_of_uid(uid) is None:
+                error_str = (f"AFC_BRIDGEBOX_ASSIGN: {uid} is not on any bay -- plug it "
+                             f"in first, or give NAME=<bay name> to pin it")
+                raise gcmd.error(error_str)
+            self._prompt_new_unit(uid, timeout=180.0)
+            gcmd.respond_info(f"{self.name}: opened the bay picker for {uid}.")
+            return
+        if (not uid
+            or not name):
+            error_str = "AFC_BRIDGEBOX_ASSIGN: give UID=<unit_uid> and NAME=<bay name>"
+            raise gcmd.error(error_str)
+        if self._unlisted(uid):
+            error_str = (f"AFC_BRIDGEBOX_ASSIGN: {uid} is not in your roster: option. "
+                         f"While roster: is set it is the whole roster, so a unit it "
+                         f"does not list gets no bay of its own at restart and cannot be "
+                         f"pinned -- add {self._roster_entry(uid)} to roster: first, "
+                         f"RESTART, then assign it.")
+            raise gcmd.error(error_str)
+        pools = getattr(self, "_pool_units", [])
+        target = next((p for p in pools if p.get("name") == name), None)
+        if target is None:
+            bays = ", ".join(sorted(p["name"] for p in pools)) or "none"
+            error_str = f"AFC_BRIDGEBOX_ASSIGN: no pool bay named {name!r} (bays: {bays})"
+            raise gcmd.error(error_str)
+        model = self._model_for_uid(uid)
+        fam = self._family_of_uid(uid)
+        if (fam is not None
+            and fam != target["family"]):
+            error_str = (f"AFC_BRIDGEBOX_ASSIGN: {uid} is an {fam.upper()} unit but bay "
+                         f"{name!r} is an {target['family'].upper()} bay (their lane "
+                         f"counts differ)")
+            raise gcmd.error(error_str)
+        owner = _norm_uid(target.get("uid"))
+        if (owner
+            and owner != uid):
+            error_str = (f"AFC_BRIDGEBOX_ASSIGN: bay {name!r} is already assigned to "
+                         f"{owner} -- AFC_BRIDGEBOX_UNASSIGN CHAIN={self.name} UID={owner} first")
+            raise gcmd.error(error_str)
+        holder = self._name_holder(name, uid)
+        if holder:
+            error_str = (f"AFC_BRIDGEBOX_ASSIGN: bay {name!r} is saved for {holder} "
+                         f"-- AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID={holder} or "
+                         f"AFC_BRIDGEBOX_UNASSIGN CHAIN={self.name} UID={holder} first")
+            raise gcmd.error(error_str)
+        cur = next((p for p in pools
+                    if _norm_uid(p.get("uid")) == uid
+                       and p is not target), None)
+        unclaimed: List[str] = []
+        if (cur is not None
+            and cur.get("bound")):
+            self._refuse_toolhead_release(gcmd, "AFC_BRIDGEBOX_ASSIGN", uid)
+        elif cur is not None:
+            unclaimed = self._refuse_unclaimed_release(gcmd, "AFC_BRIDGEBOX_ASSIGN", cur,
+                                                       f"moves {uid}")
+        cleared = self._clear_bay_toolhead(cur) if unclaimed else []
+        if cur is not None:
+            if cur.get("bound"):
+                self._release_pool_unit(uid, gcmd, "AFC_BRIDGEBOX_ASSIGN")
+            cur["uid"] = None
+        target["uid"] = uid
+        first_lane = int("".join(c for c in target["lanes"][0] if c.isdigit()))
+        span = len(target["lanes"])
+        eff_model = model or ("ht" if target["family"] == "ht" else "boxed")
+        self._persist_pin(uid, first_lane, span, name, eff_model)
+        claimed = False
+        online = not target.get("bound") and self._uid_online_now(uid)
+        if online:
+            if self._claim_pool_unit(uid, eff_model, gcmd) is not None:
+                claimed = True
+        # Online and unclaimed only because PREP has not run.
+        waits = online and not claimed and not self._prep_settled()
+        pooled = bool(self.pool_ams or self.pool_ht)
+        gcmd.respond_info(
+            f"{self.name}: assigned {uid} to bay {name!r} "
+            f"({self._lanes_text(first_lane, span)})"
+            + (f" -- cleared {', '.join(cleared)} from the toolhead"
+               if cleared else "")
+            + (" -- claimed LIVE, no restart." if claimed
+               else " -- already claimed there." if target.get("bound") == uid
+               else " -- pinned; it claims this bay once PREP finishes."
+               if waits and pooled
+               else " -- pinned; PREP has not finished, run this again once "
+                    "it has." if waits
+               else " -- pinned; it claims this bay when next online."
+               if pooled
+               else f" -- pinned; with no pool nothing claims it, so run this "
+                    f"again once {uid} is online and PREP has finished, and "
+                    f"after every restart."))
+        self._close_prompt()
+
+    def cmd_AFC_BRIDGEBOX_UNASSIGN(self, gcmd: Any) -> None:
+        """
+        Unlink a UID from its pool bay: the reverse of ASSIGN.
+        """
+        uid = _norm_uid(gcmd.get("UID", ""))
+        name = (gcmd.get("NAME", "") or "").strip()
+        pools = getattr(self, "_pool_units", [])
+        if (not uid
+            and name):
+            pu = next((p for p in pools if p.get("name") == name), None)
+            if pu is None:
+                bays = ", ".join(sorted(p["name"] for p in pools)) or "none"
+                error_str = f"AFC_BRIDGEBOX_UNASSIGN: no pool bay named {name!r} (bays: {bays})"
+                raise gcmd.error(error_str)
+            uid = _norm_uid(pu.get("uid"))
+            if not uid:
+                error_str = f"AFC_BRIDGEBOX_UNASSIGN: bay {name!r} has no unit assigned"
+                raise gcmd.error(error_str)
+        if not uid:
+            error_str = "AFC_BRIDGEBOX_UNASSIGN: give UID=<unit_uid> or NAME=<bay name>"
+            raise gcmd.error(error_str)
+        pu = next((p for p in pools
+                   if _norm_uid(p.get("uid")) == uid), None)
+        if (pu is None
+            and uid not in self._lane_map
+            and uid not in self._name_map):
+            error_str = f"AFC_BRIDGEBOX_UNASSIGN: nothing assigned for uid {uid}"
+            raise gcmd.error(error_str)
+        # Ahead of the online refusal, so the refusal names the lane FORCE=1 clears.
+        unclaimed: List[str] = []
+        if (pu is not None
+            and pu.get("bound")):
+            self._refuse_toolhead_release(gcmd, "AFC_BRIDGEBOX_UNASSIGN", uid)
+        elif pu is not None:
+            unclaimed = self._refuse_unclaimed_release(gcmd, "AFC_BRIDGEBOX_UNASSIGN", pu,
+                                                       f"unassigns {uid}")
+        if (not gcmd.get_int("FORCE", 0)
+            and self._uid_online_now(uid)):
+            error_str = (f"AFC_BRIDGEBOX_UNASSIGN: {uid} is ONLINE on the chain right "
+                         f"now -- unhook it first, or FORCE=1 to unassign it live "
+                         f"(drops its lanes)")
+            raise gcmd.error(error_str)
+        cleared = self._clear_bay_toolhead(pu) if unclaimed else []
+        was = pu.get("name") if pu is not None else self._name_map.get(uid)
+        entry = self._roster_entry(uid) if self._unlisted(uid) else None
+        dropped = False
+        if pu is not None:
+            if pu.get("bound"):
+                self._release_pool_unit(uid, gcmd, "AFC_BRIDGEBOX_UNASSIGN")
+                dropped = True
+            pu["uid"] = None
+        self._drop_pin(uid)
+        self._missing_since.pop(uid, None)
+        pooled = bool(self.pool_ams or self.pool_ht)
+        if (entry
+            and pooled):
+            tail = (f"roster: is set and does not list it, so it takes a free "
+                    f"bay of its family for this session only and is not "
+                    f"saved there; add {entry} to roster: and RESTART to give it a bay of its own.")
+        elif entry:
+            tail = (f"roster: is set and does not list it, so it gets no bay "
+                    f"at the next restart; add {entry} to roster: to give it one.")
+        elif pooled:
+            tail = (f"It takes a free bay of its family, its last one first, "
+                    f"and is saved there once it has been online {self.enroll_grace:.0f}s.")
+        else:
+            tail = "It takes the lowest free bay of its family at the next restart."
+        gcmd.respond_info(
+            f"{self.name}: unassigned {uid}"
+            + (f" from bay {was!r}" if was else "")
+            + (" -- lanes dropped live" if dropped else "")
+            + (f" -- cleared {', '.join(cleared)} from the toolhead"
+               if cleared else "")
+            + " (learned values stay with the unit). " + tail)
+        self._close_prompt()
+
+    def cmd_AFC_BRIDGEBOX_BAYS(self, gcmd: Any) -> None:
+        """
+        Pop the bay manager, listing every pool bay with its occupant.
+        """
+        pools = sorted(getattr(self, "_pool_units", []), key=_pool_laneno)
+        lines, buttons = [], []
+        now = self._reactor_now()
+        waiting = []
+        for uid, model in sorted(self._no_bay.items()):
+            fam = "ht" if model in _HT_MODELS_BB else "ams"
+            waiting.append(f"Waiting: {uid} [{fam.upper()}] -- no free bay")
+            if (self._roster_source != "option"
+                and self._replace_candidates(fam, now)
+                and len(buttons) < self._MAX_BAY_BUTTONS):
+                buttons.append((f"Replace for {uid[:8]}",
+                                f"AFC_BRIDGEBOX_REPLACE CHAIN={self.name} UID={uid}", "primary"))
+        settled = self._prep_settled()
+        printing = self._is_printing()
+        for pu in pools:
+            uid = _norm_uid(pu.get("uid"))
+            live = " (live)" if pu.get("bound") else ""
+            fam = "HT" if pu.get("family") == "ht" else "AMS"
+            held = self._bay_loaded(pu) if uid else []
+            note = ""
+            if (held
+                and pu.get("bound")):
+                note = f" -- {', '.join(held)} in the toolhead, unload it before unassigning"
+            elif held:
+                note = (f" -- {', '.join(held)} in the toolhead from {uid}, "
+                        f"which is not claimed: plug it back in and unload it before unassigning")
+            elif (pu.get("bound")
+                  and printing):
+                note = " -- a print is active, unassign it once it ends"
+            elif (uid
+                  and not pu.get("bound")
+                  and not settled):
+                note = " -- PREP has not run yet"
+            lines.append(f"{pu['name']} [{fam}]: "
+                         + (f"{uid}{live}" if uid else "free") + note)
+            if (uid
+                and not note
+                and len(buttons) < self._MAX_BAY_BUTTONS):
+                buttons.append((f"Unassign {pu['name']}",
+                                f"AFC_BRIDGEBOX_UNASSIGN CHAIN={self.name} UID={uid} FORCE=1",
+                                "warning"))
+        if not lines:
+            lines = ["No pool units configured (set pool_ams / pool_ht)."]
+        lines += waiting
+        self._prompt("Bambu AMS Units", lines, buttons, timeout=180.0)
+        gcmd.respond_info(
+            f"{self.name}: bay manager --\n  "
+            + "\n  ".join(lines))
+
+    def cmd_AFC_BRIDGEBOX_REPLACE(self, gcmd: Any) -> None:
+        """
+        Put a unit that found no free bay onto the bay of a unit that is offline.
+        """
+        cmd = "AFC_BRIDGEBOX_REPLACE"
+        new = _norm_uid(gcmd.get("UID", ""))
+        old_arg = (gcmd.get("OLD", "") or "").strip()
+        force = gcmd.get_int("FORCE", 0)
+        pooled = bool(self.pool_ams or self.pool_ht)
+        pools = getattr(self, "_pool_units", None) or []
+        if self._roster_source == "option":
+            error_str = (
+                f"{cmd}: roster: is set, so it decides which units get a bay. "
+                f"To swap an offline unit for {new or 'the new one'}, change "
+                f"its entry to "
+                f"{self._roster_entry(new) if new else '<model>:<new uid>'} "
+                f"in roster:, run AFC_BRIDGEBOX_FORGET CHAIN={self.name} "
+                f"UID=<old uid>"
+                + (" (its bay frees now and the new unit claims it live)"
+                   if pooled else "")
+                + ", then RESTART.")
+            raise gcmd.error(error_str)
+        if (not pooled
+            or not pools):
+            error_str = (f"{cmd}: chain {self.name} has no pool bays, so no unit is put "
+                         f"on a bay live -- AFC_BRIDGEBOX_FORGET CHAIN={self.name} "
+                         f"UID=<old uid> and RESTART; the new unit, once recorded, "
+                         f"takes the bay that frees")
+            raise gcmd.error(error_str)
+        if not new:
+            waiting = sorted(self._no_bay)
+            if len(waiting) != 1:
+                error_str = (
+                    f"{cmd}: give UID=<new uid> -- "
+                    + (f"waiting for a bay: {', '.join(waiting)}" if waiting
+                       else "no unit is waiting for a bay"))
+                raise gcmd.error(error_str)
+            new = waiting[0]
+        fam = self._family_of_uid(new)
+        if fam is None:
+            error_str = f"{cmd}: {new} is not on chain {self.name}"
+            raise gcmd.error(error_str)
+        # A unit on a bay would be moved off it, and the old unit forgotten for good, by one
+        # mistyped uid.
+        cur = self._bay_of_uid(new)
+        if cur is not None:
+            error_str = (f"{cmd}: {new} is on bay {cur['name']!r}, and only a unit "
+                         f"with no bay takes over another's -- AFC_BRIDGEBOX_ASSIGN "
+                         f"CHAIN={self.name} UID={new} NAME=<bay name> moves a unit between bays")
+            raise gcmd.error(error_str)
+        now = self._reactor_now()
+        if not old_arg:
+            if self._prompt_replace_unit(new, now, timeout=180.0):
+                gcmd.respond_info(f"{self.name}: opened the "
+                                  f"replace picker for {new}.")
+            else:
+                gcmd.respond_info(f"{self.name}: "
+                                  + self._no_candidate_text(new, fam, now))
+            return
+        target = (next((pu for pu in pools if pu.get("name") == old_arg), None)
+                  or self._bay_of_uid(old_arg))
+        if target is None:
+            bays = ", ".join(pu["name"] for pu in sorted(pools, key=_pool_laneno))
+            error_str = f"{cmd}: no pool bay is named or held for {old_arg} (bays: {bays})"
+            raise gcmd.error(error_str)
+        bay = target["name"]
+        if target.get("family") != fam:
+            error_str = (f"{cmd}: {new} is an {fam.upper()} unit but bay {bay!r} is an "
+                         f"{target['family'].upper()} bay (their lane counts differ)")
+            raise gcmd.error(error_str)
+        old = _norm_uid(target.get("uid") or target.get("bound"))
+        if not old:
+            error_str = (f"{cmd}: bay {bay!r} is free -- AFC_BRIDGEBOX_ASSIGN "
+                         f"CHAIN={self.name} UID={new} NAME={bay} puts {new} on it")
+            raise gcmd.error(error_str)
+        holder = self._name_holder(bay, new, self._recorded_uids() - {old})
+        if holder:
+            error_str = (f"{cmd}: bay {bay!r} is saved for {holder} too -- "
+                         f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID={holder} or "
+                         f"AFC_BRIDGEBOX_UNASSIGN CHAIN={self.name} UID={holder} first")
+            raise gcmd.error(error_str)
+        # With the link down, or before the bridge's first status, every unit reads offline.
+        bridge = self._chain_bridge() or getattr(self, "_bridge", None)
+        link_up = getattr(bridge, "_serial", None) is not None
+        try:
+            status = bridge.latest_status() if link_up else None
+        except Exception:
+            status = None
+        if status is None:
+            error_str = (
+                f"{cmd}: cannot tell whether {old} is offline: "
+                + ("the bridge has not reported the chain yet -- run this "
+                   "again once it has" if link_up
+                   else "the bridge link is down -- run this again once it "
+                        "reconnects"))
+            raise gcmd.error(error_str)
+        if self._uid_online_now(old):
+            error_str = (f"{cmd}: {old} on bay {bay!r} is online, and only a unit that "
+                         f"is offline is replaced -- unplug it first, or "
+                         f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID={old} forgets it "
+                         f"and frees the bay now")
+            raise gcmd.error(error_str)
+        loaded = self._bay_loaded(target)
+        if not force:
+            if self._is_printing():
+                error_str = (f"{cmd}: a print is active -- finish it, or "
+                             f"FORCE=1 to replace {old} anyway")
+                raise gcmd.error(error_str)
+            if not self._prep_settled():
+                error_str = (f"{cmd}: PREP has not run yet, so which lane AFC records "
+                             f"as loaded to the toolhead is not known -- run this "
+                             f"again once it has")
+                raise gcmd.error(error_str)
+            if (loaded
+                and target.get("bound")):
+                error_str = (f"{cmd}: AFC records {', '.join(loaded)} on {bay} as "
+                             f"loaded to the toolhead -- unload it first "
+                             f"({self._unset_hint(loaded)} if the filament is already "
+                             f"out), or FORCE=1 to clear it from the toolhead and replace anyway")
+                raise gcmd.error(error_str)
+            if loaded:
+                error_str = self._unclaimed_loaded_text(cmd, bay, old, loaded, f"replaces {old}")
+                raise gcmd.error(error_str)
+            since = self._missing_since.get(old)
+            if since is None:
+                error_str = (f"{cmd}: no absence is counted for {old} -- it counts "
+                             f"only while the bridge link is up and a unit on the "
+                             f"chain is online. FORCE=1 replaces it anyway")
+                raise gcmd.error(error_str)
+            if now - since < self.release_grace:
+                error_str = (f"{cmd}: {old} has been offline {now - since:.0f}s, under "
+                             f"release_grace ({self.release_grace:.0f}s) -- wait, or "
+                             f"FORCE=1 to replace it now")
+                raise gcmd.error(error_str)
+        cleared = (self._clear_bay_toolhead(target)
+                   if loaded and not target.get("bound") else [])
+        gcmd.respond_info(
+            f"{self.name}: replacing {old} on {bay} with {new}"
+            + (f"; cleared {', '.join(cleared)} from the toolhead"
+               if cleared else "") + ".")
+        self.cmd_AFC_BRIDGEBOX_FORGET(_ChildCommand(gcmd, UID=old, FORCE=force))
+        self._no_bay.pop(new, None)
+        self._no_bay_told.discard(new)
+        self._replace_offered.discard(new)
+        q = getattr(self, "_popup_queue", None)
+        if q:
+            q[:] = [e for e in q if (e[0], e[1]) != ("replace", new)]
+        try:
+            self.cmd_AFC_BRIDGEBOX_ASSIGN(_ChildCommand(gcmd, UID=new, NAME=bay, FORCE=force))
+        except Exception as e:
+            if _norm_uid(target.get("uid")) == new:
+                error_str = (f"{cmd}: {old} is forgotten and bay {bay!r} is pinned to "
+                             f"{new}, but {new} is not claimed onto it ({e}). The "
+                             f"chain watch claims it there while {new} is on the chain.")
+                raise gcmd.error(error_str)
+            error_str = (f"{cmd}: {old} is forgotten and bay {bay!r} is free, but {new} "
+                         f"is not on it ({e}). While the bay is free, {new} claims it "
+                         f"once it is on the chain.")
+            raise gcmd.error(error_str)
+
+    def _chain_bridge(self) -> Any:
+        """
+        The bridge registered for our serial port, if any.
+
+        :return Any: the BambuBridge, or None when none is registered
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        return _bridge_mod._BRIDGES.get(self.serial_port)
+
+    def _uid_online_now(self, uid: str) -> bool:
+        """
+        Whether a unit is answering on the chain right now.
+
+        :param uid: 24-hex unit uid
+        :return bool: True when that unit is online
+        """
+        try:
+            bridge = (self._chain_bridge()
+                      or getattr(self, "_bridge", None))
+            if (bridge is None
+                or getattr(bridge, "_serial", None) is None):
+                return False
+            latest = bridge.latest_status() or {}
+            online_idx = {u.get("n") for u in (latest.get("units") or [])
+                          if u.get("online")}
+            return any(i in online_idx
+                       and _norm_uid(u) == uid
+                       for i, u in enumerate(bridge.chain_uids()))
+        except Exception:
+            return False
+
+    def _bridge_forget(self, uid: str) -> None:
+        """
+        Tell the bridge firmware to forget a uid: stop re-asserting it on the bus so a
+        gone-but-still-enrolled unit stops reading its own re-assert back and flapping online.
+
+        :param uid: 24-hex unit uid
+        """
+        try:
+            bridge = (self._chain_bridge()
+                      or getattr(self, "_bridge", None))
+            if bridge is not None:
+                bridge.send({"cmd": "forget", "uid": (uid or "").strip().lower()})
+        except Exception:
+            pass
+
+    @staticmethod
+    def _read_ini(path: str) -> Optional[configparser.RawConfigParser]:
+        """
+        Read an INI file.
+
+        :param path: INI file to read
+        :return RawConfigParser: parser, or None when absent/unreadable
+        """
+        if not os.path.exists(path):
+            return None
+        cp = configparser.RawConfigParser(delimiters=(":", "="))
+        try:
+            with open(path) as fp:
+                cp.read_file(fp)
+        except Exception:
+            return None
+        return cp
+
+    def _fold_and_sweep(
+        self, config: Any,
+        sections: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Close the loop between fabricated sections and AFC's learned values.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :param sections: fabricated (name, keys) pairs
+        :return list: the same pairs with learned values folded in
+        """
+        fabricated = {name for name, _keys in sections}
+        store = self._read_state()
+        autov = self._read_ini(self.auto_vars_file)
+        overrides = self._override_sections(config)
+        # Kept so a model override can be applied once a claim reveals the model.
+        self._overrides = overrides
+
+        folded: List[Tuple[str, Dict[str, Any]]] = []
+        updates: Dict[str, Dict[str, Any]] = {}
+        for name, keys in sections:
+            merged = dict(keys)
+            target = name
+            if name.startswith(self._UNIT_SECTION + " "):
+                # A bay is worn by whichever unit claims it.
+                uid = _norm_uid(keys.get("unit_uid"))
+                record = self._learned_for(uid, store) if uid else {}
+                merged.update(record)
+                if (autov is not None
+                    and autov.has_section(name)):
+                    got = dict(autov.items(name))
+                    kept = ({k: v for k, v in got.items()
+                             if k in _LEARNED_KEYS
+                                and _learned_length(v) is not None}
+                            if uid else {})
+                    merged.update(kept)
+                    left = sorted(set(got) - set(kept))
+                    if (left
+                        and uid):
+                        self._note_learned(f"auto_vars [{name}]: {', '.join(left)} not "
+                                           f"folded -- a unit takes only its bowden lengths "
+                                           f"from there, each a positive number")
+                    elif left:
+                        self._note_learned(f"auto_vars [{name}] swept, not folded -- the "
+                                           f"bay is a spare, and learned values belong to "
+                                           f"the unit that learned them")
+                target = self._learned_section(uid) if uid else None
+                learned = {k: merged[k] for k in _LEARNED_KEYS
+                           if k in merged and keys.get(k) != merged[k]}
+                if learned == record:
+                    target = None
+            else:
+                for src in (store, autov):
+                    if (src is not None
+                        and src.has_section(name)):
+                        for k, v in src.items(name):
+                            if k not in _STRUCTURAL_KEYS:
+                                merged[k] = v
+                # Learned = whatever differs from the fabricated defaults.
+                learned = {k: v for k, v in merged.items()
+                           if keys.get(k) != v}
+            # Before operator overrides, which must never be persisted as learned.
+            ov: Dict[str, Any] = {}
+            ov.update(getattr(self, "_chain_defaults", None) or {})
+            if keys.get("ams_model"):
+                mkey = "model:" + _norm_model(str(keys["ams_model"]))
+                ov.update(overrides.get(mkey) or {})
+            ov.update(overrides.get(name) or {})
+            for k, v in ov.items():
+                if k not in _STRUCTURAL_KEYS:
+                    merged[k] = v
+            folded.append((name, merged))
+            if (learned
+                and target):
+                updates[target] = learned
+
+        # Override targets that name nothing known (likely typos), for _scout_ready to report.
+        known = {"model:" + m for m in _SLOTS_BY_MODEL}
+        known |= {name for name, _keys in sections}
+        self._unmatched_overrides = sorted(
+            sec for target in set(overrides) - known
+            for sec in self._override_written[target])
+
+        self._fabricated_names = fabricated
+        self._leftover_names = self._former_names(store) - fabricated
+        changed = False
+        if autov is not None:
+            for name in list(autov.sections()):
+                if name in fabricated:
+                    autov.remove_section(name)
+                    changed = True
+        changed = self._sweep_orphans(config, autov) or changed
+        if getattr(self, "_resolved_base", None) is not None:
+            updates.setdefault(self._BASE_SECTION + " " + self.name, {})[
+                "lane_base"] = self._resolved_base
+        if getattr(self, "_resolved_prefix", None):
+            updates.setdefault(self._BASE_SECTION + " " + self.name, {})[
+                "unit_prefix"] = self._resolved_prefix
+        if (changed
+            and autov is not None):
+            self._write_auto_vars(autov)
+        if updates:
+            self._state_set(updates)
+        return folded
+
+    def _former_names(self, store: configparser.RawConfigParser) -> Set[str]:
+        """
+        The lane, hub and temperature sections this chain may have built at an earlier start.
+
+        :param store: this chain's state, as read
+        :return set: section names
+        """
+        units = getattr(self, "units", None) or []
+        n_ht = sum(1 for u in units if u.get("model") in _HT_MODELS)
+        ams = max(getattr(self, "_pool_ams_asked", 0), len(units) - n_ht)
+        hts = max(self.pool_ht, n_ht)
+        nums = set(range(self.lane_base, self.lane_base + ams * 4 + hts))
+        for first, span in (getattr(self, "_lanes_at_boot", None)
+                            or {}).values():
+            nums |= set(range(first, first + span))
+        bays = set((getattr(self, "_pins_at_boot", None) or {}).values())
+        bays |= {self._name_for_index("ams", r) for r in range(ams)}
+        bays |= {self._name_for_index("ht", r) for r in range(hts)}
+        kinds = ("AFC_hub", "temperature_sensor")
+        names = {f"AFC_lane lane{n}" for n in nums}
+        names |= {f"{kind} {bay}" for bay in bays for kind in kinds}
+        names |= {sec for sec in store.sections()
+                  if sec.split(" ", 1)[0] in ("AFC_lane",) + kinds}
+        return names
+
+    def _sweep_orphans(self, config: Any, autov: Optional[configparser.RawConfigParser]) -> bool:
+        """
+        Delete the orphans and leftovers from auto_vars (see _fold_and_sweep).
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :param autov: auto_vars as read, edited in place; None when absent
+        :return bool: whether a section was deleted
+        """
+        if (autov is None
+            or self._later_chains(config)):
+            return False
+        chains = self._earlier_chains() + [self]
+        kept: Set[str] = set()
+        for m in chains:
+            kept |= getattr(m, "_fabricated_names", None) or set()
+        fc = getattr(config, "fileconfig", None)
+        changed = False
+        for name in list(autov.sections()):
+            if name in kept:
+                continue
+            owner = next((m for m in chains if name in
+                          (getattr(m, "_leftover_names", None) or ())), None)
+            if (owner is None
+                and not name.startswith(self._UNIT_SECTION + " ")):
+                continue
+            keys = dict(autov.items(name))
+            try:
+                in_real_cfg = bool(
+                    fc is not None
+                    and fc.has_section(name)
+                    and set(dict(fc.items(name))) - set(keys))
+            except Exception:
+                in_real_cfg = True
+            if in_real_cfg:
+                continue
+            autov.remove_section(name)
+            changed = True
+            if owner is None:
+                continue
+            owner._state_set({name: keys})
+            self._stand_in(config, name, keys)
+            owner._note_learned(f"auto_vars [{name}] moved to "
+                                f"{os.path.basename(owner.state_file)}: no chain builds that "
+                                f"section now")
+        return changed
+
+    def _stand_in(self, config: Any, name: str, keys: Dict[str, str], hold: bool = True) -> None:
+        """
+        Hold a swept leftover's name for the rest of this start (see _sweep_orphans).
+
+        :param config: this section's wrapper
+        :param name: the section name
+        :param keys: its options, read so klippy finds them used
+        :param hold: False when this start builds a section under the name, so only its options are
+        read
+        """
+        try:
+            if (hold
+                and self.printer.lookup_object(name, None) is not None):
+                return
+            if hold:
+                self.printer.add_object(name, _SweptSection())
+        except Exception:
+            return
+        try:
+            section = config.getsection(name)
+            for opt in keys:
+                section.get(opt, None)
+        except Exception:
+            pass
+
+    def _write_auto_vars(self, autov: configparser.RawConfigParser) -> None:
+        """
+        Write auto_vars back after this module deleted sections from it.
+
+        :param autov: auto_vars as edited
+        """
+        try:
+            with open(self.auto_vars_file, "w") as fp:
+                fp.write("# This file is autogenerated and updated when "
+                         "variables are not in your normal AFC config files\n\n")
+                autov.write(fp)
+        except Exception:
+            pass
+
+    def _register_scout_chip(self, config: Any) -> None:
+        """
+        Register the bambu_buffer pin chip with no unit behind it.
+
+        :param config: this section's wrapper (unused beyond symmetry)
+        """
+        import types as _types
+        from extras.AFC_BambuAMS import _register_bambu_buffer_chip
+        shim = _types.SimpleNamespace(printer=self.printer, buffer_chip_name=self.buffer_chip_name,
+                                      fps_buffer_value=lambda: None, scout_stub=True)
+        _register_bambu_buffer_chip(shim)
+
+    # Scouting: the chain names its own roster
+
+    def _locate_own_file(self, name: Optional[str] = None) -> Optional[str]:
+        """
+        The .cfg file declaring this [AFC_BridgeBox <name>] section.
+
+        :param name: another chain's name, to find its file instead
+        :return str: absolute path, or None
+        """
+        try:
+            import glob as _glob
+            import re as _re
+            cfg = (getattr(self.printer, "start_args", {}) or {}).get("config_file")
+            if not cfg:
+                return None
+            root = os.path.dirname(os.path.abspath(cfg))
+            pat = _re.compile(
+                r"^[ \t]*\[[ \t]*AFC_BridgeBox[ \t]+"
+                + _re.escape(name or self.name) + r"[ \t]*\]",
+                _re.I | _re.M)
+            for path in sorted(_glob.glob(os.path.join(root, "**", "*.cfg"), recursive=True)):
+                try:
+                    with open(path) as fp:
+                        if pat.search(fp.read()):
+                            return path
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    _DEFAULT_STATE = "~/printer_data/config/AFC/AFC_BridgeBox.cfg"
+    _STATE_MARK = "#~# --- AFC_BridgeBox managed state -- everything below is auto-written ---"
+    _STATE_PREFIX = "#~# "
+
+    def _read_state(self, path: Optional[str] = None) -> configparser.RawConfigParser:
+        """
+        The managed block of the state file, decommented and parsed.
+
+        :param path: another chain's state file, to read it instead
+        :return RawConfigParser: parser over the state (empty when absent)
+        """
+        cp = configparser.RawConfigParser(delimiters=(":", "="))
+        try:
+            with open(path or self.state_file) as fp:
+                text = fp.read()
+        except Exception:
+            return cp
+        if self._STATE_MARK not in text:
+            return cp
+        block = text.split(self._STATE_MARK, 1)[1]
+        lines = [ln[len(self._STATE_PREFIX):] if
+                 ln.startswith(self._STATE_PREFIX) else ln.lstrip("#~ ")
+                 for ln in block.splitlines() if ln.startswith("#~#")]
+        try:
+            cp.read_string("\n".join(lines))
+        except Exception:
+            return configparser.RawConfigParser(delimiters=(":", "="))
+        return cp
+
+    def _write_state(self, cp: configparser.RawConfigParser) -> None:
+        """
+        Rewrite the managed block, preserving everything the operator wrote above the marker, their
+        [AFC_BridgeBox] section included.
+
+        :param cp: the state to serialize
+        """
+        try:
+            head = ""
+            try:
+                with open(self.state_file) as fp:
+                    head = fp.read().split(self._STATE_MARK, 1)[0]
+            except Exception:
+                pass
+            if not head.strip():
+                head = ("# AFC_BridgeBox: put your [AFC_BridgeBox <name>] "
+                        "section here (serial_port + extruder is enough).\n"
+                        "# The block below is maintained by the module.\n\n")
+            import io
+            buf = io.StringIO()
+            cp.write(buf)
+            body = "".join(self._STATE_PREFIX + ln + "\n"
+                           for ln in buf.getvalue().splitlines())
+            with open(self.state_file, "w") as fp:
+                fp.write(head.rstrip("\n") + "\n\n"
+                         + self._STATE_MARK + "\n" + body)
+        except Exception:
+            pass
+
+    def _state_get(self, section: str, key: str) -> Optional[str]:
+        """
+        Read one value from the state file.
+
+        :param section: state section name
+        :param key: key within it
+        :return str: the value, or None
+        """
+        cp = self._read_state()
+        if cp.has_section(section):
+            return dict(cp.items(section)).get(key)
+        return None
+
+    def _state_set(self, updates: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Merge updates into the state block and write it back.
+
+        :param updates: {section: {key: value}}
+        """
+        cp = self._read_state()
+        for section, keys in updates.items():
+            if not cp.has_section(section):
+                cp.add_section(section)
+            for k, v in keys.items():
+                cp.set(section, k, str(v))
+        self._write_state(cp)
+
+    def _learned_section(self, uid: str) -> str:
+        """
+        The state section holding what a unit learned on this chain.
+
+        :param uid: a unit uid
+        :return str: the section name
+        """
+        return f"{self._BASE_SECTION} {self.name} learned {_norm_uid(uid)}"
+
+    def _learned_for(self, uid: str,
+                     cp: Optional[configparser.RawConfigParser] = None) -> Dict[str, str]:
+        """
+        A uid's learned record.
+
+        :param uid: a unit uid
+        :param cp: the parsed state; read when not given
+        :return dict: the learned record, {} when it has none
+        """
+        if not _norm_uid(uid):
+            return {}
+        cp = self._read_state() if cp is None else cp
+        sec = self._learned_section(uid)
+        if not cp.has_section(sec):
+            return {}
+        return {k: v for k, v in cp.items(sec)
+                if k in _LEARNED_KEYS and _learned_length(v) is not None}
+
+    def _note_learned(self, text: str, warn: bool = False) -> None:
+        """
+        Keep a line about learned values for _scout_ready to log, since there is no logger while the
+        sections are built.
+
+        :param text: the line, without the chain prefix
+        :param warn: True to log it as a warning
+        """
+        notes = getattr(self, "_learned_notes", None)
+        if notes is None:
+            notes = self._learned_notes = []
+        notes.append((warn, text))
+
+    def persist_learned(self, unit_name: str, key: str, value: Any) -> bool:
+        """
+        Record one value a unit learned about itself, so it survives a restart.
+
+        :param unit_name: the fabricated unit's name, e.g. the value of the unit's own ``name``
+        :param key: option to persist, one of _LEARNED_KEYS
+        :param value: value to persist (stringified)
+        :return bool: True if it was written
+        """
+        if (not unit_name
+            or not key):
+            return False
+        if key not in _LEARNED_KEYS:
+            self.logger.warning(f"{self.name}: refusing to persist '{key}' for "
+                                f"{unit_name} -- only {', '.join(_LEARNED_KEYS)} are saved")
+            return False
+        pu = next((p for p in getattr(self, "_pool_units", [])
+                   if p.get("name") == unit_name), None)
+        uid = _norm_uid(pu.get("bound")) if pu is not None else ""
+        try:
+            unit = self.printer.lookup_object(f"{self._UNIT_SECTION} {unit_name}", None)
+        except Exception:
+            unit = None
+        claimed = _norm_uid(getattr(unit, "unit_uid", None))
+        if (not uid
+            or (claimed and claimed != uid)):
+            self.logger.debug(
+                f"{self.name}: {key} for {unit_name} kept for "
+                f"this session only -- "
+                + (f"the bay is bound to {uid} but its unit carries {claimed}"
+                   if uid else "no unit is bound to the bay"))
+            return False
+        section = self._learned_section(uid)
+        try:
+            cur = self._read_state()
+            if (cur.has_section(section)
+                and cur.has_option(section, key)):
+                if str(cur.get(section, key)) == str(value):
+                    return False
+            self._state_set({section: {key: value}})
+            return True
+        except Exception as ex:
+            self.logger.warning(f"{self.name}: could not persist {key} for "
+                                f"{unit_name}: {ex}")
+            return False
+
+    def _unlisted_floaters(self, before: Dict[str, str]) -> Dict[str, List[str]]:
+        """
+        The units roster: leaves out that ran on its spare bays: each uid the recorded roster lists
+        that roster: does not, with no name recorded before this boot or drawn at it.
+
+        :param before: the name map as loaded, before this boot drew names
+        :return dict: family ("ams" / "ht") -> uids, in recorded order; {} unless the roster is the
+        roster: option
+        """
+        if getattr(self, "_roster_source", None) != "option":
+            return {}
+        raw = self._state_get(self._BASE_SECTION + " " + self.name, "roster") or ""
+        listed = {_norm_uid(u.get("uid"))
+                  for u in getattr(self, "units", None) or []}
+        named = set(before) | set(getattr(self, "_name_map", None) or {})
+        out: Dict[str, List[str]] = {}
+        for entry in raw.split(","):
+            model, _sep, uid = entry.strip().partition(":")
+            model, uid = model.strip().lower(), _norm_uid(uid)
+            if (not uid
+                or model not in _SLOTS_BY_MODEL
+                or uid in listed
+                or uid in named):
+                continue
+            fam = "ht" if model in _HT_MODELS_BB else "ams"
+            if uid not in out.setdefault(fam, []):
+                out[fam].append(uid)
+        return out
+
+    def _migrate_name_learned(self, before: Optional[Dict[str, str]] = None) -> None:
+        """
+        Move learned values stored under a bay name into the uid records.
+
+        :param before: the name map as loaded, before this boot drew names; the current map when not
+        given
+        """
+        cp = self._read_state()
+        pools = getattr(self, "_pool_units", [])
+        before = self._name_map if before is None else before
+        ours = ({pu["name"] for pu in pools} | set(self._name_map.values())
+                | set(before.values()))
+        prefix = self._UNIT_SECTION + " "
+        floaters = self._unlisted_floaters(before)
+        spares = {pu["name"]: pu["family"] for pu in pools
+                  if pu.get("spare")
+                     and not pu.get("uid")
+                     and pu["name"] not in before.values()
+                     and pu["name"] not in self._name_map.values()}
+        loose: Dict[str, int] = {}
+        for sec in cp.sections():
+            n = sec[len(prefix):] if sec.startswith(prefix) else None
+            if n in spares:
+                loose[spares[n]] = loose.get(spares[n], 0) + 1
+        changed = False
+        for sec in cp.sections():
+            n = sec[len(prefix):] if sec.startswith(prefix) else None
+            if n not in ours:
+                continue
+            owners = [u for u, v in before.items() if v == n]
+            drew = [u for u, v in self._name_map.items() if v == n]
+            if not owners:
+                owners = [u for u in drew if before.get(u) is None]
+            fam = spares.get(n)
+            if (not owners
+                and fam
+                and loose.get(fam) == 1
+                and len(floaters.get(fam, [])) == 1):
+                owners = list(floaters[fam])
+            if len(owners) > 1:
+                held = [u for u in owners if any(
+                    pu["name"] == n and _norm_uid(pu.get("uid")) == u
+                    for pu in pools)]
+                owners = held if len(held) == 1 else owners
+            if (len(owners) > 1
+                and any(self._name_map.get(u) == n for u in owners)):
+                self._note_learned(f"learned values stored under {n} left unread -- "
+                                   f"{', '.join(sorted(owners))} are all recorded with that "
+                                   f"name. Run AFC_BRIDGEBOX_FORGET CHAIN={self.name} "
+                                   f"UID=<uid> for each one that is gone, and the one left "
+                                   f"takes them at the next restart.", warn=True)
+                continue
+            keys = dict(cp.items(sec))
+            cp.remove_section(sec)
+            changed = True
+            if len(owners) > 1:
+                self._note_learned(f"learned values stored under {n} dropped -- "
+                                   f"{', '.join(sorted(owners))} were all recorded with that "
+                                   f"name and another unit took it over")
+                continue
+            if not owners:
+                self._note_learned(f"learned values stored under {n} dropped -- no unit is "
+                                   f"recorded with that name")
+                continue
+            owner = owners[0]
+            record = self._learned_section(owner)
+            if not cp.has_section(record):
+                cp.add_section(record)
+            found = [k for k in _LEARNED_KEYS if k in keys
+                                                 and _learned_length(keys[k]) is not None]
+            moved = [k for k in found if not (
+                cp.has_option(record, k)
+                and _learned_length(cp.get(record, k)) is not None)]
+            for k in moved:
+                cp.set(record, k, keys[k])
+            if not cp.items(record):
+                cp.remove_section(record)
+            other = sorted(set(keys) - set(found))
+            dropped = (f"{', '.join(other)} dropped -- only a bowden length "
+                       f"that is a positive number is kept" if other else "")
+            if not found:
+                if dropped:
+                    self._note_learned(f"values stored under {n}: {dropped}")
+                continue
+            wearer = next((u for u in drew if u != owner), None)
+            self._note_learned(
+                f"learned values stored under {n} now belong to its unit "
+                f"{owner}"
+                + (f" ({', '.join(moved)})" if moved
+                   else " (its own record holds them)")
+                + (f", which wore that name before {wearer} took it; "
+                   f"{wearer} measures its own" if wearer else "")
+                + (f"; {dropped}" if dropped else ""))
+        if changed:
+            self._write_state(cp)
+
+    def _migrate_legacy_state(self) -> None:
+        """
+        One-time absorb of the split .roster/.vars files this replaced.
+        """
+        base = os.path.dirname(self.auto_vars_file)
+        legacy_roster = os.path.join(base, f"AFC_BridgeBox_{self.name}.roster")
+        legacy_vars = os.path.join(base, f"AFC_BridgeBox_{self.name}.vars")
+        updates: Dict[str, Dict[str, Any]] = {}
+        try:
+            with open(legacy_roster) as fp:
+                roster = ", ".join(
+                    ln.strip() for ln in fp
+                    if ln.strip() and not ln.lstrip().startswith("#"))
+            if roster:
+                updates.setdefault(self._BASE_SECTION + " " + self.name, {})["roster"] = roster
+        except Exception:
+            pass
+        old = self._read_ini(legacy_vars)
+        if old is not None:
+            for sec in old.sections():
+                tgt = (self._BASE_SECTION + " " + self.name
+                       if sec == self._BASE_SECTION else sec)
+                updates.setdefault(tgt, {}).update(dict(old.items(sec)))
+        if updates:
+            self._state_set(updates)
+            for f in (legacy_roster, legacy_vars):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _chain_to_roster(uids: List[str], htmask: int) -> str:
+        """
+        The chain reply, rendered in roster syntax.
+
+        :param uids: chain_uids(): index -> 24-hex UID, empties kept
+        :param htmask: chain_diag()[0]: per-index HT flag bits, 0 if unknown
+        :return str: "ht:UID, boxed:UID, ..." in chain order, or ""
+        """
+        entries = []
+        for i, uid in enumerate(uids):
+            uid = _norm_uid(uid)
+            if (not uid
+                or set(uid) == {"F"}):
+                continue
+            is_ht = bool(htmask >> i & 1) if htmask else i >= 4
+            entries.append(f"{'ht' if is_ht else 'boxed'}:{uid}")
+        return ", ".join(entries)
+
+    @staticmethod
+    def _chain_snapshot(bridge: Any) -> Dict[str, Any]:
+        """
+        One chain reply, read once: the enrollment map and the counters that are judged against it
+        must come from the same reply.
+
+        :param bridge: the chain's bridge
+        :return dict: seq (None when the bridge cannot say), uids, htmask, a2mask, a2asks
+        """
+        snap = getattr(bridge, "chain_snapshot", None)
+        if callable(snap):
+            s = snap()
+            return {"seq": s.get("seq"), "uids": list(s.get("uids") or []),
+                    "htmask": int(s.get("htmask") or 0), "a2mask": int(s.get("a2mask") or 0),
+                    "a2asks": list(s.get("a2asks") or [])}
+        uids = bridge.chain_uids()
+        htmask = bridge.chain_diag()[0]
+        getter = getattr(bridge, "chain_dialect", None)
+        a2mask, a2asks = getter() if callable(getter) else (0, [])
+        return {"seq": None, "uids": list(uids), "htmask": int(htmask or 0),
+                "a2mask": int(a2mask or 0), "a2asks": list(a2asks or [])}
+
+    def _scout_ready(self, eventtime: Optional[float] = None) -> None:
+        """
+        klippy:ready handler: start the chain watch.
+
+        :param eventtime: reactor time (unused)
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        if afc is not None:
+            self.logger = afc.logger
+        for miss in getattr(self, "_unmatched_overrides", None) or []:
+            self.logger.warning(f"{self.name}: [{miss}] overrides "
+                                f"nothing -- no unit and no model by that name, so its keys are "
+                                f"ignored. Models: {', '.join(sorted(_SLOTS_BY_MODEL))}.")
+        # From config time, once.
+        if getattr(self, "_dry_note", ""):
+            self.logger.warning(self._dry_note)
+            self._dry_note = ""
+        if getattr(self, "_pool_ams_asked", 0) > _MAX_AMS_BAYS:
+            ht = [pu for pu in getattr(self, "_pool_units", [])
+                  if pu.get("family") == "ht"]
+            self.logger.warning(
+                f"{self.name}: pool_ams is "
+                f"{self._pool_ams_asked}, but a Bambu bus addresses at most "
+                f"{_MAX_AMS_BAYS} AMS, so {_MAX_AMS_BAYS} AMS bays are built"
+                + (f" and the HT lanes start at "
+                   f"lane{self.lane_base + self._ams_band * 4}" if ht else "")
+                + f". Set pool_ams: {_MAX_AMS_BAYS} to silence this.")
+        for note in ((getattr(self, "_name_notes", None) or [])
+                     + (getattr(self, "_layout_notes", None) or [])):
+            self.logger.warning(note)
+        self._name_notes, self._layout_notes = [], []
+        # The band this start built, which a recorded HT holds no wider than.
+        band = getattr(self, "_ams_band", None)
+        if band is not None:
+            sec = self._BASE_SECTION + " " + self.name
+            if self._state_get(sec, "ams_band") != str(band):
+                self._state_set({sec: {"ams_band": band}})
+        for warn, note in getattr(self, "_learned_notes", None) or []:
+            (self.logger.warning if warn else self.logger.info)(
+                f"{self.name}: {note}")
+        self._learned_notes = []
+        # Before PREP's first save, which AFC would write with every unclaimed bay empty.
+        try:
+            self._capture_boot_records()
+        except Exception as e:
+            try:
+                self.logger.debug(f"{self.name}: no saved lane records held ({e})")
+            except Exception:
+                pass
+        try:
+            self._ready_at = self.printer.get_reactor().monotonic()
+        except Exception:
+            self._ready_at = None
+        # PREP waits up to moonraker_timeout for Moonraker, then up to 30 s for Spoolman's remote
+        # method, before it restores a lane.
+        try:
+            self._prep_wait = max(self._PREP_WAIT, float(afc.moonraker_connect_to) + 60.0)
+        except Exception:
+            self._prep_wait = self._PREP_WAIT
+        # Only pure scout mode may create a bridge.
+        if self._roster_source == "scout":
+            try:
+                self._ensure_bridge()
+            except Exception as e:
+                self.logger.warning(f"{self.name}: could not open the bridge "
+                                    f"for scouting ({e}); will keep retrying.")
+        reactor = self.printer.get_reactor()
+        self._scout_timer = reactor.register_timer(self._scout_tick, reactor.monotonic() + 2.0)
+        if self._roster_source == "scout":
+            self.logger.info(f"{self.name}: no roster configured and no "
+                             f"recorded roster -- scouting the chain. Detected units are "
+                             f"recorded in {os.path.basename(self.state_file)}; RESTART "
+                             f"then enrolls them.")
+
+    def _capture_boot_records(self) -> None:
+        """
+        Hold the lane records the last session saved for each pool bay.
+        """
+        owners, present = self._load_bay_owner()
+        self._bay_owner = owners
+        self._bay_owner_pending = False
+        self._held = {}
+        afc = self.printer.lookup_object("AFC", None)
+        pools = getattr(self, "_pool_units", None) or []
+        if (afc is None
+            or not pools):
+            return
+        try:
+            with open(f"{afc.VarFile}.unit") as fh:
+                units = json.load(fh)
+        except Exception:
+            units = {}
+        if not isinstance(units, dict):
+            units = {}
+        pins = getattr(self, "_pins_at_boot", None) or {}
+        loose: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+        for pu in pools:
+            saved = units.get(pu["name"])
+            if not isinstance(saved, dict):
+                continue
+            recs = {ln: dict(saved[ln]) for ln in pu["lanes"]
+                    if isinstance(saved.get(ln), dict) and saved[ln]}
+            if not recs:
+                recs = self._moved_bay_records(pu, saved)
+            if not recs:
+                continue
+            owner = owners.get(pu["name"])
+            if (owner is None
+                and not present):
+                drew = _norm_uid(pu.get("uid"))
+                taken = pu["name"] in pins.values()
+                if (drew
+                    and (pins.get(drew) == pu["name"] or (pins.get(drew) is None and not taken))):
+                    owner = drew
+                elif (not drew
+                      and pu.get("spare")
+                      and not taken):
+                    loose.setdefault(pu.get("family", ""), []).append((pu["name"], recs))
+            if owner:
+                self._held[pu["name"]] = {"uid": owner, "lanes": recs}
+        floaters = self._unlisted_floaters(pins) if loose else {}
+        for fam, bays in loose.items():
+            if (len(bays) == 1
+                and len(floaters.get(fam, [])) == 1):
+                self._held[bays[0][0]] = {"uid": floaters[fam][0], "lanes": bays[0][1]}
+        if (not present
+            and self._held):
+            self._bay_owner = {bay: _norm_uid(entry["uid"])
+                               for bay, entry in self._held.items()}
+            self._bay_owner_pending = True
+        if self._held:
+            self.logger.debug(f"{self.name}: holding the saved lane records "
+                              f"of {', '.join(sorted(self._held))} for their units")
+
+    @staticmethod
+    def _moved_bay_records(pu: Dict[str, Any], saved: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """
+        A bay's saved lane records, put on the lanes the bay has at this start when it had others
+        when they were saved.
+
+        :param pu: the pool bay
+        :param saved: what AFC.var.unit holds under the bay's name
+        :return dict: current lane name -> record; {} when they do not fit
+        """
+        lanes = list(pu.get("lanes") or [])
+        old = [ln for ln, rec in saved.items() if isinstance(rec, dict)]
+        if (not lanes
+            or len(old) != len(lanes)
+            or any(ln in lanes for ln in old)
+            or not all(_lane_number(ln) is not None for ln in old + lanes)):
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for was, now in zip(sorted(old, key=_lane_number), sorted(lanes, key=_lane_number)):
+            rec = dict(saved[was])
+            if not rec:
+                continue
+            if "name" in rec:
+                rec["name"] = now
+            rec["tool_loaded"] = False
+            out[now] = rec
+        return out
+
+    def _handle_save_vars(self, data: Dict[str, Any]) -> None:
+        """
+        Fill in AFC's var-file snapshot with what this chain holds for its bays (see
+        _fill_held_bays), on AFC's afc:save_vars.
+
+        :param data: the snapshot AFC.save_vars is about to write
+        """
+        try:
+            self._fill_held_bays(data)
+        except Exception:
+            pass
+
+    def _fill_held_bays(self, data: Dict[str, Any]) -> None:
+        """
+        Write the lane records held for each pool bay no unit is claimed onto into a snapshot
+        AFC.save_vars built.
+
+        :param data: the snapshot, unit name -> lane name -> record
+        """
+        held = getattr(self, "_held", None) or {}
+        for pu in getattr(self, "_pool_units", None) or []:
+            name = pu.get("name")
+            if name not in data:
+                continue
+            if data[name]:
+                if isinstance(data[name], dict):
+                    self._unmapped_maps(data[name])
+                continue
+            if pu.get("bound"):
+                continue
+            lanes = (held.get(name) or {}).get("lanes")
+            if lanes:
+                data[name] = copy.deepcopy(lanes)
+
+    def _unmapped_maps(self, recs: Dict[str, Any]) -> None:
+        """
+        Give the record of each lane a claim has registered and not mapped yet the map it comes back
+        with, in place of the NONE it has until its turn.
+
+        :param recs: lane name -> record as save_vars writes it, changed in place
+        """
+        plans = getattr(self, "_claim_plans", None) or {}
+        for lname, rec in recs.items():
+            if (lname not in plans
+                or not isinstance(rec, dict)):
+                continue
+            if _parse_map(rec.get("map")):
+                continue
+            plan = plans[lname]
+            if plan is None:
+                rec.pop("map", None)
+                rec.pop("current_map", None)
+            else:
+                rec["map"], rec["current_map"] = plan
+
+    def _held_for(self, uid: str, bay: str) -> Dict[str, Dict[str, Any]]:
+        """
+        The lane records a unit gets when it claims a bay.
+
+        :param uid: the claiming unit's uid
+        :param bay: the pool bay's name
+        :return dict: lane name -> record, copies; {} for any other unit
+        """
+        entry = (getattr(self, "_held", None) or {}).get(bay) or {}
+        if (not uid
+            or _norm_uid(entry.get("uid")) != _norm_uid(uid)):
+            return {}
+        return {ln: copy.deepcopy(rec)
+                for ln, rec in (entry.get("lanes") or {}).items()}
+
+    #: Seconds after klippy:ready that claims wait for PREP at most.
+    _PREP_WAIT = 90.0
+
+    def _prep_settled(self) -> bool:
+        """
+        Whether a unit may be claimed yet: AFC's PREP has run.
+
+        :return bool: True when claims may go ahead
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        if (afc is None
+            or getattr(afc, "prep_done", True)):
+            return True
+        since = getattr(self, "_ready_at", None)
+        if since is None:
+            return True
+        try:
+            now = self.printer.get_reactor().monotonic()
+        except Exception:
+            return True
+        wait = getattr(self, "_prep_wait", self._PREP_WAIT)
+        if now - since >= wait:
+            if not getattr(self, "_prep_wait_warned", False):
+                self._prep_wait_warned = True
+                self.logger.warning(f"{self.name}: PREP has not finished "
+                                    f"{wait:.0f}s after startup; claiming units anyway.")
+            return True
+        if not getattr(self, "_prep_wait_said", False):
+            self._prep_wait_said = True
+            self.logger.debug(f"{self.name}: unit claims wait for PREP")
+        return False
+
+    def _register_wifi(self) -> None:
+        """
+        Register this chain's WifiLink when its bridge keys itself.
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        _bridge_mod._WIFI_LINKS.pop(str(self.serial_port), None)
+        is_tcp = str(self.serial_port or "").strip().lower() \
+            .startswith("tcp://")
+        if (is_tcp
+            and self.tcp_key):
+            return
+        if (not is_tcp
+            and self.connection != "wifi"):
+            return
+        sec = f"{self._BASE_SECTION} {self.name}"
+        key = self.tcp_key or self._state_get(sec, "wifi_key")
+        if not key:
+            key = secrets.token_hex(16)
+            self._state_set({sec: {"wifi_key": key}})
+        addr = (self.serial_port if is_tcp
+                else (self._state_get(sec, "wifi_addr") or None))
+        _bridge_mod._WIFI_LINKS[str(self.serial_port)] = _bridge_mod.WifiLink(
+            key, self._save_wifi_addr, f"{self.name}",
+            usb_path=None if is_tcp else self.serial_port, addr=addr, ssid=self.wifi_ssid,
+            password=self._wifi_password)
+
+    def _wifi_text(self, config: Any, option: str, low: int, high: int) -> Optional[str]:
+        """
+        Read wifi_ssid or wifi_password, as the board's parser can take it.
+
+        :param config: the master's section
+        :param option: the option's name
+        :param low: the fewest characters allowed
+        :param high: the most characters allowed
+        :return Optional[str]: the value, or None when it is not set
+        """
+        value = config.get(option, None)
+        if (value is None
+            or value == ""):
+            return None
+        bad = [c for c in value
+               if c in "\\\""
+               or not " " <= c <= "~"]
+        if bad:
+            error_str = (f"{self.name}: {option} can't hold "
+                         f"quotes, backslashes or non-ASCII characters; set "
+                         f"this network up from the bb-bridge hotspot")
+            raise config.error(error_str)
+        if not low <= len(value) <= high:
+            error_str = f"{self.name}: {option} must be {low} to {high} characters"
+            raise config.error(error_str)
+        return value
+
+    def _resolve_auto_port(self) -> None:
+        """
+        Turn serial_port: auto into the board this chain saved.
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        key = f"auto:{self.name}"
+        _bridge_mod._AUTO_FINDERS.pop(key, None)
+        saved = self._state_get(f"{self._BASE_SECTION} {self.name}", "usb_port")
+        if saved:
+            self.serial_port = saved
+            return
+        self.serial_port = key
+        _bridge_mod._AUTO_FINDERS[key] = self._find_board
+
+    #: Seconds before a port that did not answer as a BridgeBox is asked again.
+    AUTO_REPROBE_S = 10.0
+
+    def _find_board(self, probe: bool) -> Optional[str]:
+        """
+        The board of this chain on serial_port: auto, found and claimed.
+
+        :param probe: whether ports may be opened to look
+        :return Optional[str]: the board's port, or None
+        """
+        if (self._auto_board is not None
+            or not probe):
+            return self._auto_board
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        with _AUTO_LOCK:
+            ports, hosts = self._ports_in_use()
+            now = time.monotonic()
+            for path in _bridge_mod.bridge_candidates():
+                if (path in ports
+                    or os.path.realpath(path) in ports
+                    or now < self._auto_probed.get(path, 0.0)):
+                    continue
+                info = _bridge_mod.probe_bridge(path)
+                if (info is None
+                    or info.get("ip") in hosts):
+                    self._auto_probed[path] = now + self.AUTO_REPROBE_S
+                    continue
+                self._claim_board(path)
+                return path
+        if not self._auto_said:
+            self._auto_said = True
+            self.logger.info(f"{self.name}: serial_port: auto found no free "
+                             f"BridgeBox on USB yet. Plug one in and it is picked up by itself.")
+        return None
+
+    def _claim_board(self, path: str) -> None:
+        """
+        Take the board found for serial_port: auto, and save it.
+
+        :param path: the board's /dev/serial/by-id port
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        self._auto_board = path
+        link = _bridge_mod._WIFI_LINKS.get(str(self.serial_port))
+        if link is not None:
+            link.usb_path = path
+        sec = f"{self._BASE_SECTION} {self.name}"
+        self.printer.get_reactor().register_async_callback(
+            lambda et: self._state_set({sec: {"usb_port": path}}))
+        self.logger.info(f"{self.name}: serial_port: auto took the BridgeBox "
+                         f"on {path} and keeps it from now on")
+
+    def _ports_in_use(self) -> Tuple[Set[str], Set[str]]:
+        """
+        What a chain on serial_port: auto leaves alone.
+
+        :return tuple: the ports, as written and resolved, and the hosts
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        values: List[str] = []
+        try:
+            raw = self.printer.lookup_object("configfile").get_status(None)["config"]
+            values = [str(v) for opts in raw.values() for v in opts.values()]
+        except Exception:
+            pass
+        try:
+            for _name, obj in self.printer.lookup_objects(self._BASE_SECTION):
+                if (obj is not self
+                    and isinstance(obj, afcBridgeBox)):
+                    values += [str(p) for p in (obj.serial_port, obj._auto_board)
+                               if p]
+        except Exception:
+            pass
+        ports = {v for v in values if v.startswith("/dev/")}
+        ports |= {os.path.realpath(p) for p in ports}
+        hosts: Set[str] = set()
+        for v in values:
+            if v.lower().startswith("tcp://"):
+                try:
+                    hosts.add(_bridge_mod.TcpPort.parse(v)[0])
+                except ValueError:
+                    pass
+        return ports, hosts
+
+    def _save_wifi_addr(self, addr: str) -> None:
+        """
+        Save the WiFi address the board reported, for the next start.
+
+        :param addr: the board's ``tcp://host:port``
+        """
+        if self._board_forgotten:
+            return
+        self._state_set({f"{self._BASE_SECTION} {self.name}":
+                         {"wifi_addr": addr}})
+
+    def _ensure_bridge(self) -> Any:
+        """
+        The bridge for our serial port, shared with any fabricated units via the same registry they
+        use, created if scouting found none.
+
+        :return object: the bridge
+        """
+        bridge = self._chain_bridge()
+        if bridge is None:
+            from extras import AFC_BambuAMS_bridge as _bridge_mod
+            from extras.AFC_BambuAMS_bridge import BambuBridge, TcpPort
+            is_tcp = str(self.serial_port or "").strip().lower() \
+                .startswith("tcp://")
+
+            def _open() -> Any:
+                """
+                Open the master's port, the same way the units do: a socket for a
+                ``tcp://host:port`` bridge, else the USB-CDC serial port.
+
+                :return Any: an open port, pyserial-shaped either way
+                """
+                if is_tcp:
+                    host, port = TcpPort.parse(self.serial_port)
+                    return TcpPort(host, port, timeout=0.1, write_timeout=0.5, key=self.tcp_key)
+                import serial
+                return serial.Serial(_bridge_mod.usb_port(self.serial_port), 115200, timeout=0.1,
+                                     write_timeout=0.5)
+
+            bridge = BambuBridge(_open, self.printer.get_reactor(), self.logger)
+            if self._tcp_key_store:
+                bridge.store_key = self.tcp_key
+            _bridge_mod.attach_wifi(self.serial_port, bridge)
+            _bridge_mod._BRIDGES[self.serial_port] = bridge
+            # A network bridge not up yet, or a board auto has not found, keeps retrying.
+            bridge.start(defer_open=is_tcp
+                         or self.serial_port in _bridge_mod._AUTO_FINDERS)
+        self._bridge = bridge
+        return bridge
+
+    def _scout_tick(self, eventtime: float) -> float:
+        """
+        The chain watch: ask, read, and record what changed.
+
+        :param eventtime: reactor time
+        :return float: next wake
+        """
+        self._tick_count = getattr(self, "_tick_count", 0) + 1
+        if getattr(self, "_bay_owner_pending", False):
+            try:
+                self._persist_bay_owner()
+            except Exception:
+                pass
+        try:
+            self._pack_after_forget()
+        except Exception:
+            pass
+        # A fault in this warning must not stop the claims and releases below.
+        try:
+            self._check_moved_loaded()
+        except Exception as ex:
+            msg = f"{type(ex).__name__}: {ex}"
+            if msg != getattr(self, "_moved_err_logged", None):
+                self._moved_err_logged = msg
+                try:
+                    self.logger.warning(f"{self.name}: loaded-lane check failed "
+                                        f"({msg}); the chain watch carries on.")
+                except Exception:
+                    pass
+        try:
+            if self._roster_source == "scout":
+                bridge = getattr(self, "_bridge", None) or self._ensure_bridge()
+            else:
+                bridge = self._chain_bridge()
+                if bridge is None:
+                    self._watch_state = "no-bridge"
+                    return eventtime + 3.0
+            # No chain poll while the bridge is silent (an AMS 1 capscan blocks it for 10-15 s).
+            _sf = getattr(bridge, "silent_for", None)
+            try:
+                _quiet = _sf() if callable(_sf) else None
+            except Exception:
+                _quiet = None
+            if (not isinstance(_quiet, (int, float))
+                or _quiet <= max(2.0, 1.5 * self.hotplug_poll)):
+                bridge.send({"cmd": "chain"})
+            # One read of the chain reply for the whole tick (see _chain_snapshot).
+            snap = self._chain_snapshot(bridge)
+            uids = snap["uids"]
+            seen = self._chain_to_roster(uids, snap["htmask"])
+            sec = self._BASE_SECTION + " " + self.name
+            entries = [e.strip()
+                       for e in (self._state_get(sec, "roster") or "").split(",")
+                       if e.strip()]
+            known_uids = {_norm_uid(e.partition(":")[2])
+                          for e in entries}
+            # chain_uids is sticky: it keeps pulled units until the Pico reboots.
+            latest = bridge.latest_status() or {}
+            online_idx = {u.get("n") for u in (latest.get("units") or [])
+                          if u.get("online")}
+            online_uids = {_norm_uid(uids[i])
+                           for i in online_idx
+                           if i < len(uids) and (uids[i] or "").strip()}
+            # A suppressed (forgotten but online) uid is absent until it is physically pulled.
+            suppressed = getattr(self, "_forget_suppressed", None)
+            if suppressed:
+                for u in [x for x in suppressed if x not in online_uids]:
+                    suppressed.discard(u)
+                online_uids = online_uids - suppressed
+            # With the link down the bridge still hands back its last status, which says nothing
+            # about who is there now, so nothing is enrolled, claimed or released on it.
+            link_up = getattr(bridge, "_serial", None) is not None
+            if not link_up:
+                online_idx, online_uids = set(), set()
+            # A ghost that drops out between blips resets and never enrolls.
+            esince = getattr(self, "_enroll_since", None)
+            if esince is None:
+                esince = self._enroll_since = {}
+            cand: Dict[str, str] = {}
+            for e in seen.split(", "):
+                u = _norm_uid(e.partition(":")[2])
+                if (e
+                    and u
+                    and u not in known_uids
+                    and u in online_uids):
+                    cand[u] = e
+            for u in list(esince):
+                if u not in cand:
+                    del esince[u]
+            for u in cand:
+                esince.setdefault(u, eventtime)
+            new = [cand[u] for u in cand
+                   if eventtime - esince.get(u, eventtime) >= self.enroll_grace]
+            if new:
+                entries = entries + new
+                self._state_set({sec: {"roster": ", ".join(entries)}})
+                pooled = bool(self.pool_ams or self.pool_ht)
+                if (self._roster_source == "scout"
+                    and not pooled):
+                    self.logger.info(f"{self.name}: chain reports "
+                                     f"[{', '.join(entries)}] -- written to "
+                                     f"{os.path.basename(self.state_file)}. RESTART to "
+                                     f"enroll, or copy it into roster: to pin it.")
+                elif self._roster_source == "option":
+                    no_bay = self._new_ams_with_no_bay(new)
+                    # An AMS the claim already told it has no bay is not told again, but is still
+                    # named as recorded.
+                    untold = [e for e in no_bay if _norm_uid(
+                        e.partition(":")[2]) not in self._no_bay_told]
+                    listed = [e for e in new if e not in untold]
+                    unlisted = [e for e in listed if e not in no_bay
+                                                     and self._unlisted(e.partition(":")[2])]
+                    text = (f"{self.name}: NEW unit(s) on "
+                            f"the chain: {', '.join(listed)} -- recorded.")
+                    if unlisted:
+                        one = len(unlisted) == 1
+                        text += (f" Add {', '.join(unlisted)} to roster: to "
+                                 f"enroll {'it' if one else 'them'} (the "
+                                 f"option is set and overrides the file)")
+                        if any(self._bay_of_uid(e.partition(":")[2])
+                               for e in unlisted):
+                            text += ("; the next restart gives it the lowest "
+                                     "free bay of its family, which need not "
+                                     "be the one it is on now" if one else
+                                     "; the next restart gives them the "
+                                     "lowest free bays of their family, which "
+                                     "need not be the ones they are on now")
+                        text += "."
+                    if listed:
+                        self.logger.info(text)
+                    self._tell_no_bay(no_bay)
+                elif pooled:
+                    self._announce_pending = (
+                        list(getattr(self, "_announce_pending", None) or [])
+                        + new)
+                else:
+                    no_bay = self._new_ams_with_no_bay(new)
+                    enroll = [e for e in new if e not in no_bay]
+                    if enroll:
+                        self.logger.info(f"{self.name}: NEW unit(s) on the "
+                                         f"chain: {', '.join(enroll)} -- recorded. RESTART "
+                                         f"to enroll.")
+                    self._tell_no_bay(no_bay)
+            # Every present unbound unit gets its slot now: known units their own, new ones a spare.
+            if (self.pool_ams
+                or self.pool_ht):
+                model_by_uid: Dict[str, str] = {}
+                for e in seen.split(", "):
+                    m, _sep, u = e.partition(":")
+                    if u.strip():
+                        model_by_uid[_norm_uid(u)] = m.strip().lower()
+                for e in entries:
+                    m, _sep, u = e.partition(":")
+                    if u.strip():
+                        model_by_uid[_norm_uid(u)] = m.strip().lower()
+                # An option `boxed` yields to a generation the recorded roster holds.
+                if self._roster_source == "option":
+                    for entry in self.units:
+                        m = _norm_model(entry.get("model"))
+                        if not (m == "boxed"
+                                and model_by_uid.get(entry["uid"])
+                   in ("ams1", "ams2")):
+                            model_by_uid[entry["uid"]] = m
+                bound = {pu["bound"] for pu in getattr(self, "_pool_units", [])
+                         if pu.get("bound")}
+
+                def _slot_laneno(u: str) -> Tuple[int, str]:
+                    """
+                    Sort key: the first lane number of the slot a uid owns, else of the free slot
+                    wearing the name it is saved under (see _claim_pool_unit), then the uid.
+
+                    :param u: unit uid
+                    :return tuple: (lane number, 9999 for a uid with no slot yet; uid)
+                    """
+                    saved = self._name_map.get(u)
+                    mine = (next((pu for pu in self._pool_units
+                                  if pu.get("uid") == u), None)
+                            or next((pu for pu in self._pool_units
+                                     if saved
+                                        and pu.get("name") == saved
+                                        and pu.get("uid") is None
+                                        and pu.get("bound") is None), None))
+                    if (mine is not None
+                        and mine.get("lanes")):
+                        ds = "".join(c for c in mine["lanes"][0]
+                                     if c.isdigit())
+                        return (int(ds) if ds else 9999, u)
+                    last = self._last_bay(u)
+                    if (last is not None
+                        and last.get("lanes")):
+                        return (_pool_laneno(last), u)
+                    return (9999, u)
+
+                # One offline sample resets a unit's continuous online time.
+                online_since = getattr(self, "_online_since", None)
+                if online_since is None:
+                    online_since = self._online_since = {}
+                # A tick with nobody online says nothing about who left.
+                if online_idx:
+                    left = ({u for u in online_since if u not in online_uids}
+                            | (set(self._no_bay) - online_uids))
+                    self._no_bay_told -= left
+                    self._replace_offered -= left
+                    for u in left:
+                        self._no_bay.pop(u, None)
+                for u in online_uids:
+                    online_since.setdefault(u, eventtime)
+                for u in list(online_since):
+                    if u not in online_uids:
+                        del online_since[u]
+                rel_at = getattr(self, "_released_at", None)
+                if rel_at is None:
+                    rel_at = self._released_at = {}
+                # Lowest lane first, so T# numbers line up with lanes.
+                claimable = online_uids - bound
+                for u in sorted(claimable, key=_slot_laneno):
+                    req = (self.flap_claim_grace
+                           if eventtime - rel_at.get(u, -1e9) < self.flap_window
+                           else self.claim_grace)
+                    if eventtime - online_since.get(u, eventtime) >= req:
+                        # A unit that already owns a slot is just coming back, so no popup.
+                        owned_before = any(
+                            _norm_uid(pu.get("uid")) == u
+                            for pu in self._pool_units)
+                        if (self._claim_pool_unit(u, model_by_uid.get(u, "boxed"),
+                                                  "callback") is not None
+                            and not owned_before
+                            and not self._back_on_saved_bay(u)
+                            and not self._is_printing()):
+                            # Queued so a burst of adds serialize, none lost.
+                            self._queue_popup(("new", u))
+                online_seen = getattr(self, "_last_online", None)
+                if online_seen is None:
+                    online_seen = self._last_online = {}
+                # Only a run held for release_settle clears the release clock, so a phantom online
+                # flag that merely blips can never cancel a drop.
+                run = getattr(self, "_online_run", None)
+                if run is None:
+                    run = self._online_run = {}
+                # A settled return spanning _REPLUG_ABSENCE restores its follower.
+                away = getattr(self, "_away", None)
+                if away is None:
+                    away = self._away = {}
+                returned = []
+                bound_now = {pu["bound"] for pu in self._pool_units
+                             if pu.get("bound")}
+                # Kept claimed past the grace because a lane is still in a toolhead.
+                drop_held = getattr(self, "_drop_held", None)
+                if drop_held is None:
+                    drop_held = self._drop_held = set()
+                for b in bound_now:
+                    if not link_up:
+                        # The release clock restarts at the reconnect, so a unit slow to answer
+                        # after a bridge reboot still gets its whole release_grace.
+                        online_seen[b] = eventtime
+                        continue
+                    if b in online_uids:
+                        run.setdefault(b, eventtime)
+                        if eventtime - run[b] >= self.release_settle:
+                            online_seen[b] = eventtime
+                            first, last = away.pop(b, (0.0, 0.0))
+                            if last - first >= self._REPLUG_ABSENCE:
+                                returned.append((b, run[b], last - first))
+                            drop_held.discard(b)
+                    else:
+                        run.pop(b, None)
+                        online_seen.setdefault(b, eventtime)
+                        away.setdefault(b, [eventtime, eventtime])
+                        away[b][1] = eventtime
+                for b, since, gone_s in returned:
+                    self._restore_returned(b, since, gone_s)
+                announce = getattr(self, "_announce_pending", None)
+                if announce:
+                    self._announce_pending = []
+                    self._announce_enrolled(announce)
+                # So a restart brings each recorded unit back to its bay.
+                if self._roster_source == "option":
+                    recorded = {_norm_uid(u["uid"]) for u in self.units}
+                else:
+                    recorded = {_norm_uid(e.partition(":")[2])
+                                for e in entries}
+                self._pin_recorded_units(recorded, eventtime, online_since)
+                if (self.auto_drop
+                    and not self._is_printing()):
+                    for b in list(bound_now):
+                        if (b not in online_uids
+                            and eventtime - online_seen.get(b, eventtime) >= self.release_grace):
+                            gone = next(
+                                (pu.get("name") for pu in self._pool_units
+                                 if pu.get("bound") == b), None)
+                            loaded = self._toolhead_lanes(b)
+                            if loaded:
+                                if b not in drop_held:
+                                    drop_held.add(b)
+                                    routine_info(self.logger,
+                                        f"{self.name}: "
+                                        f"{gone or b} (UID {b}) is offline but "
+                                        f"AFC records "
+                                        f"{', '.join(ln.name for ln in loaded)}"
+                                        f" as loaded to the toolhead -- "
+                                        f"keeping it claimed. Unload it ("
+                                        + self._unset_hint(
+                                            [ln.name for ln in loaded])
+                                        + " if the filament is already out) "
+                                          "and it is released on the next "
+                                          "check.")
+                                continue
+                            self._release_pool_unit(b, "callback")
+                            online_seen.pop(b, None)
+                            run.pop(b, None)
+                            rel_at[b] = eventtime
+                            self._queue_popup(("removed", b, gone))
+                self._track_absence(eventtime, bridge, online_uids, online_idx, online_since)
+                self._offer_replace(eventtime, online_uids, online_since)
+                # One dialog per _POPUP_HOLD, so a burst of plug/unplugs is shown in turn.
+                self._pump_popups(eventtime)
+            # The "chain" command only reads cached state and never touches the bus.
+            self._watch_next = self.hotplug_poll
+            entries = self._refine_models(snap, online_idx, entries, sec)
+            self._save_held_ids(bridge)
+            self._prune_missing(bridge, uids, entries, eventtime, sec, online_idx)
+            # So get_status can show the recorded chain beside the running one.
+            self._recorded_raw = self._state_get(sec, "roster") or ""
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            self._watch_state = f"error: {msg}"
+            if msg != getattr(self, "_tick_err_logged", None):
+                self._tick_err_logged = msg
+                try:
+                    self.logger.warning(f"{self.name}: chain watch tick failed "
+                                        f"({msg}); will keep retrying.")
+                except Exception:
+                    pass
+        return eventtime + getattr(self, "_watch_next", self.hotplug_poll)
+
+    def _is_printing(self) -> bool:
+        """
+        Whether a print is active or paused.
+
+        :return bool: True while a print is active or paused
+        """
+        try:
+            now = self.printer.get_reactor().monotonic()
+        except Exception:
+            now = 0.0
+        for name, states in (("print_stats", ("printing", "paused")),
+                             ("idle_timeout", ("Printing",))):
+            try:
+                obj = self.printer.lookup_object(name, None)
+                if obj is not None:
+                    st = obj.get_status(now).get("state")
+                    if st in states:
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _prompt(self, title: str, lines: List[str], buttons: List[Tuple[str, str, str]],
+                timeout: float = 45.0, dismiss: str = "Dismiss") -> None:
+        """
+        Raise a Mainsail/Fluidd interactive dialog (the action:prompt protocol Klipper speaks over
+        the g-code channel, no panel change needed).
+
+        :param title: dialog title
+        :param lines: body text lines
+        :param buttons: (label, gcode command, style) each; style is one of
+        primary/secondary/info/warning/error
+        :param timeout: seconds before the dialog self-dismisses
+        :param dismiss: the label of the footer button that closes it
+        """
+        gcode = self.printer.lookup_object("gcode", None)
+        if gcode is None:
+            return
+        try:
+            # Each popup's auto-dismiss timer only closes it while it is still the current popup.
+            gen = getattr(self, "_prompt_gen", 0) + 1
+            self._prompt_gen = gen
+            respond = gcode.respond_raw
+            respond(f"// action:prompt_begin {title}")
+            for ln in lines:
+                respond(f"// action:prompt_text {ln}")
+            for label, cmd, style in buttons:
+                respond(f"// action:prompt_button {label}|{cmd}|{style}")
+            respond(f"// action:prompt_footer_button "
+                    f"{dismiss}|RESPOND TYPE=command MSG=action:prompt_end|info")
+            respond("// action:prompt_show")
+            if timeout:
+                reactor = self.printer.get_reactor()
+
+                def _close(e: float, _gen: int = gen) -> None:
+                    """
+                    Close the prompt if it is still the one this timer armed.
+
+                    :param e: reactor event time
+                    :param _gen: prompt generation this callback belongs to
+                    """
+                    if getattr(self, "_prompt_gen", 0) == _gen:
+                        gcode.respond_raw("// action:prompt_end")
+                reactor.register_callback(_close, reactor.monotonic() + timeout)
+        except Exception as ex:
+            self.logger.warning(f"{self.name}: prompt error: {ex}")
+
+    def _close_prompt(self) -> None:
+        """
+        Close whatever action:prompt dialog is open.
+        """
+        gcode = self.printer.lookup_object("gcode", None)
+        if gcode is None:
+            return
+        self._prompt_gen = getattr(self, "_prompt_gen", 0) + 1
+        try:
+            gcode.respond_raw("// action:prompt_end")
+        except Exception:
+            pass
+
+    _MAX_BAY_BUTTONS = 8
+
+    def _bay_of_uid(self, uid: str) -> Optional[Dict[str, Any]]:
+        """
+        The pool bay a uid is bound to, or (failing that) reserves.
+
+        :param uid: a unit uid
+        :return dict: the pool unit record, or None
+        """
+        uid = _norm_uid(uid)
+        pools = getattr(self, "_pool_units", [])
+        return (next((pu for pu in pools
+                      if _norm_uid(pu.get("bound")) == uid), None)
+                or next((pu for pu in pools
+                         if _norm_uid(pu.get("uid")) == uid), None))
+
+    def _back_on_saved_bay(self, uid: str) -> bool:
+        """
+        Whether a unit is back on the bay saved for it, so there is no bay to offer.
+
+        :param uid: a unit uid
+        :return bool: True when the unit is on its saved bay
+        """
+        uid = _norm_uid(uid)
+        pu = next((p for p in getattr(self, "_pool_units", [])
+                   if _norm_uid(p.get("bound")) == uid), None)
+        return (pu is not None
+                and _norm_uid(pu.get("uid")) == uid
+                and getattr(self, "_name_map", {}).get(uid) == pu.get("name")
+                and not self._unlisted(uid))
+
+    def _prompt_new_unit(self, uid: str, timeout: float = 45.0) -> None:
+        """
+        Bay-picker popup for a unit that already has a home.
+
+        :param uid: the unit's uid
+        :param timeout: seconds before the popup closes itself, 0 to keep it open
+        """
+        uid = _norm_uid(uid)
+        here = self._bay_of_uid(uid)
+        if here is None:
+            return
+        family = here.get("family")
+        pools = getattr(self, "_pool_units", [])
+
+        head = (f"UID {uid} is on {here['name']!r} "
+                + ("(its T# and lanes are live)." if here.get("bound")
+                   else "(reserved for it; its T# and lanes are not live "
+                        "yet)."))
+        if self._unlisted(uid):
+            # ASSIGN refuses a uid a set roster: does not list, so no bay button.
+            self._prompt(f"New AMS on {here['name']}",
+                         [head, f"roster: is set and does not list it. Add "
+                          f"{self._roster_entry(uid)} to roster: to pin it "
+                          f"to a named bay."], [], timeout=timeout)
+            return
+        # One saved for another recorded uid is that uid's at restart, so ASSIGN refuses it.
+        recorded = self._recorded_uids()
+        free = sorted((pu for pu in pools
+                       if pu is not here
+                          and pu.get("family") == family
+                          and not pu.get("bound")
+                          and not pu.get("uid")
+                          and not self._name_holder(pu["name"], uid, recorded)),
+                      key=_pool_laneno)
+        buttons = [(pu["name"],
+                    f"AFC_BRIDGEBOX_ASSIGN CHAIN={self.name} UID={uid} "
+                    f"NAME={pu['name']}", "primary")
+                   for pu in free[:self._MAX_BAY_BUTTONS]]
+        if self._bay_held(here):
+            saved = ["It is saved on this bay."]
+        elif self._save_refusal(here, uid) is None:
+            saved = [f"It is saved on this bay once it has been online {self.enroll_grace:.0f}s."]
+        else:
+            saved = []
+        lines = ([head] + saved
+                 + (["Keep it here, or move it to another named bay:"]
+                    if buttons
+                    else ["No other free bay of this type to move it to."]))
+        self._prompt(f"New AMS on {here['name']}", lines, buttons, timeout=timeout)
+
+    def _prompt_removed_unit(self, uid: str, name: Optional[str], timeout: float = 45.0) -> None:
+        """
+        Popup when a unit is auto-dropped on unplug.
+
+        :param uid: the unit's uid
+        :param name: the unit's name, or None to show the uid
+        :param timeout: seconds before the popup closes itself, 0 to keep it open
+        """
+        label = name or uid
+        if self._bay_of_uid(uid) is not None:
+            lines = [f"{label} (UID {uid}) was unplugged; its bay is held for a re-plug.",
+                     "Re-plug it and it reclaims the same lanes/T#. Or forget "
+                     "it to free the bay to the pool:"]
+        else:
+            lines = [f"{label} (UID {uid}) was unplugged; its bay went back to the pool.",
+                     "A re-plug takes it back while it is free, else the "
+                     "lowest free bay of its family. Or forget it if it is not coming back:"]
+        self._prompt(
+            f"AMS removed: {label}",
+            lines,
+            [(f"Forget {label}",
+              f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID={uid}", "error")],
+            timeout=timeout)
+
+    def offer_firmware(self, unit: Any, choice: Optional[Dict[str, Any]]) -> None:
+        """
+        Offer to update a unit's AMS firmware the first time the unit is read, until it is
+        forgotten. A unit first read on the newest firmware is not offered one later either.
+
+        :param unit: a unit on this chain whose firmware was just read
+        :param choice: the newer image it can take (its version, and the file holding it or ""),
+        or None when it runs the newest
+        """
+        uid = _norm_uid(unit.unit_uid)
+        if (not uid
+            or self._state_get(self._learned_section(uid), "firmware_offered") is not None):
+            return
+        if choice is None:
+            self._state_set({self._learned_section(uid): {"firmware_offered": unit.fw_version}})
+            return
+        self._queue_popup(("firmware", uid, unit.name, unit.fw_version, choice))
+
+    def _prompt_firmware(self, uid: str, name: str, have: str, choice: Dict[str, Any]) -> None:
+        """
+        The update offer; showing it is the one time it is made.
+
+        :param uid: the unit's uid
+        :param name: the unit's name
+        :param have: the firmware it runs
+        :param choice: the newest image it can take: its version, and the file holding it or ""
+        """
+        version = choice["version"]
+        self._state_set({self._learned_section(uid): {"firmware_offered": version}})
+        cmd = f"AFC_BAMBU_FIRMWARE UNIT={name} VERSION={version} CONFIRM=1"
+        if choice.get("file"):
+            cmd += f" FILE={choice['file']}"
+        self._prompt(f"Update {name}?",
+                     [f"{name} runs AMS firmware {have}, and Bambu's newest for it is {version}.",
+                      "The update takes a few minutes. The units on its bridge read offline "
+                      "until it is done, and Klipper keeps running.",
+                      "Not now: you are not asked again unless the unit is forgotten. "
+                      "AFC_BAMBU_FIRMWARE updates it any time."],
+                     [(f"Update to {version}", cmd, "primary")], timeout=0, dismiss="Not now")
+
+    def _reactor_now(self) -> float:
+        """
+        The current reactor time.
+
+        :return float: reactor time, 0.0 when there is no reactor to ask
+        """
+        try:
+            return self.printer.get_reactor().monotonic()
+        except Exception:
+            return 0.0
+
+    def _family_of_uid(self, uid: str) -> Optional[str]:
+        """
+        The bay family a unit belongs to.
+
+        :param uid: a unit uid
+        :return str: "ams" or "ht", or None when this chain knows nothing of it
+        """
+        uid = _norm_uid(uid)
+        model = self._model_for_uid(uid) or self._no_bay.get(uid)
+        if model:
+            return "ht" if model in _HT_MODELS_BB else "ams"
+        bay = self._bay_of_uid(uid)
+        return bay.get("family") if bay is not None else None
+
+    def _held_offline(self, family: str, online: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+        """
+        The pool bays of a family held for a unit that is offline: the bay's uid is set, bound to it
+        (auto_drop off, or not yet past the grace) or reserved for it (see _bay_held).
+
+        :param family: "ams" or "ht"
+        :param online: the uids online now; read from the bridge when not given
+        :return list: those bays, lowest lane first
+        """
+        out = []
+        for pu in sorted(getattr(self, "_pool_units", None) or [], key=_pool_laneno):
+            uid = _norm_uid(pu.get("uid"))
+            if (not uid
+                or pu.get("family") != family):
+                continue
+            up = (uid in online if online is not None
+                  else self._uid_online_now(uid))
+            if not up:
+                out.append(pu)
+        return out
+
+    def _replace_candidates(self, family: str, now: float,
+                            online: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+        """
+        The bays of a family a unit waiting for a bay may take over: held for a unit that has been
+        offline release_grace or longer by the absence clock (see _track_absence).
+
+        :param family: "ams" or "ht"
+        :param now: reactor time
+        :param online: the uids online now; read from the bridge when not given
+        :return list: those bays, lowest lane first
+        """
+        return [pu for pu in self._held_offline(family, online)
+                if now - self._missing_since.get(_norm_uid(pu["uid"]),
+                                                 math.inf)
+                >= self.release_grace]
+
+    def _bay_loaded(self, pu: Dict[str, Any]) -> List[str]:
+        """
+        The lanes of a pool bay AFC records as loaded to a toolhead.
+
+        :param pu: pool unit record
+        :return list: lane names
+        """
+        if pu.get("bound"):
+            return [ln.name for ln in self._toolhead_lanes(pu["bound"])]
+        afc = self.printer.lookup_object("AFC", None)
+        named = {getattr(e, "lane_loaded", None)
+                 for e in (getattr(afc, "tools", None) or {}).values()}
+        return [n for n in pu["lanes"]
+                if n in named
+                   or getattr(self.printer.lookup_object(
+         f"AFC_lane {n}", None), "tool_loaded", False)]
+
+    def _clear_bay_toolhead(self, pu: Dict[str, Any]) -> List[str]:
+        """
+        Clear AFC's record of an unbound bay's lanes as loaded to a toolhead.
+
+        :param pu: an unbound pool bay
+        :return list: the lanes whose record was cleared
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        cleared = []
+        for n in pu["lanes"]:
+            lane = self.printer.lookup_object(f"AFC_lane {n}", None)
+            hit = bool(getattr(lane, "tool_loaded", False))
+            if hit:
+                lane.tool_loaded = False
+                lane.loaded_to_hub = False
+            for ext in (getattr(afc, "tools", None) or {}).values():
+                if getattr(ext, "lane_loaded", None) == n:
+                    ext.lane_loaded = None
+                    hit = True
+            if hit:
+                cleared.append(n)
+        if (cleared
+            and afc is not None):
+            try: afc.save_vars()
+            except Exception: pass
+        return cleared
+
+    def _track_absence(self, now: float, bridge: Any, online: Set[str], online_idx: set,
+                       online_since: Dict[str, float]) -> None:
+        """
+        Time how long each unit a pool bay is held for has been offline, in _missing_since, which a
+        pooled chain uses for nothing else (it never auto-removes, see _prune_missing).
+
+        :param now: reactor time
+        :param bridge: the chain's bridge
+        :param online: the uids online this tick
+        :param online_idx: the chain indices online this tick
+        :param online_since: uid -> start of its continuous online run
+        """
+        if (getattr(bridge, "_serial", None) is None
+            or not online_idx):
+            self._missing_since.clear()
+            return
+        held = {_norm_uid(pu["uid"]) for pu in self._pool_units
+                if pu.get("uid")}
+        for u in [x for x in self._missing_since if x not in held]:
+            del self._missing_since[u]
+        for u in held:
+            if u not in online:
+                self._missing_since.setdefault(u, now)
+            elif now - online_since.get(u, now) >= self.release_settle:
+                self._missing_since.pop(u, None)
+
+    def _offer_replace(self, now: float, online: Set[str], online_since: Dict[str, float]) -> None:
+        """
+        Queue the replace picker (see _prompt_replace_unit) for each unit that found no free bay,
+        once it has been online enroll_grace (the run enrollment asks for, so a phantom online flag
+        is never offered a bay), and a bay of its family is held for a unit offline release_grace or
+        longer with no lane AFC records in a toolhead.
+
+        :param now: reactor time
+        :param online: the uids online this tick
+        :param online_since: uid -> start of its continuous online run
+        """
+        if self._roster_source == "option":
+            return
+        due = [uid for uid in sorted(self._no_bay)
+               if uid not in self._replace_offered
+                  and uid in online
+                  and now - online_since.get(uid, now) >= self.enroll_grace]
+        if (not due
+            or self._is_printing()):
+            return
+        for uid in due:
+            fam = "ht" if self._no_bay[uid] in _HT_MODELS_BB else "ams"
+            if all(self._bay_loaded(pu) for pu in
+                   self._replace_candidates(fam, now, online)):
+                continue
+            self._replace_offered.add(uid)
+            self._queue_popup(("replace", uid))
+
+    def _prompt_replace_unit(self, uid: str, now: float, timeout: float = 45.0,
+                             auto: bool = False) -> bool:
+        """
+        The replace picker: every bay of the unit's family held for a unit offline release_grace or
+        longer (see _replace_candidates), each with a Replace button that runs AFC_BRIDGEBOX_REPLACE
+        with the old unit's uid, so a button left over after the bay changed hands is refused.
+
+        :param uid: the unit waiting for a bay
+        :param now: reactor time
+        :param timeout: seconds before the dialog closes itself
+        :param auto: raised by the chain watch, which shows it only with a button to press
+        :return bool: whether the dialog was raised
+        """
+        fam = self._family_of_uid(uid)
+        held = self._replace_candidates(fam, now) if fam else []
+        rows = [(pu, _norm_uid(pu["uid"]), self._bay_loaded(pu))
+                for pu in held]
+        buttons = [(f"Replace {pu['name']}",
+                    f"AFC_BRIDGEBOX_REPLACE CHAIN={self.name} UID={uid} "
+                    f"OLD={old}", "error")
+                   for pu, old, loaded in rows
+                   if not loaded][:self._MAX_BAY_BUTTONS]
+        if (not rows
+            or (auto and not buttons)):
+            return False
+        what = "AMS HT" if fam == "ht" else "AMS"
+        printing = self._is_printing()
+        # A recorded AMS this start gave no bay is not new.
+        unbayed = getattr(self, "_unbayed", None) or {}
+        if uid in unbayed:
+            title = f"No bay for {what} {uid}"
+            head = (f"UID {uid} is recorded but has no bay: every {what} bay "
+                    f"is taken."
+                    + (f" A Bambu bus addresses at most {_MAX_AMS_BAYS} AMS, "
+                       f"and its saved bay {unbayed[uid]} is not one of the "
+                       f"{_MAX_AMS_BAYS} AMS bays." if unbayed[uid] else ""))
+        else:
+            title = f"No free bay for new {what}"
+            head = f"UID {uid} has no free bay: every {what} bay is taken."
+        lines = [head, "Replace a unit that is offline: the new one takes its bay "
+                 "and lanes now, and the old one is forgotten (its learned "
+                 "values and saved lane records, spools included, are erased)."]
+        for pu, old, loaded in rows:
+            gone = now - self._missing_since.get(old, now)
+            ago = f"{gone / 60:.0f} min" if gone >= 120 else f"{gone:.0f}s"
+            line = (f"{pu['name']}: {old}, {self._lanes_text(_pool_laneno(pu), len(pu['lanes']))}, "
+                    f"offline {ago}")
+            force = f"AFC_BRIDGEBOX_REPLACE CHAIN={self.name} UID={uid} OLD={old} FORCE=1"
+            if (loaded
+                and printing):
+                line += (f" -- AFC records {', '.join(loaded)} as loaded to "
+                         f"the toolhead, and a print is active: replace it once the print ends")
+            elif (loaded
+                  and pu.get("bound")):
+                line += (f" -- AFC records {', '.join(loaded)} as loaded to "
+                         f"the toolhead: unload it ({self._unset_hint(loaded)} if the filament is "
+                         f"already out), or {force} clears it")
+            elif loaded:
+                # An unclaimed bay's lanes are not registered, so no unload reaches them.
+                line += (f" -- AFC records {', '.join(loaded)} as loaded to "
+                         f"the toolhead: plug {old} back in and unload it, or "
+                         f"take the filament out by hand and {force} clears the record")
+            lines.append(line)
+        lines.append(f"Dismiss leaves it waiting; AFC_BRIDGEBOX_REPLACE "
+                     f"CHAIN={self.name} UID={uid} opens this again.")
+        self._prompt(title, lines, buttons, timeout=timeout)
+        return True
+
+    def _no_candidate_text(self, uid: str, family: str, now: float) -> str:
+        """
+        Why the replace picker has no bay to show, for the typed command.
+
+        :param uid: the unit waiting for a bay
+        :param family: its family
+        :param now: reactor time
+        :return str: the bays held for offline units that are not past release_grace yet, or that
+        every bay holds a unit that is online
+        """
+        what = "HT" if family == "ht" else "AMS"
+        held = self._held_offline(family)
+        if not held:
+            return (f"no {what} bay is held for a unit that is offline, so "
+                    f"{uid} has none to take over -- unplug the unit it "
+                    f"replaces, or AFC_BRIDGEBOX_FORGET CHAIN={self.name} "
+                    f"UID=<its uid> frees that unit's bay now.")
+        # FORCE=1 overrides the print gate, the PREP wait and the loaded-lane refusal as well as the
+        # wait, so it is offered as skipping only the wait when none of those applies.
+        printing = self._is_printing()
+        settled = self._prep_settled()
+        rows = []
+        for pu in held:
+            old = _norm_uid(pu["uid"])
+            since = self._missing_since.get(old)
+            loaded = self._bay_loaded(pu)
+            force = f"AFC_BRIDGEBOX_REPLACE CHAIN={self.name} UID={uid} OLD={pu['name']} FORCE=1"
+            if printing:
+                tail = "a print is active: run this again once it ends"
+            elif not settled:
+                tail = "PREP has not run yet: run this again once it has"
+            elif (loaded
+                  and pu.get("bound")):
+                tail = (f"AFC records {', '.join(loaded)} as loaded to the "
+                        f"toolhead: unload it ({self._unset_hint(loaded)} if "
+                        f"the filament is already out), or {force} clears it and skips the wait")
+            elif loaded:
+                tail = (f"AFC records {', '.join(loaded)} as loaded to the "
+                        f"toolhead: plug {old} back in and unload it, or take "
+                        f"the filament out by hand and {force} clears the "
+                        f"record and skips the wait")
+            else:
+                tail = f"{force} skips the wait"
+            rows.append(f"{pu['name']} ({old}, "
+                        + ("no absence counted" if since is None
+                           else f"offline {now - since:.0f}s")
+                        + f") -- {tail}")
+        return (f"no {what} bay is held for a unit offline "
+                f"{self.release_grace:.0f}s or longer: "
+                + "; ".join(rows) + ".")
+
+    def _replace_text(self, uid: str, bays: List[Dict[str, Any]]) -> str:
+        """
+        The sentence naming AFC_BRIDGEBOX_REPLACE for a unit waiting for a bay.
+
+        :param uid: a unit waiting for a bay
+        :param bays: the bays held for the offline units it may replace
+        :return str: the sentence; "" with no bay, no pool, or roster: set
+        """
+        if (not bays
+            or self._roster_source == "option"
+            or not (self.pool_ams or self.pool_ht)):
+            return ""
+        old = bays[0]["name"] if len(bays) == 1 else "<that unit's bay>"
+        return (f" AFC_BRIDGEBOX_REPLACE CHAIN={self.name} UID={uid} "
+                f"OLD={old} does both in one step.")
+
+    _POPUP_HOLD = 20.0
+
+    def _queue_popup(self, ev: Tuple[Any, ...]) -> None:
+        """
+        Enqueue a popup event so simultaneous plug/unplugs serialize instead of overwriting each
+        other (Mainsail shows only the newest prompt).
+
+        :param ev: ("new", uid), ("removed", uid, name), ("replace", uid) or
+        ("firmware", uid, name, version it runs, the image offered)
+        """
+        q = getattr(self, "_popup_queue", None)
+        if q is None:
+            q = self._popup_queue = []
+        key = (ev[0], ev[1])
+        q[:] = [e for e in q if (e[0], e[1]) != key]
+        q.append(ev)
+
+    def _pump_popups(self, eventtime: float) -> None:
+        """
+        Show the next queued popup if the last one has had its turn.
+
+        :param eventtime: reactor time of the watch tick
+        """
+        q = getattr(self, "_popup_queue", None)
+        if (not q
+            or eventtime < getattr(self, "_popup_active_until", 0.0)):
+            return
+        for ev in list(q):
+            # An update offer waits for an idle printer.
+            if (ev[0] == "firmware"
+                and self._is_printing()):
+                continue
+            q.remove(ev)
+            if ev[0] == "firmware":
+                self._prompt_firmware(*ev[1:])
+            elif ev[0] == "new":
+                if self._bay_of_uid(ev[1]) is None:
+                    continue
+                self._prompt_new_unit(ev[1], timeout=self._POPUP_HOLD)
+            elif ev[0] == "replace":
+                if (ev[1] not in self._no_bay
+                    or self._is_printing()
+                    or not self._prompt_replace_unit(
+                        ev[1], eventtime, timeout=self._POPUP_HOLD,
+                        auto=True)):
+                    self._replace_offered.discard(ev[1])
+                    continue
+            else:
+                self._prompt_removed_unit(ev[1], ev[2], timeout=self._POPUP_HOLD)
+            self._popup_active_until = eventtime + self._POPUP_HOLD
+            return
+
+    _REPLUG_ABSENCE = 2.0
+
+    def _restore_returned(self, uid: str, since: float, gone_s: float) -> None:
+        """
+        Have a unit that came back while still bound restore its follower.
+
+        :param uid: the returning unit's uid
+        :param since: reactor time its settled online run began
+        :param gone_s: how long it read offline, first read to last
+        """
+        name = next((pu.get("name") for pu in self._pool_units
+                     if pu.get("bound") == uid), None)
+        unit = (self.printer.lookup_object(f"AFC_BambuAMS {name}", None)
+                if name else None)
+        restore = getattr(unit, "restore_follower_on_return", None)
+        if restore is None:
+            return
+        try:
+            engaged = bool(restore(since))
+        except Exception as e:
+            self.logger.warning(f"{self.name}: follower restore for {name} "
+                                f"(UID {uid}) on its return failed: {e}")
+            return
+        self.logger.debug(f"{self.name}: {name} (UID {uid}) is back after "
+                          f"{gone_s:.0f}s offline and stayed bound; its loaded-lane "
+                          f"follower restore {'engaged' if engaged else 'engaged nothing'}.")
+
+    def _toolhead_lanes(self, uid: str) -> List[Any]:
+        """
+        The lanes of the unit bound to ``uid`` that AFC records as loaded to a toolhead (see
+        lane_in_toolhead).
+
+        :param uid: the bound unit's uid
+        :return list: those lanes, empty when there are none or nothing is bound to ``uid``
+        """
+        uid = _norm_uid(uid)
+        afc = self.printer.lookup_object("AFC", None)
+        for pu in getattr(self, "_pool_units", []):
+            if pu.get("bound") != uid:
+                continue
+            lanes = (self.printer.lookup_object(f"AFC_lane {n}", None)
+                     for n in pu["lanes"])
+            return [ln for ln in lanes
+                    if ln is not None
+                       and not getattr(ln, "unassigned", True)
+                       and lane_in_toolhead(ln, afc)]
+        return []
+
+    def _refuse_toolhead_release(self, gcmd: Any, cmd: str, uid: str) -> None:
+        """
+        Refuse a command that releases the unit bound to ``uid`` while AFC records one of its lanes
+        as loaded to a toolhead, unless FORCE=1.
+
+        :param gcmd: the command being run
+        :param cmd: its name, for the error
+        :param uid: the bound unit's uid
+        """
+        held = self._toolhead_lanes(uid)
+        if (held
+            and not gcmd.get_int("FORCE", 0)):
+            names = [ln.name for ln in held]
+            error_str = (
+                f"{cmd}: AFC records {', '.join(names)} on {uid} as loaded "
+                f"to the toolhead -- unload it first "
+                f"({self._unset_hint(names)} if the filament is already "
+                f"out), or FORCE=1 to clear it from the toolhead and release "
+                f"anyway"
+                + (" (a print is active, and FORCE=1 also pulls the lane "
+                   "out from under it)" if self._is_printing() else ""))
+            raise gcmd.error(error_str)
+
+    def _unset_hint(self, lanes: List[str]) -> str:
+        """
+        The UNSET_LANE_LOADED step for a loaded lane whose filament is already out.
+
+        :param lanes: the loaded lanes' names
+        :return str: "UNSET_LANE_LOADED", or "UNSET_LANE_LOADED with <tool> as the active tool"
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        tools = getattr(afc, "tools", None) or {}
+        exts = [n for n, e in tools.items()
+                if getattr(e, "lane_loaded", None) in set(lanes)]
+        try:
+            current = afc.function.get_current_extruder()
+        except Exception:
+            current = None
+        other = [n for n in exts if n != current]
+        if (not other
+            or (current is None and len(tools) <= 1)):
+            return "UNSET_LANE_LOADED"
+        return f"UNSET_LANE_LOADED with {' and '.join(other)} as the active tool"
+
+    def _unclaimed_loaded_text(self, cmd: str, bay: str, old: str, loaded: List[str],
+                               act: str) -> str:
+        """
+        The refusal for freeing an unclaimed bay AFC records a lane of as loaded to a toolhead.
+
+        :param cmd: the command's name
+        :param bay: the bay's name
+        :param old: the uid it is held for
+        :param loaded: those lanes
+        :param act: what FORCE=1 then does, e.g.
+        :return str: the error text
+        """
+        return (f"{cmd}: AFC records {', '.join(loaded)} on {bay} as loaded "
+                f"to the toolhead, from {old}. While {bay} is unclaimed its "
+                f"lanes are not registered, so no unload or UNSET_LANE_LOADED "
+                f"reaches them -- plug {old} back in and unload it, or take "
+                f"the filament out by hand and FORCE=1 clears the record and {act}")
+
+    def _refuse_unclaimed_release(self, gcmd: Any, cmd: str, pu: Dict[str, Any],
+                                  act: str) -> List[str]:
+        """
+        Refuse a command that frees an unclaimed bay held for a unit while AFC records one of its
+        lanes as loaded to a toolhead, or before PREP has restored that record (see _prep_settled),
+        unless FORCE=1.
+
+        :param gcmd: the command being run
+        :param cmd: its name, for the error
+        :param pu: the unbound pool bay the command frees
+        :param act: what FORCE=1 then does, for the error
+        :return list: the loaded lanes, which the caller clears with _clear_bay_toolhead once
+        nothing else refuses
+        """
+        loaded = self._bay_loaded(pu)
+        if gcmd.get_int("FORCE", 0):
+            return loaded
+        if not self._prep_settled():
+            error_str = (f"{cmd}: PREP has not run yet, so which lane AFC records as "
+                         f"loaded to the toolhead is not known -- run this again once it has")
+            raise gcmd.error(error_str)
+        if loaded:
+            error_str = self._unclaimed_loaded_text(cmd, pu["name"], _norm_uid(pu.get("uid")),
+                                                    loaded, act)
+            raise gcmd.error(error_str)
+        return []
+
+    def _loaded_clause(self, pu: Optional[Dict[str, Any]]) -> str:
+        """
+        What a FORGET suggested for a bay's offline unit needs first when AFC records a lane of that
+        bay as loaded to a toolhead.
+
+        :param pu: the bay, or None
+        :return str: the clause, "" when no lane of it is recorded
+        """
+        loaded = self._bay_loaded(pu) if pu is not None else []
+        if not loaded:
+            return ""
+        if pu.get("bound"):
+            return (f" (AFC records {', '.join(loaded)} as loaded to the "
+                    f"toolhead: unload it first, "
+                    f"{self._unset_hint(loaded)} if the filament is already out)")
+        return (f" (AFC records {', '.join(loaded)} as loaded to the "
+                f"toolhead: plug it back in and unload it, or take the "
+                f"filament out by hand and add FORCE=1, which clears the record)")
+
+    def _new_ams_with_no_bay(self, entries: List[str]) -> Dict[str, List[Tuple[str, str]]]:
+        """
+        The AMS just recorded that no restart gives a bay: each is off every bay and the roster a
+        restart builds from puts four other AMS ahead of it (see _ams_ahead).
+
+        :param entries: the roster entries just recorded, `<model>:<uid>`
+        :return dict: entry -> (name, uid) of the AMS ahead of it
+        """
+        out: Dict[str, List[Tuple[str, str]]] = {}
+        for e in entries:
+            u = _norm_uid(e.partition(":")[2])
+            if (e.startswith("ht:")
+                or self._bay_of_uid(u)):
+                continue
+            ahead = self._ams_ahead(u)
+            if len(ahead) >= _MAX_AMS_BAYS:
+                out[e] = ahead
+        return out
+
+    def _tell_no_bay(self, no_bay: Dict[str, List[Tuple[str, str]]]) -> None:
+        """
+        Say once, for each AMS _new_ams_with_no_bay found, that it has no bay and what frees one.
+
+        :param no_bay: entry -> (name, uid) of the AMS ahead of it
+        """
+        for e, ahead in no_bay.items():
+            u = _norm_uid(e.partition(":")[2])
+            if u in self._no_bay_told:
+                continue
+            self._no_bay_told.add(u)
+            self.logger.info(
+                f"{self.name}: NEW AMS on the chain: {e} -- "
+                f"recorded, but it has no bay: "
+                + self._all_ams_bays_held(u, ahead, live=True))
+
+    def _announce_enrolled(self, entries: List[str]) -> None:
+        """
+        Log the units just recorded on a pooled chain.
+
+        :param entries: the roster entries just recorded, `<model>:<uid>`
+        """
+        on_bay = {_norm_uid(pu.get("bound")) for pu in self._pool_units}
+        on_spare = {_norm_uid(pu.get("bound")) for pu in self._pool_units
+                    if pu.get("spare")}
+        uids = [_norm_uid(e.partition(":")[2]) for e in entries]
+        waiting = [u for u in uids
+                   if u not in on_bay and u not in self._no_bay_told]
+        placed = [u for u in uids if u in on_spare]
+        text = (f"{self.name}: NEW unit(s) on the chain: "
+                f"{', '.join(entries)} -- recorded.")
+        if len(waiting) == 1:
+            text += f" {waiting[0]} has no bay yet and takes the next free one of its family."
+        elif waiting:
+            text += (f" {', '.join(waiting)} have no bay yet and take the "
+                     f"next free ones of their family.")
+        if (placed
+            and waiting):
+            text += (f" A restart adds the temperature card{'s' if len(placed) > 1 else ''} of "
+                     f"{', '.join(placed)}.")
+        elif placed:
+            text += (" A restart adds its temperature card."
+                     if len(placed) == 1
+                     else " A restart adds their temperature cards.")
+        self.logger.info(text)
+
+    def _save_refusal(self, pu: Dict[str, Any], uid: str,
+                      recorded: Optional[set] = None) -> Optional[Tuple[str, str, bool]]:
+        """
+        Why ``uid`` cannot be saved on bay ``pu`` (see _pin_recorded_units).
+
+        :param pu: pool unit record
+        :param uid: the uid on it
+        :param recorded: the recorded uids; read when not given
+        :return tuple: (reason, text, True for a warning), or None when it can be saved there
+        """
+        name = pu["name"]
+        saved = getattr(self, "_name_map", {}).get(uid)
+        if (saved not in (None, name)
+            and any(p.get("name") == saved for p in self._pool_units)):
+            return ("elsewhere", f"{uid} is on {name} this session, not on {saved}, the "
+                    f"bay it is saved on; it comes back to {saved} after a restart.", False)
+        model = self._model_for_uid(uid)
+        fam = (("ht" if model in _HT_MODELS_BB else "ams") if model
+               else pu["family"])
+        if fam != pu["family"]:
+            return ("family", f"{uid} is recorded as {model} but is on "
+                    f"{pu['family'].upper()} bay {name}; not saving it. "
+                    f"AFC_BRIDGEBOX_UNASSIGN CHAIN={self.name} UID={uid} "
+                    f"FORCE=1 re-homes it.", True)
+        holder = self._name_holder(name, uid, recorded)
+        if holder:
+            return ("holder", f"{name} is saved for {holder}, so {uid} is not saved on "
+                    f"it. AFC_BRIDGEBOX_FORGET CHAIN={self.name} "
+                    f"UID={holder} or AFC_BRIDGEBOX_UNASSIGN "
+                    f"CHAIN={self.name} UID={holder}, or AFC_BRIDGEBOX_ASSIGN "
+                    f"CHAIN={self.name} UID={uid} NAME=<other bay> moves "
+                    f"{uid} to another bay.", True)
+        return None
+
+    def _pin_recorded_units(self, recorded: set, eventtime: float,
+                            online_since: Dict[str, float]) -> None:
+        """
+        Save the bay of each recorded unit that holds one, so a restart brings it back on the same
+        bay, lanes and T#.
+
+        :param recorded: the uids that get a bay of their own at restart
+        :param eventtime: reactor time
+        :param online_since: uid -> start of its continuous online run
+        """
+        warned = getattr(self, "_pin_warned", None)
+        if warned is None:
+            warned = self._pin_warned = set()
+        for pu in sorted(getattr(self, "_pool_units", []), key=_pool_laneno):
+            uid = _norm_uid(pu.get("bound"))
+            if (not uid
+                or uid not in recorded
+                or uid not in online_since
+                or eventtime - online_since[uid] < self.enroll_grace):
+                continue
+            name = pu["name"]
+            if self._name_map.get(uid) == name:
+                continue
+            refusal = self._save_refusal(pu, uid, recorded)
+            if refusal is not None:
+                reason, text, warn = refusal
+                if (uid, name, reason) not in warned:
+                    warned.add((uid, name, reason))
+                    (self.logger.warning if warn else self.logger.info)(
+                        f"{self.name}: {text}")
+                continue
+            model = self._model_for_uid(uid)
+            first = int("".join(c for c in pu["lanes"][0] if c.isdigit()))
+            span = len(pu["lanes"])
+            self._persist_pin(uid, first, span, name, model or (
+                "ht" if pu["family"] == "ht" else "boxed"))
+            pu["uid"] = uid
+            routine_info(self.logger, f"{self.name}: saved {uid} on {name} "
+                                      f"({self._lanes_text(first, span)}); it comes back there "
+                                      f"after a restart.")
+
+    def _release_pool_unit(self, uid: str, gcmd: Union[GCodeCommand, Literal["callback"]],
+                           why: Optional[str] = None) -> None:
+        """
+        Release the pool unit bound to ``uid``: the hot-unplug half.
+
+        :param uid: the UID of the unit to release
+        :param gcmd: command context the toolhead record is cleared through
+        :param why: the command releasing it; None for an unplug
+        """
+        uid = _norm_uid(uid)
+        afc = self.printer.lookup_object("AFC", None)
+        held = getattr(self, "_drop_held", None)
+        if held is not None:
+            held.discard(uid)
+        for pu in getattr(self, "_pool_units", []):
+            if pu.get("bound") != uid:
+                continue
+            gcode = self.printer.lookup_object("gcode", None)
+            # Taken while the lanes are still registered and mapped, and before a toolhead record is
+            # cleared from them.
+            recs = self._bay_records(pu)
+            cleared = []
+            for lname in pu["lanes"]:
+                lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+                if (lane is None
+                    or getattr(lane, "unassigned", True)):
+                    continue
+                # Drop this lane's T#s, or TcmdAssign pushes the re-claim onto the next free set.
+                cmds = set(getattr(lane, "map", None) or [])
+                if afc is not None:
+                    for m, owner in list(afc.tool_cmds.items()):
+                        if owner == lane.name:
+                            cmds.add(m)
+                            afc.tool_cmds.pop(m, None)
+                for cmd in cmds:
+                    if (cmd
+                        and cmd != "NONE"
+                        and gcode is not None):
+                        try: gcode.register_command(cmd, None)
+                        except Exception: pass
+                try:
+                    if unset_tool_loaded(lane, gcmd, afc):
+                        cleared.append(lane.name)
+                except Exception: pass
+                try: deactivate_to_pool(lane)
+                except Exception: pass
+            unit = self.printer.lookup_object(f"AFC_BambuAMS {pu['name']}", None)
+            if unit is not None:
+                try: unit.release()
+                except Exception: pass
+            pu["bound"] = None
+            getattr(self, "_away", {}).pop(uid, None)
+            if recs:
+                self._held = getattr(self, "_held", None) or {}
+                self._held[pu["name"]] = {"uid": uid, "lanes": recs}
+            # Save lane_loaded cleared, or the next boot restores the pooled lane as loaded.
+            if (cleared
+                and afc is not None):
+                try: afc.save_vars()
+                except Exception: pass
+            held_bay = self._bay_held(pu)
+            if not held_bay:
+                pu["uid"] = None
+            self.logger.info(
+                f"{self.name}: released {pu['name']} (UID {uid}"
+                + (f", {why}" if why
+                   else f" offline >{self.release_grace:.0f}s")
+                + "); lanes dropped live"
+                + (", slot kept for re-plug" if held_bay and not why else "")
+                + (f"; cleared {', '.join(cleared)} from the toolhead"
+                   if cleared else ""))
+            return
+
+    def _bay_records(self, pu: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """
+        The lane records a release holds for its unit's next claim of the bay.
+
+        :param pu: the pool bay being released
+        :return dict: lane name -> record
+        """
+        recs: Dict[str, Dict[str, Any]] = {}
+        for lname in pu["lanes"]:
+            lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+            if (lane is None
+                or getattr(lane, "unassigned", True)):
+                continue
+            try:
+                rec = copy.deepcopy(lane.get_status(save_to_file=True))
+            except Exception:
+                continue
+            if (isinstance(rec, dict)
+                and rec):
+                recs[lname] = rec
+        return recs
+
+    def _last_bay(self, uid: str, family: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        The free pool bay ``uid`` was last claimed onto, if any (see _set_bay_owner).
+
+        :param uid: a unit uid
+        :param family: "ams" or "ht" to require that family, None for either
+        :return dict: the bay, when it is unbound and reserved for no unit
+        """
+        uid = _norm_uid(uid)
+        owners = self._owners()
+        return next((pu for pu in getattr(self, "_pool_units", None) or []
+                     if pu.get("bound") is None
+                        and pu.get("uid") is None
+                        and (family is None or pu.get("family") == family)
+                        and owners.get(pu.get("name")) == uid), None)
+
+    def _live_access_tracking(self, config: Any = None) -> dict:
+        """
+        The printer's own config access-tracking dict, or a throwaway.
+
+        :param config: this section's wrapper, when there is one
+        :return dict: the live tracking dict, or a fresh one if not found
+        """
+        try:
+            cf = self.printer.lookup_object("configfile", None)
+            for owner in (config, getattr(cf, "validate", None), cf):
+                at = getattr(owner, "access_tracking", None)
+                if isinstance(at, dict):
+                    return at
+        except Exception as e:
+            self.logger.debug(f"{self.name}: no access tracking to share "
+                              f"({e}); fabricated sections stay out of configfile.settings")
+        return {}
+
+    def _claim_pool_unit(self, uid: str, model: str,
+                         gcmd: Union[GCodeCommand, Literal["callback"]]) -> Any:
+        """
+        Bind a free pool unit to ``uid`` and bring it fully online, live.
+
+        :param uid: the new physical AMS's UID
+        :param model: its generation tag (ht/ams1/ams2/boxed)
+        :param gcmd: command context a lane re-synced to its extruder runs through
+        :return object: the claimed unit object, or None if none was free/possible
+        """
+        uid = _norm_uid(uid)
+        if not uid:
+            return None
+        afc = self.printer.lookup_object("AFC", None)
+        if afc is None:
+            return None
+        if not self._prep_settled():
+            return None
+        try:
+            self._pack_after_forget()
+        except Exception:
+            pass
+        pools = getattr(self, "_pool_units", [])
+        if any(pu.get("bound") == uid for pu in pools):
+            return None
+        family = "ht" if model == "ht" else "ams"
+        # Prefer the slot this uid owns, else the next free spare of its family.
+        chosen = next((pu for pu in pools
+                       if pu.get("bound") is None and pu.get("uid") == uid),
+                      None)
+        adopted = False
+        if chosen is None:
+            free = [pu for pu in pools
+                    if pu.get("bound") is None
+                       and pu.get("uid") is None
+                       and pu.get("family") == family]
+            names = getattr(self, "_name_map", {})
+            chosen = next((pu for pu in free
+                           if pu.get("name") == names.get(uid)), None)
+            if (chosen is None
+                and free):
+                recorded = self._recorded_uids()
+                waiting = (set(getattr(self, "_online_since", None) or ())
+                           - {_norm_uid(pu.get("bound")) for pu in pools})
+                taken = {n for u, n in names.items()
+                         if u != uid and (u in recorded or u in waiting)}
+                last = self._last_bay(uid, family)
+                if (last is not None
+                    and last.get("name") not in taken):
+                    chosen = last
+                else:
+                    chosen = next((pu for pu in free
+                                   if pu.get("name") not in taken), free[0])
+            if chosen is not None:
+                chosen["uid"] = uid
+                adopted = True
+        if chosen is None:
+            # The watch retries every tick.
+            self._no_bay[uid] = model
+            if uid not in self._no_bay_told:
+                self._no_bay_told.add(uid)
+                self.logger.warning(self._no_bay_message(uid, family))
+            return None
+        unit = self.printer.lookup_object(f"AFC_BambuAMS {chosen['name']}", None)
+        if (unit is None
+            or not getattr(unit, "pool", False)):
+            if adopted:
+                chosen["uid"] = None
+            return None
+        held = self._held_for(uid, chosen["name"])
+        # Lanes get their T# only after the claim succeeds (see _map_claimed_lanes).
+        live = getattr(afc, "lanes", None) or {}
+        for lname in chosen["lanes"]:
+            lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+            if lane is None:
+                continue
+            for m in list(getattr(lane, "map", None) or []):
+                if afc.tool_cmds.get(m) not in live:
+                    afc.tool_cmds.pop(m, None)
+            for m, owner in list(afc.tool_cmds.items()):
+                if owner == lname:
+                    afc.tool_cmds.pop(m, None)
+            lane.map = []
+            lane._map = []
+            lane.current_map = ""
+        activated = []
+        for lname in chosen["lanes"]:
+            lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+            if lane is None:
+                continue
+            try:
+                activate_from_pool(lane)
+                activated.append(lane)
+            except Exception as ex:
+                self.logger.warning(f"{self.name}: pool lane {lname} "
+                                    f"activate failed: {ex}")
+        # The unit never parsed a section naming this master, so this is its only way back.
+        try: unit.set_master(self)
+        except Exception: pass
+        # Before claim(), so the held records are on the lanes before any save.
+        hold = getattr(unit, "hold_lanes", None)
+        if callable(hold):
+            try: hold(held)
+            except Exception: pass
+        # Before claim(): the index adoption the claim starts sends it to the firmware.
+        self._apply_model_measure(unit, model)
+        self._claim_plans = self._claim_map_plans(activated, held)
+        if not unit.claim(uid, model, gcmd):
+            self._claim_plans = {}
+            for lane in activated:
+                try: deactivate_to_pool(lane)
+                except Exception: pass
+            if callable(hold):
+                try: hold({})
+                except Exception: pass
+            if adopted:
+                chosen["uid"] = None
+            return None
+        # TcmdAssign saves the vars, and AFC.var.unit must not hold this unit's lanes under a bay
+        # recorded as another's.
+        self._set_bay_owner(chosen["name"], uid)
+        try:
+            self._map_claimed_lanes(afc, activated, held, take_macros=not self._is_printing())
+        finally:
+            self._claim_plans = {}
+        # As PREP's lane test sends it for every lane it walks.
+        for lane in activated:
+            push = getattr(lane, "send_lane_data", None)
+            if callable(push):
+                try: push()
+                except Exception: pass
+        try: afc.save_vars()
+        except Exception: pass
+        self._clear_standalone(activated)
+        chosen["bound"] = uid
+        self._no_bay_told.discard(uid)
+        self._no_bay.pop(uid, None)
+        self._replace_offered.discard(uid)
+        self._apply_model_dryer(unit, model)
+        self._apply_learned(unit, uid, model)
+        self.logger.info(f"{self.name}: CLAIMED {uid} as {model} onto "
+                         f"{chosen['name']} ({len(activated)} lanes) -- live, no restart.")
+        return unit
+
+    @staticmethod
+    def _claim_map_plans(lanes: List[Any],
+                         held: Dict[str, Dict[str, Any]]) -> Dict[str, Optional[Tuple[str, str]]]:
+        """
+        The map each lane a claim registers comes back with at a restart before the claim maps it
+        (see _unmapped_maps).
+
+        :param lanes: the lanes the claim activated
+        :param held: lane name -> record handed to this claim
+        :return dict: lane name -> (map, current_map) as save_vars writes them, the record's saved
+        map; None for a lane with no saved map, which gets the next unused T# then; none for a lane
+        whose record saved NONE, which is what it comes back with
+        """
+        plans: Dict[str, Optional[Tuple[str, str]]] = {}
+        for lane in lanes:
+            rec = held.get(lane.name) or {}
+            saved = _parse_map(rec.get("map"))
+            if saved:
+                cur = rec.get("current_map")
+                plans[lane.name] = (", ".join(saved), cur if cur in saved else saved[0])
+            elif not rec.get("map"):
+                plans[lane.name] = None
+        return plans
+
+    def _restart_roster(self) -> List[Tuple[str, str]]:
+        """
+        The roster a restart builds from, in order.
+
+        :return list: (model, uid) pairs from the roster: option when set, else the recorded roster
+        """
+        if self._roster_source == "option":
+            return [(u["model"], u["uid"]) for u in self.units]
+        raw = self._state_get(self._BASE_SECTION + " " + self.name, "roster") or ""
+        out = []
+        for e in raw.split(","):
+            m, _sep, u = e.partition(":")
+            if u.strip():
+                out.append((m.strip().lower(), _norm_uid(u)))
+        return out
+
+    def _ams_ahead(self, uid: str) -> List[Tuple[str, str]]:
+        """
+        The AMS a restart gives the AMS bays to before ``uid``, in the order pass 1b of
+        _roster_sections names them: saved names first, then recorded lanes, then roster order,
+        where a uid the roster does not list comes last.
+
+        :param uid: an AMS uid
+        :return list: (name, uid) of at most _MAX_AMS_BAYS units, name "" for one not yet named;
+        that many means a restart builds ``uid`` no AMS bay
+        """
+        uid = _norm_uid(uid)
+        roster = self._restart_roster()
+        order = [u for _m, u in roster]
+        pos = order.index(uid) if uid in order else len(order)
+        ranked = []
+        for i, (model, u) in enumerate(roster):
+            if (u == uid
+                or model in _HT_MODELS_BB):
+                continue
+            tier = (0 if u in self._name_map
+                    else 1 if u in self._lane_map else 2)
+            if (tier < 2
+                or i < pos):
+                ranked.append((tier, i, u))
+        return [(self._name_map.get(u, ""), u)
+                for _t, _i, u in sorted(ranked)[:_MAX_AMS_BAYS]]
+
+    def _no_bay_message(self, uid: str, family: str) -> str:
+        """
+        The console line for a unit that finds no free bay of its family.
+
+        :param uid: the waiting unit's uid
+        :param family: "ams" or "ht"
+        :return str: the message
+        """
+        if family == "ams":
+            ahead = self._ams_ahead(uid)
+            if len(ahead) >= _MAX_AMS_BAYS:
+                return (f"{self.name}: AMS {uid} has no bay: "
+                        + self._all_ams_bays_held(uid, ahead, live=True))
+        pools = sorted(getattr(self, "_pool_units", []), key=_pool_laneno)
+        ams = [pu for pu in pools if pu.get("family") == "ams"]
+        fam, pool = (("HT", "pool_ht") if family == "ht"
+                     else ("AMS", "pool_ams"))
+        head = (f"{self.name}: new {fam} {uid} has no free "
+                f"bay: every {fam} bay built belongs to a known unit.")
+        if self._unlisted(uid):
+            return (f"{head} roster: is set and does not list it: add "
+                    f"{self._roster_entry(uid)} to roster: and RESTART to give it a bay.")
+        if (family == "ams"
+            and len(ams) >= _MAX_AMS_BAYS):
+            return (f"{self.name}: AMS {uid} has no bay: "
+                    + self._all_ams_bays_held(uid, [
+                        (pu["name"],
+                         _norm_uid(pu.get("uid") or pu.get("bound")))
+                        for pu in ams], live=True))
+        offline = (self._held_offline(family)
+                   if (self.pool_ams or self.pool_ht)
+                   and self._roster_source != "option" else [])
+        units = [(pu["name"], _norm_uid(pu["uid"])) for pu in offline]
+        forget = f"AFC_BRIDGEBOX_FORGET CHAIN={self.name} UID="
+        if len(units) == 1:
+            head += (f" {units[0][0]} ({units[0][1]}) is offline: if this "
+                     f"{fam} replaces it, {forget}{units[0][1]}"
+                     f"{self._loaded_clause(offline[0])} frees that bay and "
+                     f"this {fam} claims it live.")
+        elif units:
+            head += (f" Offline: {', '.join(f'{n} ({u})' for n, u in units)}."
+                     f" If this {fam} replaces one of them, {forget}<that "
+                     f"unit's uid> frees that bay and this {fam} claims it live.")
+        head += self._replace_text(uid, offline)
+        moves = ""
+        if (family == "ams"
+            and any(pu.get("family") == "ht" for pu in pools)):
+            held = {(_pool_laneno(pu) - self.lane_base) // 4 for pu in ams}
+            rank = min((r for r in range(_MAX_AMS_BAYS) if r not in held), default=None)
+            grow = (0 if rank is None
+                    else rank + 1 - getattr(self, "_ams_band", rank + 1))
+            if grow > 0:
+                moves = f", past the AMS band, which moves the HT lanes up {grow * 4}"
+        return (f"{head} Once it is recorded, RESTART builds it one{moves}; "
+                f"raise {pool} to keep spare {fam} bays for units plugged in "
+                f"live"
+                + (f" (at most {_MAX_AMS_BAYS} AMS)." if family == "ams"
+                   else "."))
+
+    def loaded_lane_moved(self, lane_name: str) -> bool:
+        """
+        Whether AFC's loaded-lane record for ``lane_name`` belongs to another unit than the one
+        holding the lane in this layout.
+
+        :param lane_name: an AFC lane name
+        :return bool: True while the record is the old unit's
+        """
+        return lane_name in (getattr(self, "_lane_moves", None) or {})
+
+    def bay_records_uid(self, bay: str) -> Optional[str]:
+        """
+        Which unit a pool bay's saved lane records are attributed to.
+
+        :param bay: the pool bay's name
+        :return str: the uid the records are held for, else the one bay_owner names for the bay;
+        None when neither names one
+        """
+        entry = (getattr(self, "_held", None) or {}).get(bay) or {}
+        return (_norm_uid(entry.get("uid"))
+                or self._owners().get(bay)
+                or None)
+
+    def _check_moved_loaded(self) -> None:
+        """
+        Once PREP has restored AFC's loaded-lane records, warn once per lane about an extruder that
+        records a lane this boot gave to another unit, and stop tracking every moved lane no
+        extruder records.
+
+        :return None: runs every watch tick; a no-op with no moved lanes
+        """
+        moves = getattr(self, "_lane_moves", None)
+        if not moves:
+            return
+        afc = self.printer.lookup_object("AFC", None)
+        if (afc is None
+            or not getattr(afc, "prep_done", False)):
+            return
+        loaded: Dict[str, List[str]] = {}
+        for ext_name, ext in (getattr(afc, "tools", None) or {}).items():
+            ln = getattr(ext, "lane_loaded", None)
+            if (isinstance(ln, str)
+                and ln in moves):
+                loaded.setdefault(ln, []).append(ext_name)
+        told: Set[str] = getattr(self, "_moved_told", None) or set()
+        self._moved_told = told
+        for ln in list(moves):
+            if ln not in loaded:
+                del moves[ln]
+                told.discard(ln)
+                continue
+            if ln in told:
+                continue
+            told.add(ln)
+            mv = moves[ln]
+            fam = "HT" if mv["family"] == "ht" else "AMS"
+            was = f"{fam} {mv['uid']}" + (f" ({mv['name']})" if mv["name"]
+                                          else "")
+            exts = " and ".join(loaded[ln])
+            self.logger.warning(
+                f"{self.name}: {exts} records {ln} as loaded, "
+                f"but {ln} belonged to {was}, and this boot's layout gives it "
+                f"to {mv['now'] or 'no bay'}. The filament in {exts} is from "
+                f"{mv['uid']}"
+                + (f", so {mv['now']} leaves its follower off on {ln}"
+                   if mv["now"] else "")
+                + ". Unload that filament by hand and run "
+                + self._unset_hint([ln]) + " to clear the record.")
+
+    def _map_claimed_lanes(self, afc: Any, lanes: List[Any], held: Dict[str, Dict[str, Any]],
+                           take_macros: bool = True) -> None:
+        """
+        Give each lane a claim activated its T# map, and register it.
+
+        :param afc: the AFC object
+        :param lanes: the lanes the claim activated, in slot order
+        :param held: lane name -> record handed to this claim
+        :param take_macros: False during a print (see _plan_lane_map)
+        """
+        def _warn(msg: str) -> None:
+            """
+            Log a warning about one lane's map.
+
+            :param msg: the warning
+            """
+            self.logger.warning(f"{self.name}: {msg}")
+
+        def _assign(lane: Any, maps: List[str], current: str) -> None:
+            """
+            Set one lane's map and register its T#s.
+
+            :param lane: the lane
+            :param maps: its map
+            :param current: its current_map
+            """
+            lane.map, lane._map, lane.current_map = maps, [], current
+            try:
+                assign_pool_tcmd(lane, afc)
+            except Exception as ex:
+                self.logger.warning(f"{self.name}: TcmdAssign {lane.name} "
+                                    f"failed: {ex}")
+            (getattr(self, "_claim_plans", None) or {}).pop(lane.name, None)
+
+        stand_ins = self._take_back_from_stand_ins(afc, lanes, held)
+        unmapped = []
+        for lane in lanes:
+            rec = held.get(lane.name) or {}
+            maps, current = _plan_lane_map(afc, lane.name, rec, _warn, take_macros)
+            if maps:
+                _assign(lane, maps, current)
+            else:
+                unmapped.append((lane, bool(_parse_map(rec.get("map")))))
+        for lane, dropped in unmapped:
+            cmd = self._next_tool(afc)
+            if (dropped
+                or not cmd):
+                _warn(f"{lane.name} is on {cmd} now" if cmd else
+                      f"{lane.name} has no T# -- T0-T98 are all held; use "
+                      "SET_MAP")
+            _assign(lane, [cmd] if cmd else ["NONE"], cmd or "")
+        # A stand-in left with no T# takes the next unused one, after this claim's lanes.
+        for stand_in in stand_ins:
+            if not [m for m in stand_in.map if m != "NONE"]:
+                cmd = self._next_tool(afc)
+                _assign(stand_in, [cmd] if cmd else ["NONE"], cmd or "")
+
+    def _take_back_from_stand_ins(self, afc: Any, lanes: List[Any],
+                                  held: Dict[str, Dict[str, Any]]) -> List[Any]:
+        """
+        Free the saved T#s a waiting extruder's stand-in lane took at ready.
+
+        :param afc: the AFC object
+        :param lanes: the lanes the claim activated
+        :param held: lane name -> record handed to this claim
+        :return list: the stand-in lanes that gave up a T#
+        """
+        out: List[Any] = []
+        for lane in lanes:
+            rec = held.get(lane.name) or {}
+            for cmd in _parse_map(rec.get("map")):
+                holder = (getattr(afc, "lanes", None) or {}).get(_tcmd_holder(afc, cmd) or "")
+                ext = getattr(holder, "extruder_obj", None)
+                pending = getattr(ext, "_lanes_pending", None)
+                if (holder is None
+                    or getattr(ext, "tc_lane", None) is not holder
+                    or not getattr(ext, "no_lanes", False)
+                    or holder.name == getattr(afc, "current", None)
+                    or not callable(pending)
+                    or not pending()):
+                    continue
+                holder.map = [m for m in holder.map if m != cmd]
+                if holder.current_map == cmd:
+                    holder.current_map = holder.map[0] if holder.map else ""
+                afc.tool_cmds.pop(cmd, None)
+                self.logger.debug(f"{self.name}: {lane.name} takes back its saved "
+                                  f"{cmd} from {holder.name}, which waits for its own pool lanes")
+                if holder not in out:
+                    out.append(holder)
+        return out
+
+    def _reserved_tools(self) -> Set[str]:
+        """
+        The T#s saved for known units that are not claimed now.
+
+        :return set: the T# names
+        """
+        out: Set[str] = set()
+        try:
+            chains = [obj for _name, obj
+                      in self.printer.lookup_objects(self._BASE_SECTION)
+                      if isinstance(obj, afcBridgeBox)]
+        except Exception:
+            chains = []
+        for chain in chains or [self]:
+            held = getattr(chain, "_held", None) or {}
+            for pu in getattr(chain, "_pool_units", None) or []:
+                entry = held.get(pu.get("name")) or {}
+                if (pu.get("bound") is not None
+                    or not chain._bay_held(pu)
+                    or _norm_uid(entry.get("uid")) != _norm_uid(pu.get("uid"))):
+                    continue
+                for rec in (entry.get("lanes") or {}).values():
+                    if isinstance(rec, dict):
+                        out.update(_parse_map(rec.get("map")))
+        return out
+
+    _PACK_KEY = "pack_tools"
+
+    def _pack_after_forget(self) -> None:
+        """
+        Pack the Bambu T#s down into the ones a forget freed, once a start.
+        """
+        if getattr(self, "_pack_checked", False):
+            return
+        afc = self.printer.lookup_object("AFC", None)
+        if (afc is None
+            or not getattr(afc, "prep_done", False)):
+            return
+        try:
+            chains = [obj for _name, obj
+                      in self.printer.lookup_objects(self._BASE_SECTION)
+                      if isinstance(obj, afcBridgeBox)]
+        except Exception:
+            chains = []
+        chains = chains or [self]
+        for chain in chains:
+            chain._pack_checked = True
+        flagged = [chain for chain in chains
+                   if chain._state_get(f"{self._BASE_SECTION} {chain.name}",
+                                       self._PACK_KEY)]
+        if (not flagged
+            or any(pu.get("bound") for chain in chains
+                   for pu in getattr(chain, "_pool_units", None) or [])):
+            return
+        recs = [rec for chain in chains
+                for entry in (getattr(chain, "_held", None) or {}).values()
+                for rec in (entry.get("lanes") or {}).values()
+                if isinstance(rec, dict)]
+        taken = {cmd for cmd, handler in _tcmd_handlers(afc).items()
+                 if not _tcmd_is_ours(afc, handler)}
+        for lane in (getattr(afc, "lanes", None) or {}).values():
+            taken.update(getattr(lane, "map", None) or [])
+            taken.update(getattr(lane, "_map", None) or [])
+        tools = {cmd for rec in recs for cmd in _parse_map(rec.get("map"))}
+        moves = _pack_tools(tools - taken, taken)
+        for rec in recs:
+            maps = _parse_map(rec.get("map"))
+            if not any(cmd in moves for cmd in maps):
+                continue
+            maps = [moves.get(cmd, cmd) for cmd in maps]
+            rec["map"] = (maps if isinstance(rec["map"], (list, tuple))
+                          else ", ".join(maps))
+            cur = moves.get(rec.get("current_map"), rec.get("current_map"))
+            rec["current_map"] = cur if cur in maps else maps[0]
+        if moves:
+            try:
+                afc.save_vars()
+            except Exception:
+                pass
+            self.logger.info(
+                f"{self.name}: a unit was forgotten, so the "
+                f"Bambu T#s pack down: "
+                + ", ".join(f"{old} -> {new}" for old, new in moves.items()))
+        for chain in flagged:
+            sec = f"{self._BASE_SECTION} {chain.name}"
+            cp = chain._read_state()
+            if (cp.has_section(sec)
+                and cp.remove_option(sec, self._PACK_KEY)):
+                chain._write_state(cp)
+
+    def _next_tool(self, afc: Any) -> Optional[str]:
+        """
+        The next unused T#, for a claimed lane with no saved map.
+
+        :param afc: the AFC object
+        :return str: the T# name, or None when none of T0-T98 is free
+        """
+        handlers = _tcmd_handlers(afc)
+        taken = self._reserved_tools()
+        for ln in (getattr(afc, "lanes", None) or {}).values():
+            taken.update(getattr(ln, "map", None) or [])
+            taken.update(getattr(ln, "_map", None) or [])
+        for n in range(99):
+            cmd = f"T{n}"
+            if (cmd in taken
+                or _tcmd_holder(afc, cmd) is not None):
+                continue
+            handler = handlers.get(cmd)
+            if (handler is not None
+                and not _tcmd_is_ours(afc, handler)):
+                continue
+            return cmd
+        return None
+
+    def _clear_standalone(self, lanes: list) -> None:
+        """
+        Take the extruder out of standalone mode once a live claim gives it lanes.
+
+        :param lanes: the lanes the claim just activated
+        """
+        seen = set()
+        for lane in lanes:
+            ext = getattr(lane, "extruder_obj", None)
+            if (ext is None
+                or id(ext) in seen):
+                continue
+            seen.add(id(ext))
+            if not getattr(ext, "no_lanes", False):
+                continue
+            tc = getattr(ext, "tc_lane", None)
+            if (tc is not None
+                and tc.name in getattr(ext, "lanes", {})):
+                continue
+            ext.no_lanes = False
+            self.logger.debug(f"{self.name}: {ext.name} left standalone mode "
+                              f"(claimed lanes attached)")
+
+    #: An AMS 2 answers 0x3702 within ~1.5 s and an AMS 1 never does.
+    _AMS1_ASK_FLOOR = 12
+
+    def _refine_models(self, snap: Dict[str, Any], online_idx: set, entries: List[str],
+                       sec: str) -> List[str]:
+        """
+        Confirm `boxed` roster entries' generation from the bus dialect.
+
+        :param snap: the tick's _chain_snapshot
+        :param online_idx: chain indices the tick's status reads online
+        :param entries: the recorded roster, parsed to entry strings
+        :param sec: the state section holding the roster
+        :return list: the entries, refined where the bus was decisive
+        """
+        a2mask, a2asks = snap["a2mask"], snap["a2asks"]
+        htmask = snap["htmask"]
+        idx_by_uid = {_norm_uid(u): i
+                      for i, u in enumerate(snap["uids"]) if (u or "").strip()}
+        refined: List[str] = []
+        changed = []
+        told: List[Any] = []
+        for e in entries:
+            model, _sep, uid = e.partition(":")
+            uid = _norm_uid(uid)
+            i = idx_by_uid.get(uid)
+            if (model.strip().lower() != "boxed"
+                or i is None
+                or htmask >> i & 1):
+                refined.append(e)
+                continue
+            if a2mask >> i & 1:
+                new = "ams2"
+            elif (i in online_idx
+                  and i < len(a2asks)
+                  and a2asks[i] >= self._AMS1_ASK_FLOOR):
+                new = "ams1"
+            else:
+                refined.append(e)
+                continue
+            refined.append(f"{new}:{uid}")
+            changed.append(f"{uid} -> {new}")
+            # Live: ams2 gains the heater, ams1 moves the firmware to the AMS 1 vocabulary.
+            told += self._apply_model_live(uid, new, i)
+        # The table is saved once per tick, never mid-print.
+        saved = False
+        if (told
+            and not self._is_printing()):
+            try:
+                told[-1]._send_bindings(told[-1]._bridge)
+                saved = True
+            except Exception:
+                pass
+        if changed:
+            self._state_set({sec: {"roster": ", ".join(refined)}})
+            self.logger.debug(
+                f"{self.name}: generation confirmed by bus "
+                f"dialect (0x3702): {', '.join(changed)} -- applied to the "
+                f"running unit and recorded. Lanes and names do not move."
+                + (" The bridge has it in RAM and saves it at the next "
+                   "connect (no flash write mid-print)."
+                   if told and not saved else ""))
+        return refined
+
+    def hold_id_save(self, unit: Any) -> bool:
+        """
+        Whether a claimed unit must leave the binding table in RAM for now.
+
+        :param unit: the AFC_BambuAMS unit about to send its bindings
+        :return bool: True when the save is held and the caller must not save
+        """
+        if not self._is_printing():
+            return False
+        first = getattr(self, "_ids_held", None) is None
+        self._ids_held = unit
+        if first:
+            try:
+                self.logger.debug(f"{self.name}: {getattr(unit, 'name', '?')} "
+                                  f"bound in the bridge's RAM; the table is saved when the "
+                                  f"print ends (no flash write mid-print).")
+            except Exception:
+                pass
+        return True
+
+    def _save_held_ids(self, bridge: Any) -> None:
+        """
+        Make the binding-table save held back by hold_id_save.
+
+        :param bridge: the chain's bridge
+        """
+        unit = getattr(self, "_ids_held", None)
+        if (unit is None
+            or self._is_printing()):
+            return
+        self._ids_held = None
+        try:
+            unit._send_bindings(bridge)
+        except Exception:
+            pass
+
+    #: Options a model override may re-apply to a live unit.
+    _LATE_MODEL_KEYS = frozenset({"measure_on_insert"})
+
+    def _reapply_model_override(self, obj: Any, model: str, index: Optional[int] = None,
+                                persist: bool = True) -> None:
+        """
+        Re-apply a ``[AFC_BridgeBox <model>]`` override once the model is known.
+
+        :param obj: the live AFC_BambuAMS unit object
+        :param model: the now-known canonical model tag
+        :param index: the chain index the caller's evidence was read at, if any (see _may_tell)
+        :param persist: passed to _send_ht_flag; False when the caller saves the binding table
+        itself
+        """
+        ov = (getattr(self, "_overrides", None) or {}).get("model:" + _norm_model(model))
+        if not ov:
+            return
+        # Precedence: chain defaults < model < unit.
+        name = f"{self._UNIT_SECTION} {getattr(obj, 'name', '')}"
+        per_unit = (getattr(self, "_overrides", None) or {}).get(name) or {}
+        for key in self._LATE_MODEL_KEYS:
+            if (key in per_unit
+                or key not in ov):
+                continue
+            val = str(ov[key]).strip().lower() in ("1", "true", "yes", "on")
+            if bool(getattr(obj, key, False)) == val:
+                continue
+            setattr(obj, key, val)
+            self.logger.debug(f"{self.name}: {getattr(obj, 'name', '?')} is a "
+                              f"{model}; applied {key}={val} from [AFC_BridgeBox {model}] "
+                              f"(the bay was fabricated as a spare, before its model was known)")
+            # Only once the index is this unit's (see _may_tell).
+            if not self._may_tell(obj, index):
+                continue
+            try:
+                obj._send_ht_flag(obj._bridge, persist=persist)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _may_tell(obj: Any, index: Optional[int] = None) -> bool:
+        """
+        Whether index-keyed firmware commands for a unit may be sent now.
+
+        :param obj: the live AFC_BambuAMS unit object
+        :param index: the chain index the evidence was read at; None when the caller has no index of
+        its own
+        :return bool: True when the unit has a bridge, a pinned index, and (given index) holds that
+        index
+        """
+        return (getattr(obj, "_bridge", None) is not None
+                and bool(getattr(obj, "_id_resolved", False))
+                and (index is None
+                     or getattr(obj, "ams_index", None) == index))
+
+    def _unit_override(self, obj: Any, model: str, key: str) -> Optional[str]:
+        """
+        The operator's value for one unit-section option, if any sets it.
+
+        :param obj: the live AFC_BambuAMS unit object
+        :param model: the model the unit is being built as
+        :param key: the unit-section option
+        :return str: the configured value as written, or None
+        """
+        ov = getattr(self, "_overrides", None) or {}
+        for src in (ov.get(f"{self._UNIT_SECTION} {getattr(obj, 'name', '')}"),
+                    ov.get("model:" + _norm_model(model)), getattr(self, "_chain_defaults", None)):
+            if (src
+                and key in src):
+                return src[key]
+        return None
+
+    def _apply_model_dryer(self, obj: Any, model: str) -> None:
+        """
+        Give a running unit the heater flag and drying ceiling a restart would.
+
+        :param obj: the live AFC_BambuAMS unit object
+        :param model: the unit's model, now known
+        """
+        spec = _AMS_MODELS.get(model) or _AMS_MODELS["ams1"]
+        heater = spec[0]
+        raw = self._unit_override(obj, model, "heater")
+        if raw is not None:
+            heater = str(raw).strip().lower() in ("1", "true", "yes", "on")
+        obj.has_heater = heater
+        ceiling = (_dry_ceiling(getattr(self, "dry_max_temp", 0), model)
+                   if model in _HEATED_MODELS else spec[3])
+        raw = self._unit_override(obj, model, "dry_max_temp")
+        if raw is not None:
+            try:
+                ceiling = int(str(raw).strip())
+            except ValueError:
+                pass
+        obj.dry_max_temp = max(1, min(int(ceiling), DRY_TEMP_HARD_MAX))
+
+    def _apply_learned(self, obj: Any, uid: str, model: str) -> None:
+        """
+        Give a claimed unit the learned values of the uid that claimed it.
+
+        :param obj: the live AFC_BambuAMS unit object
+        :param uid: the uid it was claimed for
+        :param model: the model it was claimed as
+        """
+        apply = getattr(obj, "apply_learned", None)
+        if apply is None:
+            return
+        record = self._learned_for(uid)
+        values: Dict[str, float] = {}
+        used = []
+        for key in _LEARNED_KEYS:
+            for raw, mine in ((self._unit_override(obj, model, key), False),
+                              (record.get(key), True)):
+                val = _learned_length(raw)
+                if val is not None:
+                    values[key] = val
+                    if mine:
+                        mm = f"{val:.1f}".rstrip("0").rstrip(".")
+                        used.append(f"{key} {mm}mm")
+                    break
+        try:
+            apply(values)
+        except Exception as e:
+            self.logger.warning(f"{self.name}: learned values for "
+                                f"{getattr(obj, 'name', '?')} (UID {uid}) not applied: {e}")
+            return
+        if used:
+            self.logger.debug(f"{self.name}: {getattr(obj, 'name', '?')} "
+                              f"takes the {', '.join(used)} that UID {uid} learned.")
+
+    def _apply_model_measure(self, obj: Any, model: str) -> None:
+        """
+        Resolve measure_on_insert for the model a unit is being claimed as.
+
+        :param obj: the live AFC_BambuAMS unit object
+        :param model: the model the unit is being claimed as
+        """
+        raw = self._unit_override(obj, model, "measure_on_insert")
+        if raw is not None:
+            obj.measure_on_insert = (str(raw).strip().lower() in ("1", "true", "yes", "on"))
+        else:
+            obj.measure_on_insert = True
+
+    def _apply_model_live(self, uid: str, model: str, index: int) -> List[Any]:
+        """
+        Flip a running unit's model in place after a dialect verdict.
+
+        :param uid: the unit's 24-hex uid
+        :param model: the confirmed model tag (ams1/ams2)
+        :param index: the chain index the verdict was read at
+        :return list: the units whose firmware was told
+        """
+        told: List[Any] = []
+        try:
+            for u in self.units:
+                if u.get("uid") == uid:
+                    u["model"] = model
+            for _name, obj in self.printer.lookup_objects("AFC_BambuAMS"):
+                if str(getattr(obj, "unit_uid", "")).upper() == uid:
+                    obj.ams_model = model
+                    self._apply_model_dryer(obj, model)
+                    if self._may_tell(obj, index):
+                        obj._send_unit_model(obj._bridge)
+                        obj._send_bindings(obj._bridge, only_uid=uid, persist=False)
+                        told.append(obj)
+                    self._reapply_model_override(obj, model, index=index, persist=False)
+        except Exception:
+            pass
+        return told
+
+    def _prune_missing(self, bridge: Any, uids: List[str], entries: List[str], eventtime: float,
+                       sec: str, online_idx: Optional[set] = None) -> None:
+        """
+        Drop rostered units that have been provably gone for removal_grace.
+
+        :param bridge: the chain's bridge
+        :param uids: chain_uids(): index -> UID, empties kept
+        :param entries: the recorded roster, parsed to entry strings
+        :param eventtime: reactor time
+        :param sec: the state section holding the roster
+        :param online_idx: the tick's online chain indices; read from the bridge when not given
+        """
+        # Never prune with a pool (a re-plug keeps its named slot) or a roster: option.
+        if (self.pool_ams
+            or self.pool_ht
+            or self._roster_source == "option"):
+            self._watch_state = "watching"
+            return
+        if not self.removal_grace:
+            self._watch_state = "removal-disabled"
+            return
+        if getattr(bridge, "_serial", None) is None:
+            self._watch_state = "link-down"
+            self._missing_since.clear()
+            return
+        if online_idx is None:
+            latest = bridge.latest_status() or {}
+            online_idx = {u.get("n") for u in (latest.get("units") or [])
+                          if u.get("online")}
+        if not online_idx:
+            self._watch_state = "chain-dark"
+            self._missing_since.clear()
+            return
+        self._watch_state = "watching"
+
+        present = {_norm_uid(u)
+                   for i, u in enumerate(uids) if i in online_idx}
+        survivors: List[str] = []
+        dropped: List[str] = []
+        for e in entries:
+            uid = _norm_uid(e.partition(":")[2])
+            if uid in present:
+                self._missing_since.pop(uid, None)
+                survivors.append(e)
+                continue
+            if uid not in self._missing_since:
+                self._missing_since[uid] = eventtime
+                name = getattr(self, "_name_map", {}).get(uid, uid)
+                routine_info(self.logger, f"{self.name}: {name} ({uid}) is offline "
+                                          f"on a live chain -- if it stays gone "
+                                          f"{self.removal_grace:.0f}s it will be recorded as "
+                                          f"removed (takes effect at the next RESTART).")
+            since = self._missing_since[uid]
+            if eventtime - since < self.removal_grace:
+                survivors.append(e)
+                continue
+            self._missing_since.pop(uid, None)
+            dropped.append(e)
+        if dropped:
+            self._state_set({sec: {"roster": ", ".join(survivors)}})
+            gone = {_norm_uid(e.partition(":")[2]) for e in dropped}
+            waiting = sorted(
+                u for u in (set(self._no_bay) | set(self._no_bay_told)
+                            | set(getattr(self, "_unbayed", None) or ()))
+                if u not in gone)
+            self.logger.info(
+                f"{self.name}: unit(s) gone from the chain for "
+                f"over {self.removal_grace:.0f}s: {', '.join(dropped)} -- "
+                f"removed from the recorded roster; applies at the next "
+                f"RESTART. Their learned values are kept. Plugged back in "
+                f"before then, one keeps its lanes and name; after the "
+                f"restart they stay reserved for its return unless a new AMS "
+                f"would otherwise have no bay or push the HT lanes up"
+                + (f" ({', '.join(waiting)} is waiting for a bay and takes "
+                   f"one)" if len(waiting) == 1
+                   else f" ({', '.join(waiting)} are waiting for bays and "
+                        f"take them)" if waiting else "")
+                + f". If one is never coming back, AFC_BRIDGEBOX_FORGET "
+                  f"CHAIN={self.name} UID=<uid> frees its lanes and name for "
+                  f"reuse.")
+
+    def _pending_restart(self) -> List[str]:
+        """
+        What a restart would change in the enrollment.
+
+        :return list: human-readable diffs between the recorded roster and the running enrollment
+        """
+        raw = getattr(self, "_recorded_raw", None)
+        if (raw is None
+            or self._roster_source == "option"):
+            return []
+        try:
+            recorded = self._parse_roster(raw) if raw.strip() else []
+        except Exception:
+            return []
+        rec = {u["uid"]: u["model"] for u in recorded}
+        run = {u["uid"]: u["model"] for u in self.units}
+        out: List[str] = []
+        for uid, model in rec.items():
+            if uid not in run:
+                out.append(f"add {model}:{uid}")
+            elif run[uid] != model:
+                out.append(f"{run[uid]} -> {model}: {uid}")
+        for uid, model in run.items():
+            if uid not in rec:
+                out.append(f"remove {model}:{uid}")
+        return sorted(out)
+
+    def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Report the chain for the status API.
+
+        :param eventtime: reactor time (unused)
+        :return dict: the roster as fabricated
+        """
+        enrolled = {u["uid"] for u in self.units}
+        # A stand-in time would make up ages (0.0 gave negative ones).
+        now: Optional[float]
+        try:
+            now = self.printer.get_reactor().monotonic()
+        except Exception:
+            now = None
+        dialect: Dict[str, Any] = {}
+        try:
+            bridge = (self._chain_bridge()
+                      or getattr(self, "_bridge", None))
+            if (bridge is not None
+                and getattr(bridge, "_serial", None) is not None):
+                snap = self._chain_snapshot(bridge)
+                a2mask, a2asks = snap["a2mask"], snap["a2asks"]
+                htmask = snap["htmask"]
+                latest = bridge.latest_status() or {}
+                online = {u.get("n") for u in (latest.get("units") or [])
+                          if u.get("online")}
+                uids = snap["uids"]
+                dialect = {
+                    "ams1_ask_floor": self._AMS1_ASK_FLOOR,
+                    "chain": [
+                        {"i": i, "uid": (u or "").upper(),
+                         "online": i in online,
+                         "ht": bool(htmask >> i & 1),
+                         "answered_3702": bool(a2mask >> i & 1),
+                         "asks_3702": a2asks[i] if i < len(a2asks) else 0}
+                        for i, u in enumerate(uids) if (u or "").strip()],
+                }
+        except Exception as e:
+            dialect = {"error": str(e)}
+        # Fresh copies: Moonraker diffs against its cached result.
+        return {"units": [dict(u) for u in self.units],
+                "lane_base": self.lane_base,
+                "dialect": dialect,
+                "roster_source": self._roster_source,
+                "tombstones": sorted(
+                    set(getattr(self, "_lane_map", {})) - enrolled
+                    - {pu["bound"] for pu in getattr(self, "_pool_units", [])
+                       if pu.get("bound")}
+                    - ({_norm_uid(e.partition(":")[2]) for e in
+                        (getattr(self, "_recorded_raw", None) or "").split(",")
+                        if e.partition(":")[2].strip()}
+                       if self._roster_source != "option" else set())),
+                # Running countdowns in seconds (see _track_absence).
+                "missing": {uid: None if now is None else int(now - t)
+                            for uid, t in self._missing_since.items()
+                            if now is None
+                               or not (self.pool_ams or self.pool_ht)
+                               or now - t < self.release_grace},
+                "waiting_for_bay": sorted(self._no_bay),
+                # Roster changes land in the record and apply at the next restart.
+                "pending_restart": self._pending_restart(),
+                "watch_ticks": getattr(self, "_tick_count", 0),
+                "held_bays": {bay: e.get("uid") for bay, e in
+                              (getattr(self, "_held", None) or {}).items()},
+                "watch_state": getattr(self, "_watch_state", "not-started")}
+
+
+class BridgeBoxOverrideHolder:
+    """
+    A [AFC_BridgeBox <name>] section with no serial_port is an override carrier, not a second chain
+    master.
+    """
+
+    def __init__(self, config: Any) -> None:
+        """
+        Hold an override section, reading every option so Klipper accepts it.
+
+        :param config: the override section
+        """
+        self.name = config.get_name().split(None, 1)[-1]
+        try:
+            for opt in config.get_prefix_options(""):
+                config.get(opt)
+        except Exception:
+            pass
+
+
+def load_config_prefix(config: Any) -> Any:
+    # serial_port is the discriminator.
+    """
+    Build a chain master, or an override holder when the section has no serial_port.
+
+    :param config: the [AFC_BridgeBox <name>] section
+    :return Any: afcBridgeBox or BridgeBoxOverrideHolder
+    """
+    if config.get("serial_port", None) is None:
+        return BridgeBoxOverrideHolder(config)
+    return afcBridgeBox(config)

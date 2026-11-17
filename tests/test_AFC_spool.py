@@ -98,6 +98,7 @@ def _make_lane(name="lane1", extruder_name="extruder", extruder_index=0):
     lane.spool_id = None
     lane.runout_lane = None
     lane.spool_vendor = ""
+    lane.sub_type = ""
     lane.unit_obj = MagicMock()
     lane.hub_obj = MagicMock()
     lane.extruder_obj = MagicMock()
@@ -879,6 +880,89 @@ class TestSetMaterial:
         assert lane.filament_density == 1.24
 
 
+    def test_new_material_clears_filament_id(self):
+        spool = _make_spool()
+        lane = _make_lane("lane1")
+        lane.material = "PLA"
+        lane.filament_id = "OFDSrzZ8"
+        spool.afc.lanes = {"lane1": lane}
+        spool.cmd_SET_MATERIAL(_make_gcmd(LANE="lane1", MATERIAL="PETG"))
+        assert lane.filament_id == ""
+
+    def test_same_material_keeps_filament_id(self):
+        spool = _make_spool()
+        lane = _make_lane("lane1")
+        lane.material = "PLA"
+        lane.filament_id = "OFDSrzZ8"
+        spool.afc.lanes = {"lane1": lane}
+        spool.cmd_SET_MATERIAL(_make_gcmd(LANE="lane1", MATERIAL="PLA", DENSITY=1.24))
+        assert lane.filament_id == "OFDSrzZ8"
+
+
+class TestSetFilamentId:
+    def _lane(self, spool):
+        lane = _make_lane("lane1")
+        lane.filament_id = ""
+        spool.afc.lanes = {"lane1": lane}
+        spool.afc.save_vars = MagicMock()
+        return lane
+
+    def test_sets_sends_and_saves(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID=" OF5CgdDq "))
+        assert lane.filament_id == "OF5CgdDq"
+        lane.send_lane_data.assert_called_once_with()
+        spool.afc.save_vars.assert_called_once_with()
+        assert spool.logger.messages == []
+
+    def test_empty_id_clears(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        lane.filament_id = "GFL99"
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1"))
+        assert lane.filament_id == ""
+        lane.send_lane_data.assert_called_once_with()
+        spool.afc.save_vars.assert_called_once_with()
+        assert spool.logger.messages == []
+
+    def test_invalid_id_is_refused(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        lane.filament_id = "GFL99"
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="bad id;"))
+        assert lane.filament_id == "GFL99"
+        lane.send_lane_data.assert_not_called()
+        spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [
+            ("info", "Invalid filament id 'bad id;': use up to 64 letters, digits or _ . + -")]
+
+    def test_an_id_over_64_characters_is_refused(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="lane1", ID="A" * 65))
+        assert lane.filament_id == ""
+        spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [
+            ("info", f"Invalid filament id '{'A' * 65}': use up to 64 letters, digits or _ . + -")]
+
+    def test_unknown_lane_logs_info(self):
+        spool = _make_spool()
+        spool.afc.lanes = {}
+        spool.afc.save_vars = MagicMock()
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(LANE="ghost", ID="GFL99"))
+        spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [("info", "ghost Unknown")]
+
+    def test_no_lane_logs_info(self):
+        spool = _make_spool()
+        lane = self._lane(spool)
+        spool.cmd_SET_FILAMENT_ID(_make_gcmd(ID="GFL99"))
+        assert lane.filament_id == ""
+        spool.afc.save_vars.assert_not_called()
+        assert spool.logger.messages == [("info", "No LANE Defined")]
+
+
 # ── cmd_SET_FILAMENT_INFO ──────────────────────────────────────────────────────
 
 class TestSetFilamentInfo:
@@ -1407,12 +1491,12 @@ class TestHandleConnect:
 
 
 class TestRegisterLaneMacros:
-    def test_registers_eight_mux_commands(self):
+    def test_registers_nine_mux_commands(self):
         spool = _make_spool()
         spool.gcode.register_mux_command = MagicMock()
         lane = _make_lane("lane1")
         spool.register_lane_macros(lane)
-        assert spool.gcode.register_mux_command.call_count == 8
+        assert spool.gcode.register_mux_command.call_count == 9
 
     def test_all_commands_use_correct_lane_name(self):
         spool = _make_spool()
@@ -1500,8 +1584,10 @@ class TestClearValues:
         lane.weight = 500
         lane.extruder_temp = 210
         lane.bed_temp = 60
+        lane.filament_id = "OF5CgdDq"
         lane.clear_lane_data = MagicMock()
         spool.clear_values(lane)
+        assert lane.filament_id == ""
         assert lane.spool_id is None
         assert lane.material == ""
         assert lane.color == ""
@@ -1637,6 +1723,22 @@ def _stub_get_spool(spool, result):
         side_effect=lambda id, callback: callback(result))
 
 
+class TestFilamentId:
+    def test_reads_json_encoded_extra(self):
+        assert AFCSpool._filament_id({"extra": {"filament_id": '"OF5CgdDq"'}}) == "OF5CgdDq"
+
+    def test_takes_a_bare_string(self):
+        assert AFCSpool._filament_id({"extra": {"filament_id": "OF5CgdDq"}}) == "OF5CgdDq"
+
+    def test_none_without_the_field(self):
+        assert AFCSpool._filament_id({}) == ""
+        assert AFCSpool._filament_id({"extra": {}}) == ""
+        assert AFCSpool._filament_id({"extra": None}) == ""
+
+    def test_ignores_a_number(self):
+        assert AFCSpool._filament_id({"extra": {"filament_id": "12"}}) == ""
+
+
 class TestSetSpoolID:
     def _make_spool_with_spoolman(self):
         spool = _make_spool()
@@ -1707,6 +1809,56 @@ class TestSetSpoolID:
         assert lane.spool_vendor == "Polymaker"
         spool.set_snapmaker_filament_params.assert_called_once()
         spool.afc.function.afc_led.assert_not_called()
+
+    def test_valid_spool_id_sets_filament_id(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        result = _make_spool_result()
+        result["filament"]["extra"] = {"filament_id": '"OF5CgdDq"'}
+        _stub_get_spool(spool, result)
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == "OF5CgdDq"
+
+    def test_same_spool_without_spoolman_id_keeps_the_set_one(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        lane.spool_id = 42
+        lane.filament_id = "OFDSrzZ8"
+        _stub_get_spool(spool, _make_spool_result())
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == "OFDSrzZ8"
+
+    def test_same_spool_takes_spoolman_id_over_the_set_one(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        lane.spool_id = 42
+        lane.filament_id = "OFDSrzZ8"
+        result = _make_spool_result()
+        result["filament"]["extra"] = {"filament_id": '"OF5CgdDq"'}
+        _stub_get_spool(spool, result)
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == "OF5CgdDq"
+
+    def test_new_spool_without_spoolman_id_clears_it(self):
+        spool = self._make_spool_with_spoolman()
+        spool.set_snapmaker_filament_params = MagicMock()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        lane.spool_id = 7
+        lane.filament_id = "OFDSrzZ8"
+        _stub_get_spool(spool, _make_spool_result())
+        spool.set_spoolID(lane, 42)
+        assert lane.filament_id == ""
 
     def test_valid_spool_id_lane_not_loaded_lane_in_unit(self):
         spool = self._make_spool_with_spoolman()
@@ -1899,6 +2051,39 @@ class TestSetSpoolID:
         spool.set_spoolID(lane, 42, on_done=on_done)
         on_done.assert_called_once_with()
 
+    def test_sync_path_sends_spool_assigned_after_on_done(self):
+        spool = _make_spool()
+        lane = _make_lane()
+        lane.remember_spool = False
+        order = []
+        spool.printer.register_event_handler(
+            "afc:spool_assigned", lambda ln: order.append(("afc:spool_assigned", ln)))
+        spool.set_spoolID(lane, "", on_done=lambda: order.append(("on_done",)))
+        assert order == [("on_done",), ("afc:spool_assigned", lane)]
+
+    def test_async_path_sends_spool_assigned_after_on_done(self):
+        spool = self._make_spool_with_spoolman()
+        lane = _make_lane()
+        lane.remember_spool = False
+        lane.espooler = MagicMock()
+        _stub_get_spool(spool, _make_spool_result())
+        order = []
+        spool.printer.register_event_handler(
+            "afc:spool_assigned",
+            lambda ln: order.append(("afc:spool_assigned", ln, ln.spool_id)))
+        spool.set_spoolID(lane, 42, on_done=lambda: order.append(("on_done",)))
+        assert order == [("on_done",), ("afc:spool_assigned", lane, 42)]
+
+    def test_lookup_in_flight_sends_no_spool_assigned_yet(self):
+        spool = self._make_spool_with_spoolman()
+        lane = _make_lane()
+        lane.remember_spool = False
+        spool.afc.moonraker.get_spool = MagicMock()  # never invokes its callback
+        events = []
+        spool.printer.register_event_handler("afc:spool_assigned", events.append)
+        spool.set_spoolID(lane, 42)
+        assert events == []
+
     def test_empty_spool_id_with_spoolman_not_remember_spool_clears_values(self):
         """spoolman not None + SpoolID='' + not remember_spool → clear_values."""
         spool = self._make_spool_with_spoolman()
@@ -2087,6 +2272,36 @@ class TestAutoSwitchFlagReset:
         spool.set_spoolID(lane, "123")
         assert lane.auto_switch_triggered is False
 
+class TestLaneInSnapmakerTool:
+    def _lane(self, held=True, tool_loaded=False, standalone=False, prep_state=False):
+        lane = _make_lane("e1", extruder_index=1)
+        lane.extruder_obj.lane_loaded = lane.name if held else "e2"
+        lane.tool_loaded = tool_loaded
+        lane.extruder_obj.is_standalone.return_value = standalone
+        lane.prep_state = prep_state
+        return lane
+
+    def test_lane_not_held_by_extruder(self):
+        lane = self._lane(held=False, tool_loaded=True, standalone=True, prep_state=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is False
+
+    def test_tool_loaded_lane(self):
+        lane = self._lane(tool_loaded=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is True
+
+    def test_standalone_lane_with_filament(self):
+        lane = self._lane(standalone=True, prep_state=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is True
+
+    def test_standalone_lane_without_filament(self):
+        lane = self._lane(standalone=True, prep_state=False)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is False
+
+    def test_unit_lane_with_filament_not_tool_loaded(self):
+        lane = self._lane(standalone=False, prep_state=True)
+        assert AFCSpool.lane_in_snapmaker_tool(lane) is False
+
+
 class TestSetSnapmakerFilamentParams:
     def create_print_task_config(self):
         config = {
@@ -2126,6 +2341,51 @@ class TestSetSnapmakerFilamentParams:
         lane = _make_lane("lane1")
         lane.tool_loaded = False
         lane.extruder_obj.lane_loaded = lane.name
+        lane.extruder_obj.is_standalone.return_value = False
+        spool.printer = MagicMock()
+        spool.set_snapmaker_filament_params(lane)
+        spool.printer.update_snapmaker_config_file.assert_not_called()
+
+    def test_snapmaker_standalone_lane_held_by_extruder(self):
+        """A U1 toolhead lane still held by its extruder writes its spool
+        even though tool_loaded was cleared (lane reset or spool swap)."""
+        from tests.conftest import _make_print_task_config
+        import sys
+        sys.modules.setdefault("extras.print_task_config", _make_print_task_config())
+        from extras.print_task_config import DEFAULT_PRINT_TASK_CONFIG, config_path
+        spool = _make_spool()
+        spool.afc.snapmaker_printer = True
+        spool.print_task_config_obj = MagicMock()
+        spool.print_task_config_obj.print_task_config = DEFAULT_PRINT_TASK_CONFIG
+        spool.print_task_config_obj.config_path = config_path
+        lane = _make_lane("e1", extruder_index=1)
+        lane.color = "#995F11"
+        lane.material = "PLA"
+        lane.spool_vendor = "Bambu"
+        lane.tool_loaded = False
+        lane.prep_state = True
+        lane.extruder_obj.lane_loaded = lane.name
+        lane.extruder_obj.is_standalone.return_value = True
+        spool.printer = MagicMock()
+        spool.set_snapmaker_filament_params(lane)
+        spool.printer.update_snapmaker_config_file.assert_called_once()
+        print_task_config = spool.print_task_config_obj.print_task_config
+        assert print_task_config["filament_vendor"][1] == "Bambu"
+        assert print_task_config["filament_color_rgba"][1] == "995F11FF"
+
+    def test_snapmaker_standalone_lane_empty(self):
+        """A U1 toolhead lane with no filament present writes nothing."""
+        from tests.conftest import _make_print_task_config
+        import sys
+        sys.modules.setdefault("extras.print_task_config", _make_print_task_config())
+        spool = _make_spool()
+        spool.afc.snapmaker_printer = True
+        spool.print_task_config_obj = MagicMock()
+        lane = _make_lane("e1", extruder_index=1)
+        lane.tool_loaded = False
+        lane.prep_state = False
+        lane.extruder_obj.lane_loaded = lane.name
+        lane.extruder_obj.is_standalone.return_value = True
         spool.printer = MagicMock()
         spool.set_snapmaker_filament_params(lane)
         spool.printer.update_snapmaker_config_file.assert_not_called()
@@ -2218,6 +2478,28 @@ class TestSetSnapmakerFilamentParams:
         assert print_task_config["filament_type"][0] == lane.material
         assert print_task_config["filament_sub_type"][0] == "NONE"
     
+    def test_snapmaker_printer_extruder_check_sub_type_from_lane(self):
+        from tests.conftest import _make_print_task_config
+        import sys
+        sys.modules.setdefault("extras.print_task_config", _make_print_task_config())
+        from extras.print_task_config import DEFAULT_PRINT_TASK_CONFIG
+        spool = _make_spool()
+        spool.afc.snapmaker_printer = True
+        spool.print_task_config_obj = MagicMock()
+        spool.print_task_config_obj.print_task_config = DEFAULT_PRINT_TASK_CONFIG
+        lane = _make_lane("lane1")
+        lane.color = "#123456"
+        lane.material = "PLA"
+        lane.sub_type = "Matte"
+        lane.tool_loaded = True
+        lane.extruder_obj.lane_loaded = lane.name
+        lane.multi_color = []
+        spool.printer = MagicMock()
+        spool.set_snapmaker_filament_params(lane)
+
+        print_task_config = spool.print_task_config_obj.print_task_config
+        assert print_task_config["filament_sub_type"][0] == "Matte"
+
     def test_snapmaker_printer_extruder_check_vendor(self):
         from tests.conftest import _make_print_task_config
         import sys

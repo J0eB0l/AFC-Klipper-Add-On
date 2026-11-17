@@ -32,6 +32,7 @@ UNIT_VARIANTS: dict[str, list[dict[str, str]]] = {
         for bt in ("EBB", "SLB")
     ],
     "ACE": [{"ace_unit_type": t} for t in ["V1", "V2_Pro"]],
+    "BridgeBox": [{}],
 }
 
 # The default name offered for an additional unit of each type.
@@ -46,6 +47,7 @@ ADDITIONAL_UNIT_DEFAULT_NAME = {
     "HTLF": "HTLF_1",
     "Claymore": "Claymore_1",
     "ACE": "Ace_1",
+    "BridgeBox": "Chain_2",
 }
 
 

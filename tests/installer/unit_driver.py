@@ -83,6 +83,12 @@ LEGACY_KEYS = {
     "Lane Count": {"EMU": "G"},
     "Unit Type": {"ACE": "K"},
 }
+# BridgeBox rows were recorded with a key letter and a label that names no unit.
+LEGACY_LABEL_KEYS = {
+    "Units on this chain": "P",
+    "Connection": "W",
+    "USB serial port": "S",
+}
 
 
 def legacy_rows(options: List[Any], sel: Any, additional: bool) -> List[Tuple[str, str]]:
@@ -93,6 +99,9 @@ def legacy_rows(options: List[Any], sel: Any, additional: bool) -> List[Tuple[st
         if option.label.endswith(" Name"):
             key = "1" if additional else "C"
             text = f"{option.label}{':' if additional else ' :'} {value}"
+        elif option.label in LEGACY_LABEL_KEYS:
+            key = LEGACY_LABEL_KEYS[option.label]
+            text = f"{option.label} : {value}"
         else:
             unit, _, kind = option.label.partition(" ")
             key = LEGACY_KEYS[kind][unit]

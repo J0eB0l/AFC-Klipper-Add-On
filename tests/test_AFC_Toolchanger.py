@@ -517,9 +517,11 @@ def _make_toolchanger_for_tool_swap():
     # base_position/homing_position still need to be real (indexable) lists.
     # afcDeltaTime/afc_stats aren't part of MockAFC's defaults, so tool_swap()
     # needs them added explicitly.
+    # AFC.__init__ gives afc.base_position a list; MockAFC does not.
     tool = _make_toolchanger()
     tool.afc.gcode_move.base_position = [0.0, 0.0, 0.0, 0.0]
     tool.afc.gcode_move.homing_position = [0.0, 0.0, 0.0, 0.0]
+    tool.afc.base_position = [0.0, 0.0, 0.0, 0.0]
     tool.afc.afcDeltaTime = MagicMock()
     tool.afc.afc_stats = MagicMock()
     return tool
@@ -582,6 +584,23 @@ class TestToolSwap:
 
         assert captured["status"] == State.TOOL_DOCK
         assert current_extruder.status == State.IDLE
+
+    def test_a_swap_that_raises_puts_the_saved_position_back(self):
+        """A U1 head that fails to dock raises out of PICK_EXTRUDER after the
+        offsets came off the saved position; the retry would take them off again."""
+        tool = _make_toolchanger_for_tool_swap()
+        tool.function.get_current_extruder_obj.return_value = None
+        tool.afc.gcode_move.base_position = [-0.15, -0.17, -0.04, 0.0]
+        tool.afc.last_gcode_position = [169.61, 248.7, 2.35, 1643.6]
+        lane = _make_lane_for_tool_swap()
+        lane.extruder_obj.custom_tool_swap = "PICK_EXTRUDER"
+        tool.afc.gcode.run_script_from_command = MagicMock(side_effect=RuntimeError("no dock"))
+
+        with pytest.raises(RuntimeError, match="no dock"):
+            tool.tool_swap(lane)
+
+        assert tool.afc.last_gcode_position == [169.61, 248.7, 2.35, 1643.6]
+        assert lane.extruder_obj.next_pickup is True
 
     def test_no_current_extruder_does_not_raise(self):
         """Covers the `current_extruder` falsy branch: no .status assignment
@@ -731,6 +750,7 @@ class TestToolSwap:
         tool = _make_toolchanger_for_tool_swap()
         tool.function.get_current_extruder_obj.return_value = None
         tool.afc.last_gcode_position = [10.0, 20.0, 5.0, 100.0]
+        tool.afc.base_position = [9.0, 9.0, 9.0, 50.0]
         tool.afc.gcode_move.base_position = [1.0, 2.0, 3.0, 4.0]
         tool.afc.gcode_move.homing_position = [0.5, 0.5, 0.5, 0.5]
         lane = _make_lane_for_tool_swap()
@@ -738,7 +758,8 @@ class TestToolSwap:
         tool.tool_swap(lane)
 
         assert tool.afc.last_gcode_position == [10.0, 20.0, 5.0, 100.0]
-        assert tool.afc.base_position == [1.0, 2.0, 3.0, 4.0]
+        # E keeps the saved base: restore_pos adds the E the swap moved
+        assert tool.afc.base_position == [1.0, 2.0, 3.0, 50.0]
         assert tool.afc.homing_position == [0.5, 0.5, 0.5, 0.5]
         assert tool.afc.base_position is not tool.afc.gcode_move.base_position
         assert tool.afc.homing_position is not tool.afc.gcode_move.homing_position

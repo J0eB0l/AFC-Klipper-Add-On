@@ -1,0 +1,69 @@
+{
+  "about": "Bambu's own AMS firmware images, the newest two for each board. url is the Bambu offline update package (.zip) holding file; the updater reads only that file out of it. md5 and size are the image's own.",
+  "images": [
+    {
+      "board": "n3f_rev5",
+      "version": "05.00.22.22",
+      "file": "n3f_rev5-firmware-v05.00.22.22-20260702164346_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/N7/01.03.00.00/1ca3bce78c/offline-ota-p2s_v01.03.00.00-20260921090417.zip",
+      "md5": "0f54f176181a23256f0dd3f3ac29df93",
+      "size": 172132
+    },
+    {
+      "board": "n3f_rev5",
+      "version": "05.00.22.19",
+      "file": "n3f_rev5-firmware-v05.00.22.19-20260616201033_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/X2D/01.02.00.00/9b1c10b10e/offline-ota-x2d_v01.02.00.00-20260730065825.zip",
+      "md5": "cdedaa5d5a116ffeec997cdb19ba30bd",
+      "size": 171968
+    },
+    {
+      "board": "n3s_rev5",
+      "version": "05.00.22.19",
+      "file": "n3s_rev5-firmware-v05.00.22.19-20260616201708_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/N7/01.03.00.00/1ca3bce78c/offline-ota-p2s_v01.03.00.00-20260921090417.zip",
+      "md5": "3c5fba2137541f9d464756acb81e6b14",
+      "size": 160552
+    },
+    {
+      "board": "n3s_rev5",
+      "version": "04.00.21.94",
+      "file": "n3s_rev5-firmware-v04.00.21.94-20260427211029_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/O1C/01.02.00.00/9b1c10b10e/offline-ota-h2c_v01.02.00.00-20260601140832.zip",
+      "md5": "67f0c2ca2ca3e625a5767e3aec54b326",
+      "size": 160080
+    },
+    {
+      "board": "ams_rev7",
+      "version": "01.00.07.00",
+      "file": "ams_rev7-firmware-v01.00.07.00-20260701153846_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/N7/01.03.00.00/1ca3bce78c/offline-ota-p2s_v01.03.00.00-20260921090417.zip",
+      "md5": "1f0fa2d1f76a22f69b58d71a6ce2de34",
+      "size": 95928
+    },
+    {
+      "board": "ams_rev7",
+      "version": "01.00.06.87",
+      "file": "ams_rev7-firmware-v01.00.06.87-20260109151724_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/O1D/01.03.00.00/1ca3bce78c/offline-ota-h2d_v01.03.00.00-20260302165904.zip",
+      "md5": "383d56e5eee3e7482213d76d5acc6ad9",
+      "size": 94748
+    },
+    {
+      "board": "ams_rev8",
+      "version": "01.00.07.00",
+      "file": "ams_rev8-firmware-v01.00.07.00-20260701154005_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/N7/01.03.00.00/1ca3bce78c/offline-ota-p2s_v01.03.00.00-20260921090417.zip",
+      "md5": "d781e974e10c6d546bf1ab249591c272",
+      "size": 97380
+    },
+    {
+      "board": "ams_rev8",
+      "version": "01.00.06.87",
+      "file": "ams_rev8-firmware-v01.00.06.87-20260109152259_product.bin.sig",
+      "url": "https://public-cdn.bblmw.com/upgrade/device/offline/O1D/01.03.00.00/1ca3bce78c/offline-ota-h2d_v01.03.00.00-20260302165904.zip",
+      "md5": "7ca8698b359ee00423b4dcd0ceeaa982",
+      "size": 96200
+    }
+  ]
+}
