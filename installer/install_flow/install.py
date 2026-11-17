@@ -118,7 +118,7 @@ def _update_moonraker_config(ctx: Context, runner: CommandRunner) -> None:
         str(ctx.afc_path), ctx.gitrepo, ctx.klipper_service, str(ctx.home)
     )
     if ensure_moonraker_update_block(ctx.moonraker_config_file, block):
-        restart_service(runner, "moonraker")
+        restart_service(runner, "moonraker", ctx.moonraker)
 
 
 def install_afc(
@@ -134,7 +134,8 @@ def install_afc(
     Install the first unit: copy configs, link extensions and apply every selected option.
 
     On a Snapmaker U1 it also keeps `.lite` backups of Klipper's originals, uses the U1
-    config, comments out fluidd's `T<n>` macros and writes `/oem/.debug`.
+    config, comments out fluidd's `T<n>` macros and writes `/oem/.debug`. With
+    `ctx.configs_only` it leaves Klipper's modules folder and `/oem/.debug` alone.
 
     :param ctx: installer context, `files_updated_or_installed` is set
     :param console: where messages go
@@ -154,12 +155,14 @@ def install_afc(
         raise ValueError(error_str)
     sel.is_additional_unit = False
     if ctx.is_snapmaker:
-        check_and_move_lite_files(ctx, console)
+        if not ctx.configs_only:
+            check_and_move_lite_files(ctx, console)
         copy_snapmaker_config(ctx, console, prompter)
         comment_gcode_in_fluidd(ctx, console, comment=True)
     else:
         copy_config(ctx, console, prompter)
-    link_extensions(ctx)
+    if not ctx.configs_only:
+        link_extensions(ctx)
     unit.copy_files(ctx, console, prompter, sel)
     if len(find_printer_extruders(ctx)) > 1:
         apply_unit_extruder(ctx, console, prompter, sel)
@@ -187,7 +190,7 @@ def install_afc(
     replace_varfile_path(ctx.afc_file, ctx.afc_config_dir)
     if ctx.git_install and not ctx.is_snapmaker:
         _update_moonraker_config(ctx, runner)
-    if ctx.is_snapmaker:
+    if ctx.is_snapmaker and not ctx.configs_only:
         u1_write_debug_file(console, runner, euid, oem_dir)
     ctx.files_updated_or_installed = True
     return build_install_message(ctx, sel)

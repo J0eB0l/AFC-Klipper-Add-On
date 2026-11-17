@@ -49,6 +49,8 @@ class Context:
     test_mode: bool = False
     prior_installation: bool = False
     files_updated_or_installed: bool = False
+    # Change AFC's configs only, leaving Klipper's modules alone (CONFIGS_ONLY_ENV).
+    configs_only: bool = False
     is_k1_os: bool = False
     is_snapmaker: bool = False
     backup_date: str = field(default_factory=_timestamp)

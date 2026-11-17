@@ -1899,6 +1899,25 @@ class TestAmsFirmwareGetStatus:
         status = mgr.get_status(100.0)
         assert (status["running"], status["result"]) == (False, self.NO_RESULT)
 
+    def test_a_result_from_before_klipper_started_is_left_out(self, tmp_path):
+        _printer, mgr = self._setup(tmp_path)
+        write_json(tmp_path / RESULT, {"unit": "Bambu_AMS_1", "ok": True,
+                                       "message": "Bambu_AMS_1 now runs 01.03.00.00."})
+        before = mgr._started - 60
+        os.utime(tmp_path / RESULT, (before, before))
+        status = mgr.get_status(100.0)
+        assert (status["running"], status["result"]) == (False, self.NO_RESULT)
+
+    def test_an_update_running_since_before_klipper_started_still_shows(self, tmp_path):
+        _printer, mgr = self._setup(tmp_path)
+        write_json(tmp_path / RESULT, {"running": True, "unit": "Bambu_AMS_1",
+                                       "message": "Bambu_AMS_1 is at 40%."})
+        before = mgr._started - 60
+        os.utime(tmp_path / RESULT, (before, before))
+        status = mgr.get_status(100.0)
+        assert status["running"] is True
+        assert status["result"]["message"] == "Bambu_AMS_1 is at 40%."
+
     def test_a_unit_left_in_its_bootloader_is_named_as_configured(self, tmp_path):
         _printer, mgr = self._setup(tmp_path)
         write_json(tmp_path / STATE, {"unit": "bambu_ams_2"})

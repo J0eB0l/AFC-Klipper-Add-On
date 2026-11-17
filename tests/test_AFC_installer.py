@@ -9,6 +9,7 @@ import pathlib
 import signal
 import subprocess
 import sys
+import termios
 import time
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -19,6 +20,7 @@ from extras import AFC_installer as mod
 from extras.AFC_installer import (
     BRANCH_NAME,
     COLUMNS,
+    CONFIGS_ONLY_ENV,
     COPY_BRANCH,
     IDLE_S,
     LOG_NAME,
@@ -31,6 +33,7 @@ from extras.AFC_installer import (
     group_kwargs,
     has_scripts,
     is_checkout,
+    is_snapmaker_u1,
     klipper_dir,
     load_config,
     repo_dir,
@@ -84,6 +87,52 @@ class FakeGcode:
         self.commands[name] = (func, desc)
 
 
+class FakeWebhooks:
+    """Records registered endpoints."""
+
+    def __init__(self) -> None:
+        """Start with none."""
+        self.endpoints: Dict[str, Callable[[Any], None]] = {}
+
+    def register_endpoint(self, path: str, callback: Callable[[Any], None]) -> None:
+        """
+        :param path: the endpoint
+        :param callback: its handler
+        """
+        self.endpoints[path] = callback
+
+
+class WebRequestError(CommandError):
+    """Klipper's WebRequestError, a command error."""
+
+
+class FakeWebRequest:
+    """Klipper's WebRequest over a JSON body."""
+
+    error = WebRequestError
+
+    def __init__(self, params: Dict[str, Any]) -> None:
+        """:param params: the request's arguments"""
+        self.params = params
+        self.response: Any = None
+
+    def get_str(self, item: str) -> str:
+        """
+        :param item: the argument
+        :return str: its value
+        :raises WebRequestError: when it is missing or not a string
+        """
+        if item not in self.params:
+            raise WebRequestError(f"Missing Argument [{item}]")
+        if type(self.params[item]) is not str:
+            raise WebRequestError(f"Invalid Argument Type [{item}]")
+        return self.params[item]
+
+    def send(self, data: Any) -> None:
+        """:param data: the response"""
+        self.response = data
+
+
 class FakePrinter:
     """The printer calls the installer runner makes."""
 
@@ -94,8 +143,10 @@ class FakePrinter:
         """
         self.reactor = InstallerReactor()
         self.gcode = FakeGcode()
+        self.webhooks = FakeWebhooks()
         self.start_args = start_args
-        self.objects: Dict[str, Any] = {"gcode": self.gcode, "AFC": afc}
+        self.objects: Dict[str, Any] = {"gcode": self.gcode, "webhooks": self.webhooks,
+                                        "AFC": afc}
         self.handlers: Dict[str, Callable[[], None]] = {}
 
     def get_reactor(self) -> InstallerReactor:
@@ -202,7 +253,7 @@ def link_afc(root: pathlib.Path, folder: pathlib.Path) -> pathlib.Path:
 
 def make_installer(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
                    afc: Optional[SimpleNamespace] = None, log: bool = True,
-                   connect: bool = True, root: bool = False) -> afcInstaller:
+                   connect: bool = True, root: bool = False, u1: bool = False) -> afcInstaller:
     """
     :param tmp_path: the test's folder
     :param monkeypatch: to set the user id
@@ -210,6 +261,7 @@ def make_installer(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     :param log: whether Klipper was started with a log file
     :param connect: run the connect handler
     :param root: whether Klipper runs as root
+    :param u1: whether the printer is a Snapmaker U1
     :return afcInstaller: a runner whose checkout is a fresh folder in tmp_path
     """
     monkeypatch.setattr(os, "geteuid", lambda: 0 if root else 1000)
@@ -220,6 +272,7 @@ def make_installer(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     printer = FakePrinter(args, afc if afc is not None else make_afc())
     inst = afcInstaller(SimpleNamespace(get_printer=lambda: printer))
     MADE.append(inst)
+    inst.configs_only = u1
     inst.repo = str(make_repo(tmp_path))
     inst.klipper = str(tmp_path / "klipper")
     if connect:
@@ -262,6 +315,16 @@ def open_slave(started: SimpleNamespace) -> int:
     :return int: the session side opened again, as the script would hold it
     """
     return os.open(started.slave, os.O_RDWR | os.O_NOCTTY)
+
+
+def set_echo(fd: int, on: bool) -> None:
+    """
+    :param fd: a terminal
+    :param on: whether it echoes, as a password prompt turns it off
+    """
+    attrs = termios.tcgetattr(fd)
+    attrs[3] = attrs[3] | termios.ECHO if on else attrs[3] & ~termios.ECHO
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
 def popen_recording(argvs: List[List[str]]) -> Callable[..., FakeProc]:
@@ -437,6 +500,31 @@ class TestSessionEnv:
                        "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"}
         assert klipper["TERM"] == "dumb"
 
+    def test_configs_only_marks_the_installer(self):
+        assert session_env({}, configs_only=True)[CONFIGS_ONLY_ENV] == "1"
+
+    def test_a_mark_klipper_has_is_not_passed_on(self):
+        assert CONFIGS_ONLY_ENV not in session_env({CONFIGS_ONLY_ENV: "1"})
+
+
+# is_snapmaker_u1
+
+class TestIsSnapmakerU1:
+    def test_a_u1_os_release(self, tmp_path):
+        path = tmp_path / "os-release"
+        path.write_text('NAME=Buildroot\nID=buildroot\nRK_BUILD_INFO="snapmaker u1"\n')
+        assert is_snapmaker_u1(str(path)) is True
+
+    @pytest.mark.parametrize("text", ['ID=debian\nRK_BUILD_INFO="snapmaker"\n',
+                                      "ID=buildroot\n", "ID=raspbian\n"])
+    def test_any_other_system(self, tmp_path, text):
+        path = tmp_path / "os-release"
+        path.write_text(text)
+        assert is_snapmaker_u1(str(path)) is False
+
+    def test_no_os_release(self, tmp_path):
+        assert is_snapmaker_u1(str(tmp_path / "missing")) is False
+
 
 # load_config
 
@@ -465,6 +553,7 @@ class TestAfcInstallerInit:
         assert sorted(printer.handlers) == ["klippy:connect", "klippy:disconnect"]
         assert sorted(printer.gcode.commands) == ["AFC_INSTALLER", "AFC_INSTALLER_ANSWER",
                                                   "AFC_INSTALLER_STOP"]
+        assert printer.webhooks.endpoints == {"afc/installer_password": inst._handle_password}
 
     def test_no_log_file_no_log_path(self):
         printer = FakePrinter({"config_file": "/c/printer.cfg"}, make_afc())
@@ -654,6 +743,7 @@ class TestAfcInstallerStart:
         assert {k: kwargs[k] for k in group_kwargs(sys.version_info)} == group_kwargs(
             sys.version_info)
         assert kwargs["env"] == session_env(os.environ)
+        assert CONFIGS_ONLY_ENV not in kwargs["env"]
         assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"]
         assert closed(kwargs["stdin"])
         assert inst._proc is proc and not os.get_blocking(inst._master)
@@ -972,6 +1062,25 @@ class TestAfcInstallerCmdAfcInstaller:
         assert inst.mode == "install"
         assert logged(inst) == [STARTED["install"]]
 
+    def test_a_u1_runs_the_installer_for_configs_only(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch, u1=True)
+        envs: List[Dict[str, str]] = []
+
+        def popen(argv, **kwargs):
+            envs.append(kwargs["env"])
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "Popen", popen)
+        inst.cmd_AFC_INSTALLER(FakeGcmd({"MODE": "install"}))
+        assert envs[0][CONFIGS_ONLY_ENV] == "1"
+        assert logged(inst) == [STARTED["install"]]
+
+    def test_a_u1_refuses_the_updater(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch, u1=True)
+        with pytest.raises(CommandError, match="^AFC's updater does not run on a Snapmaker U1"):
+            inst.cmd_AFC_INSTALLER(FakeGcmd({"MODE": "update"}))
+        assert inst._proc is None and logged(inst) == []
+
     def test_starts_on_the_branch_asked_for(self, tmp_path, monkeypatch):
         inst = make_installer(tmp_path, monkeypatch)
         make_head(inst.repo, "ref: refs/heads/BridgeBox")
@@ -1086,6 +1195,89 @@ class TestAfcInstallerCmdAfcInstallerAnswer:
         assert inst._active == 0.0
 
 
+# afcInstaller._asks_password
+
+class TestAfcInstallerAsksPassword:
+    def test_a_terminal_that_is_not_echoing(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        slave = open_slave(run_started(inst, monkeypatch))
+        assert inst._asks_password() is False
+        set_echo(slave, False)
+        assert inst._asks_password() is True
+        set_echo(slave, True)
+        assert inst._asks_password() is False
+        os.close(slave)
+
+    def test_no_terminal(self, tmp_path, monkeypatch):
+        assert make_installer(tmp_path, monkeypatch)._asks_password() is False
+
+    def test_something_that_is_no_terminal(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        read_end, write_end = os.pipe()
+        inst._master = read_end
+        assert inst._asks_password() is False
+        os.close(write_end)
+
+
+# afcInstaller._handle_password
+
+class TestAfcInstallerHandlePassword:
+    def test_types_the_password_and_enter_into_a_terminal_that_is_not_echoing(
+            self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        slave = open_slave(run_started(inst, monkeypatch))
+        set_echo(slave, False)
+        inst.printer.reactor.now = 170.0
+        request = FakeWebRequest({"password": "s3cret;#"})
+        inst._handle_password(request)
+        assert os.read(slave, 64) == b"s3cret;#\n"
+        os.close(slave)
+        assert request.response == {"sent": True}
+        assert inst._active == 170.0 and logged(inst) == []
+
+    def test_a_terminal_that_echoes_takes_nothing(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        slave = open_slave(run_started(inst, monkeypatch))
+        os.set_blocking(slave, False)
+        request = FakeWebRequest({"password": "s3cret"})
+        with pytest.raises(WebRequestError,
+                           match="^AFC's installer is not asking for a password$"):
+            inst._handle_password(request)
+        with pytest.raises(BlockingIOError):
+            os.read(slave, 64)
+        os.close(slave)
+        assert request.response is None and inst._active == 100.0
+
+    def test_not_running(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        with pytest.raises(WebRequestError,
+                           match="^AFC's installer is not asking for a password$"):
+            inst._handle_password(FakeWebRequest({"password": "s3cret"}))
+
+    @pytest.mark.parametrize("params", [{}, {"password": 1234}])
+    def test_a_password_that_is_no_string(self, tmp_path, monkeypatch, params):
+        inst = make_installer(tmp_path, monkeypatch)
+        with pytest.raises(WebRequestError, match=r"Argument.*\[password\]"):
+            inst._handle_password(FakeWebRequest(params))
+
+    def test_a_password_the_terminal_did_not_take_is_not_in_the_error(self, tmp_path,
+                                                                      monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        slave = open_slave(run_started(inst, monkeypatch))
+        set_echo(slave, False)
+
+        def write(fd: int, data: bytes) -> int:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        monkeypatch.setattr(os, "write", write)
+        with pytest.raises(WebRequestError) as error:
+            inst._handle_password(FakeWebRequest({"password": "s3cret"}))
+        os.close(slave)
+        assert str(error.value) == ("AFC's installer did not take the password: "
+                                    + os.strerror(errno.EIO))
+        assert inst._active == 100.0
+
+
 # afcInstaller.cmd_AFC_INSTALLER_STOP
 
 class TestAfcInstallerCmdAfcInstallerStop:
@@ -1116,7 +1308,7 @@ class TestAfcInstallerGetStatus:
             "available": False,
             "why": "Klipper runs as root here, and AFC's installer refuses root", "git": False,
             "branch": "main", "running": False, "mode": "", "session": 0, "log": LOG_NAME,
-            "size": 0, "result": "", "exit_code": None}
+            "size": 0, "result": "", "exit_code": None, "asks_password": False, "update": True}
 
     def test_while_a_session_runs(self, tmp_path, monkeypatch):
         inst = make_installer(tmp_path, monkeypatch, connect=False)
@@ -1128,7 +1320,17 @@ class TestAfcInstallerGetStatus:
         assert inst.get_status() == {
             "available": True, "why": "", "git": True, "branch": "BridgeBox", "running": True,
             "mode": "update", "session": 1, "log": LOG_NAME, "size": 512, "result": "running",
-            "exit_code": None}
+            "exit_code": None, "asks_password": False, "update": True}
+
+    def test_a_u1_offers_no_updater(self, tmp_path, monkeypatch):
+        assert make_installer(tmp_path, monkeypatch, u1=True).get_status()["update"] is False
+
+    def test_while_the_script_waits_on_a_password(self, tmp_path, monkeypatch):
+        inst = make_installer(tmp_path, monkeypatch)
+        slave = open_slave(run_started(inst, monkeypatch))
+        set_echo(slave, False)
+        assert inst.get_status()["asks_password"] is True
+        os.close(slave)
 
 
 # A real session
@@ -1160,3 +1362,30 @@ class TestARealSession:
         assert (inst.result, inst.exit_code, inst.size) == ("failed", 3, len(text.encode()))
         assert logged(inst) == [STARTED["update"],
                                 ("info", "AFC update ended: failed (exit status 3)")]
+
+    def test_a_password_prompt_answered_through_the_endpoint_shows_nowhere(self, tmp_path,
+                                                                            monkeypatch):
+        script = ("printf 'Password: '\n"
+                  "read -s secret\n"
+                  "echo\n"
+                  "echo \"got ${#secret} characters\"\n")
+        inst = make_installer(tmp_path, monkeypatch)
+        for name in ("update-afc.sh", "install-afc.sh"):
+            pathlib.Path(inst.repo, name).write_text(script)
+        inst.cmd_AFC_INSTALLER(FakeGcmd({}))
+        deadline = time.monotonic() + 10.0
+        log = pathlib.Path(inst.log_path)
+        while not inst._asks_password() and time.monotonic() < deadline:
+            inst._handle_read(inst.printer.reactor.now)
+            time.sleep(0.01)
+        request = FakeWebRequest({"password": "hunter2"})
+        inst._handle_password(request)
+        while inst._proc is not None and time.monotonic() < deadline:
+            inst._tick(inst.printer.reactor.now)
+            time.sleep(0.01)
+        text = log.read_bytes().decode()
+        assert request.response == {"sent": True}
+        assert "Password: " in text and "got 7 characters" in text
+        assert "hunter2" not in text
+        assert (inst.result, inst.exit_code) == ("done", 0)
+        assert "hunter2" not in repr(logged(inst))

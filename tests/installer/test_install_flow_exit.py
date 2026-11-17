@@ -103,6 +103,18 @@ class TestUninstallAfc:
             "or fully power-cycle printer.",
         )
 
+    def test_configs_only_leaves_klippers_modules_as_they_are(self, tmp_path: Path) -> None:
+        ctx = self.ctx(tmp_path)
+        ctx.is_snapmaker = ctx.configs_only = True
+        extras = ctx.klipper_extra_path
+        (extras / "AFC.py.lite").write_text("original")
+        (extras / "AFC.py").write_text("afc replacement")
+        (ctx.printer_config_dir / "fluidd.cfg").write_text("")
+        uninstall_afc(ctx, RecordingConsole(), FakeCommandRunner(), printer_idle(False))
+        assert (extras / "AFC.py").read_text() == "afc replacement"
+        assert (extras / "AFC.py.lite").read_text() == "original"
+        assert ctx.printer_config_dir.joinpath("printer.cfg").read_text().count("include") == 0
+
     def test_snapmaker_restarts_through_the_u1_script_when_idle(self, tmp_path: Path) -> None:
         ctx = self.ctx(tmp_path)
         ctx.is_snapmaker = True

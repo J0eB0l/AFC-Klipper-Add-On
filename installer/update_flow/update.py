@@ -146,8 +146,9 @@ def update_afc(
     :return str: the update message
     """
     message = _refresh_macros(ctx, console, prompter)
-    check_init_symlink(ctx, runner)
-    link_extensions(ctx)
+    if not ctx.configs_only:
+        check_init_symlink(ctx, runner)
+        link_extensions(ctx)
     remove_t_macros(ctx)
     message += "".join(remove_velocity(ctx))
     if ctx.git_install:

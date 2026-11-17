@@ -2,8 +2,10 @@ from pathlib import Path
 
 import pytest
 
+from installer.platform_core import system
 from tests.installer.fakes import (
     FakeCommandRunner,
+    FakeLocalPosts,
     PrinterTree,
     RecordingConsole,
     ScriptedPrompter,
@@ -32,3 +34,14 @@ def runner() -> FakeCommandRunner:
 @pytest.fixture
 def prompter() -> ScriptedPrompter:
     return ScriptedPrompter([])
+
+
+@pytest.fixture(autouse=True)
+def local_posts(monkeypatch: pytest.MonkeyPatch) -> FakeLocalPosts:
+    """No test asks a real Moonraker or U1 page on this machine to restart anything:
+    every such POST is recorded and refused unless the test sets `ok`. No test inherits
+    AFC_CONFIGS_ONLY from the shell either."""
+    posts = FakeLocalPosts()
+    monkeypatch.setattr(system, "_post_ok", posts)
+    monkeypatch.delenv("AFC_CONFIGS_ONLY", raising=False)
+    return posts

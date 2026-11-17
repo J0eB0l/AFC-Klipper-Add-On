@@ -11,11 +11,18 @@ AFC's checkout is on, or on one the panel names, which the script switches the c
 A copy of AFC's folder without git keeps no branch, so there the script runs on the files the copy
 holds and only shows the branch it is given, main unless the panel names another.
 
+On a Snapmaker U1 a session leaves AFC's modules alone, since the U1 puts Klipper's folder back at
+boot unless root marks it to keep: the updater does not run there, and the installer runs with
+CONFIGS_ONLY_ENV set, so it changes AFC's configs only.
+
 The script runs in a process group of its own inside Klipper's session, which has no controlling
 terminal and which it cannot take one into, since only a session's leader can. So a sudo that
 wants a password fails instead of waiting. A password prompt that reads the script's input, such
-as BusyBox su restarting Klipper on a Snapmaker U1, does show on its screen, and a panel must not
-answer it: G-code goes to Klipper's log, so no password is sent through it.
+as BusyBox su restarting Klipper on a Snapmaker U1, does show on its screen. A panel answers it
+through the afc/installer_password endpoint (POST /printer/afc/installer_password through
+Moonraker), never with G-code, which Moonraker keeps in its console history. The endpoint types
+only into a terminal that is not echoing, so the password shows neither on the script's screen
+nor in AFC_installer.log, and this module logs it nowhere.
 """
 from __future__ import annotations
 
@@ -48,6 +55,25 @@ BRANCH_NAME = re.compile(r"(?!.*\.\.)(?!.*//)[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,98}
 #: The branch the script shows for a copy of AFC's folder without git, which keeps none of its
 #: own: the installer's own default.
 COPY_BRANCH = "main"
+#: Set in a session's environment where the installer changes AFC's configs only.
+CONFIGS_ONLY_ENV = "AFC_CONFIGS_ONLY"
+#: What /etc/os-release holds on a Snapmaker U1, as the installer tells one.
+U1_MARKERS = ("ID=buildroot", 'RK_BUILD_INFO="snapmaker')
+
+
+def is_snapmaker_u1(os_release: str = "/etc/os-release") -> bool:
+    """
+    Whether this is a Snapmaker U1, as the installer tells one.
+
+    :param os_release: the file that names the system
+    :return bool: True when it holds every U1 marker
+    """
+    try:
+        with open(os_release, "rb") as f:
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return all(marker in text for marker in U1_MARKERS)
 
 
 def repo_dir(module_file: str) -> str:
@@ -134,17 +160,21 @@ def group_kwargs(version: Tuple[int, ...]) -> Dict[str, Any]:
     return {"preexec_fn": os.setpgrp}
 
 
-def session_env(environ: Mapping[str, str]) -> Dict[str, str]:
+def session_env(environ: Mapping[str, str], configs_only: bool = False) -> Dict[str, str]:
     """
     The installer's environment: Klipper's, with the terminal's size and no pager or git
     password prompt to wait on.
 
     :param environ: Klipper's environment
+    :param configs_only: whether the installer changes AFC's configs only
     :return Dict[str, str]: the environment the script runs with
     """
     env = dict(environ)
     env.update(TERM="xterm-256color", COLUMNS=str(COLUMNS), LINES=str(ROWS), PAGER="cat",
                GIT_PAGER="cat", GIT_TERMINAL_PROMPT="0")
+    env.pop(CONFIGS_ONLY_ENV, None)
+    if configs_only:
+        env[CONFIGS_ONLY_ENV] = "1"
     return env
 
 
@@ -169,6 +199,8 @@ class afcInstaller:
         self.log_path = os.path.join(os.path.dirname(log_file), LOG_NAME) if log_file else ""
         #: Why no session can start here, empty when one can.
         self.why = ""
+        #: Whether sessions leave AFC's modules alone, as on a Snapmaker U1.
+        self.configs_only = is_snapmaker_u1()
         #: Whether AFC's folder is a git checkout, and the branch it is on, empty when none, or
         #: COPY_BRANCH for a copy without git.
         self.git = False
@@ -199,6 +231,8 @@ class afcInstaller:
                                     "AFC_INSTALLER_ANSWER HEX=<answer as hex>")
         gcode.register_command("AFC_INSTALLER_STOP", self.cmd_AFC_INSTALLER_STOP,
                                desc="Stop the running AFC installer")
+        webhooks = self.printer.lookup_object("webhooks")
+        webhooks.register_endpoint("afc/installer_password", self._handle_password)
 
     def _handle_connect(self) -> None:
         """
@@ -282,7 +316,8 @@ class afcInstaller:
             try:
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLUMNS, 0, 0))
                 proc = subprocess.Popen(argv, cwd=self.repo, stdin=slave, stdout=slave,
-                                        stderr=slave, env=session_env(os.environ),
+                                        stderr=slave,
+                                        env=session_env(os.environ, self.configs_only),
                                         **group_kwargs(sys.version_info))
             except OSError:
                 log.close()
@@ -429,7 +464,8 @@ class afcInstaller:
         It runs on the branch AFC's checkout is on, or on BRANCH, which the script switches the
         checkout to first, with Klipper's own folders, and writes what it shows to
         AFC_installer.log beside Klipper's log. A copy of AFC's folder without git runs on its own
-        files and only shows BRANCH, or main. One at a time, and not while printing.
+        files and only shows BRANCH, or main. One at a time, and not while printing. On a
+        Snapmaker U1 only the installer runs, and it changes AFC's configs only.
 
         Usage
         -------
@@ -450,6 +486,9 @@ class afcInstaller:
             error_str = f"BRANCH must be a branch name, not {branch}"
         elif self.why:
             error_str = self.why
+        elif mode == "update" and self.configs_only:
+            error_str = ("AFC's updater does not run on a Snapmaker U1; the installer runs "
+                         "there, for AFC's configs only")
         elif self._proc is not None:
             error_str = f"AFC {self.mode} is already running"
         elif self._printing():
@@ -502,6 +541,45 @@ class afcInstaller:
             raise gcmd.error(error_str)
         self._active = self.reactor.monotonic()
 
+    def _asks_password(self) -> bool:
+        """
+        Whether the running script waits on input its terminal does not echo, as a password
+        prompt such as su's turns echo off while it reads.
+
+        :return bool: True while the terminal is open and not echoing
+        """
+        if self._master is None:
+            return False
+        try:
+            lflag = termios.tcgetattr(self._master)[3]
+        except termios.error:
+            return False
+        return not lflag & termios.ECHO
+
+    def _handle_password(self, web_request: Any) -> None:
+        """
+        Type a password and Enter into the running script, for a panel answering a prompt such as
+        su's: POST /printer/afc/installer_password with {"password": "..."}. Only a terminal
+        that is not echoing takes it, so it never shows on the script's screen or in its log, and
+        nothing here logs it or names it in an error.
+
+        :param web_request: Klipper's request, its password argument a string
+        :raises web_request.error: when no script waits on a password, or the terminal did not
+            take it
+        """
+        password = web_request.get_str("password")
+        master = self._master
+        if master is None or not self._asks_password():
+            error_str = "AFC's installer is not asking for a password"
+            raise web_request.error(error_str)
+        try:
+            os.write(master, password.encode("utf-8") + b"\n")
+        except OSError as e:
+            error_str = f"AFC's installer did not take the password: {e.strerror}"
+            raise web_request.error(error_str)
+        self._active = self.reactor.monotonic()
+        web_request.send({"sent": True})
+
     def cmd_AFC_INSTALLER_STOP(self, gcmd: Any) -> None:
         """
         Stop the running AFC installer: interrupted as CTRL+C would, killed if it has not ended
@@ -532,12 +610,14 @@ class afcInstaller:
         :return Dict[str, Any]: available, why, git (whether a session can switch AFC's branch),
             branch (the one AFC's checkout is on, empty when none, or COPY_BRANCH for a copy
             without git), running, mode, session, log (the file beside Klipper's log), size,
-            result and exit_code
+            result, exit_code, asks_password (whether the script waits on a password, which
+            afc/installer_password takes) and update (whether MODE=UPDATE runs here)
         """
         return {"available": not self.why, "why": self.why, "git": self.git,
                 "branch": self.branch, "running": self._proc is not None, "mode": self.mode,
                 "session": self.session, "log": LOG_NAME, "size": self.size,
-                "result": self.result, "exit_code": self.exit_code}
+                "result": self.result, "exit_code": self.exit_code,
+                "asks_password": self._asks_password(), "update": not self.configs_only}
 
 
 def load_config(config: Any) -> afcInstaller:

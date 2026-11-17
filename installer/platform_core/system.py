@@ -58,6 +58,9 @@ class CommandRunner:
 
 
 _U1_INIT_SCRIPT = "/etc/init.d/S60klipper"
+# The Snapmaker U1 firmware page's local actions, which restart its services as root
+# without a password.
+_U1_ACTION_URL = "http://127.0.0.1/firmware-config/api/action/"
 _NOT_IDLE_WARNING = (
     "Your printer is not idle/ready, or its status could not be confirmed. Automatic "
     "Klipper restart has been skipped; please restart the Klipper service manually "
@@ -83,13 +86,20 @@ def run_or_exit(runner: CommandRunner, argv: Sequence[str]) -> None:
         raise InstallerExit(result.returncode)
 
 
-def restart_service(runner: CommandRunner, name: str) -> None:
+def restart_service(runner: CommandRunner, name: str, moonraker_url: str = "") -> None:
     """
-    Restart a service with `sudo systemctl`, or `sudo service` without systemd.
+    Restart a service through Moonraker, as Mainsail and Fluidd do, which needs no
+    password. When Moonraker can't (none given, or it does not manage that service), use
+    `sudo systemctl`, or `sudo service` without systemd.
 
     :param runner: command runner
     :param name: service name
+    :param moonraker_url: Moonraker base URL as `address:port`, empty to go straight to
+        sudo
     """
+    url = f"{moonraker_url}/machine/services/restart?service={name}"
+    if moonraker_url and _post_ok(url):
+        return
     if runner.exists("systemctl"):
         run_or_exit(runner, ["sudo", "systemctl", "restart", name])
     else:
@@ -113,6 +123,24 @@ def _fetch(url: str) -> bytes:
     except urllib.error.HTTPError as exc:
         error_body: bytes = exc.read()
         return error_body
+
+
+def _post_ok(url: str) -> bool:
+    """
+    POST an empty body to a local service and report whether it did what was asked.
+
+    :param url: address to POST to
+    :return bool: True for a 2xx answer; False for any other answer, when nothing
+        answers, or for a non-http(s) address, which is never requested
+    """
+    if not url.startswith(_HTTP_SCHEMES):
+        return False
+    request = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return 200 <= int(response.status) < 300
+    except (OSError, HTTPException, ValueError):
+        return False
 
 
 def query_printer_status(moonraker_url: str) -> bool:
@@ -139,16 +167,18 @@ def query_printer_status(moonraker_url: str) -> bool:
 
 def u1_restart_klipper(runner: CommandRunner, euid: Optional[int] = None) -> None:
     """
-    Restart Klipper on a Snapmaker U1 through its init script.
+    Restart Klipper on a Snapmaker U1: as root through its init script, otherwise
+    through the firmware page's restart action, which needs no password, or `su` when
+    that page is missing.
 
     :param runner: command runner
     :param euid: effective user id, defaults to the current process's
     """
     user = os.geteuid() if euid is None else euid
-    if user != 0:
-        run_or_exit(runner, ["su", "root", "-c", f"{_U1_INIT_SCRIPT} restart"])
-    else:
+    if user == 0:
         run_or_exit(runner, [_U1_INIT_SCRIPT, "restart"])
+    elif not _post_ok(_U1_ACTION_URL + "restart-klipper"):
+        run_or_exit(runner, ["su", "root", "-c", f"{_U1_INIT_SCRIPT} restart"])
 
 
 def u1_write_debug_file(
@@ -158,7 +188,8 @@ def u1_write_debug_file(
     oem_dir: Path = Path("/oem"),
 ) -> None:
     """
-    Create `/oem/.debug` so Klipper changes survive a U1 reboot.
+    Create `/oem/.debug` so Klipper changes survive a U1 reboot, unless it is there
+    already, which spares a user other than root the `su` password.
 
     :param console: where progress messages go
     :param runner: command runner, used to escalate with `su` when not root
@@ -167,10 +198,15 @@ def u1_write_debug_file(
     """
     user = os.geteuid() if euid is None else euid
     debug_file = oem_dir / ".debug"
+    try:
+        if debug_file.is_file():
+            return
+    except OSError:
+        pass
     if user != 0:
         console.print_msg("OTHER", "Writing .debug file to /oem/ directory")
         run_or_exit(runner, ["su", "root", "-c", f"touch {debug_file}"])
-    elif not debug_file.is_file():
+    else:
         console.print_msg("OTHER", "Adding /oem/.debug file")
         debug_file.touch()
 
@@ -185,7 +221,11 @@ def restart_klipper(
     """
     Restart Klipper when the printer is idle, otherwise warn and leave it running.
 
-    The service restarted is the literal `klipper`, not the `-s` value.
+    The service restarted is the literal `klipper`, not the `-s` value. With
+    `ctx.configs_only` only AFC's configs changed, so Klipper's own restart through
+    Moonraker re-reads them without stopping its process: a service restart asked for
+    from under Klipper, as by AFC_installer, ends the installer as Klipper stops, which
+    on a Snapmaker U1 can leave Klipper stopped.
 
     :param ctx: installer context
     :param console: where warnings go
@@ -194,10 +234,13 @@ def restart_klipper(
     :param euid: effective user id, defaults to the current process's
     """
     if status_query(ctx.moonraker):
-        if ctx.is_snapmaker:
+        if ctx.configs_only:
+            if not _post_ok(f"{ctx.moonraker}/printer/restart"):
+                console.print_msg("WARNING", _NOT_IDLE_SNAPMAKER_WARNING)
+        elif ctx.is_snapmaker:
             u1_restart_klipper(runner, euid)
         else:
-            restart_service(runner, "klipper")
+            restart_service(runner, "klipper", ctx.moonraker)
     elif ctx.is_snapmaker:
         console.print_msg("WARNING", _NOT_IDLE_SNAPMAKER_WARNING)
     else:

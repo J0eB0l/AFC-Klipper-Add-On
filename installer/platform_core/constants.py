@@ -21,3 +21,7 @@ SNAPMAKER_KLIPPER_VENV = "/usr/bin"
 OS_RELEASE_PATH = "/etc/os-release"
 K1_OS_MARKER = "ID=buildroot"
 SNAPMAKER_MARKER = 'RK_BUILD_INFO="snapmaker'
+# Set to "1" by a panel that runs the installer where Klipper's modules must stay as
+# they are, such as AFC_installer on a Snapmaker U1: the installer then changes AFC's
+# configs only.
+CONFIGS_ONLY_ENV = "AFC_CONFIGS_ONLY"

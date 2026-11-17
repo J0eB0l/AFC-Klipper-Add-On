@@ -60,6 +60,26 @@ class TestSnapmakerInstallBehavior:
         assert (oem / ".debug").is_file()
         assert runner.calls == []
 
+    def test_configs_only_leaves_klippers_modules_and_the_debug_file_alone(
+        self, tmp_path: Path
+    ) -> None:
+        home = sandbox(tmp_path, Scenario(files=U1_FILES))
+        ctx = Context.create(REPO_ROOT, home=home)
+        ctx.is_snapmaker = ctx.configs_only = True
+        oem = tmp_path / "oem"
+        oem.mkdir()
+        extras = ctx.klipper_extra_path
+        before = {p.name: (p.is_symlink(), p.read_bytes()) for p in extras.iterdir()}
+        runner = FakeCommandRunner()
+        install_afc(
+            ctx, RecordingConsole(), ScriptedPrompter([]), runner,
+            InstallOptions(selection=UnitSelection()), euid=1000, oem_dir=oem,
+        )
+        assert {p.name: (p.is_symlink(), p.read_bytes()) for p in extras.iterdir()} == before
+        assert not (oem / ".debug").exists()
+        assert runner.calls == []
+        assert (ctx.afc_config_dir / "AFC.cfg").is_file()
+
     def test_a_normal_install_never_touches_the_oem_directory(self, tmp_path: Path) -> None:
         home = sandbox(tmp_path, Scenario())
         ctx = Context.create(REPO_ROOT, home=home)

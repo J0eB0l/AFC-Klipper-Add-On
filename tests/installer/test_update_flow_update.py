@@ -138,6 +138,13 @@ class TestUpdateAfc:
         self.update(ctx, ["n"])
         assert (ctx.klipper_extra_path / "AFC.py").is_symlink()
 
+    def test_configs_only_does_not_relink(self, tmp_path: Path) -> None:
+        ctx = self.setup(tmp_path)
+        ctx.configs_only = True
+        (ctx.klipper_extra_path / "AFC.py").unlink()
+        self.update(ctx, ["n"])
+        assert not (ctx.klipper_extra_path / "AFC.py").exists()
+
     def test_end_of_input_at_a_question_stops_the_installer(self, tmp_path: Path) -> None:
         ctx = self.setup(tmp_path)
         with pytest.raises(InstallerExit) as exc:

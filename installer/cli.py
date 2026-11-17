@@ -6,11 +6,13 @@
 """Command line parsing and context building."""
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, TextIO, Tuple
 
+from installer.platform_core.constants import CONFIGS_ONLY_ENV
 from installer.platform_core.context import Context
 from installer.platform_core.errors import InstallerExit
 
@@ -179,6 +181,7 @@ def build_context(args: CliArgs, script_dir: Path, home: Path, argv: List[str]) 
 
     `afc_path` is the checkout holding the script, never a path under `home`, and the
     Moonraker config defaults to the final printer config directory (issue #853).
+    `configs_only` comes from CONFIGS_ONLY_ENV in the environment.
 
     :param args: parsed flags
     :param script_dir: directory of the shim, which is the AFC checkout
@@ -187,7 +190,7 @@ def build_context(args: CliArgs, script_dir: Path, home: Path, argv: List[str]) 
     :return Context: the new context
     """
     defaults = Context.create(afc_path=script_dir, home=home)
-    return Context.create(
+    ctx = Context.create(
         afc_path=script_dir,
         home=home,
         printer_config_dir=_path(args.printer_config_dir),
@@ -201,6 +204,8 @@ def build_context(args: CliArgs, script_dir: Path, home: Path, argv: List[str]) 
         test_mode=args.test_mode,
         original_args=list(argv),
     )
+    ctx.configs_only = os.environ.get(CONFIGS_ONLY_ENV) == "1"
+    return ctx
 
 
 def _path(value: Optional[str]) -> Optional[Path]:

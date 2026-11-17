@@ -19,6 +19,7 @@ from installer.platform_core.klipper_links import (
 )
 from installer.platform_core.system import (
     CommandRunner,
+    _post_ok,
     query_printer_status,
     restart_klipper,
     restart_service,
@@ -27,6 +28,7 @@ from installer.platform_core.system import (
 )
 from tests.installer.fakes import (
     FakeCommandRunner,
+    FakeLocalPosts,
     PrinterTree,
     RecordingConsole,
 )
@@ -346,6 +348,27 @@ class TestRestartService:
         restart_service(runner, "moonraker")
         assert runner.calls == [["sudo", "service", "moonraker", "restart"]]
 
+    def test_moonraker_restarts_it_without_sudo_when_it_can(
+        self, local_posts: FakeLocalPosts
+    ) -> None:
+        local_posts.ok = True
+        runner = FakeCommandRunner(existing=["systemctl"])
+        restart_service(runner, "moonraker", "http://h:7125")
+        assert local_posts.urls == ["http://h:7125/machine/services/restart?service=moonraker"]
+        assert runner.calls == []
+
+    def test_sudo_restarts_it_when_moonraker_refuses(self, local_posts: FakeLocalPosts) -> None:
+        runner = FakeCommandRunner(existing=["systemctl"])
+        restart_service(runner, "klipper", "http://h:7125")
+        assert local_posts.urls == ["http://h:7125/machine/services/restart?service=klipper"]
+        assert runner.calls == [["sudo", "systemctl", "restart", "klipper"]]
+
+    def test_without_a_moonraker_address_nothing_is_requested(
+        self, local_posts: FakeLocalPosts
+    ) -> None:
+        restart_service(FakeCommandRunner(), "moonraker")
+        assert local_posts.urls == []
+
     def test_a_failing_restart_exits_with_the_command_status(self) -> None:
         failing = subprocess.CompletedProcess([], 5, stdout="", stderr="")
         runner = FakeCommandRunner(
@@ -363,6 +386,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         type(self).seen.append(self.path)
+        self.send_response(type(self).status)
+        self.end_headers()
+        self.wfile.write(type(self).body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        type(self).seen.append(f"POST {self.path}")
         self.send_response(type(self).status)
         self.end_headers()
         self.wfile.write(type(self).body)
@@ -447,16 +476,54 @@ class TestQueryPrinterStatus:
         assert seen == ["/printer/objects/query?idle_timeout"]
 
 
+class TestPostOk:
+    def test_a_2xx_answer_is_success_and_the_request_is_a_post(
+        self, moonraker: Callable[[bytes, int], str]
+    ) -> None:
+        url = moonraker(b'{"result": "ok"}', 200)
+        assert _post_ok(f"{url}/machine/services/restart?service=klipper") is True
+        seen = moonraker.handler.seen  # type: ignore[attr-defined]
+        assert seen == ["POST /machine/services/restart?service=klipper"]
+
+    @pytest.mark.parametrize("status", [400, 401, 404, 500])
+    def test_an_error_status_is_not_success(
+        self, moonraker: Callable[[bytes, int], str], status: int
+    ) -> None:
+        assert _post_ok(moonraker(b"{}", status) + "/x") is False
+
+    def test_connection_refused_is_not_success(self) -> None:
+        assert _post_ok("http://127.0.0.1:1/x") is False
+
+    @pytest.mark.parametrize("url", ["file:///etc/hostname", "localhost/x", ""])
+    def test_a_non_http_address_is_never_requested(self, url: str) -> None:
+        assert _post_ok(url) is False
+
+
 class TestU1RestartKlipper:
-    def test_non_root_uses_su(self) -> None:
+    def test_non_root_uses_the_firmware_page_which_needs_no_password(
+        self, local_posts: FakeLocalPosts
+    ) -> None:
+        local_posts.ok = True
         runner = FakeCommandRunner()
         u1_restart_klipper(runner, euid=1000)
+        assert local_posts.urls == [
+            "http://127.0.0.1/firmware-config/api/action/restart-klipper"
+        ]
+        assert runner.calls == []
+
+    def test_non_root_uses_su_when_the_firmware_page_is_missing(
+        self, local_posts: FakeLocalPosts
+    ) -> None:
+        runner = FakeCommandRunner()
+        u1_restart_klipper(runner, euid=1000)
+        assert len(local_posts.urls) == 1
         assert runner.calls == [["su", "root", "-c", "/etc/init.d/S60klipper restart"]]
 
-    def test_root_runs_the_init_script_directly(self) -> None:
+    def test_root_runs_the_init_script_directly(self, local_posts: FakeLocalPosts) -> None:
         runner = FakeCommandRunner()
         u1_restart_klipper(runner, euid=0)
         assert runner.calls == [["/etc/init.d/S60klipper", "restart"]]
+        assert local_posts.urls == []
 
 
 class TestU1WriteDebugFile:
@@ -466,6 +533,13 @@ class TestU1WriteDebugFile:
         assert console.messages == [("OTHER", "Writing .debug file to /oem/ directory")]
         assert runner.calls == [["su", "root", "-c", f"touch {tmp_path}/.debug"]]
         assert not (tmp_path / ".debug").exists()
+
+    def test_non_root_does_nothing_when_the_file_exists(self, tmp_path: Path) -> None:
+        (tmp_path / ".debug").write_text("keep")
+        console, runner = RecordingConsole(), FakeCommandRunner()
+        u1_write_debug_file(console, runner, euid=1000, oem_dir=tmp_path)
+        assert console.messages == []
+        assert runner.calls == []
 
     def test_root_creates_the_file_when_missing(self, tmp_path: Path) -> None:
         console, runner = RecordingConsole(), FakeCommandRunner()
@@ -488,6 +562,16 @@ class TestRestartKlipper:
 
     def busy(self, _url: str) -> bool:
         return False
+
+    def test_idle_asks_moonraker_to_restart_klipper_first(
+        self, printer_tree: PrinterTree, local_posts: FakeLocalPosts
+    ) -> None:
+        local_posts.ok = True
+        runner = FakeCommandRunner(existing=["systemctl"])
+        ctx = make_ctx(printer_tree, moonraker_address="http://h", moonraker_port="9")
+        restart_klipper(ctx, RecordingConsole(), runner, self.idle)
+        assert local_posts.urls == ["http://h:9/machine/services/restart?service=klipper"]
+        assert runner.calls == []
 
     def test_idle_restarts_the_klipper_service_with_systemctl(
         self, printer_tree: PrinterTree
@@ -521,6 +605,29 @@ class TestRestartKlipper:
         runner = FakeCommandRunner()
         restart_klipper(ctx, RecordingConsole(), runner, self.idle, euid=1000)
         assert runner.calls == [["su", "root", "-c", "/etc/init.d/S60klipper restart"]]
+
+    def test_configs_only_asks_moonraker_for_klippers_own_restart(
+        self, printer_tree: PrinterTree, local_posts: FakeLocalPosts
+    ) -> None:
+        local_posts.ok = True
+        ctx = make_ctx(printer_tree, moonraker_address="http://h", moonraker_port="9")
+        ctx.is_snapmaker = ctx.configs_only = True
+        runner, console = FakeCommandRunner(), RecordingConsole()
+        restart_klipper(ctx, console, runner, self.idle, euid=1000)
+        assert local_posts.urls == ["http://h:9/printer/restart"]
+        assert runner.calls == []
+        assert console.messages == []
+
+    def test_configs_only_never_stops_klipper_when_moonraker_refuses(
+        self, printer_tree: PrinterTree, local_posts: FakeLocalPosts
+    ) -> None:
+        ctx = make_ctx(printer_tree, moonraker_address="http://h", moonraker_port="9")
+        ctx.is_snapmaker = ctx.configs_only = True
+        runner, console = FakeCommandRunner(), RecordingConsole()
+        restart_klipper(ctx, console, runner, self.idle, euid=1000)
+        assert local_posts.urls == ["http://h:9/printer/restart"]
+        assert runner.calls == []
+        assert console.messages == [NOT_IDLE_SNAPMAKER]
 
     def test_busy_printer_skips_the_restart_with_a_warning(
         self, printer_tree: PrinterTree

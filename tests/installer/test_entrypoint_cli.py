@@ -159,6 +159,15 @@ class TestBuildContext:
         assert ctx.test_mode is False
         assert ctx.original_args == []
 
+    def test_configs_only_comes_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert build_context(CliArgs(), tmp_path, tmp_path, []).configs_only is False
+        monkeypatch.setenv("AFC_CONFIGS_ONLY", "1")
+        assert build_context(CliArgs(), tmp_path, tmp_path, []).configs_only is True
+        monkeypatch.setenv("AFC_CONFIGS_ONLY", "0")
+        assert build_context(CliArgs(), tmp_path, tmp_path, []).configs_only is False
+
     def test_every_flag_overrides_its_value(self, tmp_path: Path) -> None:
         args = CliArgs(
             moonraker_address="http://mr", klipper_dir="/k", moonraker_config_file="/m.conf",

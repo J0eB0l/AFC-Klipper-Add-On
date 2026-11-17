@@ -74,6 +74,19 @@ class FakeCommandRunner:
         return name in self._existing
 
 
+class FakeLocalPosts:
+    """Stands in for the installer's POSTs to Moonraker and the U1 firmware page: records
+    each address and answers with `ok`."""
+
+    def __init__(self) -> None:
+        self.urls: List[str] = []
+        self.ok = False
+
+    def __call__(self, url: str) -> bool:
+        self.urls.append(url)
+        return self.ok
+
+
 @dataclass
 class PrinterTree:
     """Paths of a throwaway printer layout built under a temp directory."""

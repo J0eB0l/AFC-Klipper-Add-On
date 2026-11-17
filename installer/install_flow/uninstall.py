@@ -35,8 +35,9 @@ def uninstall_afc(
     Remove AFC: unlink the extensions, drop the printer.cfg include, back up the config.
 
     The AFC directory is moved to `AFC.backup.<date>`, never deleted. On a Snapmaker the
-    original Klipper files come back and the fluidd macros are uncommented. Klipper is
-    restarted if the printer is idle.
+    original Klipper files come back and the fluidd macros are uncommented. With
+    `ctx.configs_only` Klipper's modules folder stays as it is. Klipper is restarted if
+    the printer is idle.
 
     :param ctx: installer context
     :param console: where messages go
@@ -45,10 +46,12 @@ def uninstall_afc(
     :param euid: effective user id, defaults to the current process's
     :return str: the uninstall message
     """
-    unlink_extensions(ctx, console)
+    if not ctx.configs_only:
+        unlink_extensions(ctx, console)
     manage_include(ctx.printer_config_dir / "printer.cfg", "remove")
     if ctx.is_snapmaker:
-        move_lite_files_back(ctx)
+        if not ctx.configs_only:
+            move_lite_files_back(ctx)
         comment_gcode_in_fluidd(ctx, console, comment=False)
     backup_afc_config(ctx)
     restart_klipper(ctx, console, runner, status_query, euid)

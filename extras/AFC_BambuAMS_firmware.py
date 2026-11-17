@@ -305,6 +305,8 @@ class AmsFirmware:
         self._timer: Any = None
         # Board -> (when it was read, the images it can take), for get_status.
         self._choices: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+        # When this Klipper run began: get_status leaves out an update that ended before it.
+        self._started = time.time()
         printer.register_event_handler("klippy:ready", self._handle_ready)
         printer.lookup_object("gcode").register_command(
             "AFC_BAMBU_FIRMWARE", self.cmd_AFC_BAMBU_FIRMWARE,
@@ -698,6 +700,19 @@ class AmsFirmware:
         return (age < HOLD_MAX_S
                 and bool(read_json(result).get("running")))
 
+    def _since_start(self, result: str) -> bool:
+        """
+        Whether a result was written since this Klipper run began, so a finished update's
+        result shows until Klipper restarts.
+
+        :param result: the result file
+        :return bool: True when it was
+        """
+        try:
+            return os.path.getmtime(result) >= self._started
+        except OSError:
+            return False
+
     def _show_result(self, gcmd: Any, folder: Optional[str]) -> None:
         """
         How the last update ended.
@@ -764,6 +779,9 @@ class AmsFirmware:
         result_path = os.path.join(folder, RESULT_NAME)
         result = read_json(result_path)
         status["running"] = self._busy(result_path)
+        if (not status["running"]
+                and not self._since_start(result_path)):
+            result = {}
         status["result"] = {"unit": str(result.get("unit") or ""),
                             "ok": bool(result.get("ok")),
                             "message": str(result.get("message") or "")}
