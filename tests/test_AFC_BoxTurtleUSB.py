@@ -3436,6 +3436,7 @@ class TestBoardLed:
 class TestGetStatus:
     def test_turtleneck(self):
         unit = make_unit()
+        unit.flash_tool = "/x/flashtool.py"
         unit.buffer_obj = TurtleNeck(unit)
         unit.link.last_error = "x"
         unit.assist_mode["lane8"] = "tn"
@@ -3444,13 +3445,29 @@ class TestGetStatus:
         assert status == {"lanes": [], "turtle": {
             "connected": True, "port": unit.link.port, "firmware": "fw1", "uid": "UID1",
             "reset": "power", "error": "x", "turtleneck": unit.buffer_obj.get_status(),
-            "assist": {"lane8": "tn"}}}
+            "assist": {"lane8": "tn"}, "proto": PROTO, "flash_tool": True,
+            "flash": {"state": "", "message": "", "progress": -1, "version": ""}}}
 
     def test_external_buffer(self):
         unit = make_unit()
         unit.buffer_obj = ext_buffer()
         with patch.object(afcBoxTurtle, "get_status", return_value={}):
             assert unit.get_status()["turtle"]["turtleneck"] is None
+
+    def test_bootloader_while_away(self, tmp_path, monkeypatch):
+        unit = make_unit()
+        unit.link.connected = False
+        unit.board = "UID1"
+        monkeypatch.setattr(mod, "KATAPULT_GLOB", str(tmp_path / "usb-katapult_x_{serial}-if00"))
+        with patch.object(afcBoxTurtle, "get_status", return_value={}):
+            assert unit.get_status()["turtle"]["bootloader"] is False
+            (tmp_path / "usb-katapult_x_UID1-if00").write_text("")
+            assert unit.get_status()["turtle"]["bootloader"] is True
+
+    def test_no_bootloader_key_while_connected(self):
+        unit = make_unit()
+        with patch.object(afcBoxTurtle, "get_status", return_value={}):
+            assert "bootloader" not in unit.get_status()["turtle"]
 
 
 # ── gcode ─────────────────────────────────────────────────────────────────────
@@ -3524,6 +3541,306 @@ class TestCmdAfcTurtleBootloader:
         unit.cmd_AFC_TURTLE_BOOTLOADER(gcmd)
         assert unit.link.requests == [("bootloader", {})]
         gcmd.respond_info.assert_called_once_with("{'ok': True}")
+
+
+# ── firmware updates ──────────────────────────────────────────────────────────
+
+def firmware(tmp_path, name="boxturtle.bin", version="0.2.0", proto=PROTO, vector=0x08020101,
+             manifest=None):
+    """Writes an image and its manifest; returns the image's path."""
+    import hashlib
+    import struct
+    image = struct.pack("<II", 0x20000000, vector) + b"\x55" * 100
+    path = tmp_path / name
+    path.write_bytes(image)
+    if manifest is None:
+        manifest = {"format": "BTFW1", "version": version, "proto": proto, "len": len(image),
+                    "sha256": hashlib.sha256(image).hexdigest()}
+    (tmp_path / (name + ".json")).write_text(json.dumps(manifest))
+    return str(path)
+
+
+class TestReadFirmware:
+    def test_good(self, tmp_path):
+        image, version = mod.read_firmware(firmware(tmp_path))
+        assert version == "0.2.0" and len(image) == 108
+
+    def test_no_manifest(self, tmp_path):
+        path = firmware(tmp_path)
+        os.remove(path + ".json")
+        with pytest.raises(OSError):
+            mod.read_firmware(path)
+
+    @pytest.mark.parametrize("manifest, why", [
+        ([], "is not a BoxTurtle firmware manifest"),
+        ({"format": "X"}, "is not a BoxTurtle firmware manifest"),
+    ])
+    def test_not_a_manifest(self, tmp_path, manifest, why):
+        with pytest.raises(ValueError, match=why):
+            mod.read_firmware(firmware(tmp_path, manifest=manifest))
+
+    def test_other_protocol(self, tmp_path):
+        with pytest.raises(ValueError, match="speaks boxturtle-2 and this AFC speaks boxturtle-1; "
+                                             "update AFC first"):
+            mod.read_firmware(firmware(tmp_path, proto="boxturtle-2"))
+
+    def test_changed_image(self, tmp_path):
+        path = firmware(tmp_path)
+        with open(path, "ab") as f:
+            f.write(b"x")
+        with pytest.raises(ValueError, match="does not match its manifest"):
+            mod.read_firmware(path)
+
+    def test_over_the_bootloader(self, tmp_path):
+        with pytest.raises(ValueError, match="does not start above the bootloader"):
+            mod.read_firmware(firmware(tmp_path, vector=0x08000101))
+
+    def test_no_version(self, tmp_path):
+        with pytest.raises(ValueError, match="names no version"):
+            mod.read_firmware(firmware(tmp_path, version=""))
+
+
+class TestFindFlashTool:
+    def test_first_found(self, tmp_path, monkeypatch):
+        (tmp_path / "b.py").write_text("")
+        monkeypatch.setattr(mod, "FLASH_TOOLS", (str(tmp_path / "a.py"), str(tmp_path / "b.py")))
+        assert mod.find_flash_tool() == str(tmp_path / "b.py")
+
+    def test_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "FLASH_TOOLS", (str(tmp_path / "a.py"),))
+        assert mod.find_flash_tool() is None
+
+
+class FakeProc:
+    """flashtool: prints its progress bars over a few polls, then exits."""
+
+    def __init__(self, chunks, code=0, polls=3):
+        self.read_fd, write_fd = os.pipe()
+        for chunk in chunks:
+            os.write(write_fd, chunk)
+        os.close(write_fd)
+        self.stdout = os.fdopen(self.read_fd, "rb")
+        self.code = code
+        self.polls = polls
+        self.returncode = None
+        self.killed = False
+
+    def poll(self):
+        self.polls -= 1
+        if self.polls < 0:
+            self.returncode = self.code
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self):
+        return self.returncode
+
+
+class TestCmdAfcTurtleFlash:
+    def _setup(self, tmp_path, monkeypatch, **fw):
+        unit = make_unit()
+        unit.flash_tool = None
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        unit.printer.get_start_args = lambda: {"config_file": str(cfg / "printer.cfg")}
+        (cfg / "boxturtle").mkdir()
+        firmware(cfg / "boxturtle", **fw)
+        (tmp_path / "flashtool.py").write_text("")
+        monkeypatch.setattr(mod, "FLASH_TOOLS", (str(tmp_path / "flashtool.py"),))
+        kat = tmp_path / "dev"
+        kat.mkdir()
+        monkeypatch.setattr(mod, "KATAPULT_GLOB", str(kat / "usb-katapult_stm32h723xx_{serial}-if00"))
+        gcmd = MockGCodeCommand({"FILE": "boxturtle/boxturtle.bin"})
+        gcmd.respond_info = MagicMock()
+        return unit, gcmd, cfg, kat
+
+    def _bootloader_appears(self, unit, kat, after=1.0):
+        """The board's Katapult device shows up `after` s once AFC asks for the bootloader."""
+        start = {}
+        link = unit.link
+
+        def request(cmd, timeout=1.0, **fields):
+            link.requests.append((cmd, fields))
+            if cmd == "bootloader":
+                link.connected = False
+                start["t"] = unit.reactor.now
+            return {"ok": False, "err": "disconnected"}
+
+        def pump():
+            if "t" in start and unit.reactor.now - start["t"] >= after:
+                (kat / "usb-katapult_stm32h723xx_UID1-if00").write_text("")
+
+        link.request = request
+        unit.reactor.pumps.append(pump)
+
+    def _comes_back(self, unit, version):
+        def wait_up(timeout):
+            unit.link.connected = True
+            unit.link.info = {"fw": version}
+            return True
+        unit.link.wait_up = wait_up
+
+    def test_updates(self, tmp_path, monkeypatch):
+        unit, gcmd, cfg, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        self._comes_back(unit, "0.2.0")
+        calls = []
+
+        def popen(args, **kwargs):
+            calls.append(args)
+            return FakeProc([b"Flashing...\n[" + b"#" * 50 + b"]\n", b"Verifying\n[" + b"#" * 50 + b"]\n"])
+
+        with patch.object(mod.subprocess, "Popen", side_effect=popen):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        port = str(kat / "usb-katapult_stm32h723xx_UID1-if00")
+        assert calls == [[mod.sys.executable, str(tmp_path / "flashtool.py"), "-d", port,
+                          "-f", str(cfg / "boxturtle" / "boxturtle.bin")]]
+        assert unit.link.requests == [("bootloader", {})]
+        assert unit.flash == {"state": "done", "progress": 100, "version": "0.2.0",
+                              "message": "Turtle_1 now runs BoxTurtle firmware 0.2.0 (was fw1)"}
+        gcmd.respond_info.assert_called_once_with("Turtle_1 now runs BoxTurtle firmware 0.2.0 (was fw1)")
+
+    def test_finishes_one_left_in_the_bootloader(self, tmp_path, monkeypatch):
+        unit, gcmd, cfg, kat = self._setup(tmp_path, monkeypatch)
+        unit.link.connected = False
+        unit.board = "UID1"
+        (kat / "usb-katapult_stm32h723xx_UID1-if00").write_text("")
+        self._comes_back(unit, "0.2.0")
+        with patch.object(mod.subprocess, "Popen", return_value=FakeProc([b"ok\n"])):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert unit.link.requests == []
+        assert unit.flash["message"] == "Turtle_1 now runs BoxTurtle firmware 0.2.0"
+
+    def test_refused_while_printing(self, tmp_path, monkeypatch):
+        unit, gcmd, _, _ = self._setup(tmp_path, monkeypatch)
+        unit.afc.function.is_printing.return_value = True
+        with pytest.raises(Exception, match="Turtle_1: not while printing"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert unit.link.requests == [] and unit.flash["state"] == ""
+
+    def test_refused_while_a_lane_moves(self, tmp_path, monkeypatch):
+        unit, gcmd, _, _ = self._setup(tmp_path, monkeypatch)
+        unit.moving.add("lane8")
+        with pytest.raises(Exception, match="busy"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+
+    def test_bad_image(self, tmp_path, monkeypatch):
+        unit, gcmd, _, _ = self._setup(tmp_path, monkeypatch, proto="boxturtle-2")
+        with pytest.raises(Exception, match="update AFC first"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert unit.link.requests == []
+
+    def test_file_outside_the_config_folder(self, tmp_path, monkeypatch):
+        unit, _, _, _ = self._setup(tmp_path, monkeypatch)
+        gcmd = MockGCodeCommand({"FILE": "../x.bin"})
+        with pytest.raises(Exception, match="outside the config folder"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+
+    def test_no_flashtool(self, tmp_path, monkeypatch):
+        unit, gcmd, _, _ = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod, "FLASH_TOOLS", (str(tmp_path / "none.py"),))
+        with pytest.raises(Exception, match="Katapult's flashtool is not installed"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert unit.link.requests == []
+
+    def test_not_connected(self, tmp_path, monkeypatch):
+        unit, gcmd, _, _ = self._setup(tmp_path, monkeypatch)
+        unit.link.connected = False
+        unit.board = "UID1"
+        with pytest.raises(Exception, match="its BoxTurtle is not connected"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+
+    def test_unknown_board(self, tmp_path, monkeypatch):
+        unit, gcmd, _, _ = self._setup(tmp_path, monkeypatch)
+        unit.link.port = "/dev/ttyACM0"
+        monkeypatch.setattr(mod, "PORT_GLOB", str(tmp_path / "none-*"))
+        with pytest.raises(Exception, match="can't tell which board is this unit's"):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+
+    def test_no_bootloader(self, tmp_path, monkeypatch):
+        unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
+        with patch.object(mod.subprocess, "Popen") as popen:
+            with pytest.raises(Exception, match="did not start its bootloader"):
+                unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        popen.assert_not_called()
+        assert unit.flash["state"] == "failed"
+        assert unit.flash["message"] == "Turtle_1: the BoxTurtle did not start its bootloader"
+
+    def test_flashtool_fails(self, tmp_path, monkeypatch):
+        unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        with patch.object(mod.subprocess, "Popen", return_value=FakeProc([b"Flashing\nError: no ack\n"], code=1)):
+            with pytest.raises(Exception, match="Katapult's flashtool failed: Error: no ack"):
+                unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert unit.flash["state"] == "failed"
+
+    def test_flashtool_hangs(self, tmp_path, monkeypatch):
+        unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        proc = FakeProc([b"Flashing\n"], polls=10 ** 9)
+        with patch.object(mod.subprocess, "Popen", return_value=proc):
+            with pytest.raises(Exception, match="flashtool failed"):
+                unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert proc.killed
+
+    def test_board_does_not_come_back(self, tmp_path, monkeypatch):
+        unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        unit.link.wait_up = lambda timeout: False
+        with patch.object(mod.subprocess, "Popen", return_value=FakeProc([b"ok\n"])):
+            with pytest.raises(Exception, match="did not come back after the update"):
+                unit.cmd_AFC_TURTLE_FLASH(gcmd)
+
+    def test_board_back_on_another_version(self, tmp_path, monkeypatch):
+        unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        self._comes_back(unit, "0.1.1")
+        with patch.object(mod.subprocess, "Popen", return_value=FakeProc([b"ok\n"])):
+            with pytest.raises(Exception, match="came back on 0.1.1, not 0.2.0"):
+                unit.cmd_AFC_TURTLE_FLASH(gcmd)
+
+    def test_progress(self, tmp_path, monkeypatch):
+        unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        self._comes_back(unit, "0.2.0")
+        seen = []
+        real_step = unit._flash_step
+
+        def step(message, progress, version, state="running"):
+            seen.append(progress)
+            real_step(message, progress, version, state)
+
+        unit._flash_step = step
+        with patch.object(mod.subprocess, "Popen", return_value=FakeProc([b"[" + b"#" * 30])):
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert 30 in seen and seen[-1] == 100
+
+    def test_default_file(self, tmp_path, monkeypatch):
+        unit, _, cfg, kat = self._setup(tmp_path, monkeypatch)
+        self._bootloader_appears(unit, kat)
+        self._comes_back(unit, "0.2.0")
+        gcmd = MockGCodeCommand({})
+        gcmd.respond_info = MagicMock()
+        with patch.object(mod.subprocess, "Popen", return_value=FakeProc([b"ok\n"])) as popen:
+            unit.cmd_AFC_TURTLE_FLASH(gcmd)
+        assert popen.call_args[0][0][-1] == str(cfg / "boxturtle" / "boxturtle.bin")
+
+    def test_absolute_file(self, tmp_path, monkeypatch):
+        unit, _, cfg, _ = self._setup(tmp_path, monkeypatch)
+        assert unit._firmware_path("/x/y.bin") == "/x/y.bin"
+
+
+class TestReleaseWhileFlashing:
+    def test_waits(self, tmp_path):
+        unit, _ = hotswap_unit(tmp_path)
+        unit.claimed = True
+        unit.link.connected = False
+        unit.flash["state"] = "running"
+        assert unit._release_cb(200.0) == 200.0 + unit.release_grace
+        assert unit.claimed is True
 
 
 class TestLoadConfigPrefix:

@@ -35,9 +35,13 @@ from __future__ import annotations
 import copy
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import select
+import struct
+import subprocess
+import sys
 import termios
 import traceback
 
@@ -79,6 +83,15 @@ TMC_FAULTS = ("tmc_uart", "tmc_ot", "tmc_short", "tmc_reset", "tmc_uv",
 # What fw_home reports when the hub keeps reading filament after the lane let go of it.
 HUB_STUCK = ("the filament left the lane but the hub still reads filament: "
              "hub stuck or broken piece in hub")
+
+# Firmware updates: Katapult's flashtool writes an image over the board's USB bootloader. An image
+# comes with a manifest (<image>.json) naming its version and the protocol it speaks.
+FW_FORMAT = "BTFW1"
+FW_DEFAULT = "boxturtle/boxturtle.bin"  # in the config folder, where the update page puts it
+FLASH_TOOLS = ("~/katapult/scripts/flashtool.py", "~/CanBoot/scripts/flashtool.py")
+KATAPULT_GLOB = "/dev/serial/by-id/usb-katapult_*_{serial}-if00"
+# Apps start above the 128 KiB bootloader: the reset vector's top half.
+FW_APP_REGIONS = (0x0802, 0x0803)
 
 
 def encode_line(msg: Dict[str, Any]) -> bytes:
@@ -168,6 +181,46 @@ def port_serial(port: Optional[str]) -> Optional[str]:
     if not (name.startswith(PORT_PREFIX) and name.endswith(PORT_SUFFIX)):
         return None
     return name[len(PORT_PREFIX):-len(PORT_SUFFIX)] or None
+
+
+def find_flash_tool() -> Optional[str]:
+    """
+    :return str: Katapult's flashtool.py, or None when it is not installed
+    """
+    for path in FLASH_TOOLS:
+        full = os.path.expanduser(path)
+        if os.path.isfile(full):
+            return full
+    return None
+
+
+def read_firmware(path: str) -> tuple:
+    """
+    Reads a firmware image and its manifest and checks they belong together, speak this AFC's
+    protocol and start above the bootloader.
+
+    :param path: The image; its manifest is path + ".json"
+    :return tuple: (image bytes, version)
+    :raises ValueError: Why the image can't be flashed (OSError when a file can't be read)
+    """
+    with open(path, "rb") as f:
+        image = f.read()
+    with open(path + ".json") as f:
+        manifest = json.load(f)
+    if not isinstance(manifest, dict) or manifest.get("format") != FW_FORMAT:
+        raise ValueError(f"{os.path.basename(path)}.json is not a BoxTurtle firmware manifest")
+    if manifest.get("proto") != PROTO:
+        raise ValueError(f"the firmware speaks {manifest.get('proto')} and this AFC speaks {PROTO}; "
+                         f"update AFC first")
+    if (manifest.get("len") != len(image)
+            or manifest.get("sha256") != hashlib.sha256(image).hexdigest()):
+        raise ValueError(f"{os.path.basename(path)} does not match its manifest")
+    if len(image) < 8 or struct.unpack_from("<I", image, 4)[0] >> 16 not in FW_APP_REGIONS:
+        raise ValueError(f"{os.path.basename(path)} does not start above the bootloader")
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError(f"{os.path.basename(path)}.json names no version")
+    return image, version
 
 
 def board_file(var_file: str) -> str:
@@ -1001,6 +1054,10 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self._release_told = False
         self.claim_timer = self.reactor.register_timer(self._claim_cb)
         self.release_timer = self.reactor.register_timer(self._release_cb)
+        # The last firmware update (AFC_TURTLE_FLASH): state "", running, done or failed.
+        self.flash = {"state": "", "message": "", "progress": -1, "version": ""}
+        self.flash_tool = find_flash_tool()
+        self.flash_serial: Optional[str] = None  # the board the last update was for
 
         self.printer.register_event_handler("klippy:shutdown", self.link.stop)
         self.printer.register_event_handler("klippy:disconnect", self.link.stop)
@@ -1013,6 +1070,9 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.gcode.register_mux_command('AFC_TURTLE_BOOTLOADER', 'UNIT', self.name,
                                         self.cmd_AFC_TURTLE_BOOTLOADER,
                                         desc=self.cmd_AFC_TURTLE_BOOTLOADER_help)
+        self.gcode.register_mux_command('AFC_TURTLE_FLASH', 'UNIT', self.name,
+                                        self.cmd_AFC_TURTLE_FLASH,
+                                        desc=self.cmd_AFC_TURTLE_FLASH_help)
         if self.hotswap:
             self.printer.register_event_handler("afc:save_vars", self._handle_save_vars)
         if self.keeps_board:
@@ -1545,6 +1605,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         if not self.claimed or self.link.connected:
             self._release_told = False
             return self.reactor.NEVER
+        if self.flash["state"] == "running":
+            return eventtime + self.release_grace  # the board is in its bootloader
         from extras.AFC_BridgeBox import lane_in_toolhead
         loaded = [lane.name for lane in self.lanes.values() if lane_in_toolhead(lane, self.afc)]
         if loaded:
@@ -2523,7 +2585,12 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             "error": self.link.last_error,
             "turtleneck": self.buffer_obj.get_status() if isinstance(self.buffer_obj, TurtleNeck) else None,
             "assist": dict(self.assist_mode),
+            "proto": PROTO,
+            "flash_tool": self.flash_tool is not None,
+            "flash": dict(self.flash),
         }
+        if not self.link.connected:
+            response["turtle"]["bootloader"] = self._katapult_port() is not None
         if self.hotswap:
             response["turtle"]["slot"] = {"board": self.board, "in_afc": self.claimed}
         return response
@@ -2566,6 +2633,180 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             error_string = "Cannot restart the BoxTurtle into its bootloader while printing"
             raise gcmd.error(error_string)
         gcmd.respond_info(str(self.link.request("bootloader")))
+
+    cmd_AFC_TURTLE_FLASH_help = ("Update the BoxTurtle's firmware over USB from FILE= (in the config "
+                                 f"folder, {FW_DEFAULT} by default)")
+    def cmd_AFC_TURTLE_FLASH(self, gcmd):
+        """
+        Restarts the board into its bootloader, writes the image with Katapult's flashtool and waits
+        for the board to come back on it. Also finishes an update that left the board waiting in
+        its bootloader. Refused while printing.
+        """
+        name = gcmd.get('FILE', FW_DEFAULT)
+        try:
+            path = self._firmware_path(name)
+            image, version = read_firmware(path)
+        except (OSError, ValueError) as e:
+            error_string = f"{self.name}: {e}"
+            raise gcmd.error(error_string)
+        if self.afc.function.is_printing():
+            error_string = f"{self.name}: not while printing"
+            raise gcmd.error(error_string)
+        if self.flash["state"] == "running" or self.moving:
+            error_string = f"{self.name}: busy, try again once it is idle"
+            raise gcmd.error(error_string)
+        serial = self._board_serial()
+        if serial is None:
+            error_string = (f"{self.name}: can't tell which board is this unit's; give it "
+                            f"serial_port: auto or a /dev/serial/by-id path")
+            raise gcmd.error(error_string)
+        self.flash_serial = serial
+        self.flash_tool = find_flash_tool()
+        if self.flash_tool is None:
+            error_string = (f"{self.name}: Katapult's flashtool is not installed "
+                            f"(looked for {', '.join(FLASH_TOOLS)})")
+            raise gcmd.error(error_string)
+        if not self.link.connected and self._katapult_port() is None:
+            error_string = f"{self.name}: its BoxTurtle is not connected"
+            raise gcmd.error(error_string)
+
+        was = self.link.info.get("fw") if self.link.connected else None
+        self._flash_step("Restarting the BoxTurtle into its bootloader", 0, version)
+        failed = self._flash_run(path, version)
+        if failed:
+            error_string = f"{self.name}: {failed}"
+            self._flash_step(error_string, -1, version, "failed")
+            raise gcmd.error(error_string)
+        message = f"{self.name} now runs BoxTurtle firmware {version}" + (f" (was {was})" if was else "")
+        self._flash_step(message, 100, version, "done")
+        gcmd.respond_info(message)
+
+    def _flash_run(self, path: str, version: str) -> Optional[str]:
+        """
+        The update itself, for cmd_AFC_TURTLE_FLASH.
+
+        :param path: The image
+        :param version: The image's version, which the board must report after
+        :return str: Why it failed, or None
+        """
+        reactor = self.reactor
+        if self.link.connected:
+            # The reply is usually lost to the restart.
+            self.link.request("bootloader", timeout=1.0)
+        port = None
+        end = reactor.monotonic() + 15.0
+        while port is None and reactor.monotonic() < end:
+            reactor.pause(reactor.monotonic() + 0.25)
+            port = self._katapult_port()
+        if port is None:
+            return "the BoxTurtle did not start its bootloader"
+        self.logger.info(f"{self.name}: writing {os.path.basename(path)} ({version}) through {port}")
+        self._flash_step("Writing the firmware", 0, version)
+        try:
+            proc = subprocess.Popen([sys.executable, self.flash_tool, "-d", port, "-f", path],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            return f"could not run Katapult's flashtool: {e}"
+        os.set_blocking(proc.stdout.fileno(), False)
+        output = b""
+        end = reactor.monotonic() + 120.0
+        while proc.poll() is None and reactor.monotonic() < end:
+            reactor.pause(reactor.monotonic() + 0.2)
+            output += self._read_some(proc.stdout)
+            # Two progress bars, writing then checking, each 50 #s.
+            self._flash_step("Writing the firmware", min(99, output.count(b"#")), version)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        output += self._read_some(proc.stdout)
+        proc.stdout.close()
+        text = output.decode("utf-8", "replace")
+        self.logger.info(f"{self.name}: flashtool exit {proc.returncode}: "
+                         + " | ".join(line.strip() for line in text.splitlines()
+                                      if line.strip() and "#" not in line)[-600:])
+        if proc.returncode != 0:
+            last = [line.strip() for line in text.splitlines() if line.strip()]
+            return "Katapult's flashtool failed" + (f": {last[-1]}" if last else f" (exit {proc.returncode})")
+
+        # The new build must hear AFC within a minute or the board returns to its bootloader.
+        self._flash_step("Waiting for the BoxTurtle to start", 99, version)
+        if not self.link.wait_up(30.0):
+            return "the BoxTurtle did not come back after the update"
+        if self.link.info.get("fw") != version:
+            return f"the BoxTurtle came back on {self.link.info.get('fw')}, not {version}"
+        return None
+
+    @staticmethod
+    def _read_some(pipe) -> bytes:
+        """
+        :param pipe: A non-blocking pipe
+        :return bytes: What it holds now
+        """
+        out = b""
+        while True:
+            try:
+                chunk = os.read(pipe.fileno(), 4096)
+            except (BlockingIOError, OSError):
+                break
+            if not chunk:
+                break
+            out += chunk
+        return out
+
+    def _flash_step(self, message: str, progress: int, version: str, state: str = "running") -> None:
+        """
+        Records where an update is, for the status and the log.
+
+        :param message: What it does now, or how it ended
+        :param progress: Percent, -1 for none
+        :param version: The firmware it writes
+        :param state: running, done or failed
+        """
+        if state != "running" or message != self.flash["message"]:
+            log = self.logger.error if state == "failed" else self.logger.info
+            log(f"{self.name}: {message}" if not message.startswith(self.name) else message)
+        self.flash = {"state": state, "message": message, "progress": progress, "version": version}
+
+    def _firmware_path(self, name: str) -> str:
+        """
+        :param name: FILE=, relative to the config folder or absolute
+        :return str: The image's path
+        :raises ValueError: For a relative FILE= that leaves the config folder
+        """
+        if os.path.isabs(name):
+            return name
+        cfg_dir = os.path.dirname(self.printer.get_start_args().get("config_file", "") or "")
+        cfg_dir = cfg_dir or os.path.expanduser("~/printer_data/config")
+        full = os.path.normpath(os.path.join(cfg_dir, name))
+        if not full.startswith(os.path.normpath(cfg_dir) + os.sep):
+            error_string = f"{name} is outside the config folder"
+            raise ValueError(error_string)
+        return full
+
+    def _board_serial(self) -> Optional[str]:
+        """
+        :return str: The chip serial of this unit's board, which names its bootloader's USB device
+                     too, or None when the unit can't tell
+        """
+        if self.link.connected:
+            serial = port_serial(self.link.port)
+            if serial is None and self.link.port:
+                serial = port_serial(next((p for p in glob.glob(PORT_GLOB)
+                                           if os.path.realpath(p) == os.path.realpath(self.link.port)),
+                                          None))
+            return serial
+        return self.board or self.serial_uid or port_serial(self.serial_port) or self.flash_serial
+
+    def _katapult_port(self) -> Optional[str]:
+        """
+        :return str: This unit's board in its USB bootloader, or None
+        """
+        serial = self._board_serial()
+        if not serial:
+            return None
+        ports = sorted(glob.glob(KATAPULT_GLOB.format(serial=glob.escape(serial))))
+        return ports[0] if ports else None
 
     cmd_AFC_TURTLE_FORGET_help = ("Free a BoxTurtle unit of the board it is kept for, and a hot "
                                   "swap slot of that board's T#s")

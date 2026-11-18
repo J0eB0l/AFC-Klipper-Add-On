@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the BoxTurtle standalone firmware on top of a pinned Klipper tree.
-#   ./build.sh            -> out/boxturtle.bin (app at 0x08020000)
+#   ./build.sh            -> out/boxturtle.bin (app at 0x08020000) and its manifest, .json
 #   KLIPPER_DIR=... ./build.sh  uses an existing Klipper checkout instead
 # Needs gcc-arm-none-eabi and libnewlib-arm-none-eabi.
 set -euo pipefail
@@ -26,4 +26,15 @@ make -C "$KDIR" -j"$(nproc)"
 mkdir -p "$HERE/out"
 cp "$KDIR/out/klipper.bin" "$HERE/out/boxturtle.bin"
 cp "$KDIR/out/klipper.elf" "$HERE/out/boxturtle.elf"
-ls -l "$HERE/out/boxturtle.bin"
+# The manifest AFC_TURTLE_FLASH and the OrcaSlicer Update page read: version, protocol, size, hash.
+python3 - "$HERE/out/boxturtle.bin" "$HERE/src/turtle/board.h" <<'PY'
+import hashlib, json, re, sys
+image = open(sys.argv[1], "rb").read()
+board = open(sys.argv[2]).read()
+manifest = {"format": "BTFW1",
+            "version": re.search(r'#define FW_VERSION "([^"]+)"', board).group(1),
+            "proto": re.search(r'#define FW_PROTO "([^"]+)"', board).group(1),
+            "len": len(image), "sha256": hashlib.sha256(image).hexdigest()}
+open(sys.argv[1] + ".json", "w").write(json.dumps(manifest, indent=2) + "\n")
+PY
+ls -l "$HERE/out/boxturtle.bin" "$HERE/out/boxturtle.bin.json"
