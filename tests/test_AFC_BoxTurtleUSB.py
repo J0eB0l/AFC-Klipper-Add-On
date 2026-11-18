@@ -34,6 +34,9 @@ from extras.AFC_lane import AFCLaneState
 from extras.AFC_unit import afcUnit
 from tests.conftest import MockConfig, MockGCodeCommand, MockLogger, MockPrinter
 
+# Command context the tests pass through and check errors for
+GCMD = MagicMock()
+
 
 # ── reactor fakes ─────────────────────────────────────────────────────────────
 
@@ -1162,8 +1165,8 @@ class TestTurtleDriveMove:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move") as fw_move:
-            lane.drive_stepper.move(10, 50, 400, True)
-        fw_move.assert_called_once_with(lane, 10, 50, 400, True)
+            lane.drive_stepper.move(10, 50, 400, True, gcmd=GCMD)
+        fw_move.assert_called_once_with(lane, 10, 50, 400, True, gcmd=GCMD)
 
 
 class TestTurtleDriveHomeTo:
@@ -1171,8 +1174,8 @@ class TestTurtleDriveHomeTo:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_home", return_value=(True, 5.0, False)) as fw_home:
-            assert lane.drive_stepper.home_to("hub", 100, 50, 400, False, True, False) == (True, 5.0, False)
-        fw_home.assert_called_once_with(lane, "hub", 100, 50, 400, False, True, False)
+            assert lane.drive_stepper.home_to("hub", 100, 50, 400, False, True, False, gcmd=GCMD) == (True, 5.0, False)
+        fw_home.assert_called_once_with(lane, "hub", 100, 50, 400, False, True, False, gcmd=GCMD)
 
 
 class TestTurtleDriveDoEnable:
@@ -1188,7 +1191,7 @@ class TestTurtleDriveSyncToExtruder:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "set_current") as cur, patch.object(unit, "set_sync") as sync:
-            lane.drive_stepper.sync_to_extruder()
+            lane.drive_stepper.sync_to_extruder(gcmd=GCMD)
         cur.assert_called_once_with(lane, True)
         sync.assert_called_once_with(lane, True)
 
@@ -1196,7 +1199,7 @@ class TestTurtleDriveSyncToExtruder:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "set_current") as cur, patch.object(unit, "set_sync"):
-            lane.drive_stepper.sync_to_extruder(False)
+            lane.drive_stepper.sync_to_extruder(False, gcmd=GCMD)
         cur.assert_not_called()
 
 
@@ -1205,7 +1208,7 @@ class TestTurtleDriveUnsyncToExtruder:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "set_current") as cur, patch.object(unit, "set_sync") as sync:
-            lane.drive_stepper.unsync_to_extruder()
+            lane.drive_stepper.unsync_to_extruder(gcmd=GCMD)
         sync.assert_called_once_with(lane, False)
         cur.assert_called_once_with(lane, False)
 
@@ -1213,7 +1216,7 @@ class TestTurtleDriveUnsyncToExtruder:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "set_current") as cur, patch.object(unit, "set_sync"):
-            lane.drive_stepper.unsync_to_extruder(False)
+            lane.drive_stepper.unsync_to_extruder(False, gcmd=GCMD)
         cur.assert_not_called()
 
 
@@ -1222,8 +1225,8 @@ class TestTurtleDriveCurrents:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "set_current") as cur:
-            lane.drive_stepper.set_load_current()
-            lane.drive_stepper.set_print_current()
+            lane.drive_stepper.set_load_current(gcmd=GCMD)
+            lane.drive_stepper.set_print_current(gcmd=GCMD)
         assert cur.call_args_list == [((lane, False),), ((lane, True),)]
 
 
@@ -1644,7 +1647,7 @@ class TestLinkLost:
         unit._link_lost("port closed")
         unit.afc.error.AFC_error.assert_called_once_with(
             "Turtle_1: BoxTurtle USB link lost (port closed), pausing. Plug it back in and resume.",
-            pause=True)
+            pause=True, gcmd="callback")
 
     def test_other_unit(self):
         unit = make_unit()
@@ -1723,7 +1726,7 @@ class TestSwitchChanged:
         lane = make_lane(unit)
         with patch.object(unit, "prep_removed") as removed:
             unit.switch_changed("prep1", 0, 5.0)
-        removed.assert_called_once_with(lane, 5.0)
+        removed.assert_called_once_with(lane, 5.0, gcmd="callback")
 
     def test_unknown_lane(self):
         unit = make_unit()
@@ -1746,7 +1749,7 @@ class TestSwitchChanged:
         unit, lane, hub = self._hub_unit()
         unit.switch_changed("hub", 0, 5.0)
         hub.switch_pin_callback.assert_called_once_with(5.0, 0)
-        lane.handle_hub_runout.assert_called_once_with(sensor="Turtle_1")
+        lane.handle_hub_runout.assert_called_once_with(gcmd="callback", sensor="Turtle_1")
 
     def test_hub_triggered_is_not_runout(self):
         unit, lane, _ = self._hub_unit()
@@ -1813,16 +1816,16 @@ class TestPrepRemoved:
     def test_runout_to_next_lane(self):
         unit = make_unit()
         lane = self._lane(unit, runout_lane="lane9")
-        unit.prep_removed(lane, 5.0)
+        unit.prep_removed(lane, 5.0, gcmd=GCMD)
         assert lane.prep_state is False
-        lane._perform_infinite_runout.assert_called_once_with()
+        lane._perform_infinite_runout.assert_called_once_with(GCMD)
         lane.handle_prep_runout.assert_not_called()
 
     def test_runout_pause(self):
         unit = make_unit()
         lane = self._lane(unit)
-        unit.prep_removed(lane, 5.0)
-        lane._perform_pause_runout.assert_called_once_with()
+        unit.prep_removed(lane, 5.0, gcmd=GCMD)
+        lane._perform_pause_runout.assert_called_once_with(GCMD)
         lane._perform_infinite_runout.assert_not_called()
 
     @pytest.mark.parametrize("change", [
@@ -1846,7 +1849,7 @@ class TestPrepRemoved:
         for key in ("_afc_prep_done", "status", "raw_load_state"):
             if key in change:
                 setattr(lane, key, change[key])
-        unit.prep_removed(lane, 5.0)
+        unit.prep_removed(lane, 5.0, gcmd=GCMD)
         lane.handle_prep_runout.assert_called_once_with(5.0, False)
         lane._perform_pause_runout.assert_not_called()
 
@@ -1861,7 +1864,7 @@ class TestFault:
         with patch.object(unit, "_send_assist") as assist:
             unit.fault({"code": "clog", "lane": 1, "msg": "TurtleNeck stayed full"}, 5.0)
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: TurtleNeck stayed full (clog)", pause=True)
+            "lane8: TurtleNeck stayed full (clog)", pause=True, gcmd="callback")
         assist.assert_called_once_with(lane)
 
     def test_assist_fault_printing_unsynced_lane(self):
@@ -1871,7 +1874,7 @@ class TestFault:
         unit.afc.function.is_printing.return_value = True
         with patch.object(unit, "_send_assist") as assist:
             unit.fault({"code": "clog", "lane": 1, "msg": "full"}, 5.0)
-        unit.afc.error.AFC_error.assert_called_once_with("lane8: full (clog)", pause=True)
+        unit.afc.error.AFC_error.assert_called_once_with("lane8: full (clog)", pause=True, gcmd="callback")
         assist.assert_not_called()
 
     def test_assist_fault_idle(self):
@@ -1896,7 +1899,7 @@ class TestFault:
         unit.afc.current = "lane8"
         unit.afc.function.is_printing.return_value = True
         unit.fault({"code": "tmc_short", "lane": 1, "msg": "short"}, 5.0)
-        unit.afc.error.AFC_error.assert_called_once_with("lane8: short (tmc_short)", pause=True)
+        unit.afc.error.AFC_error.assert_called_once_with("lane8: short (tmc_short)", pause=True, gcmd="callback")
 
     def test_tmc_fault_other_lane_printing(self):
         unit = make_unit()
@@ -1904,7 +1907,7 @@ class TestFault:
         unit.afc.current = "lane9"
         unit.afc.function.is_printing.return_value = True
         unit.fault({"code": "tmc_ot", "lane": 1, "msg": "hot"}, 5.0)
-        unit.afc.error.AFC_error.assert_called_once_with("lane8: hot (tmc_ot)", pause=False)
+        unit.afc.error.AFC_error.assert_called_once_with("lane8: hot (tmc_ot)", pause=False, gcmd="callback")
 
     def test_link_lost(self):
         unit = make_unit()
@@ -1960,22 +1963,22 @@ class TestReport:
         unit = make_unit()
         lane = make_lane(unit)
         unit.afc.function.in_print.return_value = in_print
-        unit._report(lane, "stuck")
-        unit.afc.error.AFC_error.assert_called_once_with("lane8: stuck", pause=in_print)
+        unit._report(lane, "stuck", gcmd=GCMD)
+        unit.afc.error.AFC_error.assert_called_once_with("lane8: stuck", pause=in_print, gcmd=GCMD)
 
 
 class TestFwMove:
     def test_zero(self):
         unit = make_unit()
         lane = make_lane(unit)
-        assert unit.fw_move(lane, 0, 50, 400, False) == ("done", 0.0)
+        assert unit.fw_move(lane, 0, 50, 400, False, gcmd=GCMD) == ("done", 0.0)
         assert unit.link.requests == []
 
     def test_move_with_until(self):
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.events = [{"ev": "move_done", "lane": 1, "end": "triggered", "mm": 42.5}]
-        assert unit.fw_move(lane, 100, 0, 0, False, until="hub", until_v=0) == ("triggered", 42.5)
+        assert unit.fw_move(lane, 100, 0, 0, False, until="hub", until_v=0, gcmd=GCMD) == ("triggered", 42.5)
         assert unit.link.requests == [("move", {
             "lane": 1, "mm": 100.0, "speed": 50.0, "accel": 400.0, "hold": True,
             "until": "hub", "until_v": 0, "espool_fwd": 0.0, "espool_rwd": 0.0,
@@ -1989,7 +1992,7 @@ class TestFwMove:
         unit.sync["lane8"] = True
         unit.link.events = [{"ev": "move_done", "lane": 1, "end": "done", "mm": 10}]
         with patch.object(unit, "_send_assist") as assist:
-            assert unit.fw_move(lane, 10, 30, 200, True) == ("done", 10.0)
+            assert unit.fw_move(lane, 10, 30, 200, True, gcmd=GCMD) == ("done", 10.0)
         assert unit.link.requests == [
             ("assist", {"lane": 1, "on": False}),
             ("move", {"lane": 1, "mm": 10.0, "speed": 30.0, "accel": 200.0, "hold": True,
@@ -2008,7 +2011,7 @@ class TestFwMove:
 
         unit.link.events = [unsync()]
         with patch.object(unit, "_send_assist") as assist:
-            unit.fw_move(lane, 10, 50, 400, True)
+            unit.fw_move(lane, 10, 50, 400, True, gcmd=GCMD)
         assist.assert_not_called()
 
 
@@ -2076,7 +2079,7 @@ class TestStartMove:
     def test_ok(self):
         unit = make_unit()
         lane = make_lane(unit)
-        done = unit._start_move(lane, {"lane": 1})
+        done = unit._start_move(lane, {"lane": 1}, gcmd=GCMD)
         assert done is unit.link.waiters[0][1]
         predicate = unit.link.waiters[0][0]
         assert predicate({"ev": "move_done", "lane": 1}) is True
@@ -2087,7 +2090,7 @@ class TestStartMove:
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.replies["move"] = [{"ok": False, "err": "lane busy"}, {"ok": True}]
-        assert unit._start_move(lane, {"lane": 1}) is not None
+        assert unit._start_move(lane, {"lane": 1}, gcmd=GCMD) is not None
         assert len(unit.link.requests) == 2
         assert unit.reactor.now >= 100.05
 
@@ -2095,19 +2098,19 @@ class TestStartMove:
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.replies["move"] = {"ok": False, "err": "bad lane"}
-        assert unit._start_move(lane, {"lane": 1}) is None
+        assert unit._start_move(lane, {"lane": 1}, gcmd=GCMD) is None
         assert len(unit.link.requests) == 1
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: BoxTurtle refused a move (bad lane)", pause=False)
+            "lane8: BoxTurtle refused a move (bad lane)", pause=False, gcmd=GCMD)
 
     def test_always_busy(self):
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.replies["move"] = [{"ok": False, "err": "lane busy"}] * 20
-        assert unit._start_move(lane, {"lane": 1}) is None
+        assert unit._start_move(lane, {"lane": 1}, gcmd=GCMD) is None
         assert len(unit.link.requests) == 20
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: BoxTurtle refused a move (lane busy)", pause=False)
+            "lane8: BoxTurtle refused a move (lane busy)", pause=False, gcmd=GCMD)
 
 
 class TestRunMove:
@@ -2115,41 +2118,41 @@ class TestRunMove:
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.replies["move"] = {"ok": False, "err": "bad"}
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("fault", 0.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("fault", 0.0)
 
     def test_timeout(self):
         unit = make_unit()
         lane = make_lane(unit)
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("fault", 0.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("fault", 0.0)
         # 10 mm at 50 mm/s, 50/400 s to speed up, plus 10 s slack
         assert unit.reactor.now == pytest.approx(100.0 + 0.2 + 0.125 + 10.0, abs=0.01)
         assert unit.link.sent == [("stop", {"lane": 1})]
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: BoxTurtle move of 10.0 mm did not finish", pause=False)
+            "lane8: BoxTurtle move of 10.0 mm did not finish", pause=False, gcmd=GCMD)
 
     def test_link_down(self):
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.events = [{"ev": "link_down"}]
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("fault", 0.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("fault", 0.0)
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: BoxTurtle disconnected during a move", pause=False)
+            "lane8: BoxTurtle disconnected during a move", pause=False, gcmd=GCMD)
 
     def test_defaults(self):
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.events = [{"ev": "move_done", "lane": 1}]
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("done", 0.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("done", 0.0)
 
     def test_link_stays_down(self):
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.events = [{"ev": "link_down"}]
         unit.link.up_results = [False]
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("fault", 0.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("fault", 0.0)
         assert unit.link.requests == [("move", {"mm": 10.0, "seq": 1})]
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: BoxTurtle disconnected during a move", pause=False)
+            "lane8: BoxTurtle disconnected during a move", pause=False, gcmd=GCMD)
 
     def test_link_back_during_the_move(self):
         unit = make_unit()
@@ -2157,7 +2160,7 @@ class TestRunMove:
         unit.logger.messages.clear()
         unit.link.events = [{"ev": "link_down"},
                             {"ev": "move_done", "lane": 1, "seq": 1, "end": "done", "mm": 10}]
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("done", 10.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("done", 10.0)
         assert unit.link.requests == [("move", {"mm": 10.0, "seq": 1}),
                                       ("replay", {"lane": 1}), ("status", {})]
         assert unit.logger.messages == [("info", "lane8: BoxTurtle link came back during a move")]
@@ -2168,7 +2171,7 @@ class TestRunMove:
         unit.logger.messages.clear()
         unit.link.events = [{"ev": "move_done", "lane": 1, "seq": 1, "end": "link_lost", "mm": 4},
                             {"ev": "move_done", "lane": 1, "seq": 2, "end": "triggered", "mm": 5}]
-        assert unit._run_move(lane, {"until": "hub"}, 10, 50, 400) == ("triggered", 9.0)
+        assert unit._run_move(lane, {"until": "hub"}, 10, 50, 400, gcmd=GCMD) == ("triggered", 9.0)
         assert unit.link.requests == [("move", {"until": "hub", "mm": 10.0, "seq": 1}),
                                       ("move", {"until": "hub", "mm": 6.0, "seq": 2}),
                                       ("status", {})]
@@ -2181,7 +2184,7 @@ class TestRunMove:
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.events = [{"ev": "move_done", "lane": 1, "seq": 1, "end": "link_lost", "mm": mm}]
-        assert unit._run_move(lane, fields, distance, 50, 400) == (end, mm)
+        assert unit._run_move(lane, fields, distance, 50, 400, gcmd=GCMD) == (end, mm)
         assert unit.link.requests[-1] == ("status", {})
         assert len(unit.link.requests) == 2
 
@@ -2190,24 +2193,24 @@ class TestRunMove:
         lane = make_lane(unit)
         unit.link.events = [{"ev": "move_done", "lane": 1, "seq": n, "end": "link_lost", "mm": 1}
                             for n in range(1, 5)]
-        assert unit._run_move(lane, {}, 10, 50, 400) == ("fault", 4.0)
+        assert unit._run_move(lane, {}, 10, 50, 400, gcmd=GCMD) == ("fault", 4.0)
         assert [r[1]["mm"] for r in unit.link.requests] == [10.0, 9.0, 8.0, 7.0]
         unit.afc.error.AFC_error.assert_called_once_with(
-            "lane8: BoxTurtle link kept dropping during a move", pause=False)
+            "lane8: BoxTurtle link kept dropping during a move", pause=False, gcmd=GCMD)
 
 
 class TestFwMovePoll:
     def test_already_there(self):
         unit = make_unit()
         lane = make_lane(unit)
-        assert unit._fw_move_poll(lane, 50, 25, 400, False, lambda: True, True) == ("triggered", 0.0)
+        assert unit._fw_move_poll(lane, 50, 25, 400, False, lambda: True, True, gcmd=GCMD) == ("triggered", 0.0)
         assert unit.link.requests == []
 
     def test_given_speed(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "_poll_move", return_value=("done", 5.0)) as poll:
-            unit._fw_move_poll(lane, 50, 30, 200, False, lambda: False, True)
+            unit._fw_move_poll(lane, 50, 30, 200, False, lambda: False, True, gcmd=GCMD)
         assert poll.call_args[0][1]["speed"] == 30.0
         assert poll.call_args[0][1]["accel"] == 200.0
         assert poll.call_args[0][3:5] == (30.0, 200.0)
@@ -2218,7 +2221,7 @@ class TestFwMovePoll:
         unit.sync["lane8"] = True
         with patch.object(unit, "_poll_move", return_value=("done", 5.0)) as poll, \
                 patch.object(unit, "_send_assist") as assist:
-            assert unit._fw_move_poll(lane, 50, 0, 0, False, lambda: False, True) == ("done", 5.0)
+            assert unit._fw_move_poll(lane, 50, 0, 0, False, lambda: False, True, gcmd=GCMD) == ("done", 5.0)
         fields = poll.call_args[0][1]
         assert fields == {"lane": 1, "mm": 50.0, "speed": 50.0, "accel": 400.0, "hold": True,
                           "espool_fwd": 0.0, "espool_rwd": 0.0, "espool_kick": False}
@@ -2239,14 +2242,14 @@ class TestPollMove:
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.replies["move"] = {"ok": False, "err": "bad"}
-        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("fault", 0.0)
+        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("fault", 0.0)
 
     def test_sensor_hit_stops_lane(self):
         unit = make_unit()
         lane = make_lane(unit)
         reactor = unit.reactor
         self._complete_at(unit, 100.06, {"ev": "move_done", "lane": 1, "end": "stopped", "mm": 1.5})
-        result = unit._poll_move(lane, {}, 50, 25, 400, lambda: reactor.now >= 100.03, True)
+        result = unit._poll_move(lane, {}, 50, 25, 400, lambda: reactor.now >= 100.03, True, gcmd=GCMD)
         assert result == ("triggered", 1.5)
         assert unit.link.sent == [("stop", {"lane": 1})]
 
@@ -2254,7 +2257,7 @@ class TestPollMove:
         unit = make_unit()
         lane = make_lane(unit)
         self._complete_at(unit, 100.03, {"ev": "move_done", "lane": 1, "end": "done", "mm": 50})
-        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("done", 50.0)
+        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("done", 50.0)
         assert unit.link.sent == []
 
     def test_sensor_reads_true_after_the_move(self):
@@ -2263,14 +2266,14 @@ class TestPollMove:
         reactor = unit.reactor
         self._complete_at(unit, 100.03, {"ev": "move_done", "lane": 1, "mm": 50})
         assert unit._poll_move(lane, {}, 50, 25, 400,
-                               lambda: reactor.now >= 100.035, True) == ("triggered", 50.0)
+                               lambda: reactor.now >= 100.035, True, gcmd=GCMD) == ("triggered", 50.0)
 
     def test_overrun_stops(self):
         unit = make_unit()
         lane = make_lane(unit)
         unit.link.events = [{"ev": "move_done", "lane": 1, "end": "stopped", "mm": 0.1}]
         start = unit.reactor.now
-        assert unit._poll_move(lane, {}, 0.1, 100, 1000, lambda: False, True) == ("stopped", 0.1)
+        assert unit._poll_move(lane, {}, 0.1, 100, 1000, lambda: False, True, gcmd=GCMD) == ("stopped", 0.1)
         assert unit.link.sent == [("stop", {"lane": 1})]
         assert unit.reactor.now > start + 10.0
 
@@ -2279,16 +2282,16 @@ class TestPollMove:
         lane = make_lane(unit)
         unit.link.events = [None]
         with patch.object(unit, "_report") as report:
-            assert unit._poll_move(lane, {}, 0.1, 100, 1000, lambda: False, True) == ("fault", 0.0)
+            assert unit._poll_move(lane, {}, 0.1, 100, 1000, lambda: False, True, gcmd=GCMD) == ("fault", 0.0)
         assert unit.link.sent == [("stop", {"lane": 1}), ("stop", {"lane": 1})]
-        report.assert_called_once_with(lane, "BoxTurtle move to a Klipper-side sensor did not finish")
+        report.assert_called_once_with(lane, "BoxTurtle move to a Klipper-side sensor did not finish", gcmd=GCMD)
 
     def test_link_down(self):
         unit = make_unit()
         lane = make_lane(unit)
         self._complete_at(unit, 100.02, {"ev": "link_down"})
         with patch.object(unit, "_report") as report:
-            assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("fault", 0.0)
+            assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("fault", 0.0)
         report.assert_called_once()
 
 
@@ -2310,7 +2313,7 @@ class TestPollMoveDrops:
         self._script(unit, [(100.02, {"ev": "link_down"}),
                             (100.05, {"ev": "move_done", "lane": 1, "seq": 1,
                                       "end": "stopped", "mm": 3})])
-        result = unit._poll_move(lane, {}, 50, 25, 400, lambda: reactor.now >= 100.04, True)
+        result = unit._poll_move(lane, {}, 50, 25, 400, lambda: reactor.now >= 100.04, True, gcmd=GCMD)
         assert result == ("triggered", 3.0)
         assert unit.link.sent == [("stop", {"lane": 1})]
         assert unit.link.requests == [("move", {"mm": 50.0, "seq": 1}),
@@ -2325,7 +2328,7 @@ class TestPollMoveDrops:
                                       "end": "stopped", "mm": 20}),
                             (100.05, {"ev": "move_done", "lane": 1, "seq": 2,
                                       "end": "done", "mm": 30})])
-        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("done", 50.0)
+        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("done", 50.0)
         assert unit.link.requests == [("move", {"mm": 50.0, "seq": 1}),
                                       ("replay", {"lane": 1}),
                                       ("move", {"mm": 30.0, "seq": 2}), ("status", {})]
@@ -2340,7 +2343,7 @@ class TestPollMoveDrops:
                                       "end": "link_lost", "mm": 10}),
                             (100.04, {"ev": "move_done", "lane": 1, "seq": 2,
                                       "end": "done", "mm": 40})])
-        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("done", 50.0)
+        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("done", 50.0)
         assert unit.link.sent == []
         assert [r[1] for r in unit.link.requests[:2]] == [{"mm": 50.0, "seq": 1},
                                                            {"mm": 40.0, "seq": 2}]
@@ -2351,7 +2354,7 @@ class TestPollMoveDrops:
         self._script(unit, [(100.02, {"ev": "link_down"}),
                             (100.03, {"ev": "move_done", "lane": 1, "seq": 1,
                                       "end": "done", "mm": 50})])
-        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("done", 50.0)
+        assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("done", 50.0)
         assert unit.link.requests[-1] == ("status", {})
 
     def test_link_stays_down(self):
@@ -2360,9 +2363,9 @@ class TestPollMoveDrops:
         unit.link.up_results = [False]
         self._script(unit, [(100.02, {"ev": "link_down"})])
         with patch.object(unit, "_report") as report:
-            assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("fault", 0.0)
+            assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("fault", 0.0)
         assert unit.link.sent == [("stop", {"lane": 1})]
-        report.assert_called_once_with(lane, "BoxTurtle move to a Klipper-side sensor did not finish")
+        report.assert_called_once_with(lane, "BoxTurtle move to a Klipper-side sensor did not finish", gcmd=GCMD)
 
     def test_keeps_dropping(self):
         unit = make_unit()
@@ -2370,8 +2373,8 @@ class TestPollMoveDrops:
         self._script(unit, [(100.02, {"ev": "move_done", "lane": 1, "seq": n,
                                       "end": "link_lost", "mm": 1}) for n in range(1, 5)])
         with patch.object(unit, "_report") as report:
-            assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True) == ("fault", 4.0)
-        report.assert_called_once_with(lane, "BoxTurtle link kept dropping during a move")
+            assert unit._poll_move(lane, {}, 50, 25, 400, lambda: False, True, gcmd=GCMD) == ("fault", 4.0)
+        report.assert_called_once_with(lane, "BoxTurtle link kept dropping during a move", gcmd=GCMD)
 
 
 class TestAfterDrop:
@@ -2535,21 +2538,21 @@ class TestFwHome:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("triggered", -12.0)) as move:
-            assert unit.fw_home(lane, "hub", -100, 50, 400, False, True, True) == (True, 12.0, False)
-        move.assert_called_once_with(lane, -100, 50, 400, True, until="hub", until_v=0)
+            assert unit.fw_home(lane, "hub", -100, 50, 400, False, True, True, gcmd=GCMD) == (True, 12.0, False)
+        move.assert_called_once_with(lane, -100, 50, 400, True, until="hub", until_v=0, gcmd=GCMD)
 
     def test_board_switch_triggered(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("triggered", 5.0)) as move:
-            unit.fw_home(lane, "load", 100, 50, 400, True, True, False)
-        assert move.call_args[1] == {"until": "load", "until_v": 1}
+            unit.fw_home(lane, "load", 100, 50, 400, True, True, False, gcmd=GCMD)
+        assert move.call_args[1] == {"until": "load", "until_v": 1, "gcmd": GCMD}
 
     def test_klipper_sensor(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "_fw_move_poll", return_value=("triggered", 30.0)) as poll:
-            assert unit.fw_home(lane, "tool", 100, 50, 400, 1, True, True) == (True, 30.0, False)
+            assert unit.fw_home(lane, "tool", 100, 50, 400, 1, True, True, gcmd=GCMD) == (True, 30.0, False)
         assert poll.call_args[0][:5] == (lane, 100, 50, 400, True)
         assert poll.call_args[0][5] == lane.get_toolhead_pre_sensor_state
         assert poll.call_args[0][6] is True
@@ -2558,27 +2561,27 @@ class TestFwHome:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "_report") as report:
-            assert unit.fw_home(lane, "spam", 100, 50, 400, True, True, True) == (False, 0.0, True)
-        report.assert_called_once_with(lane, "BoxTurtle cannot home to endstop spam")
+            assert unit.fw_home(lane, "spam", 100, 50, 400, True, True, True, gcmd=GCMD) == (False, 0.0, True)
+        report.assert_called_once_with(lane, "BoxTurtle cannot home to endstop spam", gcmd=GCMD)
 
     @pytest.mark.parametrize("end", ["done", "no_trigger"])
     def test_not_reached_checked(self, end):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=(end, 80.0)):
-            assert unit.fw_home(lane, "hub", -100, 50, 400, True, True, True) == (False, 100, False)
+            assert unit.fw_home(lane, "hub", -100, 50, 400, True, True, True, gcmd=GCMD) == (False, 100, False)
 
     def test_not_reached_unchecked(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("done", -80.0)):
-            assert unit.fw_home(lane, "hub", -100, 50, 400, True, False, True) == (True, 80.0, False)
+            assert unit.fw_home(lane, "hub", -100, 50, 400, True, False, True, gcmd=GCMD) == (True, 80.0, False)
 
     def test_fault(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("fault", -3.0)):
-            assert unit.fw_home(lane, "hub", -100, 50, 400, True, True, True) == (False, 3.0, True)
+            assert unit.fw_home(lane, "hub", -100, 50, 400, True, True, True, gcmd=GCMD) == (False, 3.0, True)
 
 
 # ── sync and assist ───────────────────────────────────────────────────────────
@@ -2932,11 +2935,11 @@ class TestSystemTest:
         with patch.object(unit, "_wait_for_board", return_value=False), \
                 patch.object(unit, "lane_fault") as fault, \
                 patch.object(afcBoxTurtle, "system_Test") as base:
-            assert unit.system_Test(lane, 0, True, True) is False
+            assert unit.system_Test(lane, 0, True, True, gcmd=GCMD) is False
         assert unit.logger.messages == [
             ("info", "lane8 <span class=error--text>Turtle_1: BoxTurtle not found on USB "
                      "(cannot open)</span>")]
-        fault.assert_called_once_with(lane)
+        fault.assert_called_once_with(lane, gcmd=GCMD)
         lane.set_afc_prep_done.assert_called_once_with()
         base.assert_not_called()
 
@@ -2945,7 +2948,7 @@ class TestSystemTest:
         lane = make_lane(unit)
         with patch.object(unit, "_wait_for_board", return_value=False), \
                 patch.object(unit, "lane_fault"):
-            unit.system_Test(lane, 0, True, True)
+            unit.system_Test(lane, 0, True, True, gcmd=GCMD)
         assert unit.logger.messages == [
             ("info", "lane8 <span class=error--text>Turtle_1: BoxTurtle not found on USB</span>")]
 
@@ -2953,8 +2956,8 @@ class TestSystemTest:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(afcBoxTurtle, "system_Test", return_value=True) as base:
-            assert unit.system_Test(lane, 0, True, False) is True
-        base.assert_called_once_with(lane, 0, True, False)
+            assert unit.system_Test(lane, 0, True, False, gcmd=GCMD) is True
+        base.assert_called_once_with(lane, 0, True, False, GCMD)
 
 
 class TestPrepLoad:
@@ -2963,14 +2966,14 @@ class TestPrepLoad:
         lane = make_lane(unit)
         lane.raw_load_state = True
         with patch.object(unit, "fw_job") as job:
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=GCMD)
         job.assert_not_called()
 
     def test_ok(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", return_value={"ok": True}) as job:
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=GCMD)
         job.assert_called_once_with(lane, "feed", until="load", mm=400.0, speed=50.0,
                                     accel=400.0, watch="prep", hold=True, espool_fwd=0.0,
                                     espool_rwd=0.0, espool_kick=False)
@@ -2982,11 +2985,11 @@ class TestPrepLoad:
         lane.status = AFCLaneState.LOADED
         with patch.object(unit, "fw_job", return_value={"ok": False, "code": "snag"}), \
                 patch.object(unit, "lane_fault") as fault:
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=GCMD)
         msg = (" FAILED TO LOAD, CHECK FILAMENT AT TRIGGER (snag)"
                "\n||==>--||----||------||\nTRG   LOAD   HUB    TOOL")
-        unit.afc.error.AFC_error.assert_called_once_with(msg, False)
-        fault.assert_called_once_with(lane)
+        unit.afc.error.AFC_error.assert_called_once_with(msg, False, gcmd=GCMD)
+        fault.assert_called_once_with(lane, gcmd=GCMD)
         assert lane.status == AFCLaneState.NONE
 
     def test_failed_message_wins(self):
@@ -2995,7 +2998,7 @@ class TestPrepLoad:
         with patch.object(unit, "fw_job", return_value={"ok": False, "code": "snag",
                                                         "msg": "stuck at 30 mm"}), \
                 patch.object(unit, "lane_fault"):
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=GCMD)
         assert "(stuck at 30 mm)" in unit.afc.error.AFC_error.call_args[0][0]
 
     def test_failed_after_removal(self):
@@ -3004,7 +3007,7 @@ class TestPrepLoad:
         lane.prep_state = False
         lane.status = AFCLaneState.LOADED
         with patch.object(unit, "fw_job", return_value={"ok": False, "code": "cancelled"}):
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=GCMD)
         unit.afc.error.AFC_error.assert_not_called()
         assert lane.status == AFCLaneState.LOADED
 
@@ -3014,7 +3017,7 @@ class TestEjectLane:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", return_value={"ok": True}) as job:
-            unit.eject_lane(lane)
+            unit.eject_lane(lane, gcmd=GCMD)
         job.assert_called_once_with(lane, "unload", until="load", mm=280.0, speed=60.0,
                                     accel=300.0, extra_mm=50.0, espool_fwd=0.6,
                                     espool_rwd=0.4, espool_kick=True)
@@ -3025,8 +3028,8 @@ class TestEjectLane:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", return_value={"ok": False, "code": "not_clear"}):
-            unit.eject_lane(lane)
-        unit.afc.error.AFC_error.assert_called_once_with(" Failed to eject lane8 (not_clear)", False)
+            unit.eject_lane(lane, gcmd=GCMD)
+        unit.afc.error.AFC_error.assert_called_once_with(" Failed to eject lane8 (not_clear)", False, gcmd=GCMD)
         lane.do_enable.assert_called_once_with(False)
 
     def test_disables_even_on_error(self):
@@ -3034,7 +3037,7 @@ class TestEjectLane:
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", side_effect=RuntimeError("x")):
             with pytest.raises(RuntimeError):
-                unit.eject_lane(lane)
+                unit.eject_lane(lane, gcmd=GCMD)
         lane.do_enable.assert_called_once_with(False)
 
 
@@ -3152,8 +3155,8 @@ class TestTriggerLedState:
         lane = make_lane(unit)
         with patch.object(afcUnit, "_trigger_led_state") as base, \
                 patch.object(unit, "board_led") as led:
-            unit._trigger_led_state(lane, static_color="0,1,0,0")
-        base.assert_called_once_with(lane, None, "0,1,0,0", None, None)
+            unit._trigger_led_state(lane, static_color="0,1,0,0", gcmd=GCMD)
+        base.assert_called_once_with(lane, None, "0,1,0,0", None, None, gcmd=GCMD)
         led.assert_called_once_with(lane, "0,1,0,0")
 
     @pytest.mark.parametrize("with_lane,color", [(False, "0,1,0,0"), (True, None)])
@@ -3162,7 +3165,7 @@ class TestTriggerLedState:
         lane = make_lane(unit) if with_lane else None
         with patch.object(afcUnit, "_trigger_led_state"), \
                 patch.object(unit, "board_led") as led:
-            unit._trigger_led_state(lane, static_color=color)
+            unit._trigger_led_state(lane, static_color=color, gcmd=GCMD)
         led.assert_not_called()
 
 
@@ -3481,7 +3484,7 @@ class TestSlotLinkUp:
         with patch.object(unit, "_claim") as claim:
             assert unit._claim_cb(6.0) == unit.reactor.NEVER
             unit.reactor.run_callbacks()
-        claim.assert_called_once_with()
+        claim.assert_called_once_with(gcmd="callback")
 
 
 def tcmd_assign(afc):
@@ -3521,7 +3524,7 @@ class TestClaim:
         unit.afc.tool_cmds["T0"] = "lane1"
         unit.printer._objects["AFC_BridgeBox Chain_1"] = OtherHotSwapUnit({"T1", "T2"})
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True) as test:
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         assert unit.claimed is True and unit.pool is False and unit.held == {}
         assert list(unit.lanes) == ["lane8", "lane9", "lane10"]
         assert all(unit.afc.lanes.get(n) is lane for n, lane in
@@ -3532,7 +3535,7 @@ class TestClaim:
         assert (a.map, a.current_map) == (["T4"], "T4")
         assert (b.map, c.map) == (["T3"], ["T5"])
         assert unit.afc.tool_cmds == {"T0": "lane1", "T4": "lane8", "T3": "lane9", "T5": "lane10"}
-        assert [call.args[1:] for call in test.call_args_list] == [(0.2, False, True)] * 3
+        assert [call.args[1:] for call in test.call_args_list] == [(0.2, False, True, GCMD)] * 3
         unit.afc.save_vars.assert_called_once_with()
         warnings = [m for lvl, m in unit.logger.messages if lvl == "warning"]
         assert warnings == ["lane9: saved T1 is held by an unplugged unit -- not restored",
@@ -3543,18 +3546,18 @@ class TestClaim:
     def test_a_lane_saved_with_no_tool_stays_with_none(self, tmp_path):
         unit, (a, b, c) = self._unit(tmp_path, {"lane8": {"map": "NONE"}})
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         assert a.map == ["NONE"] and (b.map, c.map) == (["T0"], ["T1"])
 
     def test_only_once_and_only_with_the_board_up(self, tmp_path):
         unit, _ = self._unit(tmp_path, {})
         unit.link.connected = False
         with patch.object(afcBoxTurtleUSB, "system_Test") as test:
-            unit._claim()
+            unit._claim(gcmd=GCMD)
             assert unit.claimed is False
             unit.link.connected = True
-            unit._claim()
-            unit._claim()
+            unit._claim(gcmd=GCMD)
+            unit._claim(gcmd=GCMD)
         assert test.call_count == 3
 
 
@@ -3565,7 +3568,7 @@ class TestRelease:
         unit.link = FakeLink(unit.reactor)
         unit.afc.function.TcmdAssign.side_effect = tcmd_assign(unit.afc)
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         for lane in lanes:
             lane.get_status = MagicMock(return_value={"map": lane.map[0], "material": "PLA"})
         unit.link.connected = False
@@ -3626,7 +3629,7 @@ class TestRelease:
         unit._release_cb(200.0)
         unit.link.connected = True
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         assert (a.map, b.map) == (["T6"], ["T0"])
 
     def test_save_hook_leaves_live_lanes(self, tmp_path):
@@ -3693,20 +3696,20 @@ class TestRestoreLane:
     def test_no_record_changes_nothing(self):
         lane = self._lane()
         before = dict(vars(lane))
-        mod.restore_lane(lane, {}, MagicMock(spoolman=None))
+        mod.restore_lane(lane, {}, MagicMock(spoolman=None), gcmd=GCMD)
         assert vars(lane) == before
 
     def test_a_spoolman_spool_is_looked_up(self):
         lane = self._lane()
         afc = MagicMock(spoolman="http://spoolman")
-        mod.restore_lane(lane, {"spool_id": 7, "filament_id": "GFA00", "material": "PETG"}, afc)
-        afc.spool.set_spoolID.assert_called_once_with(lane, 7, save_vars=False)
+        mod.restore_lane(lane, {"spool_id": 7, "filament_id": "GFA00", "material": "PETG"}, afc, gcmd=GCMD)
+        afc.spool.set_spoolID.assert_called_once_with(lane, 7, save_vars=False, gcmd=GCMD)
         assert (lane.spool_id, lane.filament_id, lane.material) == (7, "GFA00", "")
 
     def test_spoolman_without_a_spool_restores_the_fields(self):
         lane = self._lane()
         afc = MagicMock(spoolman="http://spoolman")
-        mod.restore_lane(lane, {"material": "PLA"}, afc)
+        mod.restore_lane(lane, {"material": "PLA"}, afc, gcmd=GCMD)
         afc.spool.set_spoolID.assert_not_called()
         assert lane.material == "PLA" and lane.filament_id == ""
 
@@ -3714,7 +3717,7 @@ class TestRestoreLane:
         lane = self._lane()
         afc = MagicMock(spoolman=None)
         mod.restore_lane(lane, {"spool_id": 7, "material": "ABS", "density": 1.04,
-                                "need_purge": True}, afc)
+                                "need_purge": True}, afc, gcmd=GCMD)
         afc.spool.set_spoolID.assert_not_called()
         assert (lane.spool_id, lane.material, lane.filament_density) == (7, "ABS", 1.04)
         assert lane.need_purge is True
@@ -3724,20 +3727,20 @@ class TestRestoreLane:
         ([1], 0)])
     def test_numbers_are_cleaned_like_prep(self, value, want):
         lane = self._lane()
-        mod.restore_lane(lane, {"extruder_temp": value}, MagicMock(spoolman=None))
+        mod.restore_lane(lane, {"extruder_temp": value}, MagicMock(spoolman=None), gcmd=GCMD)
         assert lane.extruder_temp == want
         assert type(lane.extruder_temp) is type(want)
 
     @pytest.mark.parametrize("value, want", [("NONE", None), ("", None), ("lane2", "lane2")])
     def test_runout_lane(self, value, want):
         lane = self._lane()
-        mod.restore_lane(lane, {"runout_lane": value}, MagicMock(spoolman=None))
+        mod.restore_lane(lane, {"runout_lane": value}, MagicMock(spoolman=None), gcmd=GCMD)
         assert lane.runout_lane == want
 
     def test_hub_and_td1(self):
         lane = self._lane()
         mod.restore_lane(lane, {"loaded_to_hub": True, "td1_data": {"td": 1.2}},
-                         MagicMock(spoolman=None))
+                         MagicMock(spoolman=None), gcmd=GCMD)
         assert lane.loaded_to_hub is True and lane.td1_data == {"td": 1.2}
         assert lane.runout_lane == "lane9"
 
@@ -3969,7 +3972,7 @@ class TestMapLanes:
         unit.printer._objects["AFC_BridgeBox Chain_1"] = OtherHotSwapUnit(
             {f"T{n}" for n in range(99)})
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         assert a.map == ["NONE"]
         assert [m for lvl, m in unit.logger.messages if lvl == "warning"] == [
             "lane8 has no T# -- T0-T98 are all held; use SET_MAP"]
@@ -3978,7 +3981,7 @@ class TestMapLanes:
         unit, (a,) = self._unit(tmp_path, {"lane8": {"map": "T0"}})
         unit.afc.gcode.ready_gcode_handlers = {"T0": lambda gcmd: None}
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         assert a.map == ["T1"]
         assert [m for lvl, m in unit.logger.messages if lvl == "warning"] == [
             "lane8: saved T0 is held by a macro -- not restored", "lane8 is on T1 now"]
@@ -3986,7 +3989,7 @@ class TestMapLanes:
     def test_a_failed_lane_check_shows_the_error_logo(self, tmp_path):
         unit, _ = self._unit(tmp_path, {})
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=False):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         assert ("raw", "ERROR") in unit.logger.messages
         assert ("raw", "READY") not in unit.logger.messages
 
@@ -3998,7 +4001,7 @@ class TestReleaseOwnedTools:
         unit.link = FakeLink(unit.reactor)
         unit.afc.function.TcmdAssign.side_effect = tcmd_assign(unit.afc)
         with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True):
-            unit._claim()
+            unit._claim(gcmd=GCMD)
         unit.afc.tool_cmds["T9"] = "lane8"
         a.get_status = MagicMock(return_value={"map": "T6"})
         unit.link.connected = False

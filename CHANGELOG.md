@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11-15-2026]
+### Added
+- Added support for Creality CFS (Creality Filament System) units with `[AFC_CFS]`: up to four boxes on one
+  RS-485 chain sharing the 4-in-1 buffer as their hub, loads and unloads driven by the box through
+  `unit_load_lane`/`unit_unload_lane`, RFID tag reading and an optional cutter switch. Example config in
+  `templates/AFC_CFS_1.cfg`.
+
 ## [11-14-2026]
 ### Added
 - Added a Compensator buffer, with support in the installer and an `adc_min_val`/`adc_max_val` pair so PSF-type buffers whose ADC values don't span the full 0.0-1.0 range are scaled to the correct FPS value.
@@ -15,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [11-13-2026]
 ### Updated
 - Updated the way `run_script_by_command` was being called to work correctly with Kalico's PR 1052 changes and also work correctly with older Klipper versions.
+
+### Fixed
+- Fixed Cut.cfg's rip-length sync using the AFC_extruder section name instead of the
+  real toolhead extruder name for `SYNC_EXTRUDER_MOTION`'s `MOTION_QUEUE`, which broke
+  for custom `extruder_name` mappings (e.g. `e1` mapped to `extruder1`). (#784)
+- Fixed `sync_to_extruder`'s guard only tracking whether a lane was synced, not which
+  extruder it was synced to, so a resync to a different extruder could be silently
+  skipped. (#775)
+- Fixed a `TypeError` during a toolchange when the newly selected extruder had no lane
+  loaded, by guarding TOOL_UNLOAD's unload block against a missing current lane. (#773)
+- Fixed an `UnboundLocalError` in CHANGE_TOOL when adjusting extruder temperature on a
+  lane that hadn't completed prep. (#781)
+- Fixed PREP passing an incorrect selection-direction flag to `select_lane`, which is
+  meant for lane loads, not prep. (#778)
+
+### Changed
+- `select_lane` now has the same parameters (`sel_dir`, `disable_selector`) across all
+  unit types, instead of each unit accepting a different, inconsistent set. (#778)
 
 ## [11-09-2026]
 ### Fixed

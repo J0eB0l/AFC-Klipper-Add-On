@@ -331,7 +331,7 @@ class Test_MoveLane:
         lane.remember_spool = True
         lane.tool_loaded = False
         lane.move_to.return_value = (True, 100.0, False)
-        result = unit._move_lane(lane, 1, True)
+        result = unit._move_lane(lane, 1, True, gcmd=MagicMock())
         assert result is True
         assert lane.spool_id == 10
     
@@ -343,7 +343,7 @@ class Test_MoveLane:
         lane.prep_state = True
         lane.tool_loaded = True
         lane.move_to.return_value = (True, 100.0, False)
-        unit._move_lane(lane, 1, True)
+        unit._move_lane(lane, 1, True, gcmd=MagicMock())
         lane.move_to.assert_called_once()  # only the load-sensor move, no retract
 
     def test_homed_but_no_hub_obj_skips_hub_retract(self):
@@ -357,7 +357,7 @@ class Test_MoveLane:
         lane.tool_loaded = False
         lane.hub_obj = None
         lane.move_to.return_value = (True, 100.0, False)
-        unit._move_lane(lane, 1, True)
+        unit._move_lane(lane, 1, True, gcmd=MagicMock())
         lane.move_to.assert_called_once()  # only the load-sensor move, no retract
 
     def test_returns_prep_true_filament_not_loaded(self):
@@ -369,7 +369,7 @@ class Test_MoveLane:
         lane.remember_spool = True
         lane.tool_loaded = False
         lane.move_to.return_value = (False, 100.0, False)
-        result = unit._move_lane(lane, 1, True)
+        result = unit._move_lane(lane, 1, True, gcmd=MagicMock())
         assert result is False
         assert lane.tool_loaded is False
         assert lane.loaded_to_hub is False
@@ -385,7 +385,7 @@ class Test_MoveLane:
         lane.remember_spool = True
         lane.tool_loaded = False
         lane.move_to.return_value = (False, 100.0, False)
-        result = unit._move_lane(lane, 1, True)
+        result = unit._move_lane(lane, 1, True, gcmd=MagicMock())
         assert result is False
         assert lane.tool_loaded is False
         assert lane.loaded_to_hub is False
@@ -401,14 +401,15 @@ class Test_MoveLane:
         lane.remember_spool = False
         lane.tool_loaded = False
         lane.move_to.return_value = (False, 100.0, False)
-        result = unit._move_lane(lane, 1, True)
+        result = unit._move_lane(lane, 1, True, gcmd=MagicMock())
         assert result is False
         assert lane.tool_loaded is False
         assert lane.loaded_to_hub is False
         assert lane.spool_id is None
 
+    GCMD = MagicMock()
     LOAD_MOVE = mock.call(200.0, SpeedMode.SHORT, endstop="lane1_load",
-                          assist_active=AssistActive.DYNAMIC, use_homing=True)
+                          assist_active=AssistActive.DYNAMIC, use_homing=True, gcmd=GCMD)
 
     def test_tool_loaded_skips_retract_and_reset(self):
         unit = _build_vivid_unit()
@@ -419,7 +420,7 @@ class Test_MoveLane:
         lane.td1_data = {"color": "FF0000"}
         lane.move_to.return_value = (True, 190.0, AFCMoveWarning.NONE)
 
-        result = unit._move_lane(lane, 1, True)
+        result = unit._move_lane(lane, 1, True, gcmd=self.GCMD)
 
         assert result is True
         assert lane.loaded_to_hub is True
@@ -438,12 +439,12 @@ class Test_MoveLane:
         lane = _build_vivid_lane()
         lane.move_to.return_value = (True, 190.0, AFCMoveWarning.NONE)
 
-        result = unit._move_lane(lane, 1, True)
+        result = unit._move_lane(lane, 1, True, gcmd=self.GCMD)
 
         assert result is True
         assert lane.loaded_to_hub is True
         assert lane.move_to.call_args_list == [
-            self.LOAD_MOVE, mock.call(-65.0, SpeedMode.SHORT, use_homing=False)]
+            self.LOAD_MOVE, mock.call(-65.0, SpeedMode.SHORT, use_homing=False, gcmd=self.GCMD)]
         assert lane.current_led_state == "loaded"
         assert unit.logger.messages == []
 
@@ -523,7 +524,7 @@ class TestCmdAfcSelectLane:
         from tests.conftest import MockGCodeCommand
         gcmd = MockGCodeCommand(params={"LANE": "lane1"})
         unit.cmd_AFC_SELECT_LANE(gcmd)
-        unit.select_lane.assert_called_once_with(lane)
+        unit.select_lane.assert_called_once_with(lane, gcmd=gcmd)
 
     def test_logs_success_when_homed(self):
         unit = _make_vivid()
@@ -589,8 +590,10 @@ class TestVividSystemTest:
             with MagicMock() as patch_target:
                 from unittest.mock import patch
                 with patch.object(afcBoxTurtle, 'system_Test', return_value="ok") as mock_st:
-                    result = unit.system_Test(lane, 0.5, True, True)
-                    mock_st.assert_called_once_with(lane, 0.5, True, enable_movement=False)
+                    gcmd = MagicMock()
+                    result = unit.system_Test(lane, 0.5, True, True, gcmd=gcmd)
+                    mock_st.assert_called_once_with(lane, 0.5, True, enable_movement=False,
+                                                    gcmd=gcmd)
 
 
 # ── prep_post_load ────────────────────────────────────────────────────────────
@@ -599,7 +602,8 @@ class TestPrepPostLoad:
     def test_returns_none(self):
         unit = _make_vivid()
         lane = MagicMock()
-        result = unit.prep_post_load(lane)
+        gcmd = MagicMock()
+        result = unit.prep_post_load(lane, gcmd=gcmd)
         assert result is None
 
 
@@ -608,8 +612,9 @@ class TestPrepPostLoad:
 class TestUnselectLane:
     def test_calls_selector_stepper_move(self):
         unit = _make_vivid()
-        unit.unselect_lane()
-        unit.selector_stepper_obj.move.assert_called_once_with(50, 150, 150, False)
+        gcmd = MagicMock()
+        unit.unselect_lane(gcmd=gcmd)
+        unit.selector_stepper_obj.move.assert_called_once_with(50, 150, 150, False, gcmd=gcmd)
 
 
 # ── move_to_hub ───────────────────────────────────────────────────────────────
@@ -621,7 +626,7 @@ class TestMoveToHub:
         lane = MagicMock()
         lane.move_to.return_value = (True, 100.0, AFCMoveWarning.NONE)
         lane.load_es = "load_endstop"
-        result = unit.move_to_hub(lane, 100.0, MoveDirection.POS)
+        result = unit.move_to_hub(lane, 100.0, MoveDirection.POS, gcmd=MagicMock())
         lane.move_to.assert_called_once()
         assert result == (True, 100.0, AFCMoveWarning.NONE)
 
@@ -631,7 +636,7 @@ class TestMoveToHub:
         lane = MagicMock()
         lane.move_to.return_value = (False, 50.0, AFCMoveWarning.WARN)
         lane.load_es = "load_endstop"
-        homed, dist, warn = unit.move_to_hub(lane, 50.0, MoveDirection.NEG)
+        homed, dist, warn = unit.move_to_hub(lane, 50.0, MoveDirection.NEG, gcmd=MagicMock())
         assert homed is False
         assert warn is AFCMoveWarning.WARN
 
@@ -645,7 +650,7 @@ class TestSelectLane:
         unit = _make_vivid()
         lane = _make_lane("lane1", has_selector=False)
         lane.selector_endstop_name = None
-        result = unit.select_lane(lane)
+        result = unit.select_lane(lane, gcmd=MagicMock())
         assert result == (False, 0)
 
     def test_returns_true_and_zero_when_already_selected_and_enabled(self):
@@ -658,7 +663,7 @@ class TestSelectLane:
             "steppers": {f"AFC_stepper {unit.selector_stepper}": True}
         }
         unit.printer._objects["stepper_enable"] = stepper_enable
-        result = unit.select_lane(lane)
+        result = unit.select_lane(lane, gcmd=MagicMock())
         assert result == (True, 0.0)
 
     def test_calls_homing_when_not_selected(self):
@@ -668,7 +673,7 @@ class TestSelectLane:
         lane.fila_selector.get_status.return_value = {"filament_detected": False}
         unit.printer._objects = {}  # no stepper_enable → enabled=False
         unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.0)
-        homed, dist = unit.select_lane(lane)
+        homed, dist = unit.select_lane(lane, gcmd=MagicMock())
         assert homed is True
         assert dist == 15.0
         unit.selector_stepper_obj.do_homing_move.assert_called_once()
@@ -680,8 +685,9 @@ class TestSelectLane:
         lane.fila_selector.get_status.return_value = {"filament_detected": False}
         unit.printer._objects = {}
         unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.0)
-        unit.select_lane(lane)
-        unit._selector_cal_dis_adjust.assert_called_once_with(lane)
+        gcmd = MagicMock()
+        unit.select_lane(lane, gcmd=gcmd)
+        unit._selector_cal_dis_adjust.assert_called_once_with(lane, gcmd=gcmd)
 
     def test_calls_unselect_lane_when_disabled_but_selector_triggered(self):
         """When stepper not enabled but selector triggered, unselect_lane is called first."""
@@ -693,9 +699,10 @@ class TestSelectLane:
         unit.printer._objects = {}
         unit.unselect_lane = MagicMock()
         unit.selector_stepper_obj.do_homing_move.return_value = (True, 10.0)
-        unit.select_lane(lane)
+        unit.select_lane(lane, gcmd=MagicMock())
         unit.unselect_lane.assert_called_once()
 
+    GCMD = MagicMock()
     HOMING_MOVE = mock.call(movepos=750.0, speed=120.0, accel=240.0,
                             endstop_spec="lane1_selector", assist_active=False)
     HOMING_LOGS = [("debug", "ViViD: Selecting lane1"),
@@ -717,14 +724,14 @@ class TestSelectLane:
         lane = _build_vivid_lane()
         lane.selector_cal_dis = cal_dis
         unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.257)
-        return unit, unit.select_lane(lane)
+        return unit, unit.select_lane(lane, gcmd=TestSelectLane.GCMD)
 
     def test_calibration_move_runs_when_cal_dis_nonzero(self):
         unit, result = self._select_with_cal_dis(5.0)
 
         assert result == (True, 15.26)
         assert unit.selector_stepper_obj.do_homing_move.call_args_list == [self.HOMING_MOVE]
-        assert unit.selector_stepper_obj.move.call_args_list == [mock.call(5.0, 50.0, 400.0, False)]
+        assert unit.selector_stepper_obj.move.call_args_list == [mock.call(5.0, 50.0, 400.0, False, gcmd=self.GCMD)]
         assert unit.logger.messages == self.HOMING_LOGS
 
     def test_calibration_move_skipped_when_cal_dis_none(self):
@@ -742,6 +749,78 @@ class TestSelectLane:
         assert unit.selector_stepper_obj.do_homing_move.call_args_list == [self.HOMING_MOVE]
         assert unit.selector_stepper_obj.move.call_args_list == []
         assert unit.logger.messages == self.HOMING_LOGS
+
+    def test_sel_dir_false_homes_in_positive_direction(self):
+        """sel_dir defaults to False, which must home using MoveDirection.POS."""
+        from extras.AFC_lane import MoveDirection
+        unit = _make_vivid()
+        unit._selector_cal_dis_adjust = MagicMock()
+        lane = _make_lane("lane1", has_selector=True)
+        lane.fila_selector.get_status.return_value = {"filament_detected": False}
+        unit.printer._objects = {}
+        unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.0)
+        unit.select_lane(lane, sel_dir=False, gcmd=MagicMock())
+        movepos = unit.selector_stepper_obj.do_homing_move.call_args.kwargs["movepos"]
+        assert movepos == unit.max_selector_movement * MoveDirection.POS
+
+    def test_sel_dir_true_homes_in_negative_direction(self):
+        """sel_dir=True (set during a lane load) must home using MoveDirection.NEG."""
+        from extras.AFC_lane import MoveDirection
+        unit = _make_vivid()
+        unit._selector_cal_dis_adjust = MagicMock()
+        lane = _make_lane("lane1", has_selector=True)
+        lane.fila_selector.get_status.return_value = {"filament_detected": False}
+        unit.printer._objects = {}
+        unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.0)
+        unit.select_lane(lane, sel_dir=True, gcmd=MagicMock())
+        movepos = unit.selector_stepper_obj.do_homing_move.call_args.kwargs["movepos"]
+        assert movepos == unit.max_selector_movement * MoveDirection.NEG
+
+    def test_disable_selector_true_disables_motor_after_homing(self):
+        """disable_selector=True disables the selector stepper after a successful select."""
+        unit = _make_vivid()
+        unit._selector_cal_dis_adjust = MagicMock()
+        lane = _make_lane("lane1", has_selector=True)
+        lane.fila_selector.get_status.return_value = {"filament_detected": False}
+        unit.printer._objects = {}
+        unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.0)
+        unit.select_lane(lane, disable_selector=True, gcmd=MagicMock())
+        unit.selector_stepper_obj.do_enable.assert_called_once_with(False)
+
+    def test_disable_selector_false_leaves_motor_enabled(self):
+        """disable_selector defaults to False: do_enable must not be called."""
+        unit = _make_vivid()
+        unit._selector_cal_dis_adjust = MagicMock()
+        lane = _make_lane("lane1", has_selector=True)
+        lane.fila_selector.get_status.return_value = {"filament_detected": False}
+        unit.printer._objects = {}
+        unit.selector_stepper_obj.do_homing_move.return_value = (True, 15.0)
+        unit.select_lane(lane, disable_selector=False, gcmd=MagicMock())
+        unit.selector_stepper_obj.do_enable.assert_not_called()
+
+    def test_disable_selector_true_disables_motor_even_when_already_selected(self):
+        """The disable_selector finally block covers the early 'already selected'
+        return path too, not just the homing path."""
+        unit = _make_vivid()
+        lane = _make_lane("lane1", has_selector=True)
+        lane.fila_selector.get_status.return_value = {"filament_detected": True}
+        stepper_enable = MagicMock()
+        stepper_enable.get_status.return_value = {
+            "steppers": {f"AFC_stepper {unit.selector_stepper}": True}
+        }
+        unit.printer._objects["stepper_enable"] = stepper_enable
+        unit.select_lane(lane, disable_selector=True, gcmd=MagicMock())
+        unit.selector_stepper_obj.do_enable.assert_called_once_with(False)
+
+    def test_disable_selector_true_has_no_effect_without_selector_endstop(self):
+        """When the lane has no selector endstop, the homing/disable branch is
+        never entered at all, regardless of disable_selector."""
+        unit = _make_vivid()
+        lane = _make_lane("lane1", has_selector=False)
+        lane.selector_endstop_name = None
+        result = unit.select_lane(lane, disable_selector=True, gcmd=MagicMock())
+        assert result == (False, 0)
+        unit.selector_stepper_obj.do_enable.assert_not_called()
 
 
 # ── calibrate_lane ────────────────────────────────────────────────────────────
@@ -772,16 +851,18 @@ class TestCalibrateLane:
     def test_calls_eject_lane(self):
         unit = _make_vivid()
         lane = MagicMock()
+        gcmd = MagicMock()
         unit.eject_lane = MagicMock()
-        unit.calibrate_lane(lane, 5.0, MagicMock())
-        unit.eject_lane.assert_called_once_with(lane)
+        unit.calibrate_lane(lane, 5.0, gcmd)
+        unit.eject_lane.assert_called_once_with(lane, gcmd=gcmd)
 
     def test_calls_lane_unloaded(self):
         unit = _make_vivid()
         lane = MagicMock()
         unit.eject_lane = MagicMock()
-        unit.calibrate_lane(lane, 0, MagicMock())
-        lane.unit_obj.lane_unloaded.assert_called_once_with(lane)
+        gcmd = MagicMock()
+        unit.calibrate_lane(lane, 0, gcmd)
+        lane.unit_obj.lane_unloaded.assert_called_once_with(lane, gcmd=gcmd)
 
 
 # ── _get_selector_enabled except branch ───────────────────────────────────────
@@ -809,18 +890,19 @@ class TestPrepLoad:
         lane.prep_state = True
         lane.loaded_to_hub = False
         lane.hub_obj = MagicMock()
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
         # reads: loop check (False) -> feed -> loop check (True, exit) -> return.
         with patch.object(type(lane), "raw_load_state", new_callable=PropertyMock) as mock_prop:
             mock_prop.side_effect = [False, True, True]
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=gcmd)
 
         assert lane.loaded_to_hub is True
-        unit.lane_loading.assert_called_once_with(lane)
-        unit.select_lane.assert_called_once_with(lane, sel_prep=True)
-        unit.lane_loaded.assert_called_once_with(lane)
+        unit.lane_loading.assert_called_once_with(lane, gcmd=gcmd)
+        unit.select_lane.assert_called_once_with(lane, sel_dir=True, gcmd=gcmd)
+        unit.lane_loaded.assert_called_once_with(lane, gcmd=gcmd)
 
     def test_disables_steppers_and_selects_loaded_lane(self):
         unit = _make_vivid()
@@ -828,11 +910,12 @@ class TestPrepLoad:
         lane.calibrated_lane = True
         lane.dist_hub = 200.0
         lane.move_to.return_value = (True, 200.0, False)
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
 
-        unit.prep_load(lane)
+        unit.prep_load(lane, gcmd=gcmd)
 
         unit.selector_stepper_obj.do_enable.assert_called_with(False)
         unit.drive_stepper_obj.do_enable.assert_called_with(False)
@@ -845,13 +928,14 @@ class TestPrepLoad:
         lane.prep_state = True
         lane.hub_obj = MagicMock()
         lane.move_to = MagicMock(return_value = (True, 300.0, False))
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
         with patch.object(type(lane), "raw_load_state", new_callable=PropertyMock) as mock_prop:
             mock_prop.side_effect = [False, True, True]
 
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=gcmd)
 
         assert lane.calibrated_lane is True
         assert lane.dist_hub == round(300.0, 2) + AFC_vivid.LANE_OVERSHOOT
@@ -867,6 +951,7 @@ class TestPrepLoad:
         lane.prep_state = True
         lane.hub_obj = MagicMock()
         lane.move_to = MagicMock(return_value = (True, 300.0, False))
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
@@ -874,7 +959,7 @@ class TestPrepLoad:
         with patch.object(type(lane), "raw_load_state", new_callable=PropertyMock) as mock_prop:
             mock_prop.side_effect = [False, False, True, True]
 
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=gcmd)
 
         assert lane.calibrated_lane is True
         assert lane.dist_hub == round(600.0, 2) + AFC_vivid.LANE_OVERSHOOT
@@ -887,6 +972,7 @@ class TestPrepLoad:
         lane.prep_state = True
         lane.move_to = MagicMock(return_value = (False, 300.0, False))
         lane.dist_hub = 0.0
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
@@ -894,7 +980,7 @@ class TestPrepLoad:
         with patch.object(type(lane), "raw_load_state", new_callable=PropertyMock) as mock_prop:
             mock_prop.side_effect = [False, False, False, False]
 
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=gcmd)
 
         assert lane.calibrated_lane is False
         assert lane.dist_hub == 0.0
@@ -910,11 +996,12 @@ class TestPrepLoad:
         lane.prep_state = False
         lane.raw_load_state = False                    # real bool, not a mock obj
         lane.move_to.return_value = (True, 300.0, False)
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
 
-        unit.prep_load(lane)
+        unit.prep_load(lane, gcmd=gcmd)
 
         assert lane.calibrated_lane is False
 
@@ -930,16 +1017,17 @@ class TestPrepLoad:
         lane.move_to = move_to_mock
         lane.prep_state = True
         lane.loaded_to_hub = False
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
         with patch.object(type(lane), "raw_load_state", new_callable=PropertyMock) as mock_prop:
             mock_prop.side_effect = [False, True, True]
-            unit.prep_load(lane)
+            unit.prep_load(lane, gcmd=gcmd)
 
         # Only the one move_to call from the homing loop, no extra retract call
         assert move_to_mock.call_count == 1
-        unit.lane_loaded.assert_called_once_with(lane)
+        unit.lane_loaded.assert_called_once_with(lane, gcmd=gcmd)
 
     def test_not_homed_skips_lane_loaded(self):
         unit = _make_vivid()
@@ -949,11 +1037,12 @@ class TestPrepLoad:
         lane.prep_state = True
         lane.raw_load_state = False                    # real bool, never trips
         lane.move_to.return_value = (False, 0.0, False)
+        gcmd = MagicMock()
         unit.lane_loading = MagicMock()
         unit.select_lane = MagicMock()
         unit.lane_loaded = MagicMock()
 
-        unit.prep_load(lane)
+        unit.prep_load(lane, gcmd=gcmd)
 
         unit.lane_loaded.assert_not_called()
         # Steppers are disabled regardless of homing result
@@ -961,6 +1050,8 @@ class TestPrepLoad:
 
 
 class TestStageAndLoad:
+    GCMD = MagicMock()
+
     def test_no_rfid_listener_is_a_plain_homing_feed(self):
         unit = _make_vivid()
         lane = MagicMock()
@@ -970,13 +1061,13 @@ class TestStageAndLoad:
         lane.raw_load_state = False
 
         def move_to(dist, speed, assist_active=None, endstop=None,
-                    use_homing=False):
+                    use_homing=False, gcmd=None):
             lane.raw_load_state = True                  # the sensor trips (homed)
             return (True, 200.0, False)
 
         lane.move_to.side_effect = move_to
         # MockPrinter.send_event does nothing -> no RFID fake-abort.
-        homed, dist = unit._stage_and_load(lane)
+        homed, dist = unit._stage_and_load(lane, gcmd=self.GCMD)
         assert homed is True and dist == 200.0
         assert lane.move_to.call_count == 1             # one homing feed, no chunks
         for call in lane.move_to.call_args_list:
@@ -996,20 +1087,21 @@ class TestStageAndLoad:
         move_at_begin = {}
 
         def move_to(dist, speed, assist_active=None, endstop=None,
-                    use_homing=False):
+                    use_homing=False, gcmd=None):
             assert use_homing is True                  # only homing moves
             lane.raw_load_state = True
             return (True, dist, False)
 
         lane.move_to.side_effect = move_to
 
-        def send_event(name, l=None):
+        def send_event(name, l=None, gcmd=None):
+            assert gcmd is self.GCMD
             events.append(name)
             if name.endswith("stage_read_begin"):
                 move_at_begin["calls"] = lane.move_to.call_count
 
         unit.printer.send_event = send_event
-        homed, _dist = unit._stage_and_load(lane)
+        homed, _dist = unit._stage_and_load(lane, gcmd=self.GCMD)
         assert "afc_vivid:stage_read_begin" in events
         assert "afc_vivid:stage_read_end" in events
         # begin fires BEFORE the feed, end AFTER.
@@ -1019,7 +1111,7 @@ class TestStageAndLoad:
         assert homed is True
 
     CALIBRATED_FEED = mock.call(200.0, SpeedMode.LONG, assist_active=AssistActive.NO,
-                                endstop="lane1_load", use_homing=True)
+                                endstop="lane1_load", use_homing=True, gcmd=GCMD)
 
     @staticmethod
     def _feed_trips_sensor(lane: MagicMock, moved: float) -> None:
@@ -1040,17 +1132,18 @@ class TestStageAndLoad:
         self._feed_trips_sensor(lane, 180.0)
         ended: list = []
 
-        def failing_begin(staged: MagicMock) -> None:
+        def failing_begin(staged: MagicMock, gcmd: MagicMock) -> None:
             raise RuntimeError("boom")
 
         unit.printer.register_event_handler("afc_vivid:stage_read_begin", failing_begin)
-        unit.printer.register_event_handler("afc_vivid:stage_read_end", ended.append)
+        unit.printer.register_event_handler(
+            "afc_vivid:stage_read_end", lambda staged, gcmd: ended.append((staged, gcmd)))
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (True, 180.0)
         assert lane.move_to.call_args_list == [self.CALIBRATED_FEED]
-        assert ended == [lane]
+        assert ended == [(lane, self.GCMD)]
         assert unit.logger.messages == [("error", "ViViD stage read begin error: boom")]
 
     def test_stage_read_end_error_is_logged(self):
@@ -1059,17 +1152,18 @@ class TestStageAndLoad:
         self._feed_trips_sensor(lane, 180.0)
         begun: list = []
 
-        def failing_end(staged: MagicMock) -> None:
+        def failing_end(staged: MagicMock, gcmd: MagicMock) -> None:
             raise RuntimeError("bang")
 
-        unit.printer.register_event_handler("afc_vivid:stage_read_begin", begun.append)
+        unit.printer.register_event_handler(
+            "afc_vivid:stage_read_begin", lambda staged, gcmd: begun.append((staged, gcmd)))
         unit.printer.register_event_handler("afc_vivid:stage_read_end", failing_end)
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (True, 180.0)
         assert lane.move_to.call_args_list == [self.CALIBRATED_FEED]
-        assert begun == [lane]
+        assert begun == [(lane, self.GCMD)]
         assert unit.logger.messages == [("error", "ViViD stage read end error: bang")]
 
     def test_an_empty_prep_feeds_nothing(self):
@@ -1079,14 +1173,14 @@ class TestStageAndLoad:
         events: list = []
         for name in ("afc_vivid:stage_read_begin", "afc_vivid:stage_read_end"):
             unit.printer.register_event_handler(
-                name, lambda staged, name=name: events.append((name, staged)))
+                name, lambda staged, gcmd, name=name: events.append((name, staged, gcmd)))
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (False, 0.0)
         assert lane.move_to.call_args_list == []
-        assert events == [("afc_vivid:stage_read_begin", lane),
-                          ("afc_vivid:stage_read_end", lane)]
+        assert events == [("afc_vivid:stage_read_begin", lane, self.GCMD),
+                          ("afc_vivid:stage_read_end", lane, self.GCMD)]
         assert unit.logger.messages == []
 
     def test_a_lane_already_at_the_sensor_feeds_nothing(self):
@@ -1096,14 +1190,14 @@ class TestStageAndLoad:
         events: list = []
         for name in ("afc_vivid:stage_read_begin", "afc_vivid:stage_read_end"):
             unit.printer.register_event_handler(
-                name, lambda staged, name=name: events.append((name, staged)))
+                name, lambda staged, gcmd, name=name: events.append((name, staged, gcmd)))
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (True, 0.0)
         assert lane.move_to.call_args_list == []
-        assert events == [("afc_vivid:stage_read_begin", lane),
-                          ("afc_vivid:stage_read_end", lane)]
+        assert events == [("afc_vivid:stage_read_begin", lane, self.GCMD),
+                          ("afc_vivid:stage_read_end", lane, self.GCMD)]
         assert unit.logger.messages == []
 
     def test_a_real_miss_is_retried_once(self):
@@ -1111,7 +1205,7 @@ class TestStageAndLoad:
         lane = _build_vivid_lane()
         lane.move_to.return_value = (False, 50.0, AFCMoveWarning.ERROR)
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (False, 100.0)
         assert lane.move_to.call_args_list == [self.CALIBRATED_FEED, self.CALIBRATED_FEED]
@@ -1123,7 +1217,7 @@ class TestStageAndLoad:
         lane = _build_vivid_lane()
         lane.move_to.return_value = (True, 30.0, AFCMoveWarning.NONE)
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (False, 240.0)
         assert lane.move_to.call_args_list == [self.CALIBRATED_FEED] * 8
@@ -1135,12 +1229,12 @@ class TestStageAndLoad:
         lane.calibrated_lane = False
         self._feed_trips_sensor(lane, 1234.5)
 
-        result = unit._stage_and_load(lane)
+        result = unit._stage_and_load(lane, gcmd=self.GCMD)
 
         assert result == (True, 1234.5)
         assert lane.move_to.call_args_list == [
             mock.call(5000, SpeedMode.SHORT, assist_active=AssistActive.NO,
-                      endstop="lane1_load", use_homing=True)]
+                      endstop="lane1_load", use_homing=True, gcmd=self.GCMD)]
         assert unit.logger.messages == []
 
 
@@ -1153,10 +1247,11 @@ class TestEjectLane:
         lane.dist_hub = 200.0
         unit.select_lane = MagicMock()
         unit.unselect_lane = MagicMock()
+        gcmd = MagicMock()
 
-        unit.eject_lane(lane)
+        unit.eject_lane(lane, gcmd=gcmd)
 
-        unit.select_lane.assert_called_once_with(lane)
+        unit.select_lane.assert_called_once_with(lane, gcmd=gcmd)
         unit.unselect_lane.assert_called_once()
 
     def test_disables_steppers(self):
@@ -1165,8 +1260,9 @@ class TestEjectLane:
         lane.dist_hub = 200.0
         unit.select_lane = MagicMock()
         unit.unselect_lane = MagicMock()
+        gcmd = MagicMock()
 
-        unit.eject_lane(lane)
+        unit.eject_lane(lane, gcmd=gcmd)
 
         unit.selector_stepper_obj.do_enable.assert_called_with(False)
         unit.drive_stepper_obj.do_enable.assert_called_with(False)
@@ -1180,8 +1276,9 @@ class TestEjectLane:
         lane.dist_hub = 600.0  # > 400 → should subtract LANE_OVERSHOOT+100
         unit.select_lane = MagicMock()
         unit.unselect_lane = MagicMock()
+        gcmd = MagicMock()
 
-        unit.eject_lane(lane)
+        unit.eject_lane(lane, gcmd=gcmd)
 
         expected_dist = (600.0 - (AFC_vivid.LANE_OVERSHOOT + 100) - \
                          lane.hub_obj.hub_clear_move_dis - lane.homing_overshoot) * MoveDirection.NEG
@@ -1195,8 +1292,9 @@ class TestEjectLane:
         lane.dist_hub = 300.0  # <= 400 → full dist used
         unit.select_lane = MagicMock()
         unit.unselect_lane = MagicMock()
+        gcmd = MagicMock()
 
-        unit.eject_lane(lane)
+        unit.eject_lane(lane, gcmd=gcmd)
 
         expected_dist = 300.0 * MoveDirection.NEG
         call_args = lane.move_to.call_args[0]
@@ -1212,8 +1310,9 @@ class TestEjectLane:
         lane.dist_hub = 600.0  # > 400 → should subtract LANE_OVERSHOOT+100 only
         unit.select_lane = MagicMock()
         unit.unselect_lane = MagicMock()
+        gcmd = MagicMock()
 
-        unit.eject_lane(lane)
+        unit.eject_lane(lane, gcmd=gcmd)
 
         expected_dist = (600.0 - (AFC_vivid.LANE_OVERSHOOT + 100) - \
                          lane.homing_overshoot) * MoveDirection.NEG

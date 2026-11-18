@@ -32,6 +32,7 @@ except:
     raise error(error_str)
 
 if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
     from extras.AFC_lane import AFCLane
@@ -389,12 +390,13 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         """
         return map_tag_to_slot_info(tag)
 
-    def read_lane(self, lane_name: str) -> Optional[dict]:
+    def read_lane(self, lane_name: str, gcmd: AFCGcmd) -> Optional[dict]:
         """
         Read a lane's tag (by its mapped slot) and apply it. The caller must have
         the lane's slot selected at the reader.
 
         :param lane_name: The AFC lane name to read.
+        :param gcmd: Command context the spool assignment is run through.
         :return Optional[dict]: The applied slot_info, or None.
         """
         slot = self._get_slot(lane_name)
@@ -420,16 +422,17 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             slot_info = self._map(tag)
             self.record_tag_read(lane_name, slot_info)
             return slot_info
-        return self.apply_to_lane(lane, tag)
+        return self.apply_to_lane(lane, tag, gcmd=gcmd)
 
-    def _stage_read_begin(self, lane: "AFCLane") -> None:
+    def _stage_read_begin(self, lane: "AFCLane", gcmd: AFCGcmd) -> None:
         """
         Start polling the reader on a reactor timer as the unit's load feed
         begins for this lane. The feed itself is not touched.
 
         :param lane: The AFC lane whose load feed is starting.
+        :param gcmd: Command context the load feed runs through.
         """
-        self._cancel_poll()
+        self._cancel_poll(gcmd=gcmd)
         if not self.stage_read:
             return
         lane_name = getattr(lane, "name", None)
@@ -469,7 +472,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
                     self.logger.info(
                         f"ViViD RFID: tag {parked} parked on the shared reader for slot {slot}, "
                         f"clearing the sibling before the read")
-                    self._retract_sibling(self._probe)
+                    self._retract_sibling(self._probe, gcmd=gcmd)
                     if self._probe.get("sib_lane") is None:
                         # Could not move it: exclude its UID for the whole read.
                         self._probe["baseline"] = parked
@@ -481,7 +484,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
                 self._stage_poll, self.reactor.monotonic() + self.stage_poll_interval)
         except Exception as e:
             self.logger.warning(f"ViViD RFID: could not start stage poll: {e}")
-            self._restore_sibling(self._probe)
+            self._restore_sibling(self._probe, gcmd=gcmd)
             self._probe = None
 
     def _stage_poll(self, eventtime: float) -> float:
@@ -517,7 +520,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         if tag:
             p["done"] = True
             p["read_ok"] = True
-            self._apply_staged(p, tag)
+            self._apply_staged(p, tag, gcmd="callback")
             return self.reactor.NEVER
         if p["aborts"] >= self.stage_max_aborts:
             p["done"] = True
@@ -602,12 +605,13 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             self.logger.debug(f"ViViD RFID: fake-trigger of {endstop_name} not "
                               f"available ({e}), feeding to the real sensor instead")
 
-    def _apply_staged(self, p: dict, tag: dict) -> None:
+    def _apply_staged(self, p: dict, tag: dict, gcmd: AFCGcmd) -> None:
         """
         Cache and apply a staged read to its lane.
 
         :param p: The active probe state.
         :param tag: The confirmed tag dict to apply.
+        :param gcmd: Command context the spool assignment is run through.
         """
         self._last[p["slot"]] = tag
         lane_obj = None
@@ -616,11 +620,11 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             lane_obj = self.afc.lanes.get(p["lane"])
         try:
             if lane_obj is not None:
-                self.apply_to_lane(lane_obj, tag)
+                self.apply_to_lane(lane_obj, tag, gcmd=gcmd)
         except Exception as e:
             self.logger.warning(f"ViViD RFID: applying {p['lane']} read failed: {e}")
 
-    def _retract_sibling(self, p: dict) -> None:
+    def _retract_sibling(self, p: dict, gcmd: AFCGcmd) -> None:
         """
         Move the shared-antenna sibling off the reader before the read.
 
@@ -629,6 +633,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         _restore_sibling.
 
         :param p: The active probe state; sib_lane/sib_dist are filled if moved.
+        :param gcmd: Command context the moves are run through.
         """
         if not self.auto_tag_adjust:
             return
@@ -669,7 +674,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             hop = min(step, want - moved)
             # Assist on for the retract so the spooler winds the filament back.
             sib_lane.move_to(hop * MoveDirection.NEG, SpeedMode.SHORT,
-                             assist_active=AssistActive.YES, use_homing=False)
+                             assist_active=AssistActive.YES, use_homing=False, gcmd=gcmd)
             moved += hop
             # Recorded per hop, so a later hop that raises still leaves the
             # restore knowing how far the sibling went.
@@ -708,7 +713,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             return bool(raw)
         return bool(getattr(lane, "load_state", False))
 
-    def _restore_sibling(self, p: Optional[dict]) -> None:
+    def _restore_sibling(self, p: Optional[dict], gcmd: AFCGcmd) -> None:
         """
         Put the sibling back on the load switch it started from.
 
@@ -718,6 +723,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         off its switch is logged as an error.
 
         :param p: The active probe state, or None.
+        :param gcmd: Command context the moves are run through.
         """
         if not p:
             return
@@ -730,7 +736,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             # Plain move: a homing move would stop at once on a switch that
             # never released.
             sib_lane.move_to(dist * MoveDirection.POS, SpeedMode.SHORT,
-                             assist_active=AssistActive.NO, use_homing=False)
+                             assist_active=AssistActive.NO, use_homing=False, gcmd=gcmd)
             step = getattr(sib_lane, "short_move_dis", None) or 10.0
             unit = getattr(sib_lane, "unit_obj", None)
             if self._seated(sib_lane):
@@ -738,7 +744,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             elif (self._homing_available(sib_lane)
                   and callable(getattr(unit, "move_to_load", None))):
                 # The switch released, so home forward onto it as prep_load does.
-                unit.move_to_load(sib_lane, dist + 2.0 * step, MoveDirection.POS)
+                unit.move_to_load(sib_lane, dist + 2.0 * step, MoveDirection.POS, gcmd=gcmd)
                 if self._seated(sib_lane):
                     self.logger.info(f"ViViD RFID: homed sibling {sib_lane.name} forward "
                                      f"onto its load switch after the give-back landed short")
@@ -752,7 +758,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
                     if self._seated(sib_lane):
                         break
                     sib_lane.move_to(step * MoveDirection.POS, SpeedMode.SHORT,
-                                     assist_active=AssistActive.NO, use_homing=False)
+                                     assist_active=AssistActive.NO, use_homing=False, gcmd=gcmd)
                     crept += step
                 if crept:
                     self.logger.info(f"ViViD RFID: fed sibling {sib_lane.name} a further "
@@ -793,7 +799,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             f"shared reader blocking it. Manually move lane {sib_name}'s spool and re-run "
             f"VIVID_RFID_READ, or set {act}'s spool id by hand.")
 
-    def _stage_read_end(self, lane: "AFCLane") -> None:
+    def _stage_read_end(self, lane: "AFCLane", gcmd: AFCGcmd) -> None:
         """
         Stop polling when the feed finishes and restore a moved sibling.
 
@@ -801,6 +807,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
         tell the user; otherwise it is just a tagless or foreign spool.
 
         :param lane: The AFC lane whose load feed finished.
+        :param gcmd: Command context the load feed ran through.
         """
         p = self._probe
         if (p is not None
@@ -808,15 +815,17 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             self.logger.info(f"ViViD RFID: no tag decoded on {p.get('lane')} during staging")
             if p.get("blocked_sib"):
                 self._sister_blocked_hint(p.get("lane"), p.get("blocked_sib"))
-        self._restore_sibling(p)
-        self._cancel_poll()
+        self._restore_sibling(p, gcmd=gcmd)
+        self._cancel_poll(gcmd=gcmd)
 
-    def _cancel_poll(self) -> None:
+    def _cancel_poll(self, gcmd: AFCGcmd) -> None:
         """
         Tear down the poll timer + probe state, restoring a still-retracted
         sibling first so it's never left short (defensive for aborted reads).
+
+        :param gcmd: Command context the sibling restore is run through.
         """
-        self._restore_sibling(self._probe)
+        self._restore_sibling(self._probe, gcmd=gcmd)
         if self._poll_timer is not None:
             try:
                 self.reactor.unregister_timer(self._poll_timer)
@@ -847,7 +856,7 @@ class AFC_Vivid_rfid(AFCUnitRFID):
             raise gcmd.error(error_str)
         if lane_name is not None:
             # read_lane -> apply_to_lane already prints the console read-out.
-            si = self.read_lane(lane_name)
+            si = self.read_lane(lane_name, gcmd=gcmd)
             if si is None:
                 hint = self.undecoded_hint(lane_name)
                 gcmd.respond_info(f"ViViD RFID: no tag decoded on {lane_name}{hint}")

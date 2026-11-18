@@ -50,6 +50,7 @@ from extras.AFC_RFID import (
 )
 from extras.AFC_lane import AFCLane
 from extras.AFC_rfid_keys import AFC_rfid_keys
+from tests.conftest import MockGCodeCommand
 from tests.ace_helpers import (
     AceConfig,
     AceLogger,
@@ -2485,13 +2486,16 @@ class TestSyncRfidToSpoolman:
             """
             self.next_spool_id: Optional[int] = None
             self.assigned: List[Tuple[str, Any]] = []
+            self.gcmds: List[Any] = []
             self._raises = raises
 
-        def set_spoolID(self, cur_lane: Any, SpoolID: Any) -> None:
+        def set_spoolID(self, cur_lane: Any, SpoolID: Any, *, gcmd: Any) -> None:
             """
             :param cur_lane: lane to assign
             :param SpoolID: Spoolman spool id
+            :param gcmd: command context the assignment is run through
             """
+            self.gcmds.append(gcmd)
             if self._raises is not None:
                 raise self._raises
             self.assigned.append((cur_lane.name, SpoolID))
@@ -2655,8 +2659,8 @@ class TestSyncRfidToSpoolman:
              lane: Any = None, spool: Any = None, spoolman: Any = "http://spoolman:7912",
              reactor: Any = None, queue: Any = None, on_done: Any = None,
              logger: Optional[AceLogger] = None,
-             prepare: Optional[Callable[[Any], None]] = None
-             ) -> Tuple[Any, Any, AceLogger]:
+             prepare: Optional[Callable[[Any], None]] = None,
+             gcmd: Any = "callback") -> Tuple[Any, Any, AceLogger]:
         """
         Run sync_rfid_to_spoolman with one logger shared with moonraker, as AFC's is.
 
@@ -2664,6 +2668,7 @@ class TestSyncRfidToSpoolman:
         leaves them out runs on the sync's own defaults.
 
         :param prepare: called with the AFC object before the sync runs
+        :param gcmd: command context passed to the sync
         :return tuple: (afc, lane, logger)
         """
         logger = logger if logger is not None else AceLogger()
@@ -2679,7 +2684,7 @@ class TestSyncRfidToSpoolman:
         if prepare is not None:
             prepare(afc)
         sync_rfid_to_spoolman(afc, lane, slot_info, logger, "TEST", reactor=reactor,
-                              on_done=on_done, **flags)
+                              on_done=on_done, gcmd=gcmd, **flags)
         return afc, lane, logger
 
     def test_set_next_returns_with_no_spoolman(self):
@@ -2691,7 +2696,8 @@ class TestSyncRfidToSpoolman:
         # No moonraker stops it the same way, before the bed default is written.
         other = self._AFC(None, self._Spool(), "http://spoolman:7912")
         other_logger = AceLogger()
-        sync_rfid_to_spoolman(other, self._Lane(), slot, other_logger, "TEST", set_next=True)
+        sync_rfid_to_spoolman(other, self._Lane(), slot, other_logger, "TEST", set_next=True,
+                              gcmd="callback")
         assert slot == {"uid": "AA", "material": "PLA"}
         assert other_logger.messages == []
 
@@ -3274,8 +3280,9 @@ class TestSyncRfidToSpoolman:
     def test_with_a_reactor_the_http_runs_on_the_moonraker_thread(self):
         matched = self._matched(300, "AABB", 100, self._FULL_FILAMENT)
         queue, reactor = self._WriteQueue(), self._Reactor()
+        gcmd = MockGCodeCommand()
         afc, lane, logger = self._run(dict(self._FULL_TAG), self._routes([matched]),
-                                      reactor=reactor, queue=queue)
+                                      reactor=reactor, queue=queue, gcmd=gcmd)
         # Nothing reaches Spoolman during the call itself.
         assert afc.moonraker.calls == []
         assert len(queue.items) == 1
@@ -3296,6 +3303,8 @@ class TestSyncRfidToSpoolman:
         # Run on the sync's defaults: assigned, not staged.
         assert lane.spool_id == 300
         assert afc.spool.next_spool_id is None
+        # The caller's command has returned by then, so the reactor assigns as a callback.
+        assert afc.spool.gcmds == ["callback"]
         assert logger.messages == [
             ("info", "TEST: matched spool #300 by tag UID AABB"),
             ("info", "TEST: spool #300 ('Bambu PLA', #00ff00, 100g left) assigned to lane1")]
@@ -3324,12 +3333,15 @@ class TestSyncRfidToSpoolman:
     def test_without_a_reactor_it_stays_inline(self):
         matched = self._matched(300, "AABB", 100, self._FULL_FILAMENT)
         queue = self._WriteQueue()
+        gcmd = MockGCodeCommand()
         afc, lane, logger = self._run(dict(self._FULL_TAG), self._routes([matched]),
-                                      queue=queue)
+                                      queue=queue, gcmd=gcmd)
         assert queue.items == []
         # Run on the sync's defaults: assigned, not staged.
         assert lane.spool_id == 300
         assert afc.spool.next_spool_id is None
+        # Inline, the caller's own command context is the one the assignment uses.
+        assert afc.spool.gcmds == [gcmd]
         # A reactor without moonraker's writer queue stays inline too.
         other = self._Lane("lane2")
         reactor = self._Reactor()
@@ -3712,7 +3724,8 @@ class TestAFCUnitRFIDApplyToLane:
         reader.afc.spoolman = "http://spoolman:7912"
         # A moonraker without a host: building the Spoolman client raises.
         reader.afc.moonraker = object()
-        out = reader.apply_to_lane(lane, {"uid": "aa", "filament": {"type": "PLA"}})
+        out = reader.apply_to_lane(lane, {"uid": "aa", "filament": {"type": "PLA"}},
+                                   gcmd="callback")
         assert out == {**self._DEFAULTS, "material": "PLA", "uid": "aa", "bed_temp": 60}
         assert (lane.material, lane.bed_temp, lane.weight) == ("PLA", 60.0, 1000)
         assert reader.logger.messages == [
@@ -3737,7 +3750,7 @@ class TestAFCUnitRFIDApplyToLane:
         reader.afc.moonraker = moonraker
         reader.afc.spoolman = "http://spoolman:7912"
         out = reader.apply_to_lane(
-            lane, {"uid": "aa", "filament": {"type": "PLA", "weight_g": 250}})
+            lane, {"uid": "aa", "filament": {"type": "PLA", "weight_g": 250}}, gcmd="callback")
         # The weight travels inside slot_info; the sync only uses it to create.
         assert out == {**self._DEFAULTS, "material": "PLA", "uid": "aa", "weight_g": 250,
                        "bed_temp": 60}
@@ -3769,19 +3782,21 @@ class TestAFCUnitRFIDApplyToLane:
             logger=reader.logger)
         afc.moonraker = moonraker
         assert afc.spoolman is None
-        out = reader.apply_to_lane(lane, {"uid": "aa"})
+        out = reader.apply_to_lane(lane, {"uid": "aa"}, gcmd="callback")
         assert out == {**self._DEFAULTS, "uid": "aa"}
         assert lane.weight == 1000
         # Without an AFC there is no sync either, and no crash.
         reader.afc = None
-        second = reader.apply_to_lane(lane, {"uid": "bb", "filament": {"type": "PLA"}})
+        second = reader.apply_to_lane(lane, {"uid": "bb", "filament": {"type": "PLA"}},
+                                      gcmd="callback")
         assert second == {**self._DEFAULTS, "material": "PLA", "uid": "bb"}
         assert (lane.material, lane.bed_temp) == ("PLA", 60.0)
         # A blank URL gets past the sync's own None check, so only this guard
         # stops it. A sync would have written ABS's bed default into the read.
         reader.afc = afc
         afc.spoolman = ""
-        third = reader.apply_to_lane(lane, {"uid": "cc", "filament": {"type": "ABS"}})
+        third = reader.apply_to_lane(lane, {"uid": "cc", "filament": {"type": "ABS"}},
+                                     gcmd="callback")
         assert third == {**self._DEFAULTS, "material": "ABS", "uid": "cc"}
         assert (lane.material, lane.bed_temp) == ("PLA", 60.0)
         assert moonraker.calls == []
@@ -3798,6 +3813,24 @@ class TestAFCUnitRFIDApplyToLane:
                      "  Material: ABS\n"
                      "  Diameter: 1.75mm\n"
                      "  Tag UID: cc")]
+
+    def test_the_sync_runs_through_the_given_command(self, rfid_wall_clock, monkeypatch):
+        reader, lane = rfid_reader()
+        reader.afc.spoolman = "http://spoolman:7912"
+        sync = Recorder()
+        monkeypatch.setattr(AFC_RFID, "sync_rfid_to_spoolman", sync)
+        gcmd = MockGCodeCommand()
+        out = reader.apply_to_lane(lane, {"uid": "aa", "filament": {"type": "PLA"}}, gcmd=gcmd)
+        assert out == {**self._DEFAULTS, "material": "PLA", "uid": "aa"}
+        assert sync.calls == [((reader.afc, lane, out, reader.logger, "ACE2 RFID"),
+                               {"allow_create": False, "gcmd": gcmd})]
+        assert reader.logger.messages == []
+        assert reader.gcode.messages == [
+            ("info", "ACE2 RFID: read spool on lane1\n"
+                     "  Name: PLA\n"
+                     "  Material: PLA\n"
+                     "  Diameter: 1.75mm\n"
+                     "  Tag UID: aa")]
 
 
 class TestAFCUnitRFIDConsoleReadOut:

@@ -194,6 +194,7 @@ class _FakeScanUnit:
         self.blocked_reason = None
         self.slot_queries = []
         self.scans = []
+        self.scan_gcmds = []
 
     def _rfid_scan_slot(self, coord, lane):
         self.slot_queries.append((coord, lane))
@@ -202,8 +203,9 @@ class _FakeScanUnit:
     def _rfid_scan_blocked_reason(self, lane):
         return self.blocked_reason
 
-    def _do_rfid_scan(self, lane, hold=None):
+    def _do_rfid_scan(self, lane, hold=None, *, gcmd):
         self.scans.append((lane, set(self._rfid_scanned)))
+        self.scan_gcmds.append(gcmd)
         if self.excluder is not None:
             hold(self.excluder)
 
@@ -571,11 +573,13 @@ class TestAFCOpenAMSRfidOnConnect:
         unit = _FakeScanUnit(rfid_slot=2, excluder="ex")
         printer._afc.lanes["lane1"] = types.SimpleNamespace(name="lane1", unit_obj=unit)
         with pytest.raises(StageError) as exc:
-            calls[0]["stage_around"]("lane1", lambda ex: None)
+            calls[0]["stage_around"]("lane1", lambda ex: None, "callback")
         assert str(exc.value) == "lane1 is not on RFID_A; write it with READER=oams:RFID_B"
         written = []
-        calls[1]["stage_around"]("lane1", written.append)
+        gcmd = MockGCodeCommand()
+        calls[1]["stage_around"]("lane1", written.append, gcmd)
         assert written == ["ex"]
+        assert unit.scan_gcmds == [gcmd]
 
     def test_duplicate_slot_warns_and_last_reader_wins(self, monkeypatch):
         calls = self._record_register(monkeypatch)
@@ -651,16 +655,18 @@ class TestAFCOpenAMSRfidStageWriteAround:
     def _refused(self, coord, rdr, lane_name="lane1"):
         body_calls = []
         with pytest.raises(StageError) as exc:
-            coord._stage_write_around(lane_name, rdr, body_calls.append)
+            coord._stage_write_around(lane_name, rdr, body_calls.append, gcmd="callback")
         assert body_calls == []
         return str(exc.value)
 
     def test_runs_the_write_inside_the_scan(self, monkeypatch):
         coord, rdrs, unit, lane = self._setup(monkeypatch, excluder="sisters")
         body_calls = []
+        gcmd = MockGCodeCommand()
         assert coord._stage_write_around("lane1", rdrs["RFID_A"],
-                                         body_calls.append) is None
+                                         body_calls.append, gcmd=gcmd) is None
         assert body_calls == ["sisters"]
+        assert unit.scan_gcmds == [gcmd]
         assert unit.slot_queries == [(coord, lane)]
         # The scanned latch is cleared before the scan so it runs again.
         assert unit.scans == [(lane, set())]
@@ -954,8 +960,8 @@ class TestAFCOpenAMSRfidReadLane:
         monkeypatch.setattr(oams_rfid, "read_tag", rec)
         applied = []
 
-        def fake_apply(lane, raw):
-            applied.append((lane, raw))
+        def fake_apply(lane, raw, gcmd):
+            applied.append((lane, raw, gcmd))
             return {"brand": "Applied"}
 
         monkeypatch.setattr(coord, "apply_to_lane", fake_apply)
@@ -963,7 +969,7 @@ class TestAFCOpenAMSRfidReadLane:
 
     def test_unmapped_lane_warns(self, monkeypatch):
         coord, printer, rec, applied = self._setup(monkeypatch, TAG_PLA)
-        assert coord.read_lane("lane9") is None
+        assert coord.read_lane("lane9", gcmd="callback") is None
         assert printer._afc.logger.messages == [
             ("warning", "AFC_OpenAMS_rfid: lane 'lane9' has no slot (set lane_slot_map)")]
         assert rec.calls == []
@@ -971,7 +977,7 @@ class TestAFCOpenAMSRfidReadLane:
 
     def test_no_tag_records_nothing(self, monkeypatch):
         coord, printer, rec, applied = self._setup(monkeypatch, None)
-        assert coord.read_lane("lane1") is None
+        assert coord.read_lane("lane1", gcmd="callback") is None
         assert len(rec.calls) == 1
         assert coord.last_reads_status() == {}
         assert applied == []
@@ -979,7 +985,7 @@ class TestAFCOpenAMSRfidReadLane:
 
     def test_undecoded_tag_records_uid_and_type(self, monkeypatch):
         coord, printer, _, applied = self._setup(monkeypatch, TAG_UNDECODED)
-        assert coord.read_lane("lane1") is None
+        assert coord.read_lane("lane1", gcmd="callback") is None
         assert coord.last_reads_status() == {"lane1": {
             "uid": "aabb", "tag_type": "MifareClassic1k", "decoded": False,
             "scan_time": SCAN_TIME}}
@@ -989,7 +995,7 @@ class TestAFCOpenAMSRfidReadLane:
     def test_undecoded_tag_with_empty_fields_records_blanks(self, monkeypatch):
         tag = {"uid": None, "tag_type": None, "filament": {}}
         coord, _, _, applied = self._setup(monkeypatch, tag)
-        assert coord.read_lane("lane1") is None
+        assert coord.read_lane("lane1", gcmd="callback") is None
         assert coord.last_reads_status() == {"lane1": {
             "decoded": False, "scan_time": SCAN_TIME}}
         assert applied == []
@@ -998,15 +1004,16 @@ class TestAFCOpenAMSRfidReadLane:
         coord, printer, _, applied = self._setup(monkeypatch, TAG_PLA)
         lane = types.SimpleNamespace(name="lane1")
         printer._afc.lanes["lane1"] = lane
-        assert coord.read_lane("lane1") == {"brand": "Applied"}
-        assert applied == [(lane, TAG_PLA)]
+        gcmd = MockGCodeCommand()
+        assert coord.read_lane("lane1", gcmd=gcmd) == {"brand": "Applied"}
+        assert applied == [(lane, TAG_PLA, gcmd)]
         # apply_to_lane owns the record, so read_lane adds none itself.
         assert coord.last_reads_status() == {}
         assert printer._afc.logger.messages == []
 
     def test_lane_not_in_afc_maps_and_records(self, monkeypatch):
         coord, printer, _, applied = self._setup(monkeypatch, TAG_PLA)
-        assert coord.read_lane("lane1") == SLOT_INFO_PLA
+        assert coord.read_lane("lane1", gcmd="callback") == SLOT_INFO_PLA
         assert applied == []
         # The record drops the empty and None fields of the slot_info.
         assert coord.last_reads_status() == {"lane1": {
@@ -1019,14 +1026,14 @@ class TestAFCOpenAMSRfidReadLane:
     def test_before_connect_maps_without_applying(self, monkeypatch):
         coord, _, _, applied = self._setup(monkeypatch, TAG_PLA)
         coord.afc = None
-        assert coord.read_lane("lane1") == SLOT_INFO_PLA
+        assert coord.read_lane("lane1", gcmd="callback") == SLOT_INFO_PLA
         assert applied == []
         assert coord.last_reads_status()["lane1"]["decoded"] is True
 
     def test_afc_without_lanes_maps_without_applying(self, monkeypatch):
         coord, _, _, applied = self._setup(monkeypatch, TAG_PLA)
         coord.afc = types.SimpleNamespace()
-        assert coord.read_lane("lane1") == SLOT_INFO_PLA
+        assert coord.read_lane("lane1", gcmd="callback") == SLOT_INFO_PLA
         assert applied == []
         assert coord.last_reads_status()["lane1"]["decoded"] is True
 
@@ -1107,10 +1114,13 @@ class TestAFCOpenAMSRfidCmdOamsRfidRead:
 
     def test_lane_decoded_without_brand_or_material(self, monkeypatch):
         coord, _, _ = self._setup(monkeypatch, TAG_PLA)
-        monkeypatch.setattr(coord, "read_lane", lambda name: {"uid": "aabbccdd"})
+        given = []
+        monkeypatch.setattr(coord, "read_lane",
+                            lambda name, gcmd: given.append(gcmd) or {"uid": "aabbccdd"})
         gcmd = MockGCodeCommand(params={"LANE": "lane1"})
         coord.cmd_OAMS_RFID_READ(gcmd)
         gcmd.respond_info.assert_called_once_with("OpenAMS RFID: lane1 ->  ")
+        assert given == [gcmd]
 
     def test_lane_undecoded_reports_what_was_seen(self, monkeypatch):
         coord, _, _ = self._setup(monkeypatch, TAG_UNDECODED)

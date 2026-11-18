@@ -15,12 +15,15 @@
 from __future__ import annotations
 import threading
 import chelper
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from extras.AFC_RFID import _cached_spoolman_client
 from extras.AFC_rfid_readers import (ANYCUBIC_IMAGE_START, CLASSIC_DEFAULT_KEY, classic_write_block,
                                      decode_afc_block, decode_anycubic, encode_tag_payload,
                                      read_tag, write_tag)
+
+if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
 
 #: How long a write may take before the g-code gives up. Every page write and
 #: read-back is a round trip over the ACE2's serial passthrough.
@@ -45,11 +48,11 @@ class RfidWriteTarget:
                  write_payload: Optional[
                      Callable[[bytes], Tuple[Optional[str],
                                              Optional[str]]]] = None,
-                 stage: Optional[Callable[[str], Any]] = None,
-                 unstage: Optional[Callable[[Any], None]] = None,
+                 stage: Optional[Callable[[str, AFCGcmd], Any]] = None,
+                 unstage: Optional[Callable[[Any, AFCGcmd], None]] = None,
                  exclude: Optional[Callable[[Any], Optional[
                      Callable[[str], bool]]]] = None,
-                 stage_around: Optional[Callable[[str, Callable[..., Any]],
+                 stage_around: Optional[Callable[[str, Callable[..., Any], AFCGcmd],
                                                  Any]] = None,
                  serves: Optional[Callable[[str], bool]] = None) -> None:
         """
@@ -73,17 +76,18 @@ class RfidWriteTarget:
             open_link/prepare/write_tag/release path; a blocking hand-off wants
             threaded=True.
         :param stage: run on the reactor before the write, given the lane the
-            tag belongs to, to bring the tag into the reader's field and hold
-            it there. Returns a token passed to unstage. None means the tag is
-            already in range (a stationary reader).
+            tag belongs to and the command context, to bring the tag into the
+            reader's field and hold it there. Returns a token passed to unstage.
+            None means the tag is already in range (a stationary reader).
         :param unstage: run on the reactor after the write, always, given the
-            token stage returned, to put the filament back.
+            token stage returned and the command context, to put the filament
+            back.
         :param exclude: given the token stage returned, a uid_hex -> bool test
             for tags the write must pass over, such as the other spool's tag on
             a shared antenna.
         :param stage_around: for a unit whose pull-in scan cannot be split into
             stage and unstage (ACE 2, OpenAMS): run on the reactor as
-            stage_around(lane, body). It calls body(is_excluded) once with the
+            stage_around(lane, body, gcmd). It calls body(is_excluded) once with the
             tag stopped in the field, restores the filament and returns what
             body returned, or raises StageError when the tag never came to rest.
             Used instead of stage/unstage when given.
@@ -158,12 +162,12 @@ def register_reader(printer: Any, name: str, label: str, unit: Any,
                     write_payload: Optional[
                         Callable[[bytes], Tuple[Optional[str],
                                                 Optional[str]]]] = None,
-                    stage: Optional[Callable[[str], Any]] = None,
-                    unstage: Optional[Callable[[Any], None]] = None,
+                    stage: Optional[Callable[[str, AFCGcmd], Any]] = None,
+                    unstage: Optional[Callable[[Any, AFCGcmd], None]] = None,
                     exclude: Optional[Callable[[Any], Optional[
                         Callable[[str], bool]]]] = None,
                     stage_around: Optional[Callable[
-                        [str, Callable[..., Any]], Any]] = None,
+                        [str, Callable[..., Any], AFCGcmd], Any]] = None,
                     serves: Optional[Callable[[str], bool]] = None) -> None:
     """
     Register one reader as a write target, and ensure the commands exist.
@@ -413,7 +417,7 @@ def _write_blocking(target: RfidWriteTarget, spool_id: int, overrides: Dict[str,
 
 def _with_staging(target: RfidWriteTarget, lane: Optional[str],
                   body: Callable[[Optional[Callable[[str], bool]]],
-                                 Tuple[Any, ...]]) -> Tuple[Any, ...]:
+                                 Tuple[Any, ...]], gcmd: AFCGcmd) -> Tuple[Any, ...]:
     """
     Run ``body`` with the tag brought into the reader's field for ``lane``.
 
@@ -426,6 +430,7 @@ def _with_staging(target: RfidWriteTarget, lane: Optional[str],
     :param lane: the lane whose spool carries the tag, or None
     :param body: the write to run once the tag is in range, given the tags
         to pass over (the target's exclude for this staging, or None)
+    :param gcmd: command context the staging moves are run through
     :return tuple: whatever body returns
     """
     if (lane
@@ -443,13 +448,13 @@ def _with_staging(target: RfidWriteTarget, lane: Optional[str],
                 result.append(body(excluded))
             return result[0]
 
-        target.stage_around(lane, _once)
+        target.stage_around(lane, _once, gcmd)
         if not result:
             error_str = (f"{lane}'s tag did not come to rest in the reader's "
                          f"field, so nothing was written")
             raise StageError(error_str)
         return result[0]
-    token = target.stage(lane) if (lane and target.stage is not None) else None
+    token = target.stage(lane, gcmd) if (lane and target.stage is not None) else None
     try:
         excluded = (target.exclude(token)
                     if token is not None and target.exclude is not None
@@ -458,11 +463,11 @@ def _with_staging(target: RfidWriteTarget, lane: Optional[str],
     finally:
         if (token is not None
             and target.unstage is not None):
-            target.unstage(token)
+            target.unstage(token, gcmd)
 
 
 def run_write(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
-              lane: Optional[str] = None) -> Tuple[Any, ...]:
+              lane: Optional[str] = None, *, gcmd: AFCGcmd) -> Tuple[Any, ...]:
     """
     Run a write, on a worker thread where the transport allows it.
 
@@ -475,6 +480,7 @@ def run_write(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
     :param overrides: explicit g-code params
     :param lane: the lane whose spool holds the tag, for a reader that must spin
         it into range; None when the tag is already at the coil
+    :param gcmd: command context the staging moves are run through
     :return tuple: (uid, error, fields, note)
     """
     def _body(excluded: Optional[Callable[[str], bool]]) -> Tuple[Any, ...]:
@@ -511,7 +517,7 @@ def run_write(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
         completion.wait(reactor.monotonic() + WRITE_TIMEOUT_S)
         return result[0]
 
-    return _with_staging(target, lane, _body)
+    return _with_staging(target, lane, _body, gcmd)
 
 
 def _read_keys(unit: Any) -> Dict[str, Any]:
@@ -931,18 +937,19 @@ def tag_from_fields(uid: Optional[str], fields: Dict[str, Any]) -> dict:
 
 
 def apply_written(target: RfidWriteTarget, lane_name: str, uid: Optional[str],
-                  fields: Dict[str, Any]) -> str:
+                  fields: Dict[str, Any], gcmd: AFCGcmd) -> str:
     """
     Give the lane the tag just written to its spool. Runs on the reactor.
 
     The lane takes the new tag the way a scan would, through the unit's own
     apply (Spoolman match included). A unit that tracks tags per lane can
-    define apply_written_tag(lane_name, tag) to note the UID as well.
+    define apply_written_tag(lane_name, tag, gcmd) to note the UID as well.
 
     :param target: the reader the tag was written on
     :param lane_name: the lane whose spool carries the tag
     :param uid: the tag's UID
     :param fields: the fields the write encoded
+    :param gcmd: command context the spool assignment is run through
     :return str: a note for the command's reply, empty when applied quietly
     """
     unit = target.unit
@@ -950,7 +957,7 @@ def apply_written(target: RfidWriteTarget, lane_name: str, uid: Optional[str],
     try:
         hook = getattr(unit, "apply_written_tag", None)
         if hook is not None:
-            hook(lane_name, tag)
+            hook(lane_name, tag, gcmd=gcmd)
             return f"applied to {lane_name}"
         afc = getattr(unit, "afc", None)
         lane = (getattr(afc, "lanes", None) or {}).get(lane_name)
@@ -958,7 +965,7 @@ def apply_written(target: RfidWriteTarget, lane_name: str, uid: Optional[str],
         if (lane is None
             or apply is None):
             return f"not applied: {lane_name} is not a lane this unit can set"
-        apply(lane, tag)
+        apply(lane, tag, gcmd=gcmd)
         send = getattr(lane, "send_lane_data", None)
         if send is not None:
             send()
@@ -1009,7 +1016,7 @@ def cmd_AFC_RFID_WRITE(printer: Any, gcmd: Any) -> None:
         overrides.setdefault("diameter_mm", 1.75)
     lane = gcmd.get("LANE", None)
     try:
-        uid, err, fields, note = run_write(target, spool_id, overrides, lane=lane)
+        uid, err, fields, note = run_write(target, spool_id, overrides, lane=lane, gcmd=gcmd)
     except StageError as e:
         error_str = f"AFC_RFID_WRITE: {e}"
         raise gcmd.error(error_str)
@@ -1018,7 +1025,7 @@ def cmd_AFC_RFID_WRITE(printer: Any, gcmd: Any) -> None:
         error_str = f"AFC_RFID_WRITE: {err}{where}"
         raise gcmd.error(error_str)
     if lane:
-        applied = apply_written(target, lane, uid, fields)
+        applied = apply_written(target, lane, uid, fields, gcmd)
         note = f"{note}, {applied}" if note else applied
     weight = fields.get("weight_g")
     gcmd.respond_info(f"AFC_RFID_WRITE: wrote tag {uid} on {target.name}: "
@@ -1070,7 +1077,7 @@ def _create_spool_blocking(unit: Any, fields: Dict[str, Any]) -> Tuple[int, Opti
 
 
 def run_enroll(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
-               lane: Optional[str] = None) -> Tuple[Any, ...]:
+               lane: Optional[str] = None, *, gcmd: AFCGcmd) -> Tuple[Any, ...]:
     """
     Enroll a blank tag: create the Spoolman spool if one was not named, then
     write the tag and bind its UID, on a worker where the transport allows it.
@@ -1080,6 +1087,7 @@ def run_enroll(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any]
     :param overrides: the tag fields typed in
     :param lane: the lane whose spool holds the tag, for a reader that must spin
         it into range; None when the tag is already at the coil
+    :param gcmd: command context the staging moves are run through
     :return tuple: (uid, error, fields, note)
     """
     def _do(excluded: Optional[Callable[[str], bool]]) -> Tuple[Any, ...]:
@@ -1147,7 +1155,7 @@ def run_enroll(target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any]
         completion.wait(reactor.monotonic() + WRITE_TIMEOUT_S + 30.0)
         return result[0]
 
-    return _with_staging(target, lane, _dispatch)
+    return _with_staging(target, lane, _dispatch, gcmd)
 
 
 def cmd_AFC_RFID_ENROLL(printer: Any, gcmd: Any) -> None:
@@ -1183,7 +1191,7 @@ def cmd_AFC_RFID_ENROLL(printer: Any, gcmd: Any) -> None:
         overrides.setdefault("diameter_mm", 1.75)
     lane = gcmd.get("LANE", None)
     try:
-        uid, err, fields, note = run_enroll(target, spool_id, overrides, lane=lane)
+        uid, err, fields, note = run_enroll(target, spool_id, overrides, lane=lane, gcmd=gcmd)
     except StageError as e:
         error_str = f"AFC_RFID_ENROLL: {e}"
         raise gcmd.error(error_str)
@@ -1192,7 +1200,7 @@ def cmd_AFC_RFID_ENROLL(printer: Any, gcmd: Any) -> None:
         error_str = f"AFC_RFID_ENROLL: {err}{where}"
         raise gcmd.error(error_str)
     if lane:
-        applied = apply_written(target, lane, uid, fields)
+        applied = apply_written(target, lane, uid, fields, gcmd)
         note = f"{note}, {applied}" if note else applied
     weight = fields.get("weight_g")
     gcmd.respond_info(f"AFC_RFID_ENROLL: tag {uid} on {target.name}: "

@@ -17,10 +17,10 @@ import string
 import threading
 import chelper
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from gcode import GCodeCommand
+    from extras.AFC_utils import AFCGcmd
 
 
 # Offered in the UI.
@@ -881,7 +881,7 @@ class AFCDryer:
         self.reactor.register_async_callback(lambda e, s=script: self._run_script(s, "callback"))
         return script
 
-    def _run_script(self, script: str, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
+    def _run_script(self, script: str, gcmd: AFCGcmd) -> None:
         """
         Run a queued G-code on the reactor thread.
 

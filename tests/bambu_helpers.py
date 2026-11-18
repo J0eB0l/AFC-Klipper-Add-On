@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import inspect
 import json
 import os
 import pathlib
@@ -70,6 +71,14 @@ class Recorder:
     def call_count(self) -> int:
         """:return int: how many calls were made"""
         return len(self.calls)
+
+
+class GcmdRecorder(Recorder):
+    """A Recorder standing in for a method whose gcmd is required."""
+
+    def __call__(self, *args: Any, gcmd: Any, **kwargs: Any) -> Any:
+        """Record the call, gcmd among its keywords."""
+        return super().__call__(*args, gcmd=gcmd, **kwargs)
 
 
 class BambuLogger:
@@ -234,8 +243,13 @@ class RecordingGcode:
         """:param msg: the console line"""
         self.messages.append(("respond_raw", msg))
 
-    def run_script_from_command(self, script: str) -> None:
-        """:param script: recorded in ``scripts``"""
+    def run_script_from_command(self, script: str, gcmd: Any = None) -> None:
+        """
+        Newer Kalico's signature, so AFC dispatches on the command context.
+
+        :param script: recorded in ``scripts``
+        :param gcmd: the running command; unused
+        """
         self.scripts.append(script)
 
     def run_script(self, script: str) -> None:
@@ -692,11 +706,12 @@ class FakeError:
             self.afc.current_state = State.ERROR
 
     def AFC_error(self, msg: str, pause: bool = True,
-                  stack_name: Optional[str] = None) -> None:
+                  stack_name: Optional[str] = None, *, gcmd: Any) -> None:
         """
         :param msg: the error
         :param pause: pause the print (enters the error state)
         :param stack_name: recorded in calls when given
+        :param gcmd: command context the pause runs through
         """
         self.messages.append(("AFC_error", msg))
         kwargs = {} if stack_name is None else {"stack_name": stack_name}
@@ -705,11 +720,12 @@ class FakeError:
             self._pause()
 
     def handle_lane_failure(self, lane: Any, message: str,
-                            pause: bool = True) -> None:
+                            pause: bool = True, *, gcmd: Any) -> None:
         """
         :param lane: the failed lane: disabled, ERROR, its unit's lane_fault
         :param message: the failure text
         :param pause: pause the print (enters the error state)
+        :param gcmd: command context the pause and LED macro run through
         """
         self.messages.append(("handle_lane_failure", message))
         self.calls.append(("handle_lane_failure", (lane, message),
@@ -718,7 +734,7 @@ class FakeError:
         lane.status = AFCLaneState.ERROR
         if pause:
             self._pause()
-        lane.unit_obj.lane_fault(lane)
+        lane.unit_obj.lane_fault(lane, gcmd)
 
 
 class FakeAfcSpool:
@@ -727,6 +743,8 @@ class FakeAfcSpool:
     def __init__(self) -> None:
         """Start with no calls."""
         self.calls: List[Tuple[str, tuple, dict]] = []
+        # The gcmd each set_spoolID ran under, in call order.
+        self.gcmds: List[Any] = []
 
     def _rec(self, name: str, args: tuple, kwargs: dict) -> None:
         """
@@ -736,9 +754,10 @@ class FakeAfcSpool:
         """
         self.calls.append((name, args, kwargs))
 
-    def set_spoolID(self, lane: Any, spool_id: Any, *args: Any,
+    def set_spoolID(self, lane: Any, spool_id: Any, *args: Any, gcmd: Any,
                     **kwargs: Any) -> None:
-        """Record a Spoolman binding."""
+        """Record a Spoolman binding, and its gcmd in gcmds."""
+        self.gcmds.append(gcmd)
         self._rec("set_spoolID", (lane, spool_id) + args, kwargs)
 
     def _set_values(self, lane: Any) -> None:
@@ -928,15 +947,17 @@ class BambuAFC(MockAFC):
 
     cmd_CHANGE_TOOL_help = "change tool"
 
-    def run_script(self, script: str, gcmd: Any = None) -> None:
+    def run_script(self, script: str, gcmd: Any) -> None:
         """
-        AFC's run_script as Klipper runs it: a command holds the gcode mutex, so a script run with
-        its gcmd goes through run_script_from_command; "callback" takes the mutex test.
+        AFC's run_script on newer Kalico. A real command runs the script in its own context, which
+        records it through run_script_from_command; "callback" and "sub_command" take AFC's own
+        dispatch, so "callback" goes through gcode.run_script.
         """
-        if gcmd is not None and gcmd != "callback":
-            self.gcode.run_script_from_command(script)
-        else:
+        if (gcmd is None
+            or isinstance(gcmd, str)):
             MockAFC.run_script(self, script, gcmd)
+        else:
+            self.gcode.run_script_from_command(script)
 
     def __init__(self, printer: "BambuPrinter") -> None:
         """:param printer: the printer this AFC core lives on"""
@@ -945,6 +966,8 @@ class BambuAFC(MockAFC):
         self.logger = BambuLogger()
         self.reactor = printer.reactor
         self.gcode = printer.gcode
+        self._rsfc_accepts_gcmd = "gcmd" in inspect.signature(
+            self.gcode.run_script_from_command).parameters
         self.toolhead = printer.toolhead
         self.gcode_move = printer.gcode_move
         self.function: Any = FakeFunction(self, printer)

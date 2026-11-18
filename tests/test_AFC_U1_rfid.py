@@ -12,6 +12,7 @@ import pytest
 from extras.AFC_RFID import sync_rfid_to_spoolman
 from extras.AFC_U1_rfid import AFC_U1_RFID, load_config
 import extras.AFC_U1_rfid as u1_mod
+from tests.conftest import MockGCodeCommand
 from tests.bambu_helpers import (
     BambuConfig,
     BambuPrinter,
@@ -1140,8 +1141,8 @@ class TestAFCU1RFIDOnFilamentInfoUpdate:
         reader._on_filament_info_update(1, {"CARD_UID": U1_UID}, False)
         reader._on_filament_info_update(0, {"CARD_UID": U1_UID_OTHER})
         assert reader._check_channel.calls == [
-            (("lane1", 1), {"info": {"CARD_UID": U1_UID}}),
-            ((None, 0), {"info": {"CARD_UID": U1_UID_OTHER}}),
+            (("lane1", 1), {"info": {"CARD_UID": U1_UID}, "gcmd": "callback"}),
+            ((None, 0), {"info": {"CARD_UID": U1_UID_OTHER}, "gcmd": "callback"}),
         ]
         assert reader.logger.messages == []
 
@@ -1155,7 +1156,7 @@ class TestAFCU1RFIDOnFilamentInfoUpdate:
         reader = self._reader(check=Recorder(raises=RuntimeError("bad")))
         reader._on_filament_info_update(1, {"CARD_UID": U1_UID})
         assert reader._check_channel.calls == [
-            (("lane1", 1), {"info": {"CARD_UID": U1_UID}})]
+            (("lane1", 1), {"info": {"CARD_UID": U1_UID}, "gcmd": "callback"})]
         assert reader.logger.messages == [
             ("warning", "U1 RFID: _on_filament_info_update error ch1: bad")]
 
@@ -1163,20 +1164,20 @@ class TestAFCU1RFIDOnFilamentInfoUpdate:
         reader = self._reader()
         reader.register_lane(U1Lane("lane2"), 2)
         reader._on_filament_info_update(1)
-        assert reader._check_channel.calls == [(("lane1", 1), {}),
-                                               (("lane2", 2), {})]
+        assert reader._check_channel.calls == [(("lane1", 1), {"gcmd": "callback"}),
+                                               (("lane2", 2), {"gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_non_int_first_arg_falls_back_to_lane_loop(self):
         reader = self._reader()
         reader._on_filament_info_update("1", {"CARD_UID": U1_UID})
-        assert reader._check_channel.calls == [(("lane1", 1), {})]
+        assert reader._check_channel.calls == [(("lane1", 1), {"gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_non_dict_second_arg_falls_back_to_lane_loop(self):
         reader = self._reader()
         reader._on_filament_info_update(1, "x")
-        assert reader._check_channel.calls == [(("lane1", 1), {})]
+        assert reader._check_channel.calls == [(("lane1", 1), {"gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_lane_loop_error_logs_warning(self):
@@ -1184,8 +1185,8 @@ class TestAFCU1RFIDOnFilamentInfoUpdate:
         reader.register_lane(U1Lane("lane2"), 2)
         reader._on_filament_info_update()
         # One failing lane does not stop the next.
-        assert reader._check_channel.calls == [(("lane1", 1), {}),
-                                               (("lane2", 2), {})]
+        assert reader._check_channel.calls == [(("lane1", 1), {"gcmd": "callback"}),
+                                               (("lane2", 2), {"gcmd": "callback"})]
         assert reader.logger.messages == [
             ("warning", "U1 RFID: _on_filament_info_update error lane1: oops"),
             ("warning", "U1 RFID: _on_filament_info_update error lane2: oops"),
@@ -1223,6 +1224,11 @@ class TestAFCU1RFIDTriggerChannelUpdate:
             self.scripts: List[str] = []
 
         def run_script(self, script: str) -> None:
+            """:param script: recorded, then refused"""
+            self.scripts.append(script)
+            raise RuntimeError("m400")
+
+        def run_script_from_command(self, script: str) -> None:
             """:param script: recorded, then refused"""
             self.scripts.append(script)
             raise RuntimeError("m400")
@@ -1345,7 +1351,7 @@ class TestAFCU1RFIDPollCb:
         reader = self._reader()
         reader.register_lane(U1Lane("lane1"), 1)
         assert reader._poll_cb(10.0) == 12.0
-        assert reader._check_channel.calls == [(("lane1", 1), {})]
+        assert reader._check_channel.calls == [(("lane1", 1), {"gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_idle_not_printing_proceeds(self):
@@ -1355,8 +1361,8 @@ class TestAFCU1RFIDPollCb:
         reader.register_lane(U1Lane("lane1"), 1)
         assert reader._poll_cb(0.0) == 2.0
         assert reader._trigger_channel_update.calls == [((0, "callback"), {})]
-        assert reader._check_channel.calls == [((None, 0), {}),
-                                               (("lane1", 1), {})]
+        assert reader._check_channel.calls == [((None, 0), {"gcmd": "callback"}),
+                                               (("lane1", 1), {"gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_trigger_failure_reaches_backoff_threshold(self):
@@ -1395,8 +1401,8 @@ class TestAFCU1RFIDPollCb:
         reader._check_channel = Recorder(raises=RuntimeError("boom"))
         assert reader._poll_cb(0.0) == 2.0
         # The lane loop still runs after the scanner's failure.
-        assert reader._check_channel.calls == [((None, 0), {}),
-                                               (("lane1", 1), {})]
+        assert reader._check_channel.calls == [((None, 0), {"gcmd": "callback"}),
+                                               (("lane1", 1), {"gcmd": "callback"})]
         assert reader.logger.messages == [
             ("warning", "U1 RFID: poll error on scanner ch0: boom"),
             ("warning", "U1 RFID: poll error on lane1 ch1: boom"),
@@ -1583,7 +1589,7 @@ class TestAFCU1RFIDHandleWebhookScan:
                 "DRYING_TIME": 8, "SPOOL_ID": 164, "RGB_1": 4279312947,
                 "RGB_2": 4282668390,
             },
-            "source": "webhook"})]
+            "source": "webhook", "gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_non_list_colors_becomes_empty(self):
@@ -1591,7 +1597,8 @@ class TestAFCU1RFIDHandleWebhookScan:
         reader._handle_webhook_scan(self._WebRequest(
             {"channel": 0, "colors": "notalist"}))
         assert reader._check_channel.calls == [
-            (("lane1", 0), {"info": self._bare_info(), "source": "webhook"})]
+            (("lane1", 0), {"info": self._bare_info(), "source": "webhook",
+                            "gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_non_int_color_skipped(self):
@@ -1600,7 +1607,7 @@ class TestAFCU1RFIDHandleWebhookScan:
             {"channel": 0, "colors": ["bad", None, "4282664294"]}))
         assert reader._check_channel.calls == [(("lane1", 0), {
             "info": self._bare_info(COLOR_NUMS=3, RGB_3=4282664294),
-            "source": "webhook"})]
+            "source": "webhook", "gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_zero_valued_optional_field_omitted(self):
@@ -1609,7 +1616,8 @@ class TestAFCU1RFIDHandleWebhookScan:
             "channel": 0, "drying_temp_c": 0, "serial_number": "",
             "sku": None, "density": 1.24}))
         assert reader._check_channel.calls == [(("lane1", 0), {
-            "info": self._bare_info(DENSITY=1.24), "source": "webhook"})]
+            "info": self._bare_info(DENSITY=1.24), "source": "webhook",
+            "gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_already_seen_channel_not_readded(self):
@@ -1618,7 +1626,8 @@ class TestAFCU1RFIDHandleWebhookScan:
         reader._handle_webhook_scan(self._WebRequest({"channel": 0}))
         assert reader._webhook_channels_seen == {0}
         assert reader._check_channel.calls == [
-            (("lane1", 0), {"info": self._bare_info(), "source": "webhook"})]
+            (("lane1", 0), {"info": self._bare_info(), "source": "webhook",
+                            "gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_check_channel_error_logs_warning(self):
@@ -1725,7 +1734,7 @@ class TestAFCU1RFIDCheckChannel:
     def _scan(reader: AFC_U1_RFID, tag: Dict[str, Any],
               source: str = "poll") -> None:
         """Read ``tag`` on the standalone scanner channel 0."""
-        reader._check_channel(None, 0, info=dict(tag), source=source)
+        reader._check_channel(None, 0, info=dict(tag), source=source, gcmd="callback")
 
     @staticmethod
     def _scanned(uid_list: str, where: str = "scanner-ch0") -> List[LogLine]:
@@ -1759,11 +1768,12 @@ class TestAFCU1RFIDCheckChannel:
         events: List[Any] = []
         reader.printer.register_event_handler("afc:tool_loaded", events.append)
         set_ids = u1_pass_through_spy(reader.afc.spool, "set_spoolID")
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        gcmd = MockGCodeCommand()
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd=gcmd)
         assert reader._last_uid == {0: U1_UID}
         assert reader._tag_reads == {"lane1": self.LANE_RECORD}
         # The old spool is cleared, then the lane takes the tag's values.
-        assert set_ids == [((lane, ""), {})]
+        assert set_ids == [((lane, ""), {"gcmd": gcmd})]
         assert lane.clear_lane_data.calls == [((), {})]
         assert (lane.spool_id, lane.material, lane.color) == (None, "PLA", "#ff0000")
         assert (lane.extruder_temp, lane.bed_temp) == (210.0, 60.0)
@@ -1772,8 +1782,9 @@ class TestAFCU1RFIDCheckChannel:
         args, kwargs = sync.calls[0]
         assert len(sync.calls) == 1
         assert args == (reader.afc, lane, self.LANE_SLOT, reader.logger, "U1 RFID")
-        assert sorted(kwargs) == ["allow_create", "on_done", "reactor"]
+        assert sorted(kwargs) == ["allow_create", "gcmd", "on_done", "reactor"]
         assert kwargs["allow_create"] is True
+        assert kwargs["gcmd"] is gcmd
         assert kwargs["reactor"] is reader.reactor
         assert lane.send_lane_data.calls == [((), {})]
         assert reader.afc.save_vars.call_count == 2
@@ -1788,7 +1799,7 @@ class TestAFCU1RFIDCheckChannel:
         lane = U1Lane("lane1")
         reader = self._reader(lane=lane)
         tag = {"CARD_UID": U1_UID, "VENDOR": "Snapmaker", "MAIN_TYPE": "PLA"}
-        reader._check_channel("lane1", 0, info=tag, source="poll")
+        reader._check_channel("lane1", 0, info=tag, source="poll", gcmd="callback")
         assert reader._last_uid == {0: U1_UID}
         assert (lane.material, lane.color) == ("PLA", "")
         assert sync.calls[0][1]["allow_create"] is False
@@ -1807,7 +1818,7 @@ class TestAFCU1RFIDCheckChannel:
         reader = self._reader(lane=lane)
         events: List[Any] = []
         reader.printer.register_event_handler("afc:tool_loaded", events.append)
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         # No spool to clear, so the lane's own material stands.
         assert lane.clear_lane_data.calls == []
         assert (lane.material, lane.color) == ("PETG", "#ff0000")
@@ -1825,7 +1836,7 @@ class TestAFCU1RFIDCheckChannel:
         reader = self._reader(lane=U1Lane("lane1"))
         reader._filament_detect = None
         reader._get_channel_info = Recorder(result=dict(self.LANE_TAG))
-        reader._check_channel("lane1", 0)
+        reader._check_channel("lane1", 0, gcmd="callback")
         assert reader._get_channel_info.calls == []
         assert reader._last_uid == {0: None}
         assert sync.calls == []
@@ -1836,7 +1847,7 @@ class TestAFCU1RFIDCheckChannel:
         reader = self._reader(lane=U1Lane("lane1"))
         read = Recorder(result=None)
         reader._filament_detect = U1KlipperObject(get_a_filament_info=read)
-        reader._check_channel("lane1", 0)
+        reader._check_channel("lane1", 0, gcmd="callback")
         assert read.calls == [((0,), {})]
         assert reader._last_uid == {0: None}
         assert sync.calls == []
@@ -1849,8 +1860,8 @@ class TestAFCU1RFIDCheckChannel:
         reader._last_uid[0] = U1_UID
         reader._pending_confirm[0] = (U1_UID, 1)
         clears = u1_pass_through_spy(reader, "_clear_lane")
-        reader._check_channel("lane1", 0, info={"CARD_UID": 0})
-        assert clears == [((lane, "lane1"), {})]
+        reader._check_channel("lane1", 0, info={"CARD_UID": 0}, gcmd="callback")
+        assert clears == [((lane, "lane1"), {"gcmd": "callback"})]
         assert reader._last_uid == {0: 0}
         assert reader._pending_confirm == {}
         assert (lane.spool_id, lane.material, lane.color) == (None, "", "")
@@ -1866,7 +1877,7 @@ class TestAFCU1RFIDCheckChannel:
                       color="#ff0000")
         reader = self._reader(lane=lane)
         reader._last_uid[0] = U1_UID
-        reader._check_channel("lane1", 0, info={"CARD_UID": 0})
+        reader._check_channel("lane1", 0, info={"CARD_UID": 0}, gcmd="callback")
         assert reader._last_uid == {0: 0}
         assert (lane.spool_id, lane.material, lane.color) == (7, "PLA", "#ff0000")
         assert lane.send_lane_data.calls == []
@@ -1877,7 +1888,7 @@ class TestAFCU1RFIDCheckChannel:
     def test_removal_without_a_lane_only_resets_uid(self, sync):
         reader = self._reader()
         reader._last_uid[0] = U1_UID
-        reader._check_channel("ghost", 0, info={"CARD_UID": []})
+        reader._check_channel("ghost", 0, info={"CARD_UID": []}, gcmd="callback")
         assert reader._last_uid == {0: 0}
         assert reader.afc.save_vars.call_count == 0
         assert reader.logger.messages == []
@@ -1886,7 +1897,7 @@ class TestAFCU1RFIDCheckChannel:
     def test_webhook_seen_suppresses_poll_read(self, sync):
         reader = self._reader(lane=U1Lane("lane1"))
         reader._webhook_channels_seen = {0}
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         assert reader._last_uid == {0: None}
         assert sync.calls == []
         assert reader.printer.gcode.messages == []
@@ -1898,7 +1909,7 @@ class TestAFCU1RFIDCheckChannel:
         reader._webhook_channels_seen = {0}
         info = {"CARD_UID": "56a36aea", "VENDOR": "Bambu", "MAIN_TYPE": "PLA",
                 "COLOR_NUMS": 2, "RGB_1": 0xFFFF0000, "RGB_2": 0xFF0000FF}
-        reader._check_channel("lane1", 0, info=info, source="webhook")
+        reader._check_channel("lane1", 0, info=info, source="webhook", gcmd="callback")
         assert reader._last_uid == {0: "56a36aea"}
         assert reader._pending_defer == {}
         assert reader.reactor.callbacks == []
@@ -1920,7 +1931,7 @@ class TestAFCU1RFIDCheckChannel:
     def test_dedup_same_uid_returns(self, sync):
         reader = self._reader(lane=U1Lane("lane1"))
         reader._last_uid[0] = list(U1_UID)
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         assert reader._tag_reads == {}
         assert sync.calls == []
         assert reader.printer.gcode.messages == []
@@ -1928,7 +1939,7 @@ class TestAFCU1RFIDCheckChannel:
 
     def test_lane_none_returns(self, sync):
         reader = self._reader()
-        reader._check_channel("ghost", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("ghost", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         assert reader._last_uid == {}
         assert reader._tag_reads == {}
         assert sync.calls == []
@@ -1938,7 +1949,7 @@ class TestAFCU1RFIDCheckChannel:
     def test_locked_status_returns(self, sync):
         lane = U1Lane("lane1", status="Loaded", material="PETG")
         reader = self._reader(lane=lane)
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         assert reader._last_uid == {0: None}
         assert lane.material == "PETG"
         assert sync.calls == []
@@ -1948,7 +1959,7 @@ class TestAFCU1RFIDCheckChannel:
     def test_main_type_none_records_uid_only(self, sync):
         reader = self._reader(lane=U1Lane("lane1"))
         tag = {"CARD_UID": U1_UID, "MAIN_TYPE": "NONE"}
-        reader._check_channel("lane1", 0, info=tag, source="poll")
+        reader._check_channel("lane1", 0, info=tag, source="poll", gcmd="callback")
         assert reader._last_uid == {0: U1_UID}
         assert reader._tag_reads == {}
         assert sync.calls == []
@@ -1959,7 +1970,7 @@ class TestAFCU1RFIDCheckChannel:
 
     def test_webhook_grace_defers_new_tag(self, sync):
         reader = self._reader({"webhook_grace": 1.0}, U1Lane("lane1"))
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         assert reader._pending_defer == {0: U1_UID}
         assert reader._last_uid == {0: None}
         assert [when for _cb, when in reader.reactor.callbacks] == [101.0]
@@ -1968,13 +1979,13 @@ class TestAFCU1RFIDCheckChannel:
         # When the grace runs out, the deferred read is re-checked for this tag.
         reader._grace_expired = Recorder()
         reader.reactor.run_callbacks(101.0)
-        assert reader._grace_expired.calls == [(("lane1", 0, U1_UID), {})]
+        assert reader._grace_expired.calls == [(("lane1", 0, U1_UID), {"gcmd": "callback"})]
         assert reader.printer.gcode.messages == []
 
     def test_webhook_grace_not_rearmed_for_same_uid(self, sync):
         reader = self._reader({"webhook_grace": 1.0}, U1Lane("lane1"))
         reader._pending_defer[0] = list(U1_UID)
-        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.LANE_TAG), source="poll", gcmd="callback")
         assert reader.reactor.callbacks == []
         assert reader._pending_defer == {0: U1_UID}
         assert reader._last_uid == {0: None}
@@ -1986,7 +1997,7 @@ class TestAFCU1RFIDCheckChannel:
         lane = U1Lane("lane1")
         reader = self._reader({"webhook_grace": 1.0}, lane)
         reader._check_channel("lane1", 0, info=dict(self.LANE_TAG),
-                              source="poll-final")
+                              source="poll-final", gcmd="callback")
         assert reader._last_uid == {0: U1_UID}
         assert reader._pending_defer == {}
         assert reader.reactor.callbacks == []
@@ -2002,7 +2013,7 @@ class TestAFCU1RFIDCheckChannel:
         lane = U1Lane("lane1", extruder_obj=ext, status="Tooled")
         reader = self._reader({"scanner_auto_create": False}, lane)
         reader._scanner_lane_names.add(lane.name)
-        reader._check_channel("lane1", 0, info=dict(self.SCAN_TAG), source="poll")
+        reader._check_channel("lane1", 0, info=dict(self.SCAN_TAG), source="poll", gcmd="callback")
         assert reader._last_uid == {0: U1_UID}
         assert reader._tag_reads == {"lane1": self.SCAN_RECORD}
         args, kwargs = sync.calls[0]
@@ -2144,8 +2155,9 @@ class TestAFCU1RFIDCheckChannel:
         self._scan(reader, self.SCAN_TAG)
         args, kwargs = sync.calls[0]
         assert args == (reader.afc, None, self.SCAN_SLOT, reader.logger, "U1 RFID")
-        assert sorted(kwargs) == ["allow_create", "on_done", "reactor", "set_next"]
+        assert sorted(kwargs) == ["allow_create", "gcmd", "on_done", "reactor", "set_next"]
         assert (kwargs["allow_create"], kwargs["set_next"]) == (True, True)
+        assert kwargs["gcmd"] == "callback"
         assert kwargs["reactor"] is reader.reactor
         assert reader._tag_reads == {"scanner-ch0": self.SCAN_RECORD}
         assert reader.afc.save_vars.call_count == 0
@@ -2178,7 +2190,7 @@ class TestAFCU1RFIDGraceExpired:
     def test_superseded_uid_skips(self):
         reader = self._reader()
         reader._pending_defer = {0: U1_UID_OTHER}
-        reader._grace_expired("lane1", 0, U1_UID)
+        reader._grace_expired("lane1", 0, U1_UID, gcmd="callback")
         assert reader._check_channel.calls == []
         assert reader._pending_defer == {0: U1_UID_OTHER}
         assert reader.logger.messages == []
@@ -2187,7 +2199,7 @@ class TestAFCU1RFIDGraceExpired:
         reader = self._reader()
         reader._pending_defer = {0: U1_UID}
         reader._webhook_channels_seen = {0}
-        reader._grace_expired("lane1", 0, U1_UID)
+        reader._grace_expired("lane1", 0, U1_UID, gcmd="callback")
         assert reader._pending_defer == {}
         assert reader._check_channel.calls == []
         assert reader.logger.messages == []
@@ -2195,19 +2207,19 @@ class TestAFCU1RFIDGraceExpired:
     def test_processes_deferred_read(self):
         reader = self._reader()
         reader._pending_defer = {0: U1_UID, 1: U1_UID_OTHER}
-        reader._grace_expired("lane1", 0, U1_UID)
+        reader._grace_expired("lane1", 0, U1_UID, gcmd="callback")
         assert reader._pending_defer == {1: U1_UID_OTHER}
         assert reader._check_channel.calls == [
-            (("lane1", 0), {"source": "poll-final"})]
+            (("lane1", 0), {"source": "poll-final", "gcmd": "callback"})]
         assert reader.logger.messages == []
 
     def test_deferred_read_error_logs_warning(self):
         reader = self._reader(check=Recorder(raises=RuntimeError("bad")))
         reader._pending_defer = {0: U1_UID}
-        reader._grace_expired(None, 0, U1_UID)
+        reader._grace_expired(None, 0, U1_UID, gcmd="callback")
         assert reader._pending_defer == {}
         assert reader._check_channel.calls == [
-            ((None, 0), {"source": "poll-final"})]
+            ((None, 0), {"source": "poll-final", "gcmd": "callback"})]
         assert reader.logger.messages == [
             ("warning", "U1 RFID: deferred read error ch0: bad")]
 
@@ -2227,8 +2239,8 @@ class TestAFCU1RFIDClearLane:
         lane = U1Lane("lane1", spool_id=7, material="PLA", color="#ff0000")
         lane.extruder_temp = 210.0
         set_ids = u1_pass_through_spy(reader.afc.spool, "set_spoolID")
-        reader._clear_lane(lane, "lane1")
-        assert set_ids == [((lane, ""), {})]
+        reader._clear_lane(lane, "lane1", gcmd="callback")
+        assert set_ids == [((lane, ""), {"gcmd": "callback"})]
         assert (lane.material, lane.color) == ("", "")
         # AFC_spool cleared the spool and what it brought.
         assert (lane.spool_id, lane.extruder_temp) == (None, None)
@@ -2241,7 +2253,7 @@ class TestAFCU1RFIDClearLane:
         reader = self._reader()
         lane = U1Lane("lane1", material="PLA", color="#ff0000")
         lane.extruder_temp = 210.0
-        reader._clear_lane(lane, "lane1")
+        reader._clear_lane(lane, "lane1", gcmd="callback")
         assert (lane.material, lane.color) == ("", "")
         assert (lane.spool_id, lane.extruder_temp) == (None, 210.0)
         assert lane.clear_lane_data.calls == []
@@ -2253,7 +2265,7 @@ class TestAFCU1RFIDClearLane:
         reader = self._reader()
         lane = U1Lane("lane2", spool_id=7, material="PLA",
                       clear_raises=RuntimeError("nope"))
-        reader._clear_lane(lane, "lane2")
+        reader._clear_lane(lane, "lane2", gcmd="callback")
         assert lane.material == ""
         assert lane.send_lane_data.calls == [((), {})]
         assert reader.afc.save_vars.call_count == 1
@@ -2859,22 +2871,24 @@ class TestAFCU1RFIDForceRead:
         tag = {"CARD_UID": U1_UID, "MAIN_TYPE": "PLA"}
         reads = self._Reads(None, tag)
         reader = self._reader(reads)
-        reader.force_read("lane1", "callback")
+        gcmd = MockGCodeCommand()
+        reader.force_read("lane1", gcmd)
         # The forced re-read forgets the last UID, so the same spool reports.
         assert reader._last_uid == {0: None}
         assert reader._gcode.scripts == ["FILAMENT_DT_UPDATE CHANNEL=0"]
         assert reads.calls == [0, 0]
         assert len(reader.reactor.pauses) == 1
-        assert reader._check_channel.calls == [(("lane1", 0), {"info": tag})]
+        assert reader._check_channel.calls == [(("lane1", 0), {"info": tag, "gcmd": gcmd})]
         assert reader.logger.messages == []
 
     def test_timeout_falls_back_to_final_check(self):
         reads = self._Reads(None, {"CARD_UID": 0})
         reader = self._reader(reads)
-        reader.force_read("lane1", "callback")
+        gcmd = MockGCodeCommand()
+        reader.force_read("lane1", gcmd)
         assert reads.calls == [0, 0]
         assert len(reader.reactor.pauses) == 2
-        assert reader._check_channel.calls == [(("lane1", 0), {})]
+        assert reader._check_channel.calls == [(("lane1", 0), {"gcmd": gcmd})]
         assert reader.logger.messages == []
 
 

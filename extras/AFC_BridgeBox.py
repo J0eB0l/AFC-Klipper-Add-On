@@ -17,10 +17,10 @@ import os
 import secrets
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
-    from gcode import GCodeCommand
+    from extras.AFC_utils import AFCGcmd
 
 from extras.AFC_BambuAMS import (DRY_TEMP_HARD_MAX, _AMS_MODELS, _BUFFER_CHIP_NAME, _HT_MODELS)
 from extras.AFC_BambuAMS_bridge import routine_info
@@ -427,7 +427,7 @@ def lane_in_toolhead(lane: Any, afc: Any = None) -> bool:
                for e in tools.values())
 
 
-def unset_tool_loaded(lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
+def unset_tool_loaded(lane: Any, gcmd: AFCGcmd,
                       afc: Any = None) -> bool:
     """
     Clear AFC's record of ``lane`` as loaded to a toolhead, ahead of pooling it.
@@ -453,7 +453,7 @@ def unset_tool_loaded(lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
             # set_tool_unloaded() empties the lane's own extruder outright.
             if (ext is not None
                 and getattr(ext, "lane_loaded", None) in (None, lane.name)):
-                lane.set_tool_unloaded()
+                lane.set_tool_unloaded(gcmd=gcmd)
     except Exception:
         pass
     lane.tool_loaded = False
@@ -4566,7 +4566,7 @@ class afcBridgeBox:
                         away.setdefault(b, [eventtime, eventtime])
                         away[b][1] = eventtime
                 for b, since, gone_s in returned:
-                    self._restore_returned(b, since, gone_s)
+                    self._restore_returned(b, since, gone_s, "callback")
                 announce = getattr(self, "_announce_pending", None)
                 if announce:
                     self._announce_pending = []
@@ -5205,13 +5205,14 @@ class afcBridgeBox:
 
     _REPLUG_ABSENCE = 2.0
 
-    def _restore_returned(self, uid: str, since: float, gone_s: float) -> None:
+    def _restore_returned(self, uid: str, since: float, gone_s: float, gcmd: AFCGcmd) -> None:
         """
         Have a unit that came back while still bound restore its follower.
 
         :param uid: the returning unit's uid
         :param since: reactor time its settled online run began
         :param gone_s: how long it read offline, first read to last
+        :param gcmd: command context the unit's lane select runs through
         """
         name = next((pu.get("name") for pu in self._pool_units
                      if pu.get("bound") == uid), None)
@@ -5221,7 +5222,7 @@ class afcBridgeBox:
         if restore is None:
             return
         try:
-            engaged = bool(restore(since))
+            engaged = bool(restore(since, gcmd))
         except Exception as e:
             self.logger.warning(f"{self.name}: follower restore for {name} "
                                 f"(UID {uid}) on its return failed: {e}")
@@ -5499,7 +5500,7 @@ class afcBridgeBox:
                                       f"({self._lanes_text(first, span)}); it comes back there "
                                       f"after a restart.")
 
-    def _release_pool_unit(self, uid: str, gcmd: Union[GCodeCommand, Literal["callback"]],
+    def _release_pool_unit(self, uid: str, gcmd: AFCGcmd,
                            why: Optional[str] = None) -> None:
         """
         Release the pool unit bound to ``uid``: the hot-unplug half.
@@ -5629,7 +5630,7 @@ class afcBridgeBox:
         return {}
 
     def _claim_pool_unit(self, uid: str, model: str,
-                         gcmd: Union[GCodeCommand, Literal["callback"]]) -> Any:
+                         gcmd: AFCGcmd) -> Any:
         """
         Bind a free pool unit to ``uid`` and bring it fully online, live.
 

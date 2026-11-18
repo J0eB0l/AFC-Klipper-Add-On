@@ -12,11 +12,11 @@ import json
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
     from configfile import ConfigWrapper
-    from gcode import GCodeCommand
     from extras.AFC import afc
     from extras.AFC_lane import AFCLane
 
@@ -498,13 +498,13 @@ class AFC_U1_RFID:
             if channel in self._channel_to_lane:
                 lane_name = self._channel_to_lane.get(channel)
                 try:
-                    self._check_channel(lane_name, channel, info=info)
+                    self._check_channel(lane_name, channel, info=info, gcmd="callback")
                 except Exception as e:
                     self.logger.warning(f"U1 RFID: _on_filament_info_update error ch{channel}: {e}")
             return
         for lane_name, channel in self._lane_channel_map.items():
             try:
-                self._check_channel(lane_name, channel)
+                self._check_channel(lane_name, channel, gcmd="callback")
             except Exception as e:
                 self.logger.warning(f"U1 RFID: _on_filament_info_update error {lane_name}: {e}")
 
@@ -516,7 +516,7 @@ class AFC_U1_RFID:
             self.reactor.update_timer(self._poll_timer, self.reactor.NEVER)
 
     def _trigger_channel_update(self, channel: int,
-                                gcmd: Union[GCodeCommand, Literal["callback"]]) -> bool:
+                                gcmd: AFCGcmd) -> bool:
         """
         Trigger a fresh read from hardware for a scanner channel.
 
@@ -580,13 +580,13 @@ class AFC_U1_RFID:
         # them and the push callback may not fire for a held spool.
         for ch in self._cfg_scanner_channels:
             try:
-                self._check_channel(None, ch)
+                self._check_channel(None, ch, gcmd="callback")
             except Exception as e:
                 self.logger.warning(f"U1 RFID: poll error on scanner ch{ch}: {e}")
 
         for lane_name, channel in self._lane_channel_map.items():
             try:
-                self._check_channel(lane_name, channel)
+                self._check_channel(lane_name, channel, gcmd="callback")
             except Exception as e:
                 self.logger.warning(f"U1 RFID: poll error on {lane_name} ch{channel}: {e}")
 
@@ -694,12 +694,12 @@ class AFC_U1_RFID:
             self._webhook_channels_seen.add(channel)
         lane_name = self._channel_to_lane.get(channel)
         try:
-            self._check_channel(lane_name, channel, info=info, source='webhook')
+            self._check_channel(lane_name, channel, info=info, source='webhook', gcmd="callback")
         except Exception as e:
             self.logger.warning(f"U1 RFID: webhook scan error ch{channel}: {e}")
 
     def _check_channel(self, lane_name: Optional[str], channel: int, info: Optional[dict] = None,
-                       source: str = 'poll') -> None:
+                       source: str = 'poll', *, gcmd: AFCGcmd) -> None:
         """
         Check a single channel for new or changed RFID data.
 
@@ -711,6 +711,7 @@ class AFC_U1_RFID:
         :param channel: U1 filament_detect channel index.
         :param info: Pre-fetched RFID info dict, or *None* to read live.
         :param source: 'poll'/'push' (filament_detect) or 'webhook'.
+        :param gcmd: command context a spool assignment is run through.
         """
         if info is None:
             if self._filament_detect is None:
@@ -732,7 +733,7 @@ class AFC_U1_RFID:
                     self._last_uid[channel] = 0
                     if (lane is not None
                         and getattr(lane, "status", "") not in self._LOCKED_STATES):
-                        self._clear_lane(lane, lane_name)
+                        self._clear_lane(lane, lane_name, gcmd=gcmd)
                 # Scanner channels keep _last_uid so the same spool does not
                 # re-fire; a different uid still triggers.
             return
@@ -777,7 +778,7 @@ class AFC_U1_RFID:
                 self._pending_defer[channel] = card_uid
                 self.reactor.register_callback(
                     lambda et, ln=lane_name, ch=channel, uid=card_uid:
-                        self._grace_expired(ln, ch, uid),
+                        self._grace_expired(ln, ch, uid, gcmd="callback"),
                     self.reactor.monotonic() + self._webhook_grace)
             return
 
@@ -822,12 +823,12 @@ class AFC_U1_RFID:
                                   lane_name=(lane_name or f"scanner-ch{channel}"), is_scanner=True)
             sync_rfid_to_spoolman(self.afc, lane, slot_info, self.logger, "U1 RFID",
                                   allow_create=allow_create, set_next=True, reactor=self.reactor,
-                                  on_done=self_notify)
+                                  on_done=self_notify, gcmd=gcmd)
             return
 
         self.logger.info(f"U1 RFID: tag detected on {lane_name}: {tag_desc}")
         if getattr(lane, "spool_id", None) not in (None, "", 0):
-            self.afc.spool.set_spoolID(lane, "")
+            self.afc.spool.set_spoolID(lane, "", gcmd=gcmd)
         apply_filament_defaults(lane, slot_info)
         allow_create = get_auto_spoolman_create(lane, self._lane_auto_create)
         def _after_sync() -> None:
@@ -838,12 +839,14 @@ class AFC_U1_RFID:
             self._send_lane_data(lane)
 
         sync_rfid_to_spoolman(self.afc, lane, slot_info, self.logger, "U1 RFID",
-                              allow_create=allow_create, reactor=self.reactor, on_done=_after_sync)
+                              allow_create=allow_create, reactor=self.reactor, on_done=_after_sync,
+                              gcmd=gcmd)
         self.afc.save_vars()
         if getattr(lane, 'tool_loaded', False):
             self.printer.send_event("afc:tool_loaded", lane)
 
-    def _grace_expired(self, lane_name: Optional[str], channel: int, card_uid: Any) -> None:
+    def _grace_expired(self, lane_name: Optional[str], channel: int, card_uid: Any, *,
+                       gcmd: AFCGcmd) -> None:
         """
         webhook_grace timer: process the deferred filament_detect read only if
         no webhook arrived for the channel during the grace window.
@@ -852,6 +855,7 @@ class AFC_U1_RFID:
         :param channel: U1 filament_detect channel index.
         :param card_uid: the tag UID the deferral was armed for; the read is
             skipped if a newer tag has since superseded it.
+        :param gcmd: command context the read is run through.
         """
         if self._pending_defer.get(channel) != card_uid:
             return  # superseded by a newer tag, or already cleared
@@ -859,22 +863,23 @@ class AFC_U1_RFID:
         if channel in self._webhook_channels_seen:
             return  # a webhook landed during the grace and handled the tag
         try:
-            self._check_channel(lane_name, channel, source='poll-final')
+            self._check_channel(lane_name, channel, source='poll-final', gcmd=gcmd)
         except Exception as e:
             self.logger.warning(f"U1 RFID: deferred read error ch{channel}: {e}")
 
-    def _clear_lane(self, lane: Any, lane_name: str) -> None:
+    def _clear_lane(self, lane: Any, lane_name: str, *, gcmd: AFCGcmd) -> None:
         """
         Clear RFID data from a lane when tag is removed.
 
         :param lane: AFC lane instance to clear.
         :param lane_name: Name of the lane being cleared.
+        :param gcmd: command context the spool clear is run through.
         """
         lane.material = ""
         lane.color = ""
         if getattr(lane, "spool_id", None) not in (None, "", 0):
             try:
-                self.afc.spool.set_spoolID(lane, "")
+                self.afc.spool.set_spoolID(lane, "", gcmd=gcmd)
             except Exception as e:
                 self.logger.warning(f"U1 RFID: failed to clear spool_id on {lane_name}: {e}")
         self._send_lane_data(lane)
@@ -1181,7 +1186,7 @@ class AFC_U1_RFID:
             self.logger.warning(f"U1 RFID: notification error: {e}")
 
     def force_read(self, lane_name: str,
-                   gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
+                   gcmd: AFCGcmd) -> None:
         """
         Force an RFID re-read for a specific lane.
 
@@ -1200,10 +1205,10 @@ class AFC_U1_RFID:
             info = self._get_channel_info(channel)
             if (info is not None
                 and info.get("CARD_UID")):
-                self._check_channel(lane_name, channel, info=info)
+                self._check_channel(lane_name, channel, info=info, gcmd=gcmd)
                 return
             self.reactor.pause(self.reactor.monotonic() + _FORCE_READ_POLL_STEP)
-        self._check_channel(lane_name, channel)
+        self._check_channel(lane_name, channel, gcmd=gcmd)
 
     def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
         """

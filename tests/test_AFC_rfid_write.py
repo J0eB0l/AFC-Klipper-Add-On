@@ -585,31 +585,36 @@ class RfidwCommandRuns:
         self.raises = raises
         self.runs: List[Tuple[Any, int, Dict[str, Any], Optional[str]]] = []
         self.applies: List[Tuple[Any, str, Optional[str], Dict[str, Any]]] = []
+        self.gcmds: List[Tuple[str, Any]] = []
 
     def run(self, target: RfidWriteTarget, spool_id: int, overrides: Dict[str, Any],
-            lane: Optional[str] = None) -> Tuple[Any, ...]:
+            lane: Optional[str] = None, *, gcmd: Any) -> Tuple[Any, ...]:
         """
         :param target: the resolved reader
         :param spool_id: the SPOOL= id
         :param overrides: the typed fields, defaults included
         :param lane: the LANE= value
+        :param gcmd: the command context the run is given
         :return tuple: the configured result
         """
         self.runs.append((target, spool_id, dict(overrides), lane))
+        self.gcmds.append(("run", gcmd))
         if self.raises is not None:
             raise self.raises
         return self.result
 
     def apply(self, target: RfidWriteTarget, lane: str, uid: Optional[str],
-              fields: Dict[str, Any]) -> str:
+              fields: Dict[str, Any], gcmd: Any) -> str:
         """
         :param target: the resolved reader
         :param lane: the LANE= value
         :param uid: the tag written
         :param fields: the fields written
+        :param gcmd: the command context the apply is given
         :return str: the apply note
         """
         self.applies.append((target, lane, uid, fields))
+        self.gcmds.append(("apply", gcmd))
         return f"applied to {lane}"
 
 
@@ -1202,50 +1207,53 @@ class TestWithStaging:
         seen: List[Any] = []
         scans: List[Any] = []
 
-        def around(lane: str, run: Callable[..., Any]) -> None:
-            scans.append((lane, run("first"), run("second")))
+        def around(lane: str, run: Callable[..., Any], gcmd: Any) -> None:
+            scans.append((lane, gcmd, run("first"), run("second")))
         target = rfidw_register(MockPrinter(), stage_around=around)
-        result = rfid_write_mod._with_staging(target, "lane4", self._body(seen))
+        gcmd = MockGCodeCommand()
+        result = rfid_write_mod._with_staging(target, "lane4", self._body(seen), gcmd)
         assert result == ("04ab", None, {}, "")
         assert seen == [("body", "first")]
-        assert scans == [("lane4", result, result)]
+        assert scans == [("lane4", gcmd, result, result)]
 
     def test_no_lane_skips_every_staging_hook(self):
         seen: List[Any] = []
         target = rfidw_register(
-            MockPrinter(), stage=lambda lane: seen.append("stage") or "tok",
-            unstage=lambda tok: seen.append("unstage"),
-            stage_around=lambda lane, run: seen.append("around"))
-        assert rfid_write_mod._with_staging(target, None, self._body(seen)) == (
+            MockPrinter(), stage=lambda lane, gcmd: seen.append("stage") or "tok",
+            unstage=lambda tok, gcmd: seen.append("unstage"),
+            stage_around=lambda lane, run, gcmd: seen.append("around"))
+        assert rfid_write_mod._with_staging(target, None, self._body(seen), "callback") == (
             "04ab", None, {}, "")
         assert seen == [("body", None)]
 
     def test_a_lane_without_a_stage_runs_the_body_directly(self):
         seen: List[Any] = []
         target = rfidw_register(MockPrinter(),
-                                unstage=lambda tok: seen.append(("unstage", tok)))
-        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen)) == (
+                                unstage=lambda tok, gcmd: seen.append(("unstage", tok)))
+        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen), "callback") == (
             "04ab", None, {}, "")
         assert seen == [("body", None)]
 
     def test_a_none_token_skips_exclude_and_unstage(self):
         seen: List[Any] = []
         target = rfidw_register(
-            MockPrinter(), stage=lambda lane: seen.append(("stage", lane)),
-            unstage=lambda tok: seen.append(("unstage", tok)),
+            MockPrinter(), stage=lambda lane, gcmd: seen.append(("stage", lane)),
+            unstage=lambda tok, gcmd: seen.append(("unstage", tok)),
             exclude=lambda tok: seen.append(("exclude", tok)))
-        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen)) == (
+        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen), "callback") == (
             "04ab", None, {}, "")
         assert seen == [("stage", "lane4"), ("body", None)]
 
     def test_a_token_without_exclude_passes_none(self):
         seen: List[Any] = []
         target = rfidw_register(
-            MockPrinter(), stage=lambda lane: seen.append(("stage", lane)) or "tok",
-            unstage=lambda tok: seen.append(("unstage", tok)))
-        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen)) == (
+            MockPrinter(),
+            stage=lambda lane, gcmd: seen.append(("stage", lane, gcmd)) or "tok",
+            unstage=lambda tok, gcmd: seen.append(("unstage", tok, gcmd)))
+        gcmd = MockGCodeCommand()
+        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen), gcmd) == (
             "04ab", None, {}, "")
-        assert seen == [("stage", "lane4"), ("body", None), ("unstage", "tok")]
+        assert seen == [("stage", "lane4", gcmd), ("body", None), ("unstage", "tok", gcmd)]
 
     def test_a_token_with_exclude_passes_its_test(self):
         seen: List[Any] = []
@@ -1253,18 +1261,18 @@ class TestWithStaging:
         def is_sister(uid: str) -> bool:
             return uid == "cafe"
         target = rfidw_register(
-            MockPrinter(), stage=lambda lane: "tok",
-            unstage=lambda tok: seen.append(("unstage", tok)),
+            MockPrinter(), stage=lambda lane, gcmd: "tok",
+            unstage=lambda tok, gcmd: seen.append(("unstage", tok)),
             exclude=lambda tok: seen.append(("exclude", tok)) or is_sister)
-        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen)) == (
+        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen), "callback") == (
             "04ab", None, {}, "")
         assert seen == [("exclude", "tok"), ("body", is_sister), ("unstage", "tok")]
 
     def test_a_token_without_unstage_is_not_restored(self):
         seen: List[Any] = []
         target = rfidw_register(MockPrinter(),
-                                stage=lambda lane: seen.append(("stage", lane)) or "tok")
-        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen)) == (
+                                stage=lambda lane, gcmd: seen.append(("stage", lane)) or "tok")
+        assert rfid_write_mod._with_staging(target, "lane4", self._body(seen), "callback") == (
             "04ab", None, {}, "")
         assert seen == [("stage", "lane4"), ("body", None)]
 
@@ -1334,8 +1342,8 @@ class TestRunWrite:
         :return RfidWriteTarget: the target
         """
         stage_hooks: Dict[str, Any] = {
-            "stage": lambda lane: seen.append(("stage", lane)) or ("tok", lane),
-            "unstage": lambda tok: seen.append(("unstage", tok))}
+            "stage": lambda lane, gcmd: seen.append(("stage", lane)) or ("tok", lane),
+            "unstage": lambda tok, gcmd: seen.append(("unstage", tok))}
         stage_hooks.update(hooks)
         monkeypatch.setattr(rfid_write_mod, "write_tag", RfidwWriteTag(seen=seen))
         return rfidw_register(MockPrinter(), **stage_hooks)
@@ -1364,7 +1372,7 @@ class TestRunWrite:
         threads, ffi = rfidw_workers(monkeypatch)
         ran_on = rfidw_worker_write(monkeypatch, threads)
         target, reactor = rfidw_threaded()
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert ran_on == [("afc_wr_reader0", None)]
         assert threads.started == [("afc_wr_reader0", True)]
@@ -1376,7 +1384,7 @@ class TestRunWrite:
         threads, ffi = rfidw_workers(monkeypatch)
         rfidw_worker_write(monkeypatch, threads)
         target, _reactor = rfidw_threaded(name="ace2:slot_number_twelve")
-        rfid_write_mod.run_write(target, 0, {"ftype": "PLA"})
+        rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback")
         assert threads.started == [("afc_wr_slot_num", True)]
         assert ffi.names == [b"afc_wr_slot_num"]
 
@@ -1384,7 +1392,7 @@ class TestRunWrite:
         threads, ffi = rfidw_workers(monkeypatch, ffi_fails=True)
         ran_on = rfidw_worker_write(monkeypatch, threads)
         target, reactor = rfidw_threaded()
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert ran_on == [("afc_wr_reader0", None)]
         assert ffi.names == []
@@ -1394,7 +1402,7 @@ class TestRunWrite:
         threads, _ffi = rfidw_workers(monkeypatch)
         rfidw_worker_write(monkeypatch, threads, raises=RuntimeError("serial went away"))
         target, reactor = rfidw_threaded()
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             None, "serial went away", {}, "")
         assert reactor.completions[0].completed == [None]
 
@@ -1402,7 +1410,7 @@ class TestRunWrite:
         threads, _ffi = rfidw_workers(monkeypatch, run=False)
         ran_on = rfidw_worker_write(monkeypatch, threads)
         target, reactor = rfidw_threaded()
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             None, "the write never ran", {}, "")
         assert ran_on == []
         assert threads.started == [("afc_wr_reader0", True)]
@@ -1417,8 +1425,9 @@ class TestRunWrite:
         def is_sister(uid: str) -> bool:
             return uid == "cafe"
         target, _reactor = rfidw_threaded(
-            stage=lambda lane: "tok", exclude=lambda tok: tokens.append(tok) or is_sister)
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane4") == (
+            stage=lambda lane, gcmd: "tok", exclude=lambda tok: tokens.append(tok) or is_sister)
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane4",
+                                        gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert tokens == ["tok"]
         assert ran_on == [("afc_wr_reader0", is_sister)]
@@ -1426,14 +1435,15 @@ class TestRunWrite:
     def test_a_named_lane_stages_around_the_write(self, monkeypatch):
         seen: List[Any] = []
         target = self._staged_target(monkeypatch, seen)
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane11") == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane11",
+                                        gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert seen == [("stage", "lane11"), "write", ("unstage", ("tok", "lane11"))]
 
     def test_no_lane_skips_staging(self, monkeypatch):
         seen: List[Any] = []
         target = self._staged_target(monkeypatch, seen)
-        rfid_write_mod.run_write(target, 0, {"ftype": "PLA"})
+        rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback")
         assert seen == ["write"]
 
     def test_unstage_runs_even_when_the_write_fails(self, monkeypatch):
@@ -1443,13 +1453,14 @@ class TestRunWrite:
                             RfidwWriteTag(raises=RuntimeError("serial went away"),
                                           seen=seen))
         with pytest.raises(RuntimeError, match="^serial went away$"):
-            rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane11")
+            rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane11", gcmd="callback")
         assert seen == [("stage", "lane11"), "write", ("unstage", ("tok", "lane11"))]
 
     def test_a_target_without_a_stage_ignores_the_lane(self, monkeypatch):
         seen: List[Any] = []
         target = self._staged_target(monkeypatch, seen, stage=None)
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane1") == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane1",
+                                        gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert seen == ["write"]
 
@@ -1463,7 +1474,7 @@ class TestRunWrite:
                                 open_link=RfidwLink)
         assert target.threaded is False
         assert target.unit.reactor is None
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert ran_on == [("MainThread", None)]
         assert threads.started == []
@@ -1482,7 +1493,7 @@ class TestRunWrite:
         reactor = self._ThreadReactor()
         target = rfidw_register(MockPrinter(), unit=RfidwUnit(reactor=reactor),
                                 threaded=True)
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert ran_on == ["afc_wr_reader0"]
         assert reactor.waited == [90.0]
@@ -1493,22 +1504,24 @@ class TestRunWrite:
         def excl(uid: str) -> bool:
             return uid == "cafe"
 
-        def around(lane: str, body: Callable[..., Any]) -> None:
-            seen.append(("scan", lane))
+        def around(lane: str, body: Callable[..., Any], gcmd: Any) -> None:
+            seen.append(("scan", lane, gcmd))
             body(excl)
             seen.append("unwind")
         target = self._around_target(monkeypatch, around, seen)
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane4") == (
+        gcmd = MockGCodeCommand()
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane4",
+                                        gcmd=gcmd) == (
             "04ab", None, {"ftype": "PLA"}, "")
-        assert seen == [("scan", "lane4"), ("write", excl), "unwind"]
+        assert seen == [("scan", "lane4", gcmd), ("write", excl), "unwind"]
 
     def test_a_scan_that_never_holds_the_tag_writes_nothing(self, monkeypatch):
         seen: List[Any] = []
         scans: List[str] = []
-        target = self._around_target(monkeypatch, lambda lane, body: scans.append(lane),
+        target = self._around_target(monkeypatch, lambda lane, body, gcmd: scans.append(lane),
                                      seen)
         with pytest.raises(StageError) as exc:
-            rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane4")
+            rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane4", gcmd="callback")
         assert str(exc.value) == ("lane4's tag did not come to rest in the reader's "
                                   "field, so nothing was written")
         assert scans == ["lane4"]
@@ -1517,9 +1530,9 @@ class TestRunWrite:
     def test_without_a_lane_the_scan_is_not_run(self, monkeypatch):
         seen: List[Any] = []
         scans: List[str] = []
-        target = self._around_target(monkeypatch, lambda lane, body: scans.append(lane),
+        target = self._around_target(monkeypatch, lambda lane, body, gcmd: scans.append(lane),
                                      seen)
-        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             "04ab", None, {"ftype": "PLA"}, "")
         assert scans == []
         assert seen == [("write", None)]
@@ -1529,10 +1542,10 @@ class TestRunWrite:
         writer = RfidwWriteTag()
         monkeypatch.setattr(rfid_write_mod, "write_tag", writer)
         target = rfidw_register(
-            MockPrinter(), stage=lambda lane: ("tok", lane), unstage=lambda tok: None,
+            MockPrinter(), stage=lambda lane, gcmd: ("tok", lane), unstage=lambda tok, gcmd: None,
             exclude=lambda tok: got.append(tok) or (
                 lambda uid: uid == f"sister-of-{tok[1]}"))
-        rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane9")
+        rfid_write_mod.run_write(target, 0, {"ftype": "PLA"}, lane="lane9", gcmd="callback")
         assert got == [("tok", "lane9")]
         passed_over = writer.calls[0][2]
         assert passed_over("sister-of-lane9") is True
@@ -2319,20 +2332,22 @@ class TestApplyWritten:
             if sent is not None:
                 self.send_lane_data = lambda: sent.append("sent")
 
-    def _apply(self, unit: RfidwUnit, lane_name: str = "lane4") -> str:
+    def _apply(self, unit: RfidwUnit, lane_name: str = "lane4",
+               gcmd: Any = "callback") -> str:
         """
         :param unit: the reader's owning unit
         :param lane_name: the lane to apply to
+        :param gcmd: the command context passed to apply_written
         :return str: apply_written's note
         """
         target = rfidw_register(MockPrinter(), unit=unit)
-        return rfid_write_mod.apply_written(target, lane_name, "04ab", self.FIELDS)
+        return rfid_write_mod.apply_written(target, lane_name, "04ab", self.FIELDS, gcmd)
 
     def test_an_unknown_lane_is_not_applied(self):
         applied: List[Any] = []
         saved: List[str] = []
         unit = RfidwUnit(afc=RfidwAFC(lanes={"lane1": self._Lane()}, saved=saved),
-                         apply_to_lane=lambda lane, tag: applied.append(lane))
+                         apply_to_lane=lambda lane, tag, gcmd: applied.append(lane))
         assert self._apply(unit) == "not applied: lane4 is not a lane this unit can set"
         assert applied == []
         assert saved == []
@@ -2347,14 +2362,14 @@ class TestApplyWritten:
 
     def test_a_unit_without_afc_is_not_applied(self):
         applied: List[Any] = []
-        unit = RfidwUnit(afc=None, apply_to_lane=lambda lane, tag: applied.append(lane))
+        unit = RfidwUnit(afc=None, apply_to_lane=lambda lane, tag, gcmd: applied.append(lane))
         assert self._apply(unit) == "not applied: lane4 is not a lane this unit can set"
         assert applied == []
 
     def test_an_afc_with_no_lanes_is_not_applied(self):
         applied: List[Any] = []
         unit = RfidwUnit(afc=RfidwAFC(lanes=None),
-                         apply_to_lane=lambda lane, tag: applied.append(lane))
+                         apply_to_lane=lambda lane, tag, gcmd: applied.append(lane))
         assert self._apply(unit) == "not applied: lane4 is not a lane this unit can set"
         assert applied == []
 
@@ -2362,12 +2377,12 @@ class TestApplyWritten:
         applied: List[Any] = []
         lane = self._Lane()
         unit = RfidwUnit(afc=RfidwAFC(lanes={"lane4": lane}),
-                         apply_to_lane=lambda ln, tag: applied.append((ln, tag["uid"])))
+                         apply_to_lane=lambda ln, tag, gcmd: applied.append((ln, tag["uid"])))
         assert self._apply(unit) == "applied to lane4"
         assert applied == [(lane, "04ab")]
 
     def test_a_raising_apply_is_reported(self):
-        def _boom(lane: Any, tag: Dict[str, Any]) -> None:
+        def _boom(lane: Any, tag: Dict[str, Any], gcmd: Any) -> None:
             raise RuntimeError("Spoolman down")
         unit = RfidwUnit(afc=RfidwAFC(lanes={"lane4": self._Lane()}), apply_to_lane=_boom)
         assert self._apply(unit) == "but applying it to lane4 failed: Spoolman down"
@@ -2376,23 +2391,25 @@ class TestApplyWritten:
         seen: List[Any] = []
         unit = RfidwUnit(
             afc=RfidwAFC(lanes={"lane9": self._Lane(seen)}, saved=seen),
-            apply_written_tag=lambda ln, tag: seen.append(
-                (ln, tag["uid"], tag["filament"]["spool_id"])),
-            apply_to_lane=lambda ln, tag: seen.append("shared apply"))
-        assert self._apply(unit, "lane9") == "applied to lane9"
-        assert seen == [("lane9", "04ab", 153)]
+            apply_written_tag=lambda ln, tag, gcmd: seen.append(
+                (ln, tag["uid"], tag["filament"]["spool_id"], gcmd)),
+            apply_to_lane=lambda ln, tag, gcmd: seen.append("shared apply"))
+        gcmd = MockGCodeCommand()
+        assert self._apply(unit, "lane9", gcmd) == "applied to lane9"
+        assert seen == [("lane9", "04ab", 153, gcmd)]
 
     def test_otherwise_the_shared_apply_runs_and_the_lane_is_saved(self):
         seen: List[Any] = []
         lane = self._Lane(seen)
         unit = RfidwUnit(afc=RfidwAFC(lanes={"lane4": lane}, saved=seen),
-                         apply_to_lane=lambda ln, tag: seen.append(
-                             ("apply", ln is lane, tag["filament"]["spool_id"])))
-        assert self._apply(unit) == "applied to lane4"
-        assert seen == [("apply", True, 153), "sent", "saved"]
+                         apply_to_lane=lambda ln, tag, gcmd: seen.append(
+                             ("apply", ln is lane, tag["filament"]["spool_id"], gcmd)))
+        gcmd = MockGCodeCommand()
+        assert self._apply(unit, gcmd=gcmd) == "applied to lane4"
+        assert seen == [("apply", True, 153, gcmd), "sent", "saved"]
 
     def test_a_failed_apply_is_reported_not_raised(self):
-        def boom(ln: str, tag: Dict[str, Any]) -> None:
+        def boom(ln: str, tag: Dict[str, Any], gcmd: Any) -> None:
             raise RuntimeError("Spoolman down")
         unit = RfidwUnit(apply_written_tag=boom)
         assert self._apply(unit, "lane9") == "but applying it to lane9 failed: Spoolman down"
@@ -2517,12 +2534,16 @@ class TestCmdAFCRFIDWrite:
     def test_a_lane_apply_joins_the_note(self, monkeypatch):
         printer, target, runs = self._setup(
             monkeypatch, ("04ab", None, self.FULL, "spool 7, uid bound"))
-        assert self._replied(printer, READER="bt:reader0", LANE="lane9", SPOOL="7") == [
+        gcmd = rfidw_gcmd(READER="bt:reader0", LANE="lane9", SPOOL="7")
+        rfid_write_mod.cmd_AFC_RFID_WRITE(printer, gcmd)
+        assert gcmd.error.call_args_list == []
+        assert gcmd.respond_info.call_args_list == [
             call("AFC_RFID_WRITE: wrote tag 04ab on bt:reader0: Inland PETG, 1000g "
                  "(spool 7, uid bound, applied to lane9). Stick it on the spool and "
                  "scan to confirm.")]
         assert runs.runs == [(target, 7, {}, "lane9")]
         assert runs.applies == [(target, "lane9", "04ab", self.FULL)]
+        assert runs.gcmds == [("run", gcmd), ("apply", gcmd)]
 
     def test_a_lane_apply_alone_is_the_note(self, monkeypatch):
         printer, _target, _runs = self._setup(monkeypatch)
@@ -2541,7 +2562,7 @@ class TestCmdAFCRFIDWrite:
         """
         unstaged: List[str] = []
 
-        def _refuse(lane: str) -> None:
+        def _refuse(lane: str, gcmd: Any) -> None:
             error_str = f"{lane} is loaded in the toolhead"
             raise StageError(error_str)
         writer = RfidwWriteTag()
@@ -2549,7 +2570,7 @@ class TestCmdAFCRFIDWrite:
         printer = MockPrinter()
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         rfidw_register(printer, unit=rfidw_spoolman_unit(client), stage=_refuse,
-                       unstage=lambda tok: unstaged.append("unstage"))
+                       unstage=lambda tok, gcmd: unstaged.append("unstage"))
         return printer, unstaged, writer
 
     # Flagged multi: the enroll command shares the stage refusal, so both run here.
@@ -2572,11 +2593,12 @@ class TestCmdAFCRFIDWrite:
         seen: List[str] = []
         printer = MockPrinter()
         rfidw_register(printer, "bt:reader0", "x",
-                       unit=RfidwUnit(apply_written_tag=lambda ln, tag: seen.append(ln)))
+                       unit=RfidwUnit(apply_written_tag=lambda ln, tag, gcmd: seen.append(
+                           (ln, gcmd))))
         monkeypatch.setattr(rfid_write_mod, "write_tag", RfidwWriteTag())
         gcmd = rfidw_gcmd(READER="bt:reader0", LANE="lane9", TYPE="PLA")
         printer._gcode._commands["AFC_RFID_WRITE"](gcmd)
-        assert seen == ["lane9"]
+        assert seen == [("lane9", gcmd)]
         assert gcmd.respond_info.call_args_list == [call(
             "AFC_RFID_WRITE: wrote tag 04ab on bt:reader0: unbranded PLA "
             "(applied to lane9). Stick it on the spool and scan to confirm.")]
@@ -2586,7 +2608,7 @@ class TestCmdAFCRFIDWrite:
         seen: List[str] = []
         printer = MockPrinter()
         rfidw_register(printer, "bt:reader0", "x",
-                       unit=RfidwUnit(apply_written_tag=lambda ln, tag: seen.append(ln)))
+                       unit=RfidwUnit(apply_written_tag=lambda ln, tag, gcmd: seen.append(ln)))
         monkeypatch.setattr(rfid_write_mod, "write_tag", RfidwWriteTag())
         gcmd = rfidw_gcmd(READER="bt:reader0", TYPE="PLA")
         printer._gcode._commands["AFC_RFID_WRITE"](gcmd)
@@ -2691,7 +2713,7 @@ class TestRunEnroll:
         client = RfidwSpoolman(vendor={"id": 7}, filament={"id": 42}, created={"id": 99})
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client),
                                 open_link=lambda: None)
-        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             None, "bt:reader0 is offline", {}, "")
         assert client.calls == []
         assert writer.calls == []
@@ -2705,7 +2727,8 @@ class TestRunEnroll:
             MockPrinter(), "u1:scanner0", unit=rfidw_spoolman_unit(client),
             open_link=object,
             write_payload=lambda pay: payloads.append(pay) or ("04ffee", None))
-        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PETG", "weight_g": 1000}) == (
+        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PETG", "weight_g": 1000},
+                                         gcmd="callback") == (
             "04ffee", None, {"spool_id": 99, "ftype": "PETG", "weight_g": 1000},
             "created spool 99; spool 99, uid bound")
         assert client.calls == [("vendor", "Generic"),
@@ -2726,7 +2749,7 @@ class TestRunEnroll:
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
         typed = {"manufacturer": "inland", "sku": "", "ftype": "PLA",
                  "hotend_min_c": 190, "drying_temp_c": 55, "drying_time_h": 8}
-        assert rfid_write_mod.run_enroll(target, 0, typed) == (
+        assert rfid_write_mod.run_enroll(target, 0, typed, gcmd="callback") == (
             "04ab", None,
             {"spool_id": 99, "manufacturer": "Inland", "ftype": "PLA",
              "sku": "Generic PLA", "hotend_min_c": 190, "drying_temp_c": 55,
@@ -2752,7 +2775,7 @@ class TestRunEnroll:
         monkeypatch.setattr(rfid_write_mod, "write_tag",
                             RfidwWriteTag(("04ab", "not an NTAG")))
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             "04ab",
             "not an NTAG. Spool 99 was created in Spoolman: give SPOOL=99 when you "
             "enroll a writable tag, or delete it",
@@ -2767,7 +2790,7 @@ class TestRunEnroll:
         monkeypatch.setattr(rfid_write_mod, "write_tag",
                             RfidwWriteTag(("04ab", "not an NTAG")))
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 7, {}) == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, gcmd="callback") == (
             "04ab", "not an NTAG", {"spool_id": 7, "ftype": "PLA"}, "spool 7")
         assert client.calls == []
         assert client.bound == []
@@ -2778,7 +2801,7 @@ class TestRunEnroll:
         monkeypatch.setattr(rfid_write_mod, "write_tag", writer)
         client = RfidwSpoolman(spool=None)
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 5, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_enroll(target, 5, {"ftype": "PLA"}, gcmd="callback") == (
             None, "Spoolman has no spool 5", {}, "")
         assert client.read == [5]
         assert writer.calls == []
@@ -2788,7 +2811,7 @@ class TestRunEnroll:
         ran_on = rfidw_worker_write(monkeypatch, threads)
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target, reactor = rfidw_threaded(unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 7, {}) == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, gcmd="callback") == (
             "04ab", None, {"spool_id": 7, "ftype": "PLA"}, "spool 7, uid bound")
         assert ran_on == [("afc_rfid_en", None)]
         assert threads.started == [("afc_rfid_en", True)]
@@ -2801,7 +2824,7 @@ class TestRunEnroll:
         ran_on = rfidw_worker_write(monkeypatch, threads)
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target, _reactor = rfidw_threaded(unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 7, {}) == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, gcmd="callback") == (
             "04ab", None, {"spool_id": 7, "ftype": "PLA"}, "spool 7, uid bound")
         assert ran_on == [("afc_rfid_en", None)]
         assert ffi.names == []
@@ -2811,7 +2834,7 @@ class TestRunEnroll:
         rfidw_worker_write(monkeypatch, threads, raises=RuntimeError("serial went away"))
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target, reactor = rfidw_threaded(unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 7, {}) == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, gcmd="callback") == (
             None, "serial went away", {}, "")
         assert reactor.completions[0].completed == [None]
         assert client.bound == []
@@ -2821,7 +2844,7 @@ class TestRunEnroll:
         ran_on = rfidw_worker_write(monkeypatch, threads)
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target, reactor = rfidw_threaded(unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 7, {}) == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, gcmd="callback") == (
             None, "the enroll never ran", {}, "")
         assert ran_on == []
         assert client.read == []
@@ -2837,9 +2860,9 @@ class TestRunEnroll:
             return uid == "cafe"
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target, _reactor = rfidw_threaded(
-            unit=rfidw_spoolman_unit(client), stage=lambda lane: "tok",
+            unit=rfidw_spoolman_unit(client), stage=lambda lane, gcmd: "tok",
             exclude=lambda tok: tokens.append(tok) or is_sister)
-        assert rfid_write_mod.run_enroll(target, 7, {}, lane="lane4") == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, lane="lane4", gcmd="callback") == (
             "04ab", None, {"spool_id": 7, "ftype": "PLA"}, "spool 7, uid bound")
         assert tokens == ["tok"]
         assert ran_on == [("afc_rfid_en", is_sister)]
@@ -2850,18 +2873,21 @@ class TestRunEnroll:
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target = rfidw_register(
             MockPrinter(), unit=rfidw_spoolman_unit(client),
-            stage=lambda lane: seen.append(("stage", lane)) or ("tok", lane),
-            unstage=lambda tok: seen.append(("unstage", tok)))
-        assert rfid_write_mod.run_enroll(target, 7, {"ftype": "PLA"}, lane="lane11") == (
+            stage=lambda lane, gcmd: seen.append(("stage", lane, gcmd)) or ("tok", lane),
+            unstage=lambda tok, gcmd: seen.append(("unstage", tok, gcmd)))
+        gcmd = MockGCodeCommand()
+        assert rfid_write_mod.run_enroll(target, 7, {"ftype": "PLA"}, lane="lane11",
+                                         gcmd=gcmd) == (
             "04ab", None, {"spool_id": 7, "ftype": "PLA"}, "spool 7, uid bound")
-        assert seen == [("stage", "lane11"), "write", ("unstage", ("tok", "lane11"))]
+        assert seen == [("stage", "lane11", gcmd), "write",
+                        ("unstage", ("tok", "lane11"), gcmd)]
 
     def test_linking_an_existing_spool_writes_and_binds(self, monkeypatch):
         monkeypatch.setattr(rfid_write_mod, "write_tag",
                             RfidwWriteTag(("04a1b2c3d4e5f6", None)))
         client = RfidwSpoolman(spool=rfidw_spool_record())
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 136, {}) == (
+        assert rfid_write_mod.run_enroll(target, 136, {}, gcmd="callback") == (
             "04a1b2c3d4e5f6", None, RFIDW_SPOOL_FIELDS, "spool 136, uid bound")
         assert client.bound == [(136, "04a1b2c3d4e5f6")]
         assert client.calls == []
@@ -2877,7 +2903,7 @@ class TestRunEnroll:
         assert rfid_write_mod.run_enroll(
             target, 0, {"manufacturer": "Inland", "ftype": "PETG",
                         "color_argb": 0xFF00FF00, "weight_g": 1000,
-                        "diameter_mm": 1.75}) == (
+                        "diameter_mm": 1.75}, gcmd="callback") == (
             "04ffee", None,
             {"spool_id": 99, "ftype": "PETG", "sku": "Inland PETG", "weight_g": 1000},
             "created spool 99; spool 99, uid bound")
@@ -2894,7 +2920,7 @@ class TestRunEnroll:
         writer = RfidwWriteTag()
         monkeypatch.setattr(rfid_write_mod, "write_tag", writer)
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             None, "Spoolman filament create failed (None)", {}, "")
         assert writer.calls == []
         assert client.read == []
@@ -2906,7 +2932,7 @@ class TestRunEnroll:
         writer = RfidwWriteTag()
         monkeypatch.setattr(rfid_write_mod, "write_tag", writer)
         target = rfidw_register(MockPrinter(), unit=rfidw_spoolman_unit(client))
-        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}) == (
+        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}, gcmd="callback") == (
             None, RFIDW_NO_TAG, {}, "")
         assert client.calls == []
         assert writer.calls == []
@@ -2917,7 +2943,7 @@ class TestRunEnroll:
         def excl(uid: str) -> bool:
             return uid == "cafe"
 
-        def around(lane: str, body: Callable[..., Any]) -> None:
+        def around(lane: str, body: Callable[..., Any], gcmd: Any) -> None:
             seen.append(("scan", lane))
             body(excl)
             seen.append("unwind")
@@ -2926,7 +2952,7 @@ class TestRunEnroll:
         client = RfidwSpoolman(spool={"filament": {"material": "PLA"}})
         target = rfidw_register(MockPrinter(), "oams:RFID_A", "OpenAMS RFID_A",
                                 unit=rfidw_spoolman_unit(client), stage_around=around)
-        assert rfid_write_mod.run_enroll(target, 7, {}, lane="lane4") == (
+        assert rfid_write_mod.run_enroll(target, 7, {}, lane="lane4", gcmd="callback") == (
             "04ab", None, {"spool_id": 7, "ftype": "PLA"}, "spool 7, uid bound")
         assert seen == [("scan", "lane4"), "write", "unwind"]
         assert len(writer.calls) == 1
@@ -2938,7 +2964,7 @@ class TestRunEnroll:
         def excl(uid: str) -> bool:
             return uid == "cafe"
 
-        def around(lane: str, body: Callable[..., Any]) -> None:
+        def around(lane: str, body: Callable[..., Any], gcmd: Any) -> None:
             seen.append(("scan", lane))
             body(excl)
             seen.append("unwind")
@@ -2949,7 +2975,8 @@ class TestRunEnroll:
                                vendor={"id": 7}, filament={"id": 42}, created={"id": 99})
         target = rfidw_register(MockPrinter(), "oams:RFID_A", "OpenAMS RFID_A",
                                 unit=rfidw_spoolman_unit(client), stage_around=around)
-        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}, lane="lane4") == (
+        assert rfid_write_mod.run_enroll(target, 0, {"ftype": "PLA"}, lane="lane4",
+                                         gcmd="callback") == (
             "04ab", None, {"spool_id": 99, "ftype": "PLA"},
             "created spool 99; spool 99, uid bound")
         assert seen == [("scan", "lane4"), "write", "unwind"]
@@ -3059,11 +3086,15 @@ class TestCmdAFCRFIDEnroll:
     def test_a_lane_apply_joins_the_note(self, monkeypatch):
         printer, target, runs = self._setup(
             monkeypatch, ("04ab", None, self.FULL, "spool 7, uid bound"))
-        assert self._replied(printer, READER="bt:reader0", LANE="lane9", SPOOL="7") == [
+        gcmd = rfidw_gcmd(READER="bt:reader0", LANE="lane9", SPOOL="7")
+        rfid_write_mod.cmd_AFC_RFID_ENROLL(printer, gcmd)
+        assert gcmd.error.call_args_list == []
+        assert gcmd.respond_info.call_args_list == [
             call("AFC_RFID_ENROLL: tag 04ab on bt:reader0: Inland PETG, 1000g "
                  "(spool 7, uid bound, applied to lane9).")]
         assert runs.runs == [(target, 7, {}, "lane9")]
         assert runs.applies == [(target, "lane9", "04ab", self.FULL)]
+        assert runs.gcmds == [("run", gcmd), ("apply", gcmd)]
 
     def test_a_lane_apply_alone_is_the_note(self, monkeypatch):
         printer, _target, _runs = self._setup(monkeypatch)
