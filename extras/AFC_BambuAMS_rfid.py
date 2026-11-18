@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
+    from extras.AFC_utils import AFCGcmd
 
 # That module imports this one back lazily, so there is no import cycle.
 from extras.AFC_BambuAMS import BAMBU_BRAND, _split_bambu_material
@@ -412,10 +413,11 @@ class BambuSpoolman:
                             afc.spool.set_spoolID(
                                 lane, spool.get("id"),
                                 on_done=lambda: BambuSpoolman._bind_landed(
-                                    self, lane, slot, uid))
+                                    self, lane, slot, uid),
+                                gcmd="callback")
                             landing = True
                         else:
-                            afc.spool.set_spoolID(lane, spool.get("id"))
+                            afc.spool.set_spoolID(lane, spool.get("id"), gcmd="callback")
                             self._remember_bound_uid(slot, uid)
                         self._u.logger.debug(
                             f"{self._u.name}: matched {lane.name} to "
@@ -701,7 +703,8 @@ class BambuSpoolman:
             and not held[3]):
             owed[slot] = (held[0], held[1], held[2], True)
 
-    def _spoolman_sync(self, lane: Any, info: dict, restored: bool = False) -> None:
+    def _spoolman_sync(self, lane: Any, info: dict, restored: bool = False, *,
+                       gcmd: AFCGcmd) -> None:
         """
         Bind this bay in Spoolman, then release the summary that was waiting.
 
@@ -709,13 +712,14 @@ class BambuSpoolman:
         :param info: normalized bridge slot info (must carry rfid_uid)
         :param restored: the unit's lookup for a lane AFC restored with no spool (see
         _spoolman_sync_inner)
+        :param gcmd: the command this runs under, or "callback"
         """
         slot = info.get("index")
         try:
             if restored:
-                BambuSpoolman._spoolman_sync_inner(self, lane, info, restored=True)
+                BambuSpoolman._spoolman_sync_inner(self, lane, info, restored=True, gcmd=gcmd)
             else:
-                BambuSpoolman._spoolman_sync_inner(self, lane, info)
+                BambuSpoolman._spoolman_sync_inner(self, lane, info, gcmd=gcmd)
         finally:
             try:
                 owed = getattr(self, "_bind_owed", None)
@@ -732,7 +736,8 @@ class BambuSpoolman:
             except Exception:
                 pass
 
-    def _spoolman_sync_inner(self, lane: Any, info: dict, restored: bool = False) -> None:
+    def _spoolman_sync_inner(self, lane: Any, info: dict, restored: bool = False, *,
+                             gcmd: AFCGcmd) -> None:
         """
         Bind this lane's spool to Spoolman by tag UID, creating it if allowed.
 
@@ -740,6 +745,7 @@ class BambuSpoolman:
         :param info: normalized bridge slot info (must carry rfid_uid)
         :param restored: the unit's lookup for a restored lane with no spool
         (afcBambuAMS._lookup_unbound), not a read of the bay
+        :param gcmd: the command this runs under, or "callback"
         """
         uid = info.get("rfid_uid")
         if (not uid
@@ -797,7 +803,8 @@ class BambuSpoolman:
                     afc, lane, si, _QuietInfo(self._u.logger), "Bambu RFID",
                     allow_create=True, reactor=getattr(afc, "reactor", None),
                     on_done=lambda _s=slot: BambuSpoolman._bind_landed(
-                        self, lane, _s, uid, miss=True))
+                        self, lane, _s, uid, miss=True),
+                    gcmd=gcmd)
             else:
                 # Match-only and off-reactor.
                 BambuSpoolman._bind_by_uid_bg(self, lane, slot, uid,

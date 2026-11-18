@@ -15,6 +15,8 @@ state verification after every call, and branch-complete coverage:
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from extras.AFC_OpenAMS import afcAMS, FollowerController, FollowerState
 from extras.AFC_lane import AFCLaneState
 
@@ -57,17 +59,18 @@ def test_runout_without_runout_lane_pauses_and_handles():
     lane = _lane("lane0", runout_lane=None)
     unit = _make_unit([lane])
 
-    handled = unit.handle_runout(lane)
+    gcmd = MagicMock()
+    handled = unit.handle_runout(lane, gcmd)
 
     # Return + every state mutation
     assert handled is True
     assert lane.status == AFCLaneState.NONE
-    assert unit.lane_unloaded.calls == [((lane,), {})]
+    assert unit.lane_unloaded.calls == [((lane,), {"gcmd": gcmd})]
     assert unit.afc.error.AFC_error.call_count == 1
     msg = unit.afc.error.AFC_error.last_args[0]
     assert "Runout detected on OAMS lane0" in msg
     assert "No runout lane configured" in msg
-    assert unit.afc.error.AFC_error.last_kwargs == {"pause": True}
+    assert unit.afc.error.AFC_error.last_kwargs == {"pause": True, "gcmd": gcmd}
     # Nothing else fired, no flags set
     assert not unit.handle_same_fps_reload.called
     assert lane._oams_runout_detected is False
@@ -80,15 +83,16 @@ def test_runout_with_unresolvable_target_pauses_and_handles():
     lane = _lane("lane0", runout_lane="lane_missing")
     unit = _make_unit([lane])
 
-    handled = unit.handle_runout(lane)
+    gcmd = MagicMock()
+    handled = unit.handle_runout(lane, gcmd)
 
     assert handled is True
     assert lane.status == AFCLaneState.NONE
-    assert unit.lane_unloaded.calls == [((lane,), {})]
+    assert unit.lane_unloaded.calls == [((lane,), {"gcmd": gcmd})]
     assert unit.afc.error.AFC_error.call_count == 1
     assert "lane_missing" in unit.afc.error.AFC_error.last_args[0]
     assert "not found" in unit.afc.error.AFC_error.last_args[0]
-    assert unit.afc.error.AFC_error.last_kwargs == {"pause": True}
+    assert unit.afc.error.AFC_error.last_kwargs == {"pause": True, "gcmd": gcmd}
     assert not unit.handle_same_fps_reload.called
     assert lane._oams_runout_empty is False
 
@@ -100,12 +104,13 @@ def test_same_extruder_runout_does_seamless_reload():
     target = _lane("lane1", extruder="extruder")
     unit = _make_unit([lane, target])
 
-    handled = unit.handle_runout(lane)
+    gcmd = MagicMock()
+    handled = unit.handle_runout(lane, gcmd)
 
     assert handled is True
     assert lane._oams_runout_detected is True   # blocks sensor noise
     assert lane._oams_runout_empty is False     # hardware unload NOT skipped
-    assert unit.handle_same_fps_reload.calls == [((lane, target), {})]
+    assert unit.handle_same_fps_reload.calls == [((lane, target), {"gcmd": gcmd})]
     # No pause path artifacts
     assert not unit.afc.error.AFC_error.called
     assert not unit.lane_not_ready.called
@@ -119,7 +124,8 @@ def test_cross_extruder_runout_defers_to_generic_infinite_spool():
     target = _lane("lane4", extruder="extruder4")
     unit = _make_unit([lane, target])
 
-    handled = unit.handle_runout(lane)
+    gcmd = MagicMock()
+    handled = unit.handle_runout(lane, gcmd)
 
     assert handled is False                     # generic path takes over
     assert lane._oams_runout_empty is True      # hardware unload will be skipped

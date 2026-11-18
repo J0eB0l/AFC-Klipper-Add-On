@@ -29,6 +29,10 @@ from tests.bambu_helpers import BambuConfig, BambuLogger, BambuPrinter, FakeGcmd
 VIVID_WALL_TIME = 1700000000.0
 
 
+#: The command the unit's load feed runs through, sent with the stage-read events.
+LOAD_GCMD = FakeGcmd()
+
+
 #: config.error() raises this, as Klipper's ConfigWrapper.error does.
 VIVID_CONFIG_ERROR = configparser.Error
 
@@ -228,18 +232,20 @@ class VividUnit:
 
     def move_to_load(self, lane: "VividLane", dist: float, dir: Any,
                      use_homing: bool = True,
-                     speed_mode: Any = SpeedMode.LONG) -> Tuple[bool, float, None]:
+                     speed_mode: Any = SpeedMode.LONG, *,
+                     gcmd: Any) -> Tuple[bool, float, None]:
         """
         :param lane: the lane to move
         :param dist: mm
         :param dir: the MoveDirection
         :param use_homing: home on the load switch
         :param speed_mode: AFC's speed mode
+        :param gcmd: the command context, passed to the lane's move
         :return tuple: the lane's move_to result
         """
         return lane.move_to(dist * dir, speed_mode, endstop=lane.load_es,
                             assist_active=AssistActive.DYNAMIC,
-                            use_homing=use_homing)
+                            use_homing=use_homing, gcmd=gcmd)
 
 
 class VividLane:
@@ -279,6 +285,7 @@ class VividLane:
         self.slip = slip
         self.fault: Optional[Exception] = None
         self.moves: List[VividMove] = []
+        self.gcmds: List[Any] = []
         # The filament fields apply_to_lane fills from a decoded tag.
         self.material: Optional[str] = None
         self.color: Optional[str] = None
@@ -296,17 +303,19 @@ class VividLane:
 
     def move_to(self, distance: float, speed_mode: Any,
                 endstop: Optional[str] = None, assist_active: Any = None,
-                use_homing: bool = True) -> Tuple[bool, float, None]:
+                use_homing: bool = True, *, gcmd: Any) -> Tuple[bool, float, None]:
         """
         :param distance: signed mm
         :param speed_mode: AFC's speed mode
         :param endstop: the endstop to home to
         :param assist_active: the espooler mode
         :param use_homing: home on the endstop
+        :param gcmd: the command context, recorded in gcmds
         :return tuple: (homed, distance, None)
         """
         self.moves.append((distance, speed_mode, endstop, assist_active,
                            use_homing))
+        self.gcmds.append(gcmd)
         if self.fault is not None:
             raise self.fault
         gained = distance * (1.0 - self.slip) if distance > 0 else distance
@@ -1110,7 +1119,7 @@ class TestAFCVividrfidReadLane:
         rig = self._rig(monkeypatch)
         tag = vivid_elegoo_tag()
         rig.field.tags = [tag]
-        assert rig.unit.read_lane("lane0") == self._elegoo_info()
+        assert rig.unit.read_lane("lane0", gcmd="callback") == self._elegoo_info()
         assert rig.unit._last == {0: tag}
         assert rig.unit.get_status()["last_reads"] == {"lane0": vivid_elegoo_record()}
         assert rig.console == []
@@ -1120,7 +1129,7 @@ class TestAFCVividrfidReadLane:
         rig = self._rig(monkeypatch)
         rig.field.tags = [{"uid": "AABB", "tag_type": "MifareClassic1k",
                            "filament": None}]
-        assert rig.unit.read_lane("lane0") is None
+        assert rig.unit.read_lane("lane0", gcmd="callback") is None
         assert rig.unit._last == {}
         assert rig.unit.get_status()["last_reads"] == {"lane0": {
             "uid": "AABB", "tag_type": "MifareClassic1k", "decoded": False,
@@ -1130,7 +1139,7 @@ class TestAFCVividrfidReadLane:
 
     def test_no_tag_at_all_records_nothing(self, monkeypatch):
         rig = self._rig(monkeypatch)
-        assert rig.unit.read_lane("lane0") is None
+        assert rig.unit.read_lane("lane0", gcmd="callback") is None
         assert len(rig.field.calls) == 1
         assert rig.unit.get_status()["last_reads"] == {}
         assert rig.console == []
@@ -1139,7 +1148,7 @@ class TestAFCVividrfidReadLane:
     def test_warns_when_lane_unmapped(self, monkeypatch):
         rig = self._rig(monkeypatch)
         rig.field.tags = [vivid_elegoo_tag()]
-        assert rig.unit.read_lane("ghost") is None
+        assert rig.unit.read_lane("ghost", gcmd="callback") is None
         assert rig.field.calls == []
         assert rig.unit._last == {}
         assert rig.unit.last_reads_status() == {}
@@ -1153,7 +1162,7 @@ class TestAFCVividrfidReadLane:
         rig.unit.afc = None
         tag = vivid_elegoo_tag()
         rig.field.tags = [tag]
-        assert rig.unit.read_lane("lane0") == self._elegoo_info()
+        assert rig.unit.read_lane("lane0", gcmd="callback") == self._elegoo_info()
         assert rig.unit._last == {0: tag}
         assert rig.unit.get_status()["last_reads"] == {"lane0": vivid_elegoo_record()}
         # Not applied: the registered lane is untouched and nothing is printed.
@@ -1166,7 +1175,7 @@ class TestAFCVividrfidReadLane:
         rig.unit.afc = VividBareAfc()
         tag = vivid_elegoo_tag()
         rig.field.tags = [tag]
-        assert rig.unit.read_lane("lane0") == self._elegoo_info()
+        assert rig.unit.read_lane("lane0", gcmd="callback") == self._elegoo_info()
         assert rig.unit._last == {0: tag}
         assert rig.unit.get_status()["last_reads"] == {"lane0": vivid_elegoo_record()}
         assert rig.console == []
@@ -1177,7 +1186,7 @@ class TestAFCVividrfidReadLane:
         rig = self._rig(monkeypatch, lanes=[lane1])
         tag = vivid_elegoo_tag()
         rig.field.tags = [tag]
-        assert rig.unit.read_lane("lane0") == self._elegoo_info()
+        assert rig.unit.read_lane("lane0", gcmd="callback") == self._elegoo_info()
         assert rig.unit._last == {0: tag}
         assert rig.unit.get_status()["last_reads"] == {"lane0": vivid_elegoo_record()}
         assert lane1.material is None
@@ -1192,10 +1201,14 @@ class TestAFCVividrfidReadLane:
         # Spy that still runs the real apply, to prove its result is returned.
         real = rig.unit.apply_to_lane
         returned: List[Dict[str, Any]] = []
+        given: List[Any] = []
         monkeypatch.setattr(rig.unit, "apply_to_lane",
-                            lambda lane, t: returned.append(real(lane, t)) or returned[-1])
-        result = rig.unit.read_lane("lane0")
+                            lambda lane, t, gcmd: given.append(gcmd) or returned.append(
+                                real(lane, t, gcmd=gcmd)) or returned[-1])
+        gcmd = FakeGcmd()
+        result = rig.unit.read_lane("lane0", gcmd=gcmd)
         assert len(returned) == 1 and result is returned[0]
+        assert given == [gcmd]
         assert result == self._elegoo_info()
         assert rig.unit._last == {0: tag}
         # apply_to_lane filled the lane and printed the read-out.
@@ -1210,7 +1223,7 @@ class TestAFCVividrfidStageReadBegin:
     def test_stage_read_begin_starts_poll_for_mapped_lane(self, monkeypatch):
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0"},
                           lanes=[VividLane("lane0")])
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.unit._probe == vivid_probe()
         timer = rig.unit._poll_timer
         assert rig.printer.reactor.timers == [timer]
@@ -1222,7 +1235,7 @@ class TestAFCVividrfidStageReadBegin:
     def test_stage_read_begin_ignores_lane_without_reader(self, monkeypatch):
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0"},
                           readers=(), lanes=[VividLane("lane0")])
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.unit._probe is None and rig.unit._poll_timer is None
         assert rig.printer.reactor.timers == []
         assert rig.logger.messages == []
@@ -1231,7 +1244,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0",
                                                 "stage_read": False},
                           lanes=[VividLane("lane0")])
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.unit._probe is None and rig.unit._poll_timer is None
         assert rig.printer.reactor.timers == []
         assert rig.logger.messages == []
@@ -1240,7 +1253,7 @@ class TestAFCVividrfidStageReadBegin:
         # ":0" maps the empty name to slot 0, so only the name guard stops it.
         rig = build_vivid(monkeypatch, options={"lane_slot_map": ":0"})
         assert rig.unit._lane_slot == {"": 0}
-        rig.unit._stage_read_begin(VividLane(""))
+        rig.unit._stage_read_begin(VividLane(""), LOAD_GCMD)
         assert rig.unit._probe is None
         assert rig.printer.reactor.timers == []
         assert rig.logger.messages == []
@@ -1249,7 +1262,7 @@ class TestAFCVividrfidStageReadBegin:
         # Sibling has a spool, but no tag is parked on the shared reader.
         rig = vivid_pair_rig(monkeypatch)
         rig.unit._slot_uid[0] = "CAFE"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.antenna.activations == [(rig.readers["reader0"].link, None)]
         assert rig.lane("lane1").moves == []
         assert rig.unit._probe == vivid_probe()
@@ -1261,7 +1274,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch)
         rig.unit._slot_uid[0] = "CAFE"
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.lane("lane1").moves == []
         assert rig.unit._probe == vivid_probe()
         assert rig.logger.messages == [
@@ -1272,7 +1285,7 @@ class TestAFCVividrfidStageReadBegin:
         # No history to attribute it by, so it stays a collision.
         rig = vivid_pair_rig(monkeypatch)
         rig.antenna.uid = b"\xde\xad\xbe\xef"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         lane1 = rig.lane("lane1")
         assert lane1.moves == vivid_retract_moves(*VIVID_FULL_RETRACT)
         assert rig.unit._probe == vivid_probe(sib_lane=lane1, sib_dist=75.0)
@@ -1285,7 +1298,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch)
         rig.unit._slot_uid.update({0: "BEEF", 1: "CAFE"})
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         lane1 = rig.lane("lane1")
         assert lane1.pos == 425.0
         assert rig.unit._probe == vivid_probe(sib_lane=lane1, sib_dist=75.0)
@@ -1296,7 +1309,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch, options={"auto_tag_adjust": False})
         rig.unit._slot_uid.update({0: "BEEF", 1: "CAFE"})
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.lane("lane1").moves == []
         assert rig.unit._probe == vivid_probe(baseline="cafe", blocked_sib="lane1")
         assert rig.logger.messages == [VIVID_PARKED_CAFE]
@@ -1305,7 +1318,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch,
                              sibling=VividLane("lane1", tool_loaded=True))
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.lane("lane1").moves == []
         assert rig.unit._probe == vivid_probe(baseline="cafe", blocked_sib="lane1")
         assert rig.logger.messages == [
@@ -1315,7 +1328,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0"},
                           lanes=[VividLane("lane0"), VividLane("lane1")])
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.antenna.activations == []
         assert rig.unit._probe == vivid_probe()
         assert rig.printer.reactor.timers == [rig.unit._poll_timer]
@@ -1326,7 +1339,7 @@ class TestAFCVividrfidStageReadBegin:
                           readers=(("reader0", "5"),),
                           lanes=[VividLane("lane0"), VividLane("lane1")])
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.antenna.activations == []
         assert rig.unit._probe == vivid_probe(slot=5)
         assert rig.logger.messages == []
@@ -1335,7 +1348,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch)
         rig.unit.afc = None
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.antenna.activations == []
         assert rig.unit._probe == vivid_probe()
         assert rig.logger.messages == []
@@ -1344,7 +1357,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch)
         rig.unit.afc = VividBareAfc()
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.antenna.activations == []
         assert rig.unit._probe == vivid_probe()
         assert rig.logger.messages == []
@@ -1353,7 +1366,7 @@ class TestAFCVividrfidStageReadBegin:
         rig = vivid_pair_rig(monkeypatch,
                              sibling=VividLane("lane1", prep_state=False))
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.antenna.activations == []
         assert rig.unit._probe == vivid_probe()
         assert rig.logger.messages == []
@@ -1363,7 +1376,7 @@ class TestAFCVividrfidStageReadBegin:
         sibling.fault = RuntimeError("boom")
         rig = vivid_pair_rig(monkeypatch, sibling=sibling)
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert sibling.moves == vivid_retract_moves(10.0)
         assert rig.unit._probe == vivid_probe()
         assert rig.printer.reactor.timers == [rig.unit._poll_timer]
@@ -1376,7 +1389,7 @@ class TestAFCVividrfidStageReadBegin:
                           lanes=[VividLane("lane0")])
         monkeypatch.setattr(rig.printer.reactor, "register_timer",
                             Recorder(raises=RuntimeError("boom")))
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.unit._probe is None and rig.unit._poll_timer is None
         assert rig.logger.messages == [
             ("warning", "ViViD RFID: could not start stage poll: boom")]
@@ -1386,10 +1399,11 @@ class TestAFCVividrfidStageReadBegin:
         rig.antenna.uid = b"\xca\xfe"
         monkeypatch.setattr(rig.printer.reactor, "register_timer",
                             Recorder(raises=RuntimeError("boom")))
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         lane1 = rig.lane("lane1")
         assert lane1.moves == vivid_retract_moves(*VIVID_FULL_RETRACT) + [
             (75.0, SpeedMode.SHORT, None, AssistActive.NO, False)]
+        assert lane1.gcmds == [LOAD_GCMD] * len(lane1.moves)
         assert lane1.pos == 500.0
         assert rig.unit._probe is None
         assert rig.logger.messages == [
@@ -1416,7 +1430,7 @@ class TestAFCVividrfidStagePoll:
         rig = build_vivid(monkeypatch, options=values,
                           lanes=[VividLane("lane0", load_endstop_name="load_es0")])
         cmd = add_vivid_endstop(rig.printer)
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         return rig, cmd
 
     def test_stage_poll_detects_aborts_reads_and_applies(self, monkeypatch):
@@ -1424,7 +1438,12 @@ class TestAFCVividrfidStagePoll:
         rig.antenna.uid = b"\xaa\xbb"
         tag = vivid_elegoo_tag()
         rig.field.tags = [tag]
+        real = rig.unit.apply_to_lane
+        given: List[Any] = []
+        monkeypatch.setattr(rig.unit, "apply_to_lane",
+                            lambda lane, t, gcmd: given.append(gcmd) or real(lane, t, gcmd=gcmd))
         assert rig.unit._stage_poll(100.2) == rig.printer.reactor.NEVER
+        assert given == ["callback"]
         assert cmd.sent == [[7, 3]]                    # the feed was stopped
         assert len(rig.field.calls) == 2               # read, then confirmed
         assert rig.unit._probe == vivid_probe(done=True, read_ok=True, aborts=1)
@@ -1684,7 +1703,7 @@ class TestAFCVividrfidApplyStaged:
         rig = self._rig(monkeypatch)
         rig.unit.afc = None
         tag = vivid_elegoo_tag()
-        rig.unit._apply_staged(vivid_probe(), tag)
+        rig.unit._apply_staged(vivid_probe(), tag, gcmd="callback")
         assert rig.unit._last == {0: tag}
         assert rig.lane("lane0").material is None
         assert rig.unit.last_reads_status() == {}
@@ -1695,7 +1714,7 @@ class TestAFCVividrfidApplyStaged:
         rig = self._rig(monkeypatch)
         rig.unit.afc = VividBareAfc()
         tag = vivid_elegoo_tag()
-        rig.unit._apply_staged(vivid_probe(), tag)
+        rig.unit._apply_staged(vivid_probe(), tag, gcmd="callback")
         assert rig.unit._last == {0: tag}
         assert rig.lane("lane0").material is None
         assert rig.unit.last_reads_status() == {}
@@ -1705,7 +1724,7 @@ class TestAFCVividrfidApplyStaged:
     def test_skips_apply_when_lane_not_found(self, monkeypatch):
         rig = self._rig(monkeypatch, lane="lane1")
         tag = vivid_elegoo_tag()
-        rig.unit._apply_staged(vivid_probe(), tag)
+        rig.unit._apply_staged(vivid_probe(), tag, gcmd="callback")
         assert rig.unit._last == {0: tag}
         assert rig.lane("lane1").material is None
         assert rig.unit.last_reads_status() == {}
@@ -1715,7 +1734,7 @@ class TestAFCVividrfidApplyStaged:
     def test_applies_when_lane_present(self, monkeypatch):
         rig = self._rig(monkeypatch)
         tag = vivid_elegoo_tag()
-        rig.unit._apply_staged(vivid_probe(), tag)
+        rig.unit._apply_staged(vivid_probe(), tag, gcmd="callback")
         assert rig.unit._last == {0: tag}
         assert rig.lane("lane0").material == "PLA"
         assert rig.unit.last_reads_status() == {"lane0": vivid_elegoo_record()}
@@ -1725,7 +1744,7 @@ class TestAFCVividrfidApplyStaged:
     def test_warns_when_apply_raises(self, monkeypatch):
         rig = self._rig(monkeypatch)
         tag = {"uid": "AA", "filament": "PLA"}         # a malformed decode
-        rig.unit._apply_staged(vivid_probe(), tag)
+        rig.unit._apply_staged(vivid_probe(), tag, gcmd="callback")
         assert rig.unit._last == {0: tag}
         assert rig.lane("lane0").material is None
         assert rig.console == []
@@ -1748,31 +1767,32 @@ class TestAFCVividrfidRetractSibling:
 
         def move_to(self, distance: float, speed_mode: Any,
                     endstop: Optional[str] = None, assist_active: Any = None,
-                    use_homing: bool = True) -> Tuple[bool, float, None]:
+                    use_homing: bool = True, *, gcmd: Any) -> Tuple[bool, float, None]:
             """
             :param distance: signed mm
             :param speed_mode: AFC's speed mode
             :param endstop: the endstop to home to
             :param assist_active: the espooler mode
             :param use_homing: home on the endstop
+            :param gcmd: the command context, recorded in gcmds
             :return tuple: (homed, distance, None)
             """
             stall = len(self.moves) + 1 == self._stall_on
             self.fault = RuntimeError("stall") if stall else None
             return super().move_to(distance, speed_mode, endstop, assist_active,
-                                   use_homing)
+                                   use_homing, gcmd=gcmd)
 
     def test_a_retract_that_fails_midway_is_still_restored(self, monkeypatch):
         sibling = self._StallsOnHop(3)
         rig = vivid_pair_rig(monkeypatch, sibling=sibling)
         p: Dict[str, Any] = {"slot": 0}
         with pytest.raises(RuntimeError, match="stall"):
-            rig.unit._retract_sibling(p)
+            rig.unit._retract_sibling(p, gcmd="sub_command")
         # Two hops landed before the third raised; the probe knows about them.
         assert sibling.moves == vivid_retract_moves(10.0, 10.0, 10.0)
         assert sibling.pos == 480.0
         assert p == {"slot": 0, "sib_lane": sibling, "sib_dist": 20.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sibling.moves[3:] == [
             (20.0, SpeedMode.SHORT, None, AssistActive.NO, False)]
         assert sibling.pos == 500.0
@@ -1781,10 +1801,12 @@ class TestAFCVividrfidRetractSibling:
     def test_retracts_idle_sibling_and_records(self, monkeypatch):
         rig = vivid_pair_rig(monkeypatch)
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        gcmd = FakeGcmd()
+        rig.unit._retract_sibling(p, gcmd=gcmd)
         lane1 = rig.lane("lane1")
         # Stepped, so the distance is a maximum the load switch can cut short.
         assert lane1.moves == vivid_retract_moves(*VIVID_FULL_RETRACT)
+        assert lane1.gcmds == [gcmd] * len(lane1.moves)
         assert lane1.pos == 425.0
         assert p == {"slot": 0, "sib_lane": lane1, "sib_dist": 75.0}
         assert rig.logger.messages == [VIVID_RETRACTING]
@@ -1793,7 +1815,7 @@ class TestAFCVividrfidRetractSibling:
         # prep_state alone is a hand on the switch, not a seated tip.
         rig = vivid_pair_rig(monkeypatch, sibling=VividLane("lane1", pos=-5.0))
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == [
@@ -1804,7 +1826,7 @@ class TestAFCVividrfidRetractSibling:
         # Only 25mm past the switch: the 75mm ask must not be a commitment.
         rig = vivid_pair_rig(monkeypatch, sibling=VividLane("lane1", pos=25.0))
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         lane1 = rig.lane("lane1")
         assert lane1.moves == vivid_retract_moves(10.0, 10.0, 10.0)
         assert lane1.pos == -5.0                    # one step past at most
@@ -1817,7 +1839,7 @@ class TestAFCVividrfidRetractSibling:
     def test_noop_when_disabled(self, monkeypatch):
         rig = vivid_pair_rig(monkeypatch, options={"auto_tag_adjust": False})
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == []
@@ -1827,7 +1849,7 @@ class TestAFCVividrfidRetractSibling:
                           readers=(("reader0", "5"),),
                           lanes=[VividLane("lane0"), VividLane("lane1")])
         p: Dict[str, Any] = {"slot": 5}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 5}
         assert rig.logger.messages == []
@@ -1836,7 +1858,7 @@ class TestAFCVividrfidRetractSibling:
         rig = vivid_pair_rig(monkeypatch)
         rig.unit.afc = None
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == []
@@ -1845,7 +1867,7 @@ class TestAFCVividrfidRetractSibling:
         rig = vivid_pair_rig(monkeypatch)
         rig.unit.afc = VividBareAfc()
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == []
@@ -1854,7 +1876,7 @@ class TestAFCVividrfidRetractSibling:
         rig = vivid_pair_rig(monkeypatch,
                              sibling=VividLane("lane1", prep_state=False))
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == []
@@ -1863,7 +1885,7 @@ class TestAFCVividrfidRetractSibling:
         rig = vivid_pair_rig(monkeypatch,
                              sibling=VividLane("lane1", tool_loaded=True))
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == [VIVID_REFUSED]
@@ -1872,7 +1894,7 @@ class TestAFCVividrfidRetractSibling:
         rig = vivid_pair_rig(monkeypatch)
         rig.printer.set_print_state("printing")
         p: Dict[str, Any] = {"slot": 0}
-        rig.unit._retract_sibling(p)
+        rig.unit._retract_sibling(p, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert p == {"slot": 0}
         assert rig.logger.messages == [VIVID_REFUSED]
@@ -1910,9 +1932,11 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=-20.0, slip=0.5)
         rig = self._rig(monkeypatch, sib)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 30.0}
-        rig.unit._restore_sibling(p)
+        gcmd = FakeGcmd()
+        rig.unit._restore_sibling(p, gcmd=gcmd)
         assert sib.moves == [self.GIVE_BACK_30,
                              (50.0, SpeedMode.LONG, "load", AssistActive.DYNAMIC, True)]
+        assert sib.gcmds == [gcmd, gcmd]
         assert sib.pos == 0.5
         assert p == {"slot": 0, "sib_lane": None, "sib_dist": 0.0}
         assert rig.logger.messages == [self.HOMED]
@@ -1921,7 +1945,7 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=-20.0, slip=0.5)
         rig = self._rig(monkeypatch, sib, homing=False)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 30.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sib.moves == [self.GIVE_BACK_30, self.CREEP, self.CREEP]
         assert sib.pos == 5.0
         assert p == {"slot": 0, "sib_lane": None, "sib_dist": 0.0}
@@ -1933,7 +1957,7 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=-20.0, slip=1.0)   # feeds achieve nothing
         rig = self._rig(monkeypatch, sib)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 30.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sib.moves == [self.GIVE_BACK_30,
                              (50.0, SpeedMode.LONG, "load", AssistActive.DYNAMIC, True)]
         assert sib.pos == -20.0
@@ -1947,7 +1971,7 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=-20.0, slip=1.0)
         rig = self._rig(monkeypatch, sib, homing=False)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 30.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         # int(30 / 10) + 4 creep steps, then it gives up.
         assert sib.moves == [self.GIVE_BACK_30] + [self.CREEP] * 7
         assert rig.logger.messages == [
@@ -1959,23 +1983,23 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=470.0)
         rig = self._rig(monkeypatch, sib)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 30.0}
-        rig.unit._restore_sibling(p)
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sib.moves == [self.GIVE_BACK_30]
         assert sib.pos == 500.0
         assert rig.logger.messages == []
 
     def test_noop_when_probe_none(self, monkeypatch):
         rig = vivid_pair_rig(monkeypatch)
-        rig.unit._restore_sibling(None)
-        rig.unit._restore_sibling({})
+        rig.unit._restore_sibling(None, gcmd="sub_command")
+        rig.unit._restore_sibling({}, gcmd="sub_command")
         assert rig.lane("lane1").moves == []
         assert rig.logger.messages == []
 
     def test_noop_when_no_sib_lane(self, monkeypatch):
         rig = vivid_pair_rig(monkeypatch)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": None, "sib_dist": 75.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert p == {"slot": 0, "sib_lane": None, "sib_dist": 75.0}
         assert rig.logger.messages == []
 
@@ -1983,7 +2007,7 @@ class TestAFCVividrfidRestoreSibling:
         rig = vivid_pair_rig(monkeypatch)
         sib = rig.lane("lane1")
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 0.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sib.moves == []
         assert p == {"slot": 0, "sib_lane": sib, "sib_dist": 0.0}
         assert rig.logger.messages == []
@@ -1993,7 +2017,7 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=425.0)
         rig = self._rig(monkeypatch, sib)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 75.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sib.moves == [(75.0, SpeedMode.SHORT, None, AssistActive.NO, False)]
         assert sib.pos == 500.0
         assert p == {"slot": 0, "sib_lane": None, "sib_dist": 0.0}
@@ -2004,7 +2028,7 @@ class TestAFCVividrfidRestoreSibling:
         sib = VividLane("lane1", pos=-100.0, unit=False)
         rig = self._rig(monkeypatch, sib)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 75.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert sib.moves == [(75.0, SpeedMode.SHORT, None, AssistActive.NO, False),
                              self.CREEP, self.CREEP, self.CREEP]
         assert sib.pos == 5.0
@@ -2017,7 +2041,7 @@ class TestAFCVividrfidRestoreSibling:
         sib.fault = RuntimeError("boom")
         rig = self._rig(monkeypatch, sib)
         p: Dict[str, Any] = {"slot": 0, "sib_lane": sib, "sib_dist": 75.0}
-        rig.unit._restore_sibling(p)
+        rig.unit._restore_sibling(p, gcmd="sub_command")
         assert p == {"slot": 0, "sib_lane": None, "sib_dist": 0.0}
         assert rig.logger.messages == [
             ("error", "ViViD RFID: FAILED to restore sibling by 75mm: boom")]
@@ -2065,15 +2089,15 @@ class TestAFCVividrfidStageReadEnd:
         rig = vivid_pair_rig(monkeypatch,
                              sibling=VividLane("lane1", tool_loaded=True))
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         return rig
 
     def test_stage_read_end_tears_down_the_poll(self, monkeypatch):
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0"},
                           lanes=[VividLane("lane0")])
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         assert rig.printer.reactor.timers == [rig.unit._poll_timer]
-        rig.unit._stage_read_end(rig.lane("lane0"))
+        rig.unit._stage_read_end(rig.lane("lane0"), LOAD_GCMD)
         assert rig.unit._probe is None and rig.unit._poll_timer is None
         assert rig.printer.reactor.timers == []
         assert rig.console == []
@@ -2082,7 +2106,7 @@ class TestAFCVividrfidStageReadEnd:
     def test_stage_read_end_without_a_probe_is_quiet(self, monkeypatch):
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0"},
                           lanes=[VividLane("lane0")])
-        rig.unit._stage_read_end(rig.lane("lane0"))
+        rig.unit._stage_read_end(rig.lane("lane0"), LOAD_GCMD)
         assert rig.unit._probe is None and rig.unit._poll_timer is None
         assert rig.console == []
         assert rig.logger.messages == []
@@ -2090,12 +2114,13 @@ class TestAFCVividrfidStageReadEnd:
     def test_stage_read_end_restores_a_moved_sibling(self, monkeypatch):
         rig = vivid_pair_rig(monkeypatch)
         rig.antenna.uid = b"\xca\xfe"
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         rig.unit._probe["read_ok"] = True
-        rig.unit._stage_read_end(rig.lane("lane0"))
+        rig.unit._stage_read_end(rig.lane("lane0"), LOAD_GCMD)
         lane1 = rig.lane("lane1")
         assert lane1.moves == vivid_retract_moves(*VIVID_FULL_RETRACT) + [
             (75.0, SpeedMode.SHORT, None, AssistActive.NO, False)]
+        assert lane1.gcmds == [LOAD_GCMD] * len(lane1.moves)
         assert lane1.pos == 500.0
         assert rig.unit._probe is None
         assert rig.unit._poll_timer is None and rig.printer.reactor.timers == []
@@ -2105,7 +2130,7 @@ class TestAFCVividrfidStageReadEnd:
     def test_stage_hint_when_unmovable_sister_blocks_and_no_read(self, monkeypatch):
         rig = self._blocked_rig(monkeypatch)
         assert rig.unit._probe["blocked_sib"] == "lane1"
-        rig.unit._stage_read_end(rig.lane("lane0"))
+        rig.unit._stage_read_end(rig.lane("lane0"), LOAD_GCMD)
         assert rig.console == [(
             "respond_info",
             "ViViD RFID: couldn't read lane0's RFID, lane lane1's spool is on the "
@@ -2117,7 +2142,7 @@ class TestAFCVividrfidStageReadEnd:
     def test_stage_no_hint_when_read_succeeded(self, monkeypatch):
         rig = self._blocked_rig(monkeypatch)
         rig.unit._probe["read_ok"] = True
-        rig.unit._stage_read_end(rig.lane("lane0"))
+        rig.unit._stage_read_end(rig.lane("lane0"), LOAD_GCMD)
         assert rig.console == []
         assert rig.logger.messages == [VIVID_PARKED_CAFE, VIVID_REFUSED]
         assert rig.unit._probe is None
@@ -2129,7 +2154,7 @@ class TestAFCVividrfidCancelPoll:
         unregister = Recorder()
         monkeypatch.setattr(rig.printer.reactor, "unregister_timer", unregister)
         rig.unit._probe = vivid_probe()
-        rig.unit._cancel_poll()
+        rig.unit._cancel_poll(gcmd="sub_command")
         assert unregister.calls == []
         assert rig.unit._probe is None and rig.unit._poll_timer is None
         assert rig.logger.messages == []
@@ -2137,11 +2162,11 @@ class TestAFCVividrfidCancelPoll:
     def test_unregister_exception_swallowed(self, monkeypatch):
         rig = build_vivid(monkeypatch, options={"lane_slot_map": "lane0:0"},
                           lanes=[VividLane("lane0")])
-        rig.unit._stage_read_begin(rig.lane("lane0"))
+        rig.unit._stage_read_begin(rig.lane("lane0"), LOAD_GCMD)
         timer = rig.unit._poll_timer
         unregister = Recorder(raises=RuntimeError("boom"))
         monkeypatch.setattr(rig.printer.reactor, "unregister_timer", unregister)
-        rig.unit._cancel_poll()
+        rig.unit._cancel_poll(gcmd="sub_command")
         assert unregister.calls == [((timer,), {})]
         assert rig.unit._poll_timer is None and rig.unit._probe is None
         assert rig.logger.messages == []

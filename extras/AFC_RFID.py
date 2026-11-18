@@ -19,6 +19,7 @@ from urllib.request import Request
 from urllib.parse import urljoin, quote
 
 if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
     from klippy import Printer
     from extras.AFC_lane import AFCLane
 
@@ -2080,7 +2081,7 @@ def _spoolman_resolve(afc: Any, prep: dict, slot_info: dict, logger: Any, prefix
 
 
 def _spoolman_apply(afc: Any, lane: Any, logger: Any, prefix: str, resolved: Optional[dict],
-                    set_next: bool, done: Any = None) -> None:
+                    set_next: bool, done: Any = None, *, gcmd: AFCGcmd) -> None:
     """
     Put the answer on the lane.
 
@@ -2091,6 +2092,7 @@ def _spoolman_apply(afc: Any, lane: Any, logger: Any, prefix: str, resolved: Opt
     :param resolved: the dict from _spoolman_resolve, or None
     :param set_next: stage as next spool rather than assigning the lane
     :param done: called once, after the lane is populated where possible
+    :param gcmd: command context the assignment is run through
     """
     def _done() -> None:
         """
@@ -2123,9 +2125,9 @@ def _spoolman_apply(afc: Any, lane: Any, logger: Any, prefix: str, resolved: Opt
             _done()
 
         if _set_spoolid_takes_on_done(afc):
-            afc.spool.set_spoolID(lane, spool_id, on_done=_applied)
+            afc.spool.set_spoolID(lane, spool_id, on_done=_applied, gcmd=gcmd)
         else:
-            afc.spool.set_spoolID(lane, spool_id)
+            afc.spool.set_spoolID(lane, spool_id, gcmd=gcmd)
             _applied()
     except Exception as e:
         lane_name = getattr(lane, 'name', '?')
@@ -2161,7 +2163,7 @@ def _report_lane_scan(afc: Any, lane: Any, slot_info: dict) -> None:
 
 def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any, prefix: str,
                           allow_create: bool = False, set_next: bool = False, reactor: Any = None,
-                          on_done: Any = None) -> None:
+                          on_done: Any = None, *, gcmd: AFCGcmd) -> None:
     """
     Sync an RFID tag to Spoolman, keyed on the tag UID.
 
@@ -2175,6 +2177,7 @@ def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any, pre
     :param reactor: Klipper reactor
     :param on_done: Called on the reactor once the lane has been assigned, on every path including
     early exits
+    :param gcmd: command context an assignment made right here is run through
     """
     def _finish() -> None:
         """
@@ -2196,7 +2199,7 @@ def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any, pre
         or queue is None):
         resolved = _spoolman_resolve(afc, prep, slot_info, logger, prefix, allow_create)
         _report_lane_scan(afc, lane, slot_info)
-        _spoolman_apply(afc, lane, logger, prefix, resolved, set_next, done=_finish)
+        _spoolman_apply(afc, lane, logger, prefix, resolved, set_next, done=_finish, gcmd=gcmd)
         return
 
     deferred = _DeferredLog()
@@ -2221,7 +2224,8 @@ def sync_rfid_to_spoolman(afc: Any, lane: Any, slot_info: dict, logger: Any, pre
             :param _eventtime: reactor event time
             """
             deferred.replay(logger)
-            _spoolman_apply(afc, lane, logger, prefix, resolved, set_next, done=_finish)
+            _spoolman_apply(afc, lane, logger, prefix, resolved, set_next, done=_finish,
+                            gcmd="callback")
 
         reactor.register_async_callback(_back)
 
@@ -2294,13 +2298,14 @@ class AFCUnitRFID:
             hint += f", {rec['tag_type']}"
         return hint + ", no decoder/key matched)"
 
-    def apply_to_lane(self, lane: Any, tag: dict) -> dict:
+    def apply_to_lane(self, lane: Any, tag: dict, gcmd: AFCGcmd) -> dict:
         """
         Map a raw read to slot_info, apply filament defaults to the lane, and sync to Spoolman
         (shared AFC_RFID path).
 
         :param lane: AFC lane the tag was read for
         :param tag: Raw hardware tag read to decode into slot_info
+        :param gcmd: command context the spool assignment is run through
         :return dict: The decoded slot_info dict
         """
         slot_info = self._map(tag)
@@ -2310,7 +2315,7 @@ class AFCUnitRFID:
             and getattr(self.afc, "spoolman", None)):
             try:
                 sync_rfid_to_spoolman(self.afc, lane, slot_info, self.logger, self.log_prefix,
-                                      allow_create=allow_create)
+                                      allow_create=allow_create, gcmd=gcmd)
             except Exception as e:
                 self.logger.warning(f"{self.log_prefix} Spoolman sync failed: {e}")
         # Console read-out AFTER the sync so it shows the enriched, matched Spoolman record

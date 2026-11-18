@@ -26,7 +26,7 @@ _bus_stub.MCU_I2C_from_config = MagicMock()
 sys.modules.setdefault("extras.bus", _bus_stub)
 
 from extras.AFC_OpenAMS import afcAMS, OAMSStatus  # noqa: E402
-from tests.conftest import MockAFC, MockPrinter, MockConfig  # noqa: E402
+from tests.conftest import MockAFC, MockConfig, MockGCodeCommand, MockPrinter  # noqa: E402
 
 
 class AdvancingReactor:
@@ -155,6 +155,7 @@ class FakeCoordinator:
         self._reads = list(full_reads or [])
         self.read_excludes = []
         self.applied = []
+        self.applied_gcmds = []
         self.slot_map = {"lane1": 0}
 
     def _get_slot(self, name):
@@ -174,8 +175,9 @@ class FakeCoordinator:
     def read_slot(self, slot):              # manual-path compat
         return self.read_slot_excluding(slot, set())
 
-    def apply_to_lane(self, lane, tag):
+    def apply_to_lane(self, lane, tag, gcmd):
         self.applied.append((lane, tag))
+        self.applied_gcmds.append(gcmd)
         return {"brand": "X", "material": "PLA"}
 
     def undecoded_hint(self, name):
@@ -239,11 +241,13 @@ class TestConfigDefaults:
 
 
 class TestScanTagFound:
+    GCMD = MockGCodeCommand()
+
     def _run(self):
         # Empty field at rest; the moving tag arrives on the second poll.
         coord = FakeCoordinator(fields=[[], [], ["aabb"]], full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd=self.GCMD)
         return ams, coord, result
 
     def test_returns_true(self):
@@ -256,6 +260,7 @@ class TestScanTagFound:
         lane, tag = coord.applied[0]
         assert lane is ams.lanes["lane1"]
         assert tag is TAG
+        assert coord.applied_gcmds == [self.GCMD]
 
     def test_surfaces_to_mainsail(self):
         ams, _, _ = self._run()
@@ -293,7 +298,7 @@ class TestSisterTags:
         # so a scan with ONLY it in field times out instead of detecting.
         coord = FakeCoordinator(fields=[["5157e12"]], full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert coord.applied == []
 
@@ -304,7 +309,7 @@ class TestSisterTags:
             fields=[["5157e12"], ["5157e12"], ["5157e12", "aabb"]],
             full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is True
         assert all("5157e12" in ex for ex in coord.read_excludes)
 
@@ -319,7 +324,7 @@ class TestSisterTags:
                     ["01d0ec0f"]],                       # back in range
             full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is True
         # It is the target, so it must NOT be excluded from the read.
         assert all("01d0ec0f" not in ex for ex in coord.read_excludes)
@@ -380,7 +385,7 @@ class TestSisterBayTagNeverTaken:
         ams, coord = _sister_rig(monkeypatch, BLINKING_SISTER,
                                  reads={"lane2": {"uid": "B6:DC:5F:EB"}})
 
-        assert ams._do_rfid_scan(ams.lanes["lane1"]) is False
+        assert ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback") is False
         assert coord.applied == []
         assert ("debug", "OAMS: RFID scan lane1: passing over the sister bay's "
                          "tag(s) B6DC5FEB") in ams.logger.messages
@@ -390,7 +395,7 @@ class TestSisterBayTagNeverTaken:
         ams, coord = _sister_rig(monkeypatch, BLINKING_SISTER, spoolman=spoolman,
                                  spool_id=118)
 
-        assert ams._do_rfid_scan(ams.lanes["lane1"]) is False
+        assert ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback") is False
         assert spoolman.asked == [118]
         assert coord.applied == []
 
@@ -399,7 +404,7 @@ class TestSisterBayTagNeverTaken:
             monkeypatch, [[], ["b6dc5feb"], ["b6dc5feb", "aabb"]],
             reads={"lane2": {"uid": "b6dc5feb"}})
 
-        assert ams._do_rfid_scan(ams.lanes["lane1"]) is True
+        assert ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback") is True
         assert coord.applied == [(ams.lanes["lane1"], TAG)]
         assert coord.read_excludes == [{"b6dc5feb"}]
 
@@ -408,7 +413,7 @@ class TestSisterBayTagNeverTaken:
         ams, coord = _sister_rig(monkeypatch, BLINKING_SISTER, prep=False,
                                  reads={"lane2": {"uid": "B6DC5FEB"}})
 
-        assert ams._do_rfid_scan(ams.lanes["lane1"]) is True
+        assert ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback") is True
         assert coord.applied == [(ams.lanes["lane1"], TAG)]
 
 
@@ -500,7 +505,7 @@ class TestUnreadableReposition:
         coord = FakeCoordinator(fields=[[], ["aabb"]],
                                 full_reads=[None, None, TAG])
         ams, coord = _build_unit(coord=coord)
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         return ams, coord, result
 
     def test_decodes_after_reposition(self):
@@ -521,7 +526,7 @@ class TestUnreadableReposition:
     def test_gives_up_cleanly_when_still_unreadable(self):
         coord = FakeCoordinator(fields=[[], ["aabb"]], full_reads=[])
         ams, coord = _build_unit(coord=coord)
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert coord.applied == []
         assert ams._operation_active is False
@@ -537,7 +542,7 @@ class TestSafetyGates:
         shared_ext = types.SimpleNamespace(name="extruder1",
                                            lane_loaded="lane9")
         ams.lanes["lane1"].extruder_obj = shared_ext
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert ams.oams.oams_load_spool_cmd.sent == []
         assert coord.applied == []
@@ -549,14 +554,14 @@ class TestSafetyGates:
         ams, coord = _build_unit(coord=coord)
         free_ext = types.SimpleNamespace(name="extruder1", lane_loaded=None)
         ams.lanes["lane1"].extruder_obj = free_ext
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is True
 
     def test_occupied_hub_blocks_scan(self):
         coord = FakeCoordinator(fields=[[], ["aabb"]], full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
         ams.oams.hub_hes_value[2] = 1        # some other bay at the hub
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert ams.oams.oams_load_spool_cmd.sent == []
 
@@ -579,7 +584,7 @@ class TestSafetyGates:
         coord = FakeCoordinator(fields=[[], ["aabb"]], full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
         ams.afc.function.in_print = lambda: True
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert ams.oams.oams_load_spool_cmd.sent == []
 
@@ -599,7 +604,7 @@ class TestHubEngageCancel:
             ams.oams.action_status = OAMSStatus.LOADING
 
         ams.oams.oams_load_spool_cmd.send = slow_load
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is True
         assert ams.oams.cancel_calls >= 1          # load cancelled at hub
         assert (1, 1) in ams.oams.follower_calls   # creep enabled
@@ -609,7 +614,7 @@ class TestScanTimeout:
     def _run(self):
         # Reader never sees a new tag (e.g. a spool without one).
         ams, coord = _build_unit()
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         return ams, coord, result
 
     def test_returns_false(self):
@@ -633,7 +638,7 @@ class TestBusyHandling:
         coord = FakeCoordinator(fields=[[], ["aabb"]], full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
         ams.oams.busy_rejections = 1
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is True
         assert len(ams.oams.oams_load_spool_cmd.sent) == 2
         assert len(coord.applied) == 1
@@ -643,7 +648,7 @@ class TestBusyHandling:
         ams, coord = _build_unit(values={"rfid_scan_ready_timeout": 5.0},
                                  coord=coord)
         ams.oams.busy_rejections = 10_000
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         # Never more than two load attempts: we wait on ready, we don't spam.
         assert len(ams.oams.oams_load_spool_cmd.sent) == 2
@@ -656,7 +661,7 @@ class TestBusyHandling:
         # _oams_load), but an aborted scan must always leave it STOPPED.
         ams, _ = _build_unit(values={"rfid_scan_ready_timeout": 5.0})
         ams.oams.busy_rejections = 10_000
-        ams._do_rfid_scan(ams.lanes["lane1"])
+        ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert ams.oams.follower_calls[-1] == (0, 0)
 
 
@@ -672,7 +677,7 @@ class TestRefusedLoad:
             ams.oams.action_status_code = 4    # NO_SPOOL_IN_BAY
 
         ams.oams.oams_load_spool_cmd.send = dead_send
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert len(ams.oams.oams_load_spool_cmd.sent) == 1
         # Nothing engaged, so no unwind noise.
@@ -689,6 +694,17 @@ class TestScheduling:
         ams, _ = _build_unit()
         ams._maybe_schedule_rfid_scan(ams.lanes["lane1"])
         assert "lane1" in ams._rfid_scan_timers
+
+    def test_the_timer_scans_as_a_callback(self, monkeypatch):
+        ams, _ = _build_unit()
+        scans = []
+        monkeypatch.setattr(ams, "_do_rfid_scan",
+                            lambda lane, gcmd: scans.append((lane, gcmd)) or True)
+        ams._maybe_schedule_rfid_scan(ams.lanes["lane1"])
+        [(_handle, kickoff, _waketime)] = ams.afc.reactor.registered
+        assert kickoff(100.25) == ams.afc.reactor.NEVER
+        assert scans == [(ams.lanes["lane1"], "callback")]
+        assert ams._rfid_scan_timers == {}
 
     def test_already_scanned_not_rescheduled(self):
         ams, _ = _build_unit()
@@ -716,7 +732,7 @@ class TestOperationActiveGuard:
         coord = FakeCoordinator(fields=[[], ["aabb"]], full_reads=[TAG])
         ams, coord = _build_unit(coord=coord)
         ams._operation_active = True
-        result = ams._do_rfid_scan(ams.lanes["lane1"])
+        result = ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback")
         assert result is False
         assert coord.applied == []
 
@@ -775,7 +791,7 @@ class TestUnitReadyWait:
         # the firmware's insert routine.
         ams, _ = _build_unit(values={"rfid_scan_ready_timeout": 3.0})
         ams.oams.staging_probes = 10_000
-        assert ams._do_rfid_scan(ams.lanes["lane1"]) is False
+        assert ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback") is False
         assert ams.oams.oams_load_spool_cmd.sent == []
         assert ams._operation_active is False
 
@@ -822,7 +838,7 @@ class TestHeldForAWrite:
         def hold(excluded):
             seen.append((ams.oams.unload_calls, ams._operation_active))
 
-        assert ams._do_rfid_scan(ams.lanes["lane1"], hold=hold) is True
+        assert ams._do_rfid_scan(ams.lanes["lane1"], hold=hold, gcmd="callback") is True
         assert seen == [(0, True)]           # written before the unwind
         assert coord.applied == []           # the write applies, not the scan
         assert ams.oams.unload_calls == 1
@@ -832,14 +848,14 @@ class TestHeldForAWrite:
         ams, coord = self._unit(fields=[["5157e12"], ["5157e12"],
                                         ["5157e12", "aabb"]])
         got = []
-        ams._do_rfid_scan(ams.lanes["lane1"], hold=got.append)
+        ams._do_rfid_scan(ams.lanes["lane1"], hold=got.append, gcmd="callback")
         assert got[0]("5157E12") is True
         assert got[0]("aabb") is False
 
     def test_no_tag_holds_nothing(self):
         ams, coord = self._unit(fields=[[]], reads=())
         held = []
-        assert ams._do_rfid_scan(ams.lanes["lane1"], hold=held.append) is False
+        assert ams._do_rfid_scan(ams.lanes["lane1"], hold=held.append, gcmd="callback") is False
         assert held == []
 
     def test_a_failed_write_still_unwinds(self):
@@ -849,14 +865,14 @@ class TestHeldForAWrite:
             raise RuntimeError("SPI write failed")
 
         with pytest.raises(RuntimeError, match="SPI write failed"):
-            ams._do_rfid_scan(ams.lanes["lane1"], hold=hold)
+            ams._do_rfid_scan(ams.lanes["lane1"], hold=hold, gcmd="callback")
         assert ams.oams.unload_calls == 1
         assert ams._operation_active is False
         assert ams.oams.follower_calls[-1] == (0, 0)
 
     def test_without_a_hold_a_blank_tag_is_still_not_applied(self):
         ams, coord = self._unit(reads=(BLANK, BLANK, BLANK))
-        assert ams._do_rfid_scan(ams.lanes["lane1"]) is False
+        assert ams._do_rfid_scan(ams.lanes["lane1"], gcmd="callback") is False
         assert coord.applied == []
 
 
@@ -884,7 +900,7 @@ class TestWriteStagedByTheScan:
         calls = []
         rfid._stage_write_around(
             "lane1", rdr_a,
-            lambda ex: calls.append(ams.oams.unload_calls))
+            lambda ex: calls.append(ams.oams.unload_calls), gcmd="callback")
         assert calls == [0]
         assert ams.oams.unload_calls == 1
 
@@ -892,7 +908,7 @@ class TestWriteStagedByTheScan:
         from extras.AFC_rfid_write import StageError
         rfid, ams, lane, _, rdr_b = self._setup()
         with pytest.raises(StageError, match="READER=oams:RFID_A"):
-            rfid._stage_write_around("lane1", rdr_b, lambda ex: None)
+            rfid._stage_write_around("lane1", rdr_b, lambda ex: None, gcmd="callback")
         assert ams.oams.oams_load_spool_cmd.sent == []
 
     def test_a_lane_in_the_toolhead_is_refused(self):
@@ -900,7 +916,7 @@ class TestWriteStagedByTheScan:
         rfid, ams, lane, rdr_a, _ = self._setup()
         lane.tool_loaded = True
         with pytest.raises(StageError, match="blocked"):
-            rfid._stage_write_around("lane1", rdr_a, lambda ex: None)
+            rfid._stage_write_around("lane1", rdr_a, lambda ex: None, gcmd="callback")
         assert ams.oams.oams_load_spool_cmd.sent == []
 
     def test_no_tag_is_reported(self):
@@ -908,5 +924,5 @@ class TestWriteStagedByTheScan:
         rfid, ams, lane, rdr_a, _ = self._setup(fields=[[]], reads=())
         with pytest.raises(StageError, match="came to rest"):
             rfid._stage_write_around(
-                "lane1", rdr_a, lambda ex: pytest.fail("must not write"))
+                "lane1", rdr_a, lambda ex: pytest.fail("must not write"), gcmd="callback")
         assert ams._operation_active is False

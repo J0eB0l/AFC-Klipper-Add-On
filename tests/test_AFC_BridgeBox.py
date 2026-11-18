@@ -8438,7 +8438,7 @@ class TestAfcBridgeBoxCmdAFCBridgeboxReplace:
         unit._slots[0] = slot_info(0, present=True)
         unit._prev_present[0] = True
         unit._presence_ok = True
-        unit._prime_scan_baseline()
+        unit._prime_scan_baseline(gcmd="callback")
         # No spool is bound from H's record: J's lane gets AFC's defaults.
         assert afc.spool.calls == []
         assert (lane.spool_id, lane.material, lane.color, lane.weight) == (
@@ -11470,9 +11470,9 @@ class TestAfcBridgeBoxScoutTick:
         calls: List[float] = []
         real = unit.restore_follower_on_return
 
-        def _restore(since: float) -> bool:
+        def _restore(since: float, gcmd: Any) -> bool:
             calls.append(since)
-            return real(since)
+            return real(since, gcmd)
         monkeypatch.setattr(unit, "restore_follower_on_return", _restore)
         return calls
 
@@ -15053,7 +15053,7 @@ class TestAfcBridgeBoxRestoreReturned:
         bridge = live_bridges()[m.serial_port]
         bridge.sent.clear()
         _p6_quiet(m)
-        m._restore_returned(A, 100.0, 5.0)
+        m._restore_returned(A, 100.0, 5.0, "callback")
         assert _p6_log(m) == [(
             "debug",
             "chain1: Alpha (UID AAAA) is back after 5s offline "
@@ -15075,7 +15075,7 @@ class TestAfcBridgeBoxRestoreReturned:
         bridge.sent.clear()
         m.printer.reactor.now = 120.0
         _p6_quiet(m)
-        m._restore_returned(A, 100.0, 5.0)
+        m._restore_returned(A, 100.0, 5.0, "callback")
         assert _p6_log(m) == [
             ("debug",
              "Alpha: lane24 loaded at startup, re-asserting AMS "
@@ -15099,19 +15099,19 @@ class TestAfcBridgeBoxRestoreReturned:
     def test_a_uid_on_no_bay_restores_nothing(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
         _p6_quiet(m)
-        m._restore_returned(C, 100.0, 5.0)
+        m._restore_returned(C, 100.0, 5.0, "callback")
         assert _p6_log(m) == []
 
     def test_a_restore_that_fails_is_a_warning(self, tmp_path, monkeypatch):
         m = _p6_named(tmp_path, monkeypatch)
         unit = m._claim_pool_unit(A, "boxed", "callback")
 
-        def _fail(since: float) -> bool:
+        def _fail(since: float, gcmd: Any) -> bool:
             """:raises RuntimeError: the restore fails"""
             raise RuntimeError("bus busy")
         monkeypatch.setattr(unit, "restore_follower_on_return", _fail)
         _p6_quiet(m)
-        m._restore_returned(A, 100.0, 5.0)
+        m._restore_returned(A, 100.0, 5.0, "callback")
         assert _p6_log(m) == [(
             "warning",
             "chain1: follower restore for Alpha (UID AAAA) on "
@@ -17206,7 +17206,7 @@ class TestAfcBridgeBoxCheckMovedLoaded:
         unit._id_resolved, unit._loaded_restore_done = True, False
         bridge.sent.clear()
         _p6_quiet(m)
-        assert unit._restore_loaded_follower() is False
+        assert unit._restore_loaded_follower(gcmd="callback") is False
         assert (lane40.tool_loaded, bridge.sent) == (False, [])
         assert _p6_log(m) == []
         m._check_moved_loaded()
@@ -17231,7 +17231,7 @@ class TestAfcBridgeBoxCheckMovedLoaded:
         lane40.tool_loaded = True
         unit._loaded_restore_done = False
         _p6_quiet(m)
-        assert unit._restore_loaded_follower() is True
+        assert unit._restore_loaded_follower(gcmd="callback") is True
         assert bridge.sent[-2:] == [
             {"cmd": "select", "slot": 0, "unit": 0},
             {"cmd": "assist", "on": True, "slot": 0, "unit": 0}]

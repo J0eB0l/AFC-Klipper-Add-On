@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 if TYPE_CHECKING:
     from extras.AFC_lane import AFCLane
+    from extras.AFC_utils import AFCGcmd
 
 try: from extras.AFC_utils import ERROR_STR
 except: raise error("Error when trying to import AFC_utils.ERROR_STR\n{trace}".format(trace=traceback.format_exc()))
@@ -206,7 +207,7 @@ RESTORE_FIELDS = (("material", "material"), ("color", "color"), ("filament_name"
                   ("extruder_temp", "extruder_temp"))
 
 
-def restore_lane(lane: AFCLane, rec: Dict[str, Any], afc: Any) -> None:
+def restore_lane(lane: AFCLane, rec: Dict[str, Any], afc: Any, *, gcmd: AFCGcmd) -> None:
     """
     Gives a lane a hot swap slot brings in the saved record PREP gives every lane at a start (all
     but its T# map, which the slot hands out).
@@ -214,6 +215,7 @@ def restore_lane(lane: AFCLane, rec: Dict[str, Any], afc: Any) -> None:
     :param lane: The lane
     :param rec: Its saved record, as save_vars writes it
     :param afc: The AFC object
+    :param gcmd: Command context Spoolman lookups run through
     """
     if not rec:
         return
@@ -221,7 +223,7 @@ def restore_lane(lane: AFCLane, rec: Dict[str, Any], afc: Any) -> None:
         lane.spool_id = rec['spool_id']
     lane.filament_id = rec.get('filament_id', '') or ''
     if afc.spoolman is not None and lane.spool_id:
-        afc.spool.set_spoolID(lane, lane.spool_id, save_vars=False)
+        afc.spool.set_spoolID(lane, lane.spool_id, save_vars=False, gcmd=gcmd)
     else:
         for key, attr in RESTORE_FIELDS:
             if key in rec:
@@ -940,7 +942,7 @@ class TurtleDrive:
         self.rotation = TurtleRotation(self)
 
     def move(self, distance: float, speed: float, accel: float,
-             assist_active: bool = False) -> None:
+             assist_active: bool = False, *, gcmd: AFCGcmd) -> None:
         """
         A plain lane move.
 
@@ -948,12 +950,13 @@ class TurtleDrive:
         :param speed: mm/s
         :param accel: mm/s^2
         :param assist_active: Run the espooler like AFC does on long moves
+        :param gcmd: Command context errors are reported through
         """
-        self.unit.fw_move(self.lane, distance, speed, accel, assist_active)
+        self.unit.fw_move(self.lane, distance, speed, accel, assist_active, gcmd=gcmd)
 
     def home_to(self, endstop_spec, distance: float, speed: float, accel: float,
                 triggered: bool = True, check_trigger: bool = True,
-                assist_active: bool = True) -> tuple:
+                assist_active: bool = True, *, gcmd: AFCGcmd) -> tuple:
         """
         Moves until a switch reaches a state, like AFC_stepper.home_to.
 
@@ -964,10 +967,11 @@ class TurtleDrive:
         :param triggered: Stop when the switch triggers (False: when it clears)
         :param check_trigger: A move that never reaches the state fails
         :param assist_active: Run the espooler
+        :param gcmd: Command context errors are reported through
         :return tuple: (homed, distance moved, error)
         """
         return self.unit.fw_home(self.lane, endstop_spec, distance, speed, accel,
-                                 triggered, check_trigger, assist_active)
+                                 triggered, check_trigger, assist_active, gcmd=gcmd)
 
     def do_enable(self, enable: bool) -> None:
         """
@@ -977,30 +981,30 @@ class TurtleDrive:
 
     def sync_to_extruder(self, update_current: bool = True, *,
                          th_extruder_name: Optional[str] = None,
-                         gcmd: Any = None) -> None:
+                         gcmd: AFCGcmd) -> None:
         """
         The lane follows the extruder: TurtleNeck assist when the buffer is on, plain position
         following otherwise.
 
         :param update_current: Switch to print current
         :param th_extruder_name: Unused, the lane's extruder is used
-        :param gcmd: Unused, the board sets the current
+        :param gcmd: Command context
         """
         if update_current:
-            self.set_print_current()
+            self.set_print_current(gcmd)
         self.unit.set_sync(self.lane, True)
 
-    def unsync_to_extruder(self, update_current: bool = True,
-                           gcmd: Any = None) -> None:
+    def unsync_to_extruder(self, update_current: bool = True, *,
+                           gcmd: AFCGcmd) -> None:
         """
         :param update_current: Switch back to load current
-        :param gcmd: Unused, the board sets the current
+        :param gcmd: Command context
         """
         self.unit.set_sync(self.lane, False)
         if update_current:
-            self.set_load_current()
+            self.set_load_current(gcmd)
 
-    def set_load_current(self, gcmd: Any = None) -> None:
+    def set_load_current(self, gcmd: AFCGcmd) -> None:
         """
         Load current is run_current.
 
@@ -1008,7 +1012,7 @@ class TurtleDrive:
         """
         self.unit.set_current(self.lane, False)
 
-    def set_print_current(self, gcmd: Any = None) -> None:
+    def set_print_current(self, gcmd: AFCGcmd) -> None:
         """
         Print current is print_current, when set.
 
@@ -1463,7 +1467,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         if (current in self.lanes
                 and self.afc.function.is_printing()):
             self.afc.error.AFC_error(f"{msg}, pausing. Plug it back in and resume.",
-                                     pause=True)
+                                     pause=True, gcmd="callback")
 
 
     # ── hot swap ───────────────────────────────────────────────────
@@ -1606,13 +1610,15 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             return self.reactor.NEVER
         if not getattr(self.afc, 'prep_done', False):
             return eventtime + 1.0
-        self.reactor.register_callback(lambda et: self._claim())
+        self.reactor.register_callback(lambda et: self._claim(gcmd="callback"))
         return self.reactor.NEVER
 
-    def _claim(self) -> None:
+    def _claim(self, *, gcmd: AFCGcmd) -> None:
         """
         A hot swap slot's board is up: brings its lanes into AFC live with their saved spools and
         T#s, and runs PREP's lane check on them.
+
+        :param gcmd: Command context
         """
         if self.claimed or not self.link.connected:
             return
@@ -1622,7 +1628,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.claimed = True
         for lane in self.slot_lanes:
             activate_from_pool(lane)
-            restore_lane(lane, held.get(lane.name) or {}, self.afc)
+            restore_lane(lane, held.get(lane.name) or {}, self.afc, gcmd=gcmd)
         self.lanes = dict(sorted(self.lanes.items(), key=lambda item: item[1].index))
         self._map_lanes(held)
         self._apply_switches()
@@ -1631,7 +1637,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         enable = getattr(prep, 'enable', False)
         ok = True
         for lane in self.lanes.values():
-            ok = self.system_Test(lane, delay, False, enable) and ok
+            ok = self.system_Test(lane, delay, False, enable, gcmd) and ok
         self.logger.raw(self.logo if ok else self.logo_error)
         self.afc.save_vars()
         self.logger.info(f"{self.name}: BoxTurtle {self.board} plugged in, its lanes are in AFC")
@@ -1800,7 +1806,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             elif value:
                 lane.prep_callback(eventtime, 1)
             else:
-                self.prep_removed(lane, eventtime)
+                self.prep_removed(lane, eventtime, gcmd="callback")
         elif name == "hub":
             hub = self._hub()
             if hub is None:
@@ -1811,16 +1817,17 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                     and current is not None
                     and current.name in self.lanes
                     and getattr(hub, 'enable_runout', False)):
-                current.handle_hub_runout(sensor=hub.name)
+                current.handle_hub_runout(gcmd="callback", sensor=hub.name)
         elif name in ("tn_adv", "tn_trl") and isinstance(self.buffer_obj, TurtleNeck):
             self.buffer_obj.set_switch(name, value)
 
-    def prep_removed(self, lane: AFCLane, eventtime: float) -> None:
+    def prep_removed(self, lane: AFCLane, eventtime: float, *, gcmd: AFCGcmd) -> None:
         """
         A lane's prep switch opened.
 
         :param lane: The lane
         :param eventtime: Reactor time
+        :param gcmd: Command context runout handling runs through
         """
         lane.prep_state = False
         if (self.printer.state_message == 'Printer is ready'
@@ -1831,9 +1838,9 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                 and lane.raw_load_state
                 and lane.status != AFCLaneState.EJECTING):
             if lane.runout_lane is not None:
-                lane._perform_infinite_runout()
+                lane._perform_infinite_runout(gcmd)
             else:
-                lane._perform_pause_runout()
+                lane._perform_pause_runout(gcmd)
             return
         lane.handle_prep_runout(eventtime, False)
 
@@ -1854,14 +1861,14 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                             and self.afc.function.is_printing())
         if code in ASSIST_FAULTS:
             if printing_on_lane:
-                self.afc.error.AFC_error(text, pause=True)
+                self.afc.error.AFC_error(text, pause=True, gcmd="callback")
             else:
                 self.logger.warning(text)
             if lane is not None and self.sync.get(lane.name):
                 # The board stopped the assist.
                 self._send_assist(lane)
         elif code in TMC_FAULTS:
-            self.afc.error.AFC_error(text, pause=printing_on_lane)
+            self.afc.error.AFC_error(text, pause=printing_on_lane, gcmd="callback")
         elif code == "link_lost":
             self.logger.warning(text)
         elif code in ("tmc_otpw", "tmc_open", "tmc_ok"):
@@ -1888,18 +1895,20 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         kick = bool(getattr(lane.espooler, 'enable_kick_start', True))
         return {"espool_fwd": fwd, "espool_rwd": rwd, "espool_kick": kick}
 
-    def _report(self, lane: AFCLane, text: str) -> None:
+    def _report(self, lane: AFCLane, text: str, *, gcmd: AFCGcmd) -> None:
         """
         Reports a move the board could not do.
 
         :param lane: Lane that was moving
         :param text: What went wrong
+        :param gcmd: Command context the error is reported through
         """
         msg = f"{lane.name}: {text}"
-        self.afc.error.AFC_error(msg, pause=self.afc.function.in_print())
+        self.afc.error.AFC_error(msg, pause=self.afc.function.in_print(), gcmd=gcmd)
 
     def fw_move(self, lane: AFCLane, distance: float, speed: float, accel: float,
-                assist: bool, until: Optional[str] = None, until_v: int = 1) -> tuple:
+                assist: bool, until: Optional[str] = None, until_v: int = 1, *,
+                gcmd: AFCGcmd) -> tuple:
         """
         Runs one move on the board and waits for it to end.
 
@@ -1910,6 +1919,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         :param assist: Run the espooler
         :param until: Board switch that ends the move early
         :param until_v: State of that switch that ends it
+        :param gcmd: Command context errors are reported through
         :return tuple: (end reason, mm moved)
         """
         if not distance:
@@ -1926,7 +1936,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.moving.add(lane.name)
         synced = self._pause_assist(lane)
         try:
-            return self._run_move(lane, fields, distance, speed, accel)
+            return self._run_move(lane, fields, distance, speed, accel, gcmd=gcmd)
         finally:
             self.moving.discard(lane.name)
             self._resume_assist(lane, synced)
@@ -2003,12 +2013,13 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         if synced and self.sync.get(lane.name):
             self._send_assist(lane)
 
-    def _start_move(self, lane: AFCLane, fields: Dict[str, Any]) -> tuple:
+    def _start_move(self, lane: AFCLane, fields: Dict[str, Any], *, gcmd: AFCGcmd) -> tuple:
         """
         Sends a move, retrying while the lane is still slowing from its assist.
 
         :param lane: Lane to move
         :param fields: move request fields
+        :param gcmd: Command context errors are reported through
         :return tuple: (move_done completion, or None when refused)
         """
         for _ in range(20):
@@ -2021,11 +2032,11 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             if reply.get("err") != "lane busy":
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
-        self._report(lane, f"BoxTurtle refused a move ({reply.get('err')})")
+        self._report(lane, f"BoxTurtle refused a move ({reply.get('err')})", gcmd=gcmd)
         return None
 
     def _run_move(self, lane: AFCLane, fields: Dict[str, Any], distance: float,
-                  speed: float, accel: float) -> tuple:
+                  speed: float, accel: float, *, gcmd: AFCGcmd) -> tuple:
         """
         Sends a move and waits for move_done.
 
@@ -2034,6 +2045,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         :param distance: mm
         :param speed: mm/s
         :param accel: mm/s^2
+        :param gcmd: Command context errors are reported through
         :return tuple: (end reason, mm moved)
         """
         timeout = abs(distance) / speed + speed / accel + 10.0
@@ -2041,19 +2053,20 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         rest = float(distance)
         for _ in range(self.DROP_TRIES + 1):
             seq = self._next_seq()
-            done = self._start_move(lane, dict(fields, mm=rest, seq=seq))
+            done = self._start_move(lane, dict(fields, mm=rest, seq=seq), gcmd=gcmd)
             if done is None:
                 return "fault", moved
             msg = self.link.wait(done, timeout)
             if msg is not None and msg.get("ev") == "link_down":
                 msg = self._after_drop(lane, "move_done", seq, timeout)
                 if msg is None:
-                    self._report(lane, "BoxTurtle disconnected during a move")
+                    self._report(lane, "BoxTurtle disconnected during a move", gcmd=gcmd)
                     return "fault", moved
                 self.logger.info(f"{lane.name}: BoxTurtle link came back during a move")
             if msg is None:
                 self.link.send("stop", lane=lane.index)
-                self._report(lane, f"BoxTurtle move of {distance:.1f} mm did not finish")
+                self._report(lane, f"BoxTurtle move of {distance:.1f} mm did not finish",
+                             gcmd=gcmd)
                 return "fault", moved
             moved += float(msg.get("mm", 0.0))
             if msg.get("end") != "link_lost":
@@ -2065,7 +2078,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                 return ("no_trigger" if fields.get("until") else "done"), moved
             self.logger.info(f"{lane.name}: BoxTurtle stopped on a link drop, "
                              f"moving the last {rest:.1f} mm")
-        self._report(lane, "BoxTurtle link kept dropping during a move")
+        self._report(lane, "BoxTurtle link kept dropping during a move", gcmd=gcmd)
         return "fault", moved
 
     def _settle_switches(self) -> None:
@@ -2081,7 +2094,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self._apply_switches()
 
     def _fw_move_poll(self, lane: AFCLane, distance: float, speed: float, accel: float,
-                      assist: bool, predicate: Callable[[], bool], want: bool) -> tuple:
+                      assist: bool, predicate: Callable[[], bool], want: bool, *,
+                      gcmd: AFCGcmd) -> tuple:
         """
         A move that ends on a Klipper-side sensor (a toolhead switch): the host watches it and stops
         the lane.
@@ -2093,6 +2107,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         :param assist: Run the espooler
         :param predicate: Reads the sensor
         :param want: Sensor state that ends the move
+        :param gcmd: Command context errors are reported through
         :return tuple: (end reason, mm moved)
         """
         if bool(predicate()) == want:
@@ -2107,14 +2122,14 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         synced = self._pause_assist(lane)
         try:
             return self._poll_move(lane, fields, distance, speed, accel,
-                                   predicate, want)
+                                   predicate, want, gcmd=gcmd)
         finally:
             self.moving.discard(lane.name)
             self._resume_assist(lane, synced)
 
     def _poll_move(self, lane: AFCLane, fields: Dict[str, Any], distance: float,
                    speed: float, accel: float, predicate: Callable[[], bool],
-                   want: bool) -> tuple:
+                   want: bool, *, gcmd: AFCGcmd) -> tuple:
         """
         Runs the move for _fw_move_poll, stopping it when the sensor reads the wanted state.
 
@@ -2125,13 +2140,14 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         :param accel: mm/s^2
         :param predicate: Reads the sensor
         :param want: Sensor state that ends the move
+        :param gcmd: Command context errors are reported through
         :return tuple: (end reason, mm moved)
         """
         moved = 0.0
         rest = float(distance)
         for _ in range(self.DROP_TRIES + 1):
             seq = self._next_seq()
-            done = self._start_move(lane, dict(fields, mm=rest, seq=seq))
+            done = self._start_move(lane, dict(fields, mm=rest, seq=seq), gcmd=gcmd)
             if done is None:
                 return "fault", moved
             hit = False
@@ -2152,7 +2168,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                 msg = self._after_drop(lane, "move_done", seq, 2.0, stop=True)
             if msg is None:
                 self.link.send("stop", lane=lane.index)
-                self._report(lane, "BoxTurtle move to a Klipper-side sensor did not finish")
+                self._report(lane, "BoxTurtle move to a Klipper-side sensor did not finish",
+                             gcmd=gcmd)
                 return "fault", moved
             moved += float(msg.get("mm", 0.0))
             if hit or bool(predicate()) == want:
@@ -2167,7 +2184,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                 return "done", moved
             self.logger.info(f"{lane.name}: BoxTurtle link dropped during a move to a "
                              f"Klipper-side sensor, moving the last {rest:.1f} mm")
-        self._report(lane, "BoxTurtle link kept dropping during a move")
+        self._report(lane, "BoxTurtle link kept dropping during a move", gcmd=gcmd)
         return "fault", moved
 
     def endstop_switch(self, lane: AFCLane, spec) -> Optional[str]:
@@ -2213,23 +2230,25 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         return None
 
     def fw_home(self, lane: AFCLane, spec, distance: float, speed: float, accel: float,
-                triggered: bool, check_trigger: bool, assist: bool) -> tuple:
+                triggered: bool, check_trigger: bool, assist: bool, *,
+                gcmd: AFCGcmd) -> tuple:
         """
         AFC_stepper.home_to on the board.
 
+        :param gcmd: Command context errors are reported through
         :return tuple: (homed, distance moved, error)
         """
         switch = self.endstop_switch(lane, spec)
         if switch is not None:
             end, moved = self.fw_move(lane, distance, speed, accel, assist,
-                                      until=switch, until_v=1 if triggered else 0)
+                                      until=switch, until_v=1 if triggered else 0, gcmd=gcmd)
         else:
             predicate = self._sensor_predicate(lane, spec)
             if predicate is None:
-                self._report(lane, f"BoxTurtle cannot home to endstop {spec}")
+                self._report(lane, f"BoxTurtle cannot home to endstop {spec}", gcmd=gcmd)
                 return False, 0.0, True
             end, moved = self._fw_move_poll(lane, distance, speed, accel, assist,
-                                            predicate, bool(triggered))
+                                            predicate, bool(triggered), gcmd=gcmd)
         if end == "triggered":
             return True, abs(moved), False
         if end in ("done", "no_trigger"):
@@ -2418,7 +2437,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             self.reactor.pause(self.reactor.monotonic() + 0.2)
         return self.link.connected
 
-    def system_Test(self, cur_lane, delay, assignTcmd, enable_movement) -> bool:
+    def system_Test(self, cur_lane, delay, assignTcmd, enable_movement, gcmd: AFCGcmd) -> bool:
         """
         PREP's lane check, after the board is up.
         """
@@ -2426,12 +2445,12 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             msg = (f"<span class=error--text>{self.name}: BoxTurtle not found on USB"
                    f"{' (' + self.link.last_error + ')' if self.link.last_error else ''}</span>")
             self.logger.info(f"{cur_lane.name} {msg}")
-            self.lane_fault(cur_lane)
+            self.lane_fault(cur_lane, gcmd=gcmd)
             cur_lane.set_afc_prep_done()
             return False
-        return super().system_Test(cur_lane, delay, assignTcmd, enable_movement)
+        return super().system_Test(cur_lane, delay, assignTcmd, enable_movement, gcmd)
 
-    def prep_load(self, lane: AFCLane):
+    def prep_load(self, lane: AFCLane, gcmd: AFCGcmd):
         """
         A spool was inserted: the board's feed job pulls it to the load switch, retrying on its own
         before AFC hears about a problem.
@@ -2446,11 +2465,11 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         if not result.get("ok") and lane.prep_state:
             msg = (f' FAILED TO LOAD, CHECK FILAMENT AT TRIGGER ({result.get("msg") or result.get("code")})'
                    '\n||==>--||----||------||\nTRG   LOAD   HUB    TOOL')
-            self.afc.error.AFC_error(msg, False)
-            self.lane_fault(lane)
+            self.afc.error.AFC_error(msg, False, gcmd=gcmd)
+            self.lane_fault(lane, gcmd=gcmd)
             lane.status = AFCLaneState.NONE
 
-    def eject_lane(self, lane: AFCLane):
+    def eject_lane(self, lane: AFCLane, gcmd: AFCGcmd):
         """
         Ejects a spool with the board's unload job: back past the load switch, retrying a stuck
         retract, then extruder_clear_dis more.
@@ -2463,7 +2482,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                                  **self._espool_fields(lane, speed, True))
             if not result.get("ok"):
                 self.afc.error.AFC_error(f' Failed to eject {lane.name} '
-                                         f'({result.get("msg") or result.get("code")})', False)
+                                         f'({result.get("msg") or result.get("code")})', False,
+                                         gcmd=gcmd)
         finally:
             lane.do_enable(False)
 
@@ -2509,12 +2529,13 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             self.moving.discard(lane.name)
 
     def _trigger_led_state(self, lane=None, extruder=None, static_color=None,
-                           extruder_static_color=None, effect_suffix=None) -> None:
+                           extruder_static_color=None, effect_suffix=None, *,
+                           gcmd: AFCGcmd) -> None:
         """
         AFC's lane LED states, also shown on the board's own LEDs.
         """
         super()._trigger_led_state(lane, extruder, static_color,
-                                   extruder_static_color, effect_suffix)
+                                   extruder_static_color, effect_suffix, gcmd=gcmd)
         if lane is not None and static_color is not None:
             self.board_led(lane, static_color)
 
