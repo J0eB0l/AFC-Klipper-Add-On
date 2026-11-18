@@ -33,11 +33,13 @@
 from __future__ import annotations
 
 import copy
+import errno
 import fcntl
 import glob
 import json
 import os
 import select
+import socket
 import termios
 import traceback
 
@@ -55,6 +57,12 @@ except: raise error(ERROR_STR.format(import_lib="AFC_lane", trace=traceback.form
 
 try: from extras.AFC_BoxTurtle import afcBoxTurtle
 except: raise error(ERROR_STR.format(import_lib="AFC_BoxTurtle", trace=traceback.format_exc()))
+
+try:
+    from extras.AFC_bhub_link import (AUTH_REPLY_TIME, GREETING_TIME, TCP_SCHEME, HubLinkError,
+                                     bad_tcp_key, hub_answer, hub_verdict, is_auth,
+                                     link_key_file, parse_tcp, stored_link_key)
+except: raise error(ERROR_STR.format(import_lib="AFC_bhub_link", trace=traceback.format_exc()))
 
 PROTO = "boxturtle-1"
 PORT_GLOB = "/dev/serial/by-id/usb-AFC_BoxTurtle_*-if00"
@@ -238,11 +246,16 @@ def restore_lane(lane: AFCLane, rec: Dict[str, Any], afc: Any) -> None:
 
 class TurtleLink:
     """
-    The USB link: opens the board's tty without blocking, reads JSON lines in a reactor fd handler,
-    matches replies to requests by id, and keeps the board's link-loss timer fed with pings.
+    The USB link: opens the board's tty (or connects to a raw TCP serial server) without blocking,
+    reads JSON lines in a reactor fd handler, matches replies to requests by id, and keeps the
+    board's link-loss timer fed with pings.
     """
     PING_TIME = 0.5
     RX_TIMEOUT = 3.0
+    # A BridgeHub's greeting and its answer to a key (AFC_bhub_link).
+    GREETING_TIME = GREETING_TIME
+    AUTH_REPLY_TIME = AUTH_REPLY_TIME
+    CONNECT_POLL_TIME = 0.05
     RETRY_TIME = 2.0
     FAST_RETRY_TIME = 0.1
     FAST_RETRY_WINDOW = 10.0
@@ -250,7 +263,8 @@ class TurtleLink:
     def __init__(self, unit: "afcBoxTurtleUSB", port: str, uid: Optional[str]):
         """
         :param unit: The unit that owns this link
-        :param port: tty path, or "auto" to find the board by its USB name
+        :param port: tty path, "auto" to find the board by its USB name, or tcp://<ip>:<port> for a
+        board on a raw TCP serial server
         :param uid: Chip serial to pick one board when several are plugged in
         """
         self.unit = unit
@@ -259,6 +273,8 @@ class TurtleLink:
         self.port_cfg = port
         self.uid = uid
         self.fd: Optional[int] = None
+        self.sock: Optional[socket.socket] = None
+        self.connecting = False
         self.fd_handle = None
         self.port: Optional[str] = None
         self.connected = False
@@ -271,6 +287,11 @@ class TurtleLink:
         self._waiters: list = []
         self._last_rx = 0.0
         self._dropped_at: Optional[float] = None
+        # A BridgeHub's auth lines, the handshake waiting for one, and whether a tcp_key with no hub
+        # to take it was logged.
+        self._auth_lines: list = []
+        self._auth_wait = None
+        self._key_unused_logged = False
         self.timer = self.reactor.register_timer(self._timer_cb)
 
     def start(self) -> None:
@@ -290,8 +311,11 @@ class TurtleLink:
         """
         Finds the board's tty.
 
-        :return str: The tty path, or None when the board is not plugged in
+        :return str: The tty path (or the tcp:// address, which is always tried), or None when the
+        board is not plugged in
         """
+        if self.port_cfg.startswith(TCP_SCHEME):
+            return self.port_cfg
         if self.port_cfg != "auto":
             return self.port_cfg if os.path.exists(self.port_cfg) else None
         ports = sorted(glob.glob(PORT_GLOB))
@@ -311,7 +335,15 @@ class TurtleLink:
             port = self.find_port()
             if port is not None:
                 self.open(port)
+            if self.connecting:
+                return eventtime + self.CONNECT_POLL_TIME
             return eventtime + self.retry_time(eventtime)
+        if self.connecting:
+            if self._connect_pending(eventtime):
+                return eventtime + self.CONNECT_POLL_TIME
+            if self.fd is None:
+                return eventtime + self.retry_time(eventtime)
+            return eventtime + self.PING_TIME
         if eventtime - self._last_rx > self.RX_TIMEOUT:
             self.close("no reply for 3 s")
             return eventtime + self.retry_time(eventtime)
@@ -336,9 +368,11 @@ class TurtleLink:
         Opens the tty raw, non-blocking and exclusive (TIOCEXCL, so other programs that probe serial
         ports can't steal replies), then starts the handshake.
 
-        :param port: tty path
-        :return bool: True when the port opened
+        :param port: tty path, or tcp://<ip>:<port>
+        :return bool: True when the port opened (or the connect started)
         """
+        if port.startswith(TCP_SCHEME):
+            return self._open_tcp(port)
         try:
             fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except OSError as e:
@@ -366,16 +400,68 @@ class TurtleLink:
         self.reactor.register_callback(self._handshake)
         return True
 
+    def _open_tcp(self, port: str) -> bool:
+        """
+        Starts a non-blocking connect to a raw TCP serial server (ser2net in raw mode, or a USB host
+        box that serves the board's bytes as they are); the timer finishes it and starts the
+        handshake.
+
+        :param port: tcp://<ip>:<port>
+        :return bool: True when the connect started
+        """
+        host, number = parse_tcp(port)
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        try:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+        except OSError as e:
+            self._warn_once(f"{self.unit.name}: cannot open {port}: {e}")
+            return False
+        sock.setblocking(False)
+        # Short JSON lines: send each one now, not when a segment fills.
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        err = sock.connect_ex((host, number))
+        if err not in (0, errno.EINPROGRESS):
+            sock.close()
+            self._warn_once(f"{self.unit.name}: cannot connect to {port}: "
+                            f"{os.strerror(err)}")
+            return False
+        self.sock = sock
+        self.connecting = True
+        self._attach(sock.fileno(), port)
+        return True
+
+    def _connect_pending(self, eventtime: float) -> bool:
+        """
+        Checks a TCP connect in progress.
+
+        :param eventtime: Reactor time
+        :return bool: True while the connect is still in progress
+        """
+        if not select.select([], [self.fd], [], 0)[1]:
+            if eventtime - self._last_rx > self.RX_TIMEOUT:
+                self.close("connect timed out")
+                return False
+            return True
+        err = self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if err:
+            self.close(f"cannot connect: {os.strerror(err)}")
+            return False
+        self.connecting = False
+        self._last_rx = eventtime
+        self.reactor.register_callback(self._handshake)
+        return False
+
     def _attach(self, fd: int, port: str) -> None:
         """
         Takes an opened port into use and starts reading it.
 
-        :param fd: File descriptor of the tty
+        :param fd: File descriptor of the tty or socket
         :param port: What was opened, for the log
         """
         self.fd = fd
         self.port = port
         self._rx = self._tx = b""
+        self._auth_lines = []
         self._last_rx = self.reactor.monotonic()
         self.fd_handle = self.reactor.register_fd(fd, self._read_cb)
 
@@ -392,11 +478,13 @@ class TurtleLink:
 
     def _handshake(self, eventtime: float) -> None:
         """
-        Ends any half line in the board's buffer, asks for info and checks the protocol, then lets
-        the unit push its settings.
+        Passes a BridgeHub's link key check (TCP only), ends any half line in the board's buffer,
+        asks for info and checks the protocol, then lets the unit push its settings.
 
         :param eventtime: Reactor time
         """
+        if self.sock is not None and not self._hub_auth():
+            return
         self._write(b"\n")
         reply = self.request("info", timeout=2.0)
         if not reply.get("ok"):
@@ -412,6 +500,55 @@ class TurtleLink:
         self.last_error = ""
         if not self.unit.handle_link_up(reply):
             self.close("settings were refused")
+
+    def _auth_line(self, timeout: float) -> Optional[Dict[str, Any]]:
+        """
+        Waits for the hub's next auth line.
+
+        :param timeout: Seconds to wait
+        :return dict: The line, or None on timeout or a closed link
+        """
+        if not self._auth_lines and self.fd is not None:
+            self._auth_wait = self.reactor.completion()
+            self._auth_wait.wait(self.reactor.monotonic() + timeout, None)
+            self._auth_wait = None
+        return self._auth_lines.pop(0) if self._auth_lines else None
+
+    def _hub_auth(self) -> bool:
+        """
+        A BridgeHub greets each connection before any of the unit's bytes (see AFC_bhub_link): a
+        challenge is answered with this unit's key, an open hub is claimed with it (made and saved
+        the first time).
+
+        :return bool: False when the link was closed
+        """
+        name = self.unit.name
+        greeting = self._auth_line(self.GREETING_TIME)
+        if self.fd is None:
+            return False
+        if greeting is None:
+            if self.unit.tcp_key and not self._key_unused_logged:
+                self.logger.warning(f"{name}: {self.port} asked for no link key, "
+                                    f"so tcp_key is not used")
+                self._key_unused_logged = True
+            return True
+        try:
+            line, claimed = hub_answer(greeting, self.unit.link_key)
+        except HubLinkError as e:
+            self.close(str(e))
+            return False
+        self._write(line)
+        reply = self._auth_line(self.AUTH_REPLY_TIME)
+        if self.fd is None:
+            return False
+        try:
+            hub_verdict(reply)
+        except HubLinkError as e:
+            self.close(str(e))
+            return False
+        if claimed:
+            self.logger.info(f"{name}: link key stored on the hub at {self.port}")
+        return True
 
     def close(self, reason: str, notify: bool = True) -> None:
         """
@@ -430,11 +567,18 @@ class TurtleLink:
             self.reactor.unregister_fd(self.fd_handle)
             self.fd_handle = None
         try:
-            os.close(self.fd)
+            if self.sock is not None:
+                self.sock.close()
+            else:
+                os.close(self.fd)
         except OSError:
             pass
         self.fd = None
+        self.sock = None
+        self.connecting = False
         self.connected = False
+        if self._auth_wait is not None:
+            self._auth_wait.complete(None)
         for completion in self._pending.values():
             completion.complete({"ok": False, "err": "disconnected"})
         self._pending = {}
@@ -454,6 +598,9 @@ class TurtleLink:
 
         :param eventtime: Reactor time
         """
+        if self.connecting:
+            self._connect_pending(eventtime)
+            return
         try:
             if not select.select([self.fd], [], [], 0)[0]:
                 return
@@ -489,6 +636,12 @@ class TurtleLink:
         try:
             msg = json.loads(line)
         except ValueError:
+            return
+        if is_auth(msg):
+            # A BridgeHub's link key exchange (see _hub_auth).
+            self._auth_lines.append(msg)
+            if self._auth_wait is not None:
+                self._auth_wait.complete(msg)
             return
         if "ev" in msg:
             for waiter in list(self._waiters):
@@ -888,6 +1041,11 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         # Fluidd and Mainsail find a unit as AFC_<type without underscores>.
         self.type = config.get('type', 'BoxTurtleUSB')
         self.serial_port = config.get('serial_port', 'auto')
+        if self.serial_port.startswith(TCP_SCHEME):
+            try:
+                parse_tcp(self.serial_port)
+            except ValueError as e:
+                raise error(str(e))
         self.serial_uid = config.get('serial_uid', None)
         # A slot for whichever board turns up (see the top of this file).
         self.hotswap = config.getboolean('hotswap', False)
@@ -897,6 +1055,10 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         # How long an unplugged slot's lanes stay in AFC.
         self.release_grace = config.getfloat('release_grace', 10.0, minval=2.0)
         self.link_timeout = config.getfloat('link_timeout', 2.0, minval=0.5)
+        # A BridgeHub's link key.
+        self.tcp_key = config.get('tcp_key', None)
+        if bad_tcp_key(self.tcp_key):
+            raise error(bad_tcp_key(self.tcp_key))
 
         # Lane drivers (each lane's [AFC_lane] section can override these)
         self.rotation_distance = config.getfloat('rotation_distance', 4.65, above=0.)
@@ -1151,6 +1313,22 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         except (TypeError, ZeroDivisionError):
             return delta, 0
         return delta, max(0, min(pulse_ms, 5000))
+
+    def link_key_file(self) -> str:
+        """
+        :return str: Where the link keys AFC made for BridgeHubs are kept, next to AFC's other saved
+        state
+        """
+        return link_key_file(self.afc.VarFile)
+
+    def link_key(self, make: bool) -> Optional[str]:
+        """
+        The key for this unit's BridgeHub (see AFC_bhub_link.stored_link_key).
+
+        :param make: Make and save a key when none is saved
+        :return str: The key, or None (none saved, or it could not be saved)
+        """
+        return stored_link_key(self.afc.VarFile, self.name, self.tcp_key, make, self.logger)
 
     def handle_link_up(self, info: Dict[str, Any]) -> bool:
         """

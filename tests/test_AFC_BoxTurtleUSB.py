@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import select
+import socket
 import termios
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -15,6 +18,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from extras import AFC_BoxTurtleUSB as mod
+from extras import AFC_bhub_link as hub_link
+from extras.AFC_bhub_link import check_link_key
 from extras.AFC_BoxTurtle import afcBoxTurtle
 from extras.AFC_BoxTurtleUSB import (
     LINE_MAX,
@@ -132,7 +137,18 @@ class LinkUnit:
         self.link_down: List[tuple] = []
         self.events: List[Dict[str, Any]] = []
         self.up_result = True
+        self.tcp_key: Optional[str] = None
+        self.saved_key: Optional[str] = None
+        self.new_key: Optional[str] = "ab" * 16
+        self.key_calls: List[bool] = []
 
+    def link_key(self, make):
+        self.key_calls.append(make)
+        if self.tcp_key or self.saved_key:
+            return self.tcp_key or self.saved_key
+        if make and self.new_key:
+            self.saved_key = self.new_key
+        return self.saved_key
 
     def handle_link_up(self, info):
         self.link_up.append(info)
@@ -226,6 +242,86 @@ def connect(link: TurtleLink, reactor: FakeReactor, path: str) -> None:
     assert link.open(path)
     reactor.run_callbacks()
     assert link.connected
+
+
+@pytest.fixture
+def tcp():
+    """A link to a loopback listener; accept() hands back the board end."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    url = f"tcp://127.0.0.1:{server.getsockname()[1]}"
+    reactor = FakeReactor()
+    unit = LinkUnit(reactor)
+    link = TurtleLink(unit, url, None)
+    ends = []
+
+    def accept() -> PtyBoard:
+        end, _ = server.accept()
+        ends.append(end)
+        board = PtyBoard(end.fileno(), reactor)
+        board.sock = end
+        return board
+
+    yield link, unit, reactor, url, accept
+    link.close("test done", notify=False)
+    for sock in ends + [server]:
+        sock.close()
+
+
+def refused_url() -> str:
+    """A loopback address nothing listens on."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return f"tcp://127.0.0.1:{port}"
+
+
+def wait_connected(link: TurtleLink) -> None:
+    """Waits for the link's connect to finish, one way or the other."""
+    assert select.select([], [link.fd], [], 1.0)[1]
+
+
+# The firmware's host test (firmwares/BridgeHub/test) checks the same answer.
+HUB_KEY = "0123456789abcdef0123456789abcdef"
+HUB_NONCE = bytes(range(16))
+HUB_MAC = "84aa390f3f68d40d3b8f2b5ee2ad3517c13e31649284a43e867a8fa5974500bc"
+
+
+def make_hub(board: PtyBoard, key: Optional[str]) -> PtyBoard:
+    """
+    Makes the board end act as a BridgeHub that holds key (None: an open hub): it greets, then
+    checks the answer or takes the claim.
+    """
+    board.hub_key = key
+    unit_handler = board.handler
+
+    def handler(msg):
+        if msg.get("cmd") == "auth":
+            want = hmac.new(board.hub_key.encode(), HUB_NONCE, hashlib.sha512).hexdigest()
+            return [{"evt": "auth", "ok": int(msg.get("mac") == want[:64])}]
+        if msg.get("cmd") == "linkkey":
+            board.hub_key = msg["key"]
+            return [{"evt": "auth", "ok": 1}]
+        return unit_handler(msg)
+
+    board.handler = handler
+    board.write({"evt": "auth", "nonce": HUB_NONCE.hex()} if key else {"evt": "auth", "open": 1})
+    return board
+
+
+def tcp_handshake(link: TurtleLink, reactor: FakeReactor, url: str, accept,
+                  key: Optional[str] = None, hub: bool = True) -> PtyBoard:
+    """Connects to the listener, which answers as a hub (or not), and runs the handshake."""
+    assert link.open(url)
+    board = accept()
+    if hub:
+        make_hub(board, key)
+    wait_connected(link)
+    assert link._connect_pending(101.0) is False
+    reactor.run_callbacks()
+    return board
 
 
 # ── unit fakes ────────────────────────────────────────────────────────────────
@@ -550,6 +646,10 @@ class TestTurtleLinkFindPort:
         with patch.object(mod.glob, "glob", return_value=[]):
             assert link.find_port() is None
 
+    def test_tcp_always_tried(self, tcp):
+        link, _, _, url, _ = tcp
+        assert link.find_port() == url
+
 
 class TestTurtleLinkTimerCb:
     def test_no_board(self, pty):
@@ -590,6 +690,59 @@ class TestTurtleLinkTimerCb:
         assert link._timer_cb(now) == now + TurtleLink.PING_TIME
         board.drain()
         assert board.received == []
+
+
+class TestTurtleLinkTimerCbTcp:
+    def test_starts_connect(self, tcp):
+        link, _, _, url, _ = tcp
+        assert link._timer_cb(200.0) == 200.0 + TurtleLink.CONNECT_POLL_TIME
+        assert link.port == url
+        assert link.connecting is True
+
+    def test_connected_starts_handshake(self, tcp):
+        link, _, reactor, _, accept = tcp
+        assert link.open(link.port_cfg)
+        accept()
+        wait_connected(link)
+        now = link._last_rx + 0.1
+        assert link._timer_cb(now) == now + TurtleLink.PING_TIME
+        assert link.connecting is False
+        assert link._last_rx == now
+        assert reactor.callbacks == [link._handshake]
+
+    def test_still_connecting(self, tcp):
+        link, unit, reactor, _, _ = tcp
+        assert link.open(link.port_cfg)
+        now = link._last_rx + 0.1
+        with patch.object(mod.select, "select", return_value=([], [], [])):
+            assert link._timer_cb(now) == now + TurtleLink.CONNECT_POLL_TIME
+        assert link.connecting is True
+        assert reactor.callbacks == []
+        assert unit.logger.messages == []
+
+    def test_connect_times_out(self, tcp):
+        link, unit, _, url, _ = tcp
+        assert link.open(link.port_cfg)
+        now = link._last_rx + TurtleLink.RX_TIMEOUT + 0.1
+        with patch.object(mod.select, "select", return_value=([], [], [])):
+            assert link._timer_cb(now) == now + TurtleLink.RETRY_TIME
+        assert link.fd is None and link.sock is None
+        assert link.connecting is False
+        assert unit.logger.messages == [("warning", f"Turtle_1: closed {url}: connect timed out")]
+        assert unit.link_down == [("connect timed out", False)]
+
+    def test_connect_refused(self, tcp):
+        link, unit, reactor, _, _ = tcp
+        url = refused_url()
+        assert link.open(url)
+        wait_connected(link)
+        now = link._last_rx + 0.1
+        assert link._timer_cb(now) == now + TurtleLink.RETRY_TIME
+        assert link.fd is None
+        assert reactor.callbacks == []
+        assert unit.logger.messages == [
+            ("warning", f"Turtle_1: closed {url}: cannot connect: Connection refused")]
+        assert unit.link_down == [("cannot connect: Connection refused", False)]
 
 
 class TestTurtleLinkRetryTime:
@@ -639,6 +792,72 @@ class TestTurtleLinkOpen:
         assert link.fd is None
 
 
+class TestTurtleLinkOpenTcp:
+    def test_starts_connect_without_handshake(self, tcp):
+        link, _, reactor, url, _ = tcp
+        assert link.open(url) is True
+        assert link.connecting is True
+        assert link.fd == link.sock.fileno()
+        assert link.sock.getblocking() is False
+        assert link.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+        assert link.port == url
+        assert link._last_rx == 100.0
+        assert link.fd in reactor.fds
+        assert reactor.callbacks == []
+
+    def test_talks_to_the_board(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        assert link.open(url)
+        board = accept()
+        wait_connected(link)
+        assert link._connect_pending(101.0) is False
+        reactor.run_callbacks()
+        assert link.connected is True
+        assert board.received[0]["cmd"] == "info"
+        assert unit.link_up == [link.info]
+
+    def test_connect_error_warns_once(self, tcp):
+        link, unit, _, url, _ = tcp
+        with patch.object(mod.socket.socket, "connect_ex", return_value=errno.ENETUNREACH):
+            assert link.open(url) is False
+            assert link.open(url) is False
+        msg = f"Turtle_1: cannot connect to {url}: Network is unreachable"
+        assert unit.logger.messages == [("warning", msg)]
+        assert link.last_error == msg
+        assert link.fd is None and link.sock is None
+        assert link.connecting is False
+
+    def test_ipv6_address(self, tcp):
+        link, _, reactor, _, _ = tcp
+        sock = MagicMock()
+        sock.connect_ex.return_value = errno.EINPROGRESS
+        sock.fileno.return_value = 99
+        with patch.object(mod.socket, "socket", return_value=sock) as make:
+            assert link.open("tcp://[fe80::1]:4002") is True
+        make.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.connect_ex.assert_called_once_with(("fe80::1", 4002))
+        assert link.fd == 99 and 99 in reactor.fds
+
+    def test_no_socket(self, tcp):
+        link, unit, _, url, _ = tcp
+        with patch.object(mod.socket, "socket", side_effect=OSError("no sockets")):
+            assert link.open(url) is False
+        assert unit.logger.messages == [("warning", f"Turtle_1: cannot open {url}: no sockets")]
+        assert link.fd is None
+
+
+class TestTurtleLinkConnectPending:
+    def test_read_while_connecting_finishes_the_connect(self, tcp):
+        link, unit, _, _, _ = tcp
+        url = refused_url()
+        assert link.open(url)
+        assert select.select([link.fd], [], [], 1.0)[0]
+        link._read_cb(101.0)
+        assert link.fd is None
+        assert unit.logger.messages == [
+            ("warning", f"Turtle_1: closed {url}: cannot connect: Connection refused")]
+
+
 class TestTurtleLinkHandshake:
     def test_connects(self, pty):
         link, board, unit, reactor, path = pty
@@ -676,6 +895,186 @@ class TestTurtleLinkHandshake:
         reactor.run_callbacks()
         assert link.connected is False
         assert unit.link_down == [("settings were refused", True)]
+
+
+class TestTurtleLinkHubAuth:
+    BOOT = "hold the hub's BOOT button for 10 s to clear it"
+
+    def test_answers_the_challenge(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.saved_key = HUB_KEY
+        board = tcp_handshake(link, reactor, url, accept, key=HUB_KEY)
+        assert link.connected is True
+        # Byte for byte what the hub's firmware reads (no spaces).
+        assert board.raw[0] == f'{{"cmd":"auth","mac":"{HUB_MAC}"}}'.encode()
+        assert board.received[1]["cmd"] == "info"
+        assert unit.key_calls == [False]
+        assert unit.logger.messages == []
+        assert unit.link_up == [link.info]
+
+    def test_tcp_key_answers_the_challenge(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.tcp_key = HUB_KEY
+        board = tcp_handshake(link, reactor, url, accept, key=HUB_KEY)
+        assert link.connected is True
+        assert board.received[0] == {"cmd": "auth", "mac": HUB_MAC}
+        assert unit.logger.messages == []
+
+    def test_claims_an_open_hub(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        board = tcp_handshake(link, reactor, url, accept)
+        assert link.connected is True
+        # The hub's firmware takes a claim only in exactly this form.
+        assert board.raw[0] == b'{"cmd":"linkkey","key":"' + b"ab" * 16 + b'"}'
+        assert board.received[1]["cmd"] == "info"
+        assert board.hub_key == "ab" * 16
+        assert unit.key_calls == [True]
+        assert unit.logger.messages == [
+            ("info", f"Turtle_1: link key stored on the hub at {url}")]
+
+    def test_open_hub_with_no_key_to_give(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.new_key = None
+        board = tcp_handshake(link, reactor, url, accept)
+        board.drain()
+        assert link.fd is None
+        assert board.received == []
+        assert unit.link_down == [("no link key to give the hub", False)]
+        assert unit.logger.messages == [
+            ("warning", f"Turtle_1: closed {url}: no link key to give the hub")]
+
+    def test_keyed_hub_this_printer_has_no_key_for(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        board = tcp_handshake(link, reactor, url, accept, key=HUB_KEY)
+        board.drain()
+        reason = f"the hub holds a link key this printer doesn't have; {self.BOOT}"
+        assert link.fd is None
+        assert board.received == []
+        assert unit.key_calls == [False]
+        assert unit.link_down == [(reason, False)]
+        assert unit.logger.messages == [("warning", f"Turtle_1: closed {url}: {reason}")]
+
+    def test_wrong_key_refused(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.saved_key = "not-the-hubs-key"
+        board = tcp_handshake(link, reactor, url, accept, key=HUB_KEY)
+        board.drain()
+        reason = f"the hub refused the link key; {self.BOOT}"
+        assert link.fd is None
+        assert [m["cmd"] for m in board.received] == ["auth"]
+        assert unit.link_down == [(reason, False)]
+        assert unit.logger.messages == [("warning", f"Turtle_1: closed {url}: {reason}")]
+
+    def test_no_answer_to_the_key(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.saved_key = HUB_KEY
+        assert link.open(url)
+        board = make_hub(accept(), HUB_KEY)
+        board.handler = lambda msg: []
+        wait_connected(link)
+        link._connect_pending(101.0)
+        start = reactor.now
+        reactor.run_callbacks()
+        assert reactor.now >= start + TurtleLink.AUTH_REPLY_TIME
+        assert link.fd is None
+        assert unit.logger.messages == [
+            ("warning", f"Turtle_1: closed {url}: no answer from the hub to the link key")]
+
+    def test_bad_challenge(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.saved_key = HUB_KEY
+        assert link.open(url)
+        accept().write({"evt": "auth", "nonce": "zz"})
+        wait_connected(link)
+        link._connect_pending(101.0)
+        reactor.run_callbacks()
+        assert link.fd is None
+        assert unit.logger.messages == [
+            ("warning", f"Turtle_1: closed {url}: the hub sent a bad challenge")]
+
+    def test_unknown_greeting(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        assert link.open(url)
+        accept().write({"evt": "auth", "open": 0})
+        wait_connected(link)
+        link._connect_pending(101.0)
+        reactor.run_callbacks()
+        reason = "the hub sent an unknown greeting {'evt': 'auth', 'open': 0}"
+        assert link.fd is None
+        assert unit.key_calls == []
+        assert unit.logger.messages == [("warning", f"Turtle_1: closed {url}: {reason}")]
+
+    def test_no_greeting(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        start = reactor.now
+        board = tcp_handshake(link, reactor, url, accept, hub=False)
+        assert reactor.now >= start + TurtleLink.GREETING_TIME
+        assert link.connected is True
+        assert board.received[0]["cmd"] == "info"
+        assert unit.key_calls == []
+        assert unit.logger.messages == []
+
+    def test_no_greeting_with_tcp_key_warns_once(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.tcp_key = HUB_KEY
+        tcp_handshake(link, reactor, url, accept, hub=False)
+        assert link.connected is True
+        link._hub_auth()
+        msg = f"Turtle_1: {url} asked for no link key, so tcp_key is not used"
+        assert unit.logger.messages == [("warning", msg)]
+        assert unit.key_calls == []
+
+    def test_hangs_up_before_the_greeting(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        assert link.open(url)
+        board = accept()
+        board.sock.shutdown(socket.SHUT_RDWR)
+        wait_connected(link)
+        link._connect_pending(101.0)
+        reactor.run_callbacks()
+        assert link.fd is None
+        assert unit.key_calls == []
+        assert unit.link_down == [("port closed", False)]
+
+    def test_hangs_up_after_the_answer(self, tcp):
+        link, unit, reactor, url, accept = tcp
+        unit.saved_key = HUB_KEY
+        assert link.open(url)
+        board = make_hub(accept(), HUB_KEY)
+        board.handler = lambda msg: board.sock.shutdown(socket.SHUT_RDWR)
+        wait_connected(link)
+        link._connect_pending(101.0)
+        reactor.run_callbacks()
+        assert link.fd is None
+        assert [m["cmd"] for m in board.received] == ["auth"]
+        assert unit.link_down == [("port closed", False)]
+
+    def test_serial_port_has_no_hub(self, pty):
+        link, board, unit, reactor, path = pty
+        connect(link, reactor, path)
+        assert board.received[0]["cmd"] == "info"
+        assert unit.key_calls == []
+
+    def test_auth_line_already_read(self, pty):
+        link, _, _, reactor, path = pty
+        assert link.open(path)
+        link._handle_line(b'{"evt":"auth","ok":1}', 1.0)
+        start = reactor.now
+        assert link._auth_line(1.0) == {"evt": "auth", "ok": 1}
+        assert reactor.now == start
+        assert link._auth_wait is None
+
+    def test_auth_line_on_a_closed_link(self, pty):
+        link, _, _, reactor, _ = pty
+        start = reactor.now
+        assert link._auth_line(1.0) is None
+        assert reactor.now == start
+
+    def test_open_drops_old_auth_lines(self, pty):
+        link, _, _, _, path = pty
+        link._auth_lines = [{"evt": "auth", "ok": 1}]
+        assert link.open(path)
+        assert link._auth_lines == []
 
 
 class TestTurtleLinkClose:
@@ -729,6 +1128,15 @@ class TestTurtleLinkClose:
         assert fd in reactor.fds
         assert link.fd is None
 
+    def test_closes_the_socket(self, tcp):
+        link, _, reactor, url, _ = tcp
+        assert link.open(url)
+        sock = link.sock
+        link.close("x", notify=False)
+        assert sock.fileno() == -1
+        assert link.sock is None and link.fd is None
+        assert link.connecting is False
+        assert reactor.fds == {}
 
     def test_os_close_error_ignored(self, pty):
         link, _, _, _, path = pty
@@ -738,6 +1146,13 @@ class TestTurtleLinkClose:
             link.close("x", notify=False)
         os.close(fd)
         assert link.fd is None
+
+    def test_ends_a_wait_for_the_hub(self, pty):
+        link, _, _, reactor, path = pty
+        assert link.open(path)
+        link._auth_wait = waiting = reactor.completion()
+        link.close("x", notify=False)
+        assert waiting.done is True and waiting.result is None
 
 
 class TestTurtleLinkReadCb:
@@ -821,6 +1236,16 @@ class TestTurtleLinkHandleLine:
         assert link._waiters == [(link._waiters[0][0], miss)]
         assert unit.events == [{"ev": "move_done", "lane": 2}]
 
+    def test_hub_auth_line(self, pty):
+        link, _, unit, reactor, path = pty
+        assert link.open(path)
+        waiter = link.expect(lambda m: True)
+        link._auth_wait = waiting = reactor.completion()
+        link._handle_line(b'{"evt":"auth","ok":1}', 1.0)
+        assert waiting.result == {"evt": "auth", "ok": 1}
+        assert link._auth_lines == [{"evt": "auth", "ok": 1}]
+        assert waiter.done is False
+        assert unit.events == []
 
     def test_reply_by_id(self, pty):
         link, *_ = pty
@@ -1291,10 +1716,102 @@ class TestInit:
             make_unit({"rgb3_color_order": "BGR"})
         assert str(e.value) == "rgb3_color_order BGR is not one of GRB, GRBW, RGB, RGBW"
 
+    def test_tcp_port(self):
+        unit = make_unit({"serial_port": "tcp://192.168.1.50:4001"}, fake_link=False)
+        assert unit.serial_port == "tcp://192.168.1.50:4001"
+        assert unit.link.port_cfg == "tcp://192.168.1.50:4001"
+
+    def test_bad_tcp_port(self):
+        with pytest.raises(mod.error) as e:
+            make_unit({"serial_port": "tcp://hub.local:4001"})
+        assert str(e.value) == "serial_port tcp://hub.local:4001 is not tcp://<ip address>[:<port>]"
+
+    def test_tcp_without_port(self):
+        unit = make_unit({"serial_port": "tcp://192.168.1.50"}, fake_link=False)
+        assert unit.link.port_cfg == "tcp://192.168.1.50"
+        assert unit.tcp_key is None
+
+    def test_tcp_key(self):
+        unit = make_unit({"tcp_key": HUB_KEY})
+        assert unit.tcp_key == HUB_KEY
+
+    @pytest.mark.parametrize("key", ["has space", "x" * 65, 'q"uote'])
+    def test_bad_tcp_key(self, key):
+        with pytest.raises(mod.error) as e:
+            make_unit({"tcp_key": key})
+        assert str(e.value) == ("tcp_key must be 1 to 64 characters with no spaces, "
+                                "quotes or backslashes")
 
     def test_sensitivity_sets_fault_distance(self):
         unit = make_unit({"filament_error_sensitivity": 8})
         assert unit.assist_fault_mm == 30.0
+
+
+class TestLinkKey:
+    @pytest.fixture
+    def unit(self, tmp_path):
+        unit = make_unit()
+        unit.afc.VarFile = str(tmp_path / "AFC.var")
+        return unit
+
+    def saved(self, unit):
+        with open(unit.link_key_file()) as f:
+            return json.load(f)
+
+    def test_file_next_to_var_file(self, unit, tmp_path):
+        assert unit.link_key_file() == str(tmp_path / "AFC.var.hub")
+
+    def test_file_expands_home(self, unit):
+        unit.afc.VarFile = "~/printer_data/config/AFC/AFC.var"
+        assert unit.link_key_file() == os.path.expanduser(
+            "~/printer_data/config/AFC/AFC.var.hub")
+
+    def test_tcp_key_wins(self, unit):
+        unit.tcp_key = HUB_KEY
+        assert unit.link_key(make=True) == HUB_KEY
+        assert not os.path.exists(unit.link_key_file())
+
+    def test_none_saved(self, unit):
+        assert unit.link_key(make=False) is None
+        assert not os.path.exists(unit.link_key_file())
+
+    def test_makes_and_saves(self, unit):
+        with open(unit.link_key_file(), "w") as f:
+            json.dump({"Turtle_2": "other"}, f)
+        with patch.object(hub_link.secrets, "token_hex", return_value=HUB_KEY) as token:
+            assert unit.link_key(make=True) == HUB_KEY
+        token.assert_called_once_with(16)
+        assert self.saved(unit) == {"Turtle_2": "other", "Turtle_1": HUB_KEY}
+        assert not os.path.exists(f"{unit.link_key_file()}.tmp")
+        assert unit.link_key(make=False) == HUB_KEY
+
+    def test_made_key_is_one_the_hub_takes(self, unit):
+        key = unit.link_key(make=True)
+        assert check_link_key(key) and len(key) == 32
+
+    def test_reads_the_saved_key(self, unit):
+        with open(unit.link_key_file(), "w") as f:
+            json.dump({"Turtle_1": HUB_KEY}, f)
+        with patch.object(hub_link.secrets, "token_hex") as token:
+            assert unit.link_key(make=True) == HUB_KEY
+        token.assert_not_called()
+
+    @pytest.mark.parametrize("text", ["not json", "[1, 2]", '{"Turtle_1": 5}',
+                                      '{"Turtle_1": "has space"}'])
+    def test_unusable_file_makes_a_new_key(self, unit, text):
+        with open(unit.link_key_file(), "w") as f:
+            f.write(text)
+        with patch.object(hub_link.secrets, "token_hex", return_value=HUB_KEY):
+            assert unit.link_key(make=True) == HUB_KEY
+        assert self.saved(unit)["Turtle_1"] == HUB_KEY
+
+    def test_cannot_save(self, unit, tmp_path):
+        unit.afc.VarFile = str(tmp_path / "missing" / "AFC.var")
+        path = unit.link_key_file()
+        assert unit.link_key(make=True) is None
+        assert unit.logger.messages[-1] == (
+            "warning", f"Turtle_1: cannot save the hub's link key in {path}: "
+                       f"[Errno 2] No such file or directory: '{path}.tmp'")
 
 
 class TestReadLaneSettings:
