@@ -1114,80 +1114,17 @@ def hold_bridge(moon, unit: str, seconds: int) -> bool:
     return moon.gcode(f"AFC_BAMBU_FIRMWARE UNIT={unit} HOLD={seconds}")
 
 
-def relaunch_detached(pass_file: str) -> tuple:
+def relaunch_detached() -> None:
     """
-    Re-run this script in its OWN transient systemd unit, so the update outlives the shell command
-    that started it (Klipper ends that after its timeout) and a Klipper restart: a child of the
-    klipper service is killed with it, which mid-flash would strand a half-written AMS.
+    Re-run this script in its own session, so the update outlives the shell command that started
+    it (Klipper ends that after its timeout). A Klipper service restart still stops it; the unit
+    then waits in its loader and running the update again finishes it.
     """
     import subprocess
     args = [x for x in sys.argv[1:] if x != "--detached"] + ["--detached"]
-
-    # 0) systemd not running (a Snapmaker U1 ships systemd-run but boots BusyBox init).
-    if not os.path.isdir("/run/systemd/system"):
-        subprocess.Popen([sys.executable or "python3", os.path.abspath(__file__)]
-                         + args, start_new_session=True, close_fds=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-        return 0, "detached in its own session (no systemd)\n"
-
-    unit = ["systemd-run", "--collect", "/usr/bin/python3",
-            os.path.abspath(__file__)] + args
-
-    # 1) user manager -- needs XDG_RUNTIME_DIR pointing at the user's runtime dir (not always set in
-    # the gcode_shell_command environment).
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
-    if _lingering():
-        r1 = subprocess.run(["systemd-run", "--user", "--collect",
-                             "/usr/bin/python3", os.path.abspath(__file__)]
-                            + args, capture_output=True, env=env)
-        if r1.returncode == 0:
-            return 0, "detached via systemd-run --user\n" + \
-                      (r1.stdout + r1.stderr).decode("utf-8", "replace")
-    else:
-        r1 = subprocess.CompletedProcess(
-            [], 1, b"", b"lingering is off for this user (enable it once with: "
-            b"sudo loginctl enable-linger $USER)")
-
-    # 2) passwordless sudo grant, if present.
-    r2 = subprocess.run(["sudo", "-n"] + unit, capture_output=True)
-    if r2.returncode == 0:
-        return 0, "detached via sudo -n\n" + \
-                  (r2.stdout + r2.stderr).decode("utf-8", "replace")
-
-    # 3) password file (used once, then deleted so the secret never lingers in the Moonraker-served
-    # config dir).
-    pf = os.path.expanduser(pass_file)
-    if not os.path.exists(pf):
-        u1 = (r1.stderr or r1.stdout).decode("utf-8", "replace").strip()
-        u2 = (r2.stderr or r2.stdout).decode("utf-8", "replace").strip()
-        return 2, ("could not detach without root:\n"
-                   f"  systemd-run --user failed: {u1}\n"
-                   f"  sudo -n systemd-run failed: {u2}\n"
-                   f"  last resort -- create a sudo password file (chmod 600):\n"
-                   f"    printf '%s' 'YOURPASSWORD' > {pf}")
-    pw = open(pf).read().rstrip("\n") + "\n"
-    r3 = subprocess.run(["sudo", "-S", "-p", ""] + unit,
-                        input=pw.encode(), capture_output=True)
-    try:
-        os.remove(pf)
-    except Exception:
-        pass
-    return r3.returncode, (r3.stdout + r3.stderr).decode("utf-8", "replace")
-
-
-def _lingering() -> bool:
-    """
-    Whether this user's systemd manager outlives login sessions.
-    """
-    import subprocess
-    try:
-        r = subprocess.run(["loginctl", "show-user", str(os.getuid()),
-                            "-p", "Linger"], capture_output=True, timeout=5)
-    except Exception:
-        return False
-    return r.stdout.decode("utf-8", "replace").strip().lower() == "linger=yes"
+    subprocess.Popen([sys.executable or "python3", os.path.abspath(__file__)] + args,
+                     start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # Config auto-detection (self-locating from this file's directory)
@@ -1591,12 +1528,13 @@ def update(a, here: str, moon, result: dict) -> int:
         result.update(running=True, message=f"Updating {unit}. The units on its bridge read "
                                              f"offline until it is done.")
         write_result(here, **result)
-        rc, out = relaunch_detached(a.sudo_pass_file)
-        if rc != 0:
+        try:
+            relaunch_detached()
+        except OSError as e:
             result["running"] = False
-            raise Abort("could not start the update on its own:\n" + out)
+            raise Abort(f"could not start the update on its own: {e}")
         print("launched detached; progress in logs/ams_flash.log")
-        return rc
+        return 0
 
     # One update at a time.
     import fcntl
@@ -1773,9 +1711,6 @@ def main() -> int:
     ap.add_argument("--target", default=None,
                     help="bridge tcp://host:port or USB serial path (default: the unit's own)")
     ap.add_argument("--key", default=None, help="link key (default: tcp_key from config)")
-    ap.add_argument("--sudo-pass-file", default=os.path.join(here, "ams_sudo.pw"),
-                    help="file holding the sudo password, used once to relaunch detached "
-                    "and then DELETED automatically (default: ams_sudo.pw beside this file)")
     ap.add_argument("--detached", action="store_true",
                     help=argparse.SUPPRESS)   # internal: set on the relaunched copy
     a = ap.parse_args()
