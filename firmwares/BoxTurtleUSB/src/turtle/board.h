@@ -11,7 +11,7 @@
 #define TGPIO(PORT, NUM) (((PORT)-'A') * 16 + (NUM))
 
 #define FW_NAME "AFC-Turtle"
-#define FW_VERSION "0.1.0"
+#define FW_VERSION "0.1.1"
 #define FW_PROTO "boxturtle-1"
 
 #define NUM_LANES 4

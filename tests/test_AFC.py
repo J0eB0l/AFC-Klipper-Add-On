@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from extras.AFC import afc, State, AFC_VERSION
-from extras.AFC_lane import AFCLaneState, AFCMoveWarning
+from extras.AFC_lane import AFCLaneState, AFCMoveWarning, MoveDirection
 from gcode import CommandError
 from klippy import Printer
 
@@ -4235,6 +4235,8 @@ class TestCmdHubLoadMoveLimit:
         lane.hub_obj.state = False
         lane.hub_obj.move_dis = 65.0
         lane.hub_obj.hub_clear_move_dis = 35.0
+        lane.move_to.return_value = (True, 65.0, AFCMoveWarning.NONE)
+        lane.unit_obj.move_to_hub.return_value = (True, 65.0, AFCMoveWarning.NONE)
         obj.lanes = {"lane1": lane}
         gcmd = MagicMock()
         gcmd.get.return_value = "lane1"
@@ -4271,6 +4273,7 @@ class TestCmdHubLoadMoveLimit:
 
         def reach_hub(*args, **kwargs):
             lane.hub_obj.state = lane.unit_obj.move_to_hub.call_count >= 3
+            return True, 65.0, AFCMoveWarning.NONE
 
         lane.unit_obj.move_to_hub.side_effect = reach_hub
 
@@ -4280,6 +4283,49 @@ class TestCmdHubLoadMoveLimit:
         obj.error.AFC_error.assert_not_called()
         assert lane.loaded_to_hub is True
         obj.save_vars.assert_called_once_with()
+
+    def test_a_load_move_error_stops(self):
+        obj, lane, gcmd = self._make(load_state=False)
+        lane.move_to.return_value = (False, 10.0, AFCMoveWarning.ERROR)
+
+        obj.cmd_HUB_LOAD(gcmd)
+
+        assert lane.move_to.call_count == 1
+        lane.unit_obj.move_to_hub.assert_not_called()
+        assert lane.status == AFCLaneState.NONE
+        lane.do_enable.assert_called_once_with(False)
+        assert obj.error.AFC_error.call_args_list == [
+            call(self.MESSAGE.format("load"), pause=False, gcmd=gcmd)]
+        obj.save_vars.assert_not_called()
+
+    def test_a_hub_move_error_stops(self):
+        obj, lane, gcmd = self._make(load_state=True)
+        lane.unit_obj.move_to_hub.return_value = (False, 10.0, AFCMoveWarning.ERROR)
+
+        obj.cmd_HUB_LOAD(gcmd)
+
+        assert lane.unit_obj.move_to_hub.call_count == 1
+        assert lane.status == AFCLaneState.NONE
+        lane.do_enable.assert_called_once_with(False)
+        assert obj.error.AFC_error.call_args_list == [
+            call(self.MESSAGE.format("hub"), pause=False, gcmd=gcmd)]
+        obj.save_vars.assert_not_called()
+
+    def test_a_first_hub_move_error_stops(self):
+        obj, lane, gcmd = self._make(load_state=True)
+        lane.loaded_to_hub = False
+        lane.dist_hub = 800.0
+        lane.unit_obj.move_to_hub.return_value = (False, 10.0, AFCMoveWarning.ERROR)
+
+        obj.cmd_HUB_LOAD(gcmd)
+
+        assert lane.unit_obj.move_to_hub.call_args_list == [
+            call(lane, 865.0, MoveDirection.POS, True, gcmd=gcmd)]
+        assert lane.status == AFCLaneState.NONE
+        lane.do_enable.assert_called_once_with(False)
+        assert obj.error.AFC_error.call_args_list == [
+            call(self.MESSAGE.format("hub"), pause=False, gcmd=gcmd)]
+        obj.save_vars.assert_not_called()
 
 
 class TestLoadSequenceDefaultPathSuccess:

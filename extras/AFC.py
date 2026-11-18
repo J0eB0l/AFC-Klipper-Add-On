@@ -1540,17 +1540,23 @@ class afc:
                 if load_attempts > self.HUB_LOAD_MAX_MOVES:
                     self._hub_load_failed(cur_lane, "load", gcmd)
                     return
-                cur_lane.move_to(cur_hub.move_dis, SpeedMode.SHORT,
-                                 endstop=cur_lane.load_es,
-                                 assist_active=AssistActive.DYNAMIC,
-                                 use_homing=self.homing_enabled, gcmd=gcmd)
+                _, _, warn = cur_lane.move_to(cur_hub.move_dis, SpeedMode.SHORT,
+                                              endstop=cur_lane.load_es,
+                                              assist_active=AssistActive.DYNAMIC,
+                                              use_homing=self.homing_enabled, gcmd=gcmd)
+                if warn == AFCMoveWarning.ERROR:
+                    self._hub_load_failed(cur_lane, "load", gcmd)
+                    return
 
         if not cur_lane.loaded_to_hub:
             dist_to_hub = cur_lane.dist_hub
             if self.homing_enabled:
                 dist_to_hub = cur_lane.dist_hub + cur_hub.move_dis
-            cur_lane.unit_obj.move_to_hub(cur_lane, dist_to_hub, MoveDirection.POS,
-                                          self.homing_enabled, gcmd=gcmd)
+            _, _, warn = cur_lane.unit_obj.move_to_hub(cur_lane, dist_to_hub, MoveDirection.POS,
+                                                       self.homing_enabled, gcmd=gcmd)
+            if warn == AFCMoveWarning.ERROR:
+                self._hub_load_failed(cur_lane, "hub", gcmd)
+                return
 
         hub_attempts = 0
         while not cur_hub.state:
@@ -1558,8 +1564,12 @@ class afc:
             if hub_attempts > self.HUB_LOAD_MAX_MOVES:
                 self._hub_load_failed(cur_lane, "hub", gcmd)
                 return
-            cur_lane.unit_obj.move_to_hub(cur_lane, cur_hub.move_dis, MoveDirection.POS,
-                                          self.homing_enabled, gcmd=gcmd)
+            _, _, warn = cur_lane.unit_obj.move_to_hub(cur_lane, cur_hub.move_dis,
+                                                       MoveDirection.POS,
+                                                       self.homing_enabled, gcmd=gcmd)
+            if warn == AFCMoveWarning.ERROR:
+                self._hub_load_failed(cur_lane, "hub", gcmd)
+                return
 
         cur_lane.move_to(cur_hub.hub_clear_move_dis*MoveDirection.NEG, SpeedMode.HUB,
                          assist_active=AssistActive.YES, use_homing=False, gcmd=gcmd)

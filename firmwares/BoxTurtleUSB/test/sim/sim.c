@@ -1,10 +1,11 @@
 // Host-side simulator for the BoxTurtle firmware.
 //
 // Builds the real firmware sources (json, link, events, sensors, proto,
-// motion, cmds, spool, jobs) against stand-ins for Klipper's scheduler and
-// GPIO, and a simple physical model of a BoxTurtle: four lanes, prep and
-// load switches, a hub, a bowden, a TurtleNeck in front of the extruder.
-// Scenarios send JSON lines like AFC would and check the replies/events.
+// motion, tmc, cmds, spool, jobs) against stand-ins for Klipper's scheduler
+// and GPIO, four TMC2209s on their UART pins, and a simple physical model
+// of a BoxTurtle: four lanes, prep and load switches, a hub, a bowden, a
+// TurtleNeck in front of the extruder. Scenarios send JSON lines like AFC
+// would and check the replies/events.
 //
 //   make -C test/sim && ./test/sim/sim
 //
@@ -21,6 +22,7 @@
 #include "sched.h"
 #include "board.h"
 #include "link.h"
+#include "spool.h"
 
 /****************************************************************
  * Clock and timers
@@ -29,8 +31,12 @@
 static uint64_t now; // ticks at 400 MHz
 #define MS (400000ull)
 
-// Each read moves the clock a little, so firmware busy-waits end.
-uint32_t timer_read_time(void) { now += 4; return (uint32_t)now; }
+// Each read moves the clock the firmware sees a little, so its busy-waits
+// end, without moving the simulation's own time: the driver UART spins
+// through milliseconds of reads inside one task call. run_ms clears it.
+static uint64_t read_skew;
+static uint64_t sim_time(void) { return now + read_skew; }
+uint32_t timer_read_time(void) { read_skew += 400; return (uint32_t)sim_time(); }
 
 #define MAX_TIMERS 16
 static struct timer *timers[MAX_TIMERS];
@@ -76,23 +82,141 @@ struct sim_guard_mem sim_guard;
 void try_request_canboot(void) {}
 
 /****************************************************************
- * TMC stand-in (always healthy)
+ * TMC2209 stand-ins
  ****************************************************************/
 
+// The real tmc.c talks to these over its bit-banged UART pins: each
+// gpio_out_write on a UART pin is one bit, gpio_in_setup on it ends a
+// datagram, and gpio_in_read plays a read's reply back by the clock.
 #include "tmc.h"
 #include "guard.h"
-static struct tmc_cfg tcfg[NUM_LANES];
-int tmc_write(int lane, uint8_t reg, uint32_t val) { return 0; }
-int tmc_read(int lane, uint8_t reg, uint32_t *val) { *val = 0; return 0; }
-int tmc_wtest(int lane, int flags, int gap, int n, uint8_t reg, uint32_t val, uint32_t *b,
-              uint32_t *a) { *b = *a = 0; return 0; }
-int tmc_setup(int lane, const struct tmc_cfg *c) { tcfg[lane] = *c; return 0; }
-void tmc_default_cfg(struct tmc_cfg *c) { memset(c, 0, sizeof(*c)); }
-int tmc_health(int lane) { return TMC_OK; }
-const char *tmc_health_name(int code) { return code ? "tmc_bad" : "ok"; }
-void tmc_init(void) {}
-void tmc_reconfigure(int lane, const struct tmc_cfg *c) { tcfg[lane] = *c; }
-const struct tmc_cfg *tmc_get_cfg(int lane) { return &tcfg[lane]; }
+#include "motion.h"
+#define TMC_BIT (400000000 / 40000)   // ticks per bit at 40 kbaud
+struct ftmc {
+    uint32_t reg[128];
+    uint8_t ifcnt;
+    uint8_t bits[200];
+    int nbits;
+    uint8_t reply[8];
+    uint64_t reply_at;
+    int replying;
+    uint32_t drv_fault;   // DRV_STATUS fault bits to report
+    int unplugged;        // no motor: both open load flags while enabled
+    int flicker;          // both open load flags on this many reads
+    int reads;
+};
+static struct ftmc ft[NUM_LANES];
+static int uart_pin_lane[256];
+static int pin_level[256];      // output pins
+
+static uint8_t
+tmc_crc(const uint8_t *d, int n)
+{
+    uint8_t crc = 0;
+    int i, j;
+    for (i = 0; i < n; i++) {
+        uint8_t b = d[i];
+        for (j = 0; j < 8; j++) {
+            crc = ((crc >> 7) ^ (b & 1)) ? (crc << 1) ^ 0x07 : crc << 1;
+            b >>= 1;
+        }
+    }
+    return crc;
+}
+
+// A healthy motor: both open load flags above 40 mm/s (back-EMF keeps the
+// coils under their current, as a real one may), one coil every other read
+// otherwise (a coil at a zero crossing). No motor: both while enabled.
+static uint32_t
+ftmc_drv_status(int lane)
+{
+    struct ftmc *f = &ft[lane];
+    uint32_t v = f->drv_fault;
+    int enabled = !pin_level[LANE_PINS[lane].en];
+    int32_t speed = motion_get_velocity(lane);
+    f->reads++;
+    if (f->flicker > 0) {
+        f->flicker--;
+        v |= 3 << 6;
+    } else if (f->unplugged && enabled) {
+        v |= 3 << 6;
+    } else if (speed > 40000 || speed < -40000) {
+        v |= 3 << 6;
+    } else if (enabled && (f->reads & 1)) {
+        v |= 1 << 6;
+    }
+    return v;
+}
+
+static void
+ftmc_datagram(int lane)
+{
+    struct ftmc *f = &ft[lane];
+    uint8_t d[20];
+    int n = 0, i = 0;
+    while (i + 9 < f->nbits && n < (int)sizeof(d)) {
+        if (f->bits[i]) {
+            i++;                      // idle or stop bit
+            continue;
+        }
+        uint8_t v = 0;
+        int b;
+        for (b = 0; b < 8; b++)
+            v |= f->bits[i + 1 + b] << b;
+        d[n++] = v;
+        i += 10;
+    }
+    f->nbits = 0;
+    if (n < 4 || (d[0] & 0x0f) != 0x05 || d[1] != 0)
+        return;
+    if (n == 8 && (d[2] & 0x80) && tmc_crc(d, 7) == d[7]) {
+        uint8_t reg = d[2] & 0x7f;
+        uint32_t val = (d[3] << 24) | (d[4] << 16) | (d[5] << 8) | d[6];
+        if (reg == TMC_GSTAT)
+            f->reg[reg] &= ~val;      // write 1 to clear
+        else
+            f->reg[reg] = val;
+        f->ifcnt++;
+    } else if (n == 4 && tmc_crc(d, 3) == d[3]) {
+        uint8_t reg = d[2] & 0x7f;
+        uint32_t val = reg == TMC_IFCNT ? f->ifcnt
+            : reg == TMC_DRV_STATUS ? ftmc_drv_status(lane) : f->reg[reg];
+        uint8_t r[8] = {0x05, 0xff, reg, val >> 24, val >> 16, val >> 8, val, 0};
+        r[7] = tmc_crc(r, 7);
+        memcpy(f->reply, r, 8);
+        f->reply_at = sim_time() + 8 * TMC_BIT;  // SENDDELAY
+        f->replying = 1;
+    }
+}
+
+static int
+ftmc_read_pin(int lane)
+{
+    struct ftmc *f = &ft[lane];
+    if (!f->replying || sim_time() < f->reply_at)
+        return 1;
+    uint64_t k = (sim_time() - f->reply_at) / TMC_BIT;
+    if (k >= 80) {
+        f->replying = 0;
+        return 1;
+    }
+    int bit = k % 10;
+    if (bit == 0)
+        return 0;                     // start bit
+    if (bit == 9)
+        return 1;                     // stop bit
+    return (f->reply[k / 10] >> (bit - 1)) & 1;
+}
+
+static void
+ftmc_reset(void)
+{
+    int i;
+    for (i = 0; i < NUM_LANES; i++) {
+        memset(&ft[i], 0, sizeof(ft[i]));
+        ft[i].reg[TMC_GSTAT] = 1;     // reset flag after power up
+    }
+}
 
 // LED stand-ins (the real leds.c busy-waits on the clock).
 int leds_config(int strip, int count, const char *order) { return 1; }
@@ -128,7 +252,6 @@ static double slip_mm;          // drive pushed into a full TurtleNeck (grinding
 static double buf_max;          // most the TurtleNeck was compressed
 static double buf_hand = -1;    // TurtleNeck held by hand here, -1 = free
 static double feed_scale = 1.0; // real feed per commanded mm (calibration error)
-static int pin_level[256];      // output pins
 static int step_pin_lane[256];
 static int pwm_val[256];
 
@@ -143,7 +266,7 @@ model_step(int lane, int dir)
 {
     struct mlane *m = &ml[lane];
     m->steps += dir;
-    if (!m->present)
+    if (!m->present || ft[lane].unplugged)
         return;
     double d = dir / STEPS_PER_MM * feed_scale;
     if (d > 0 && m->snag_at && m->snag_holds && m->tip < m->snag_at
@@ -245,6 +368,10 @@ struct gpio_out
 gpio_out_setup(uint32_t pin, uint32_t val)
 {
     pin_level[pin] = val;
+    if (uart_pin_lane[pin] >= 0) {
+        ft[uart_pin_lane[pin]].nbits = 0;   // a datagram starts
+        ft[uart_pin_lane[pin]].replying = 0;
+    }
     return (struct gpio_out){pin};
 }
 
@@ -252,6 +379,9 @@ void
 gpio_out_write(struct gpio_out g, uint32_t val)
 {
     pin_level[g.pin] = !!val;
+    int lane = uart_pin_lane[g.pin];
+    if (lane >= 0 && ft[lane].nbits < (int)sizeof(ft[lane].bits))
+        ft[lane].bits[ft[lane].nbits++] = !!val;
 }
 
 void
@@ -274,12 +404,16 @@ gpio_out_toggle_noirq(struct gpio_out g)
 struct gpio_in
 gpio_in_setup(uint32_t pin, int32_t pull_up)
 {
+    if (uart_pin_lane[pin] >= 0 && ft[uart_pin_lane[pin]].nbits)
+        ftmc_datagram(uart_pin_lane[pin]);  // the line is let go
     return (struct gpio_in){pin};
 }
 
 uint8_t
 gpio_in_read(struct gpio_in g)
 {
+    if (uart_pin_lane[g.pin] >= 0)
+        return ftmc_read_pin(uart_pin_lane[g.pin]);
     int sw;
     for (sw = 0; sw < SW_COUNT; sw++) {
         int pin;
@@ -323,6 +457,7 @@ void sensors_task(void);
 void cmds_task(void);
 void spool_task(void);
 void jobs_task(void);
+void tmc_task(void);
 
 static char out_log[1 << 20];
 static int out_len;
@@ -351,6 +486,8 @@ run_tasks(void)
     jobs_task();
     cmds_task();
     spool_task();
+    tmc_task();
+    read_skew = 0;
     drain_output();
 }
 
@@ -394,6 +531,7 @@ run_ms(double ms)
             best = -4;
         }
         now = t;
+        read_skew = 0;
         if (best >= 0) {
             struct timer *tm = timers[best];
             if (tm->func(tm) == SF_DONE)
@@ -469,6 +607,12 @@ reset_model(void)
     stream_period = 200;
     stream_jitter = 0;
     ping_host = 1;
+    int i;
+    for (i = 0; i < NUM_LANES; i++) {
+        ft[i].drv_fault = 0;
+        ft[i].unplugged = 0;
+        ft[i].flicker = 0;
+    }
     send("{\"cmd\":\"stop\"}");
     run_ms(200);
 }
@@ -1188,15 +1332,264 @@ t_two_lanes(void)
     CHECK(n == 2, "two move_done (%d)", n);
 }
 
+// The drivers start healthy: a move before their first setup is taken.
+static void
+t_boot_drivers(void)
+{
+    printf("drivers at boot\n");
+    int mark = out_len;
+    CHECK(uptime() < 500, "before the first driver setup (%u ms)", uptime());
+    send("{\"id\":9,\"cmd\":\"move\",\"lane\":1,\"mm\":1,\"speed\":10}");
+    CHECK(strstr(out_log + mark, "{\"id\":9,\"ok\":true}"), "move taken");
+    run_ms(1500);
+    CHECK(!strstr(out_log + mark, "\"code\":\"tmc"), "drivers set up quietly");
+    int i, set = 1;
+    for (i = 0; i < NUM_LANES; i++)
+        set &= ft[i].reg[TMC_GSTAT] == 0 && ft[i].reg[TMC_IHOLD_IRUN] != 0;
+    CHECK(set, "every driver set up");
+}
+
+static void
+t_driver_fault_assist(void)
+{
+    printf("a driver fault stops assist until the host starts it again\n");
+    reset_model();
+    park_lane(0, gears);
+    buf_c = 6;
+    e_rate = 8;
+    stream_e = 1;
+    // AFC's moves hold, so the lane holds when assist starts.
+    send("{\"cmd\":\"move\",\"lane\":1,\"mm\":-1,\"speed\":20,\"hold\":true}");
+    run_ms(500);
+    send("{\"cmd\":\"assist\",\"lane\":1,\"on\":true}");
+    run_ms(2000);
+    long s0 = ml[0].steps;
+    run_ms(1000);
+    CHECK(ml[0].steps > s0, "lane feeds before the fault");
+    int mark = out_len;
+    ft[0].drv_fault = 1 << 1;                  // over temperature
+    CHECK(wait_for("\"code\":\"tmc_ot\"", mark, 1000), "tmc_ot reported");
+    CHECK(!assist_active(0), "assist stopped");
+    s0 = ml[0].steps;
+    run_ms(3000);
+    CHECK(ml[0].steps == s0, "lane stays stopped (%ld steps)", ml[0].steps - s0);
+    CHECK(pin_level[LANE_PINS[0].en] == 1, "driver let go");
+    ft[0].drv_fault = 0;
+    CHECK(wait_for("\"code\":\"tmc_ok\"", mark, 1000), "tmc_ok once it cools");
+    s0 = ml[0].steps;
+    run_ms(2000);
+    CHECK(!assist_active(0) && ml[0].steps == s0, "assist not started again by itself");
+    mark = out_len;
+    send("{\"id\":30,\"cmd\":\"assist\",\"lane\":1,\"on\":true}");
+    CHECK(strstr(out_log + mark, "{\"id\":30,\"ok\":true}"), "host starts it again");
+    s0 = ml[0].steps;
+    run_ms(2000);
+    CHECK(ml[0].steps > s0, "lane feeds again");
+    send("{\"cmd\":\"assist\",\"lane\":1,\"on\":false}");
+    send("{\"cmd\":\"enable\",\"lane\":1,\"on\":false}");
+    run_ms(500);
+    stream_e = 0;
+}
+
+// The reply to request id in out_log after mark.
+static int
+replied(int mark, int id, const char *rest)
+{
+    char want[96];
+    snprintf(want, sizeof(want), "{\"id\":%d,%s}", id, rest);
+    return strstr(out_log + mark, want) != NULL;
+}
+
+static void
+t_driver_fault_refuse(void)
+{
+    printf("a driver fault ends the job and refuses the lane until tmc_ok\n");
+    reset_model();
+    park_lane(1, 0);
+    int mark = out_len;
+    send("{\"cmd\":\"job\",\"job\":\"feed\",\"lane\":2,\"until\":\"hub\","
+         "\"mm\":250,\"speed\":20,\"hold\":true,\"seq\":7}");
+    run_ms(1000);
+    ft[1].drv_fault = 1 << 2;                  // short to ground
+    CHECK(wait_for("\"ev\":\"job_done\"", mark, 1000), "job ended");
+    CHECK(strstr(out_log + mark, "\"code\":\"tmc_short\""), "tmc_short reported");
+    CHECK(strstr(out_log + mark, "\"ok\":false,\"tries\":1,") != NULL
+          && strstr(out_log + mark, "\"seq\":7,\"code\":\"fault\","
+                    "\"msg\":\"driver fault\"}") != NULL, "job_done says fault");
+    double tip = ml[1].tip;
+    run_ms(1000);
+    CHECK(fabs(ml[1].tip - tip) < 0.01, "lane stopped");
+    CHECK(pin_level[LANE_PINS[1].en] == 1, "driver let go despite hold");
+    mark = out_len;
+    send("{\"id\":40,\"cmd\":\"move\",\"lane\":2,\"mm\":10}");
+    send("{\"id\":41,\"cmd\":\"job\",\"job\":\"feed\",\"lane\":2,\"mm\":10}");
+    send("{\"id\":42,\"cmd\":\"assist\",\"lane\":2,\"on\":true}");
+    CHECK(replied(mark, 40, "\"ok\":false,\"err\":\"driver fault\""), "move refused");
+    CHECK(replied(mark, 41, "\"ok\":false,\"err\":\"driver fault\""), "job refused");
+    CHECK(replied(mark, 42, "\"ok\":false,\"err\":\"driver fault\""), "assist refused");
+    send("{\"id\":43,\"cmd\":\"stop\",\"lane\":2}");
+    send("{\"id\":44,\"cmd\":\"enable\",\"lane\":2,\"on\":false}");
+    send("{\"id\":45,\"cmd\":\"assist\",\"lane\":2,\"on\":false}");
+    CHECK(replied(mark, 43, "\"ok\":true") && replied(mark, 44, "\"ok\":true")
+          && replied(mark, 45, "\"ok\":true"), "stop, enable off, assist off work");
+    send("{\"id\":46,\"cmd\":\"status\"}");
+    CHECK(strstr(out_log + mark, "\"id\":46,\"ok\":true") != NULL
+          && strstr(out_log + mark, "\"tmc\":\"tmc_short\"") != NULL, "status shows it");
+    ft[1].drv_fault = 0;
+    CHECK(wait_for("\"code\":\"tmc_ok\"", mark, 1000), "tmc_ok");
+    mark = out_len;
+    send("{\"id\":47,\"cmd\":\"move\",\"lane\":2,\"mm\":10,\"speed\":20}");
+    CHECK(replied(mark, 47, "\"ok\":true"), "move taken after tmc_ok");
+    CHECK(wait_for("\"end\":\"done\"", mark, 2000), "and runs");
+    send("{\"id\":48,\"cmd\":\"job\",\"job\":\"feed\",\"lane\":2,\"mm\":10,"
+         "\"speed\":20}");
+    CHECK(replied(mark, 48, "\"ok\":true"), "job taken after tmc_ok");
+    CHECK(wait_for("\"job\":\"feed\",\"ok\":true", mark, 2000), "and runs");
+    send("{\"id\":49,\"cmd\":\"assist\",\"lane\":2,\"on\":true}");
+    CHECK(replied(mark, 49, "\"ok\":true"), "assist taken after tmc_ok");
+    send("{\"cmd\":\"assist\",\"lane\":2,\"on\":false}");
+    run_ms(500);
+}
+
+static void
+t_link_loss_assist(void)
+{
+    printf("link loss lets go of assisting lanes, held lanes keep holding\n");
+    reset_model();
+    park_lane(0, gears);
+    park_lane(1, 0);
+    park_lane(2, 0);
+    park_lane(3, 0);
+    buf_c = 6;
+    e_rate = 8;
+    stream_e = 1;
+    // AFC's moves hold, so the assist lanes hold when assist starts.
+    send("{\"cmd\":\"move\",\"lane\":1,\"mm\":-1,\"speed\":20,\"hold\":true}");
+    send("{\"cmd\":\"move\",\"lane\":3,\"mm\":5,\"speed\":20,\"hold\":true}");
+    send("{\"cmd\":\"move\",\"lane\":4,\"mm\":5,\"speed\":20,\"hold\":true}");
+    run_ms(500);
+    send("{\"cmd\":\"assist\",\"lane\":1,\"on\":true}");
+    send("{\"cmd\":\"assist\",\"lane\":4,\"on\":true,\"mode\":\"follow\"}");
+    send("{\"cmd\":\"move\",\"lane\":2,\"mm\":1000,\"speed\":20,\"hold\":true,"
+         "\"seq\":51}");
+    run_ms(1000);
+    long s0 = ml[3].steps;
+    run_ms(500);
+    CHECK(assist_active(0) && ml[3].steps > s0, "both lanes assisting");
+    int mark = out_len;
+    ping_host = 0;
+    stream_e = 0;
+    CHECK(wait_for("\"code\":\"link_lost\"", mark, 4000), "link_lost");
+    run_ms(500);
+    CHECK(pin_level[LANE_PINS[0].en] == 1, "tn assist lane let go");
+    CHECK(pin_level[LANE_PINS[3].en] == 1, "follow assist lane let go");
+    CHECK(pin_level[LANE_PINS[1].en] == 0, "moving lane with hold keeps holding");
+    CHECK(pin_level[LANE_PINS[2].en] == 0, "idle held lane keeps holding");
+    CHECK(strstr(out_log + mark, "\"lane\":2,\"end\":\"link_lost\"") != NULL
+          && strstr(out_log + mark, "\"seq\":51}") != NULL, "move ends with link_lost");
+    CHECK(!assist_active(0) && !assist_active(3), "assist off");
+    ping_host = 1;
+    send("{\"cmd\":\"enable\",\"lane\":2,\"on\":false}");
+    send("{\"cmd\":\"enable\",\"lane\":3,\"on\":false}");
+    run_ms(200);
+}
+
+static void
+t_open_coil(void)
+{
+    printf("an open coil while moving stops the lane, a flicker does not\n");
+    // A healthy motor flags both coils in a fast move here, and one coil
+    // now and then at slow speed.
+    reset_model();
+    park_lane(0, 0);
+    int mark = out_len;
+    send("{\"cmd\":\"move\",\"lane\":1,\"mm\":1500,\"speed\":150,\"accel\":250}");
+    CHECK(wait_for("move_done", mark, 15000), "150 mm/s move finished");
+    CHECK(strstr(out_log + mark, "\"end\":\"done\""), "ran its full distance");
+    CHECK(!strstr(out_log + mark, "tmc_open"), "no open coil on a healthy motor");
+
+    reset_model();
+    park_lane(0, 0);
+    mark = out_len;
+    send("{\"cmd\":\"move\",\"lane\":1,\"mm\":60,\"speed\":20}");
+    run_ms(700);
+    ft[0].flicker = 1;
+    CHECK(wait_for("move_done", mark, 5000), "slow move finished");
+    CHECK(ft[0].flicker == 0, "the flicker was read");
+    CHECK(strstr(out_log + mark, "\"end\":\"done\"")
+          && !strstr(out_log + mark, "tmc_open"), "one flicker does not stop it");
+
+    // Motor unplugged: the filament does not move, the steps still count.
+    reset_model();
+    park_lane(0, 0);
+    ft[0].unplugged = 1;
+    mark = out_len;
+    send("{\"cmd\":\"move\",\"lane\":1,\"mm\":200,\"speed\":20,\"hold\":true,"
+         "\"seq\":61}");
+    CHECK(wait_for("move_done", mark, 3000), "unplugged: move ended early");
+    CHECK(strstr(out_log + mark, "\"end\":\"fault\"") != NULL
+          && strstr(out_log + mark, "\"seq\":61}") != NULL, "as a fault");
+    CHECK(strstr(out_log + mark, "{\"ev\":\"fault\",\"code\":\"tmc_open\",\"lane\":1,"
+                 "\"msg\":\"open coil: motor not connected?\"}"), "tmc_open reported");
+    double fed = ml[0].steps / STEPS_PER_MM;
+    CHECK(fed < 40, "stopped after %.1f of 200 mm", fed);
+    CHECK(pin_level[LANE_PINS[0].en] == 1, "driver let go despite hold");
+    run_ms(1500);
+    CHECK(!strstr(out_log + mark, "tmc_ok"), "no tmc_ok (only checked while moving)");
+
+    // Plugged back in: nothing is held, the next move works.
+    ft[0].unplugged = 0;
+    mark = out_len;
+    send("{\"id\":62,\"cmd\":\"move\",\"lane\":1,\"mm\":20,\"speed\":20}");
+    CHECK(replied(mark, 62, "\"ok\":true"), "plugged back in: move taken");
+    CHECK(wait_for("move_done", mark, 3000)
+          && strstr(out_log + mark, "\"end\":\"done\""), "and runs");
+
+    // A feed job on an unplugged motor fails at once, without retries.
+    ft[0].unplugged = 1;
+    mark = out_len;
+    send("{\"cmd\":\"job\",\"job\":\"feed\",\"lane\":1,\"until\":\"hub\","
+         "\"mm\":250,\"speed\":20,\"tries\":2}");
+    CHECK(wait_for("\"ev\":\"job_done\"", mark, 3000), "unplugged: job ended early");
+    CHECK(strstr(out_log + mark, "\"ok\":false") != NULL
+          && strstr(out_log + mark, "\"code\":\"fault\",\"msg\":\"driver fault\"}")
+          && strstr(out_log + mark, "\"code\":\"tmc_open\"") != NULL, "as a fault");
+    CHECK(!strstr(out_log + mark, "recovering"), "no retries");
+    ft[0].unplugged = 0;
+
+    // Unplugged while assisting: assist stops and stays stopped.
+    reset_model();
+    park_lane(0, gears);
+    buf_c = 6;
+    e_rate = 8;
+    stream_e = 1;
+    send("{\"cmd\":\"assist\",\"lane\":1,\"on\":true}");
+    run_ms(2000);
+    mark = out_len;
+    ft[0].unplugged = 1;
+    CHECK(wait_for("\"code\":\"tmc_open\"", mark, 3000), "unplugged while assisting");
+    CHECK(!assist_active(0), "assist stopped");
+    long s0 = ml[0].steps;
+    run_ms(2000);
+    CHECK(ml[0].steps == s0, "lane stays stopped");
+    stream_e = 0;
+    e_rate = 0;
+    ft[0].unplugged = 0;
+}
+
 int
 main(int argc, char **argv)
 {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
     gears = dist_hub + bowden;
     memset(step_pin_lane, -1, sizeof(step_pin_lane));
+    memset(uart_pin_lane, -1, sizeof(uart_pin_lane));
     int i;
-    for (i = 0; i < NUM_LANES; i++)
+    for (i = 0; i < NUM_LANES; i++) {
         step_pin_lane[LANE_PINS[i].step] = i;
+        uart_pin_lane[LANE_PINS[i].uart] = i;
+    }
+    ftmc_reset();
     turtle_init();
     next_model_ms = now + MS;
     next_task = now;
@@ -1205,6 +1598,7 @@ main(int argc, char **argv)
     // AFC sends its config; the firmware's own defaults are stock.
     send("{\"cmd\":\"cfg\",\"assist_high\":1.15,\"assist_low\":0.85,"
          "\"assist_fault_mm\":80}");
+    t_boot_drivers();
     t_info();
     t_switch_events();
     t_move_until();
@@ -1232,6 +1626,10 @@ main(int argc, char **argv)
     t_link_loss();
     t_link_loss_job();
     t_two_lanes();
+    t_driver_fault_assist();
+    t_driver_fault_refuse();
+    t_link_loss_assist();
+    t_open_coil();
     printf("%d/%d checks passed\n", checks - fails, checks);
     return fails != 0;
 }

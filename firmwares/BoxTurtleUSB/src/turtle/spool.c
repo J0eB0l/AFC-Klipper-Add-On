@@ -60,6 +60,7 @@
 #include "motion.h"
 #include "proto.h"
 #include "spool.h"
+#include "tmc.h"
 
 #define PWM_FULL 32768            // MAX_PWM in Klipper's stm32 hard_pwm.c
 
@@ -504,6 +505,10 @@ cmd_assist(char *line)
             follow = ASSIST_EXT;
         } else {
             reply_err(line, "bad mode");
+            return;
+        }
+        if (tmc_faulted(lane)) {
+            reply_err(line, "driver fault");
             return;
         }
         if (motion_is_moving(lane) && !assist_active(lane)) {

@@ -5,8 +5,9 @@
 // klippy/extras/tmc2209.py and tmc2130.py.
 //
 // The monitor task reads GSTAT and DRV_STATUS of one driver every 125 ms
-// (each driver every 0.5 s), reports faults once per change and asks
-// motion.c to stop the lane on a hard fault.
+// (each driver every 0.5 s) and reports faults once per change. A hard
+// fault stops the lane (move, job and assist) and keeps it stopped until
+// the driver is healthy again; an open coil while moving stops it once.
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -16,7 +17,9 @@
 #include "sched.h" // DECL_TASK
 #include "board.h"
 #include "events.h"
+#include "jobs.h"
 #include "motion.h"
+#include "spool.h"
 #include "tmc.h"
 
 #define BAUD 40000
@@ -32,8 +35,12 @@ static uint8_t gap_bits = 100;
 enum { TXF_SYNC_F5 = 1, TXF_NOIRQ = 2, TXF_STOP2 = 8 };
 static uint8_t tx_flags;
 static struct tmc_cfg cfgs[NUM_LANES];
+// Every lane starts TMC_OK and not faulted, so a boot takes moves before
+// the first setup; a driver that never answers turns tmc_uart after 3 tries.
 static uint8_t health[NUM_LANES], fail_count[NUM_LANES];
 static uint8_t setup_done[NUM_LANES];
+static uint8_t faulted[NUM_LANES];      // hard fault until tmc_ok
+static uint8_t open_count[NUM_LANES];
 
 static uint8_t
 crc8(const uint8_t *d, int n)
@@ -241,6 +248,12 @@ tmc_health(int lane)
     return health[lane];
 }
 
+int
+tmc_faulted(int lane)
+{
+    return faulted[lane];
+}
+
 const char *
 tmc_health_name(int code)
 {
@@ -257,6 +270,16 @@ tmc_health_name(int code)
     return "tmc_unknown";
 }
 
+// Stops the lane's assist (or its next tick starts the lane again), job and
+// move, and lets the motor go.
+static void
+fault_stop(int lane, const char *code)
+{
+    assist_stop(lane);
+    motion_fault(lane, code);
+    jobs_abort(lane, "fault", "driver fault");
+}
+
 static void
 set_health(int lane, int code, const char *msg)
 {
@@ -264,13 +287,48 @@ set_health(int lane, int code, const char *msg)
         return;
     health[lane] = code;
     if (code == TMC_OK) {
+        faulted[lane] = 0;
         ev_fault("tmc_ok", lane, msg);
         return;
     }
     ev_fault(tmc_health_name(code), lane, msg);
-    // Hard faults stop the lane; a warning (otpw, open) only reports.
-    if (code != TMC_OTPW && code != TMC_OPEN)
-        motion_fault(lane, tmc_health_name(code));
+    // A hard fault stops the lane and refuses moves, jobs and assist on it
+    // until tmc_ok (the host starts assist again). otpw only reports.
+    if (code != TMC_OTPW) {
+        faulted[lane] = 1;
+        fault_stop(lane, tmc_health_name(code));
+    }
+}
+
+// Open coil. OLA/OLB only mean a coil missed its current: a healthy motor
+// can flag one at standstill and both in a fast move (back-EMF), while an
+// unplugged one flags both at any speed. So only a check with both flags
+// while the lane steps at OPEN_MAX_FSTEPS or slower counts; faster checks
+// neither count nor reset, so a 150 mm/s move (6450 full steps/s on a stock
+// lane) cannot trip it. OPEN_CHECKS in a row (each lane is read every
+// 0.5 s) stop the lane. Nothing is held after it: the coils can only be
+// checked while moving, so the next move tries again.
+#define OPEN_MAX_FSTEPS 1300    // full steps/s, 30 mm/s on a stock lane
+#define OPEN_CHECKS 2
+
+static int
+open_coil(int lane, uint32_t drv)
+{
+    if (!motion_is_moving(lane)) {
+        open_count[lane] = 0;
+        return 0;
+    }
+    uint32_t rate = motion_step_rate(lane);
+    if (!rate || rate > OPEN_MAX_FSTEPS * (uint32_t)cfgs[lane].microsteps)
+        return 0;
+    if ((drv & (3 << 6)) != (3 << 6)) {
+        open_count[lane] = 0;
+        return 0;
+    }
+    if (++open_count[lane] < OPEN_CHECKS)
+        return 0;
+    open_count[lane] = 0;
+    return 1;
 }
 
 static void
@@ -312,12 +370,15 @@ check_lane(int lane)
                    : "short on low side");
     else if (gstat & (1 << 2))
         set_health(lane, TMC_UV, "charge pump under voltage");
-    else if ((drv & (3 << 6)) && motion_is_moving(lane))
-        set_health(lane, TMC_OPEN, "open load (motor wire?)");
     else if (drv & 1)
         set_health(lane, TMC_OTPW, "over temperature warning");
     else
         set_health(lane, TMC_OK, 0);
+    if (open_coil(lane, drv)) {
+        ev_fault(tmc_health_name(TMC_OPEN), lane,
+                 "open coil: motor not connected?");
+        fault_stop(lane, tmc_health_name(TMC_OPEN));
+    }
     if (gstat & 6)
         tmc_write(lane, TMC_GSTAT, 6);
 }

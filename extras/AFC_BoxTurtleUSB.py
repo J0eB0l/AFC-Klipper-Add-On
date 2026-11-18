@@ -53,7 +53,8 @@ if TYPE_CHECKING:
 try: from extras.AFC_utils import ERROR_STR
 except: raise error("Error when trying to import AFC_utils.ERROR_STR\n{trace}".format(trace=traceback.format_exc()))
 
-try: from extras.AFC_lane import AFCLaneState, SpeedMode
+try: from extras.AFC_lane import (AFCLaneState, AFCMoveWarning, AssistActive, MoveDirection,
+                                  SpeedMode)
 except: raise error(ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc()))
 
 try: from extras.AFC_BoxTurtle import afcBoxTurtle
@@ -80,8 +81,12 @@ ID_ROOM = 9999999
 
 # Firmware fault codes that need AFC to act.
 ASSIST_FAULTS = ("clog", "not_feeding")
+# Driver faults that stop the lane; tmc_open (a motor unplugged) only stops what was running.
 TMC_FAULTS = ("tmc_uart", "tmc_ot", "tmc_short", "tmc_reset", "tmc_uv",
-              "tmc_unknown")
+              "tmc_unknown", "tmc_open")
+# What fw_home reports when the hub keeps reading filament after the lane let go of it.
+HUB_STUCK = ("the filament left the lane but the hub still reads filament: "
+             "hub stuck or broken piece in hub")
 
 
 def encode_line(msg: Dict[str, Any]) -> bytes:
@@ -1039,6 +1044,15 @@ class afcBoxTurtleUSB(afcBoxTurtle):
     # one move or job gets through.
     RECONNECT_WAIT = 5.0
     DROP_TRIES = 3
+    # A print feeding from a board that is gone pauses this long after the drop, once the board's
+    # own link timeout has stopped its lanes.
+    LINK_PAUSE_WAIT = 2.5
+    # A prep switch must stay open this long during a print before the runout starts.
+    RUNOUT_CONFIRM = 0.3
+    # Most a spool insert feeds toward the load switch per try, mm.
+    PREP_FEED_MM = 100.0
+    # Most the at-extruder check pushes on to find the extruder after a drag, mm.
+    VERIFY_MAX_MM = 300.0
 
     def __init__(self, config):
         super().__init__(config)
@@ -1074,6 +1088,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.print_current = config.getfloat('print_current', None, above=0., maxval=2.)
         self.sense_resistor = config.getfloat('sense_resistor', 0.110, above=0.)
         self.stealthchop = config.getboolean('stealthchop', False)
+        # Written to the drivers' SGTHRS, but nothing reads StallGuard, so it detects no stalls.
         self.driver_sgthrs = config.getint('driver_sgthrs', 0, minval=0, maxval=255)
 
         # TurtleNeck on the board (AFC_buffer's TurtleNeck options).
@@ -1446,15 +1461,15 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         if not was_connected:
             return
         self.reactor.register_callback(lambda et, r=reason: self._link_lost(r),
-                                       self.reactor.monotonic() + self.RECONNECT_WAIT)
+                                       self.reactor.monotonic() + self.LINK_PAUSE_WAIT)
         if self.hotswap and self.claimed:
             self.reactor.update_timer(self.release_timer,
                                       self.reactor.monotonic() + self.release_grace)
 
     def _link_lost(self, reason: str) -> None:
         """
-        RECONNECT_WAIT after a drop: pauses a print that was feeding from this unit if the board is
-        still gone (runs outside the fd handler, since a pause runs gcode).
+        LINK_PAUSE_WAIT after a drop: pauses a print that was feeding from this unit if the board
+        is still gone (runs outside the fd handler, since a pause runs gcode).
 
         :param reason: Why the link closed
         """
@@ -1806,7 +1821,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             elif value:
                 lane.prep_callback(eventtime, 1)
             else:
-                self.prep_removed(lane, eventtime, gcmd="callback")
+                self.prep_removed(lane, eventtime)
         elif name == "hub":
             hub = self._hub()
             if hub is None:
@@ -1821,28 +1836,53 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         elif name in ("tn_adv", "tn_trl") and isinstance(self.buffer_obj, TurtleNeck):
             self.buffer_obj.set_switch(name, value)
 
-    def prep_removed(self, lane: AFCLane, eventtime: float, *, gcmd: AFCGcmd) -> None:
+    def prep_removed(self, lane: AFCLane, eventtime: float) -> None:
         """
-        A lane's prep switch opened.
+        A lane's prep switch opened. During a print the runout waits RUNOUT_CONFIRM, so a switch
+        glitch never ejects a lane that still has filament.
 
         :param lane: The lane
         :param eventtime: Reactor time
-        :param gcmd: Command context runout handling runs through
         """
         lane.prep_state = False
-        if (self.printer.state_message == 'Printer is ready'
+        if self._runout_applies(lane):
+            self.reactor.register_callback(
+                lambda et, ln=lane: self._confirm_runout(ln, gcmd="callback"),
+                self.reactor.monotonic() + self.RUNOUT_CONFIRM)
+            return
+        lane.handle_prep_runout(eventtime, False)
+
+    def _runout_applies(self, lane: AFCLane) -> bool:
+        """
+        :param lane: A lane whose prep switch is open
+        :return bool: The lane feeds the print, so an open prep switch is a runout
+        """
+        return (self.printer.state_message == 'Printer is ready'
                 and lane._afc_prep_done
                 and lane.status != AFCLaneState.TOOL_UNLOADING
                 and lane.name == self.afc.current
                 and self.afc.function.is_printing()
                 and lane.raw_load_state
-                and lane.status != AFCLaneState.EJECTING):
-            if lane.runout_lane is not None:
-                lane._perform_infinite_runout(gcmd)
-            else:
-                lane._perform_pause_runout(gcmd)
+                and lane.status != AFCLaneState.EJECTING)
+
+    def _confirm_runout(self, lane: AFCLane, *, gcmd: AFCGcmd) -> None:
+        """
+        RUNOUT_CONFIRM after a prep switch opened during a print: runs the runout if the switch is
+        still open and the lane still feeds the print.
+
+        :param lane: The lane
+        :param gcmd: Command context the runout runs through
+        """
+        if self.switches.get(f"prep{lane.index}"):
+            self.logger.info(f"{lane.name}: prep switch was open for under "
+                             f"{self.RUNOUT_CONFIRM:.1f} s, not a runout")
             return
-        lane.handle_prep_runout(eventtime, False)
+        if not self._runout_applies(lane):
+            return
+        if lane.runout_lane is not None:
+            lane._perform_infinite_runout(gcmd)
+        else:
+            lane._perform_pause_runout(gcmd)
 
     def fault(self, msg: Dict[str, Any], eventtime: float) -> None:
         """
@@ -1853,9 +1893,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         """
         code = msg.get("code")
         lane = self.lane_by_index(int(msg.get("lane", 0) or 0))
-        text = f"{self.name}: {msg.get('msg')} ({code})"
-        if lane is not None:
-            text = f"{lane.name}: {msg.get('msg')} ({code})"
+        detail = f"{msg.get('msg')} ({code})" if msg.get("msg") else code
+        text = f"{lane.name if lane is not None else self.name}: {detail}"
         printing_on_lane = (lane is not None
                             and lane.name == self.afc.current
                             and self.afc.function.is_printing())
@@ -1870,8 +1909,16 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         elif code in TMC_FAULTS:
             self.afc.error.AFC_error(text, pause=printing_on_lane, gcmd="callback")
         elif code == "link_lost":
+            # The board let go of the assisting lanes.
             self.logger.warning(text)
-        elif code in ("tmc_otpw", "tmc_open", "tmc_ok"):
+            self._resume_after_reconnect()
+        elif code == "tmc_ok":
+            self.logger.info(text)
+            # A driver fault stopped the assist and the board leaves restarting it to the host.
+            if (lane is not None and self.sync.get(lane.name)
+                    and lane.name not in self.moving):
+                self._send_assist(lane)
+        elif code == "tmc_otpw":
             self.logger.info(text)
 
     # ── moves ──────────────────────────────────────────────────────
@@ -1907,8 +1954,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.afc.error.AFC_error(msg, pause=self.afc.function.in_print(), gcmd=gcmd)
 
     def fw_move(self, lane: AFCLane, distance: float, speed: float, accel: float,
-                assist: bool, until: Optional[str] = None, until_v: int = 1, *,
-                gcmd: AFCGcmd) -> tuple:
+                assist: bool, until: Optional[str] = None, until_v: int = 1,
+                watch: Optional[str] = None, *, gcmd: AFCGcmd) -> tuple:
         """
         Runs one move on the board and waits for it to end.
 
@@ -1919,6 +1966,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         :param assist: Run the espooler
         :param until: Board switch that ends the move early
         :param until_v: State of that switch that ends it
+        :param watch: Board switch that ends the move when it opens
         :param gcmd: Command context errors are reported through
         :return tuple: (end reason, mm moved)
         """
@@ -1931,6 +1979,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         if until:
             fields["until"] = until
             fields["until_v"] = int(until_v)
+        if watch:
+            fields["watch"] = watch
         fields.update(self._espool_fields(lane, speed, assist))
         self.wait_toolhead()
         self.moving.add(lane.name)
@@ -2240,8 +2290,21 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         """
         switch = self.endstop_switch(lane, spec)
         if switch is not None:
+            watch = None
+            if switch == "hub" and distance < 0 and not triggered:
+                # The tail leaving the lane while the hub still reads filament is a broken piece
+                # (or a stuck switch) in the hub: stop there, not after the whole retract.
+                if self.switches.get(f"load{lane.index}"):
+                    watch = "load"
+                elif self.switches.get("hub"):
+                    self._report(lane, HUB_STUCK, gcmd=gcmd)
+                    return False, 0.0, True
             end, moved = self.fw_move(lane, distance, speed, accel, assist,
-                                      until=switch, until_v=1 if triggered else 0, gcmd=gcmd)
+                                      until=switch, until_v=1 if triggered else 0,
+                                      watch=watch, gcmd=gcmd)
+            if end == "watch":
+                self._report(lane, HUB_STUCK, gcmd=gcmd)
+                return False, abs(moved), True
         else:
             predicate = self._sensor_predicate(lane, spec)
             if predicate is None:
@@ -2250,12 +2313,76 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             end, moved = self._fw_move_poll(lane, distance, speed, accel, assist,
                                             predicate, bool(triggered), gcmd=gcmd)
         if end == "triggered":
+            if distance > 0 and abs(moved) < 0.01:
+                self.logger.warning(f"{lane.name}: {spec} already read triggered when the move "
+                                    f"to it started")
+            if (switch == "tn_adv" and distance > 0
+                    and lane.status != AFCLaneState.CALIBRATING):
+                return self._verify_at_extruder(lane, abs(distance) - abs(moved), speed, accel,
+                                                abs(moved), gcmd=gcmd)
             return True, abs(moved), False
         if end in ("done", "no_trigger"):
             if check_trigger:
                 return False, abs(distance), False
             return True, abs(moved), False
         return False, abs(moved), True
+
+    def _verify_at_extruder(self, lane: AFCLane, remaining: float, speed: float, accel: float,
+                            moved: float, *, gcmd: AFCGcmd) -> tuple:
+        """
+        The TurtleNeck filled on a feed toward the toolhead. The board's verify job pulls back
+        until it relaxes and pushes again, which must fill it within verify_mm, so a drag in the
+        bowden is not taken for the filament reaching the extruder: a drag gives way and the job
+        feeds on until the TurtleNeck fills at the gears.
+
+        :param lane: Lane that fed
+        :param remaining: What was left of the move, mm
+        :param speed: mm/s
+        :param accel: mm/s^2
+        :param moved: mm the feed moved
+        :param gcmd: Command context errors are reported through
+        :return tuple: (homed, distance moved, error) like fw_home
+        """
+        mm = min(max(remaining, 50.0), self.VERIFY_MAX_MM)
+        result = self.fw_job(lane, "verify", mm=float(mm), speed=float(speed),
+                             accel=float(accel), hold=True)
+        if not result.get("ok"):
+            self._report(lane, "filament did not reach the extruder, the TurtleNeck filled early "
+                         f"({result.get('msg') or result.get('code')})", gcmd=gcmd)
+            return False, moved, True
+        return True, moved + max(0.0, float(result.get("mm", 0.0))), False
+
+    def move_to_hub(self, lane: AFCLane, dist: float, dir: MoveDirection,
+                    use_homing: bool = True, speed_mode: SpeedMode = SpeedMode.HUB,
+                    assist_active: AssistActive = AssistActive.DYNAMIC, *,
+                    gcmd: AFCGcmd) -> tuple:
+        """
+        A homing feed to the hub runs as the board's feed job: on a miss (a grind or a snag) it
+        backs off and feeds again slower, and after job_tries retries it stops with an error
+        instead of AFC feeding on. Calibration and retracts move like a stock BoxTurtle.
+
+        :return tuple: (moved ok, distance moved, AFCMoveWarning) like afcUnit.move_to_hub
+        """
+        if (dir != MoveDirection.POS or not use_homing
+                or speed_mode == SpeedMode.CALIBRATION
+                or self.endstop_switch(lane, lane.hub_endstop_name) != "hub"):
+            return super().move_to_hub(lane, dist, dir, use_homing, speed_mode, assist_active,
+                                       gcmd=gcmd)
+        self.select_lane(lane, gcmd=gcmd)
+        speed, accel = lane.get_speed_accel(speed_mode)
+        mm = float(dist) + float(lane.homing_overshoot or 0.0)
+        assist = lane.get_active_assist(dist, assist_active)
+        result = self.fw_job(lane, "feed", until="hub", mm=mm, speed=float(speed),
+                             accel=float(accel), watch="prep", hold=True,
+                             **self._espool_fields(lane, speed, assist))
+        moved = abs(float(result.get("mm", 0.0)))
+        if not result.get("ok"):
+            self._report(lane, "can't feed to the hub sensor, check the filament path "
+                         f"({result.get('msg') or result.get('code')})", gcmd=gcmd)
+            return False, moved, AFCMoveWarning.ERROR
+        if abs(dist) - moved > lane.homing_delta:
+            return True, moved, AFCMoveWarning.WARN
+        return True, moved, AFCMoveWarning.NONE
 
     # ── sync and assist ──────────────────────────────────────────
 
@@ -2459,7 +2586,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             return
         speed, accel = lane.short_moves_speed, lane.short_moves_accel
         result = self.fw_job(lane, "feed", until="load",
-                             mm=float(self.short_move_dis * self.MAX_NUM_MOVES),
+                             mm=self.PREP_FEED_MM,
                              speed=float(speed), accel=float(accel), watch="prep",
                              hold=True, **self._espool_fields(lane, speed, False))
         if not result.get("ok") and lane.prep_state:
@@ -2498,7 +2625,10 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         """
         speed = float(fields.get("speed", 50.0)) or 50.0
         tries = int(fields.get("tries", self.job_tries)) + 1
-        timeout = tries * (2 * float(fields.get("mm", 100.0)) / speed + 10.0)
+        mm = float(fields.get("mm", 100.0))
+        # A feed retries at half the speed each time.
+        slow = 0.5 if job == "feed" else 1.0
+        timeout = sum(2 * mm / (speed * slow ** n) + 10.0 for n in range(tries))
         self.wait_toolhead()
         self.moving.add(lane.name)
         try:

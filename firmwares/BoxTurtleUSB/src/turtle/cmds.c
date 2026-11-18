@@ -97,9 +97,8 @@ cmd_move(char *line)
         reply_err(line, "lane busy");
         return;
     }
-    if (tmc_health(lane) != TMC_OK && tmc_health(lane) != TMC_OTPW
-        && tmc_health(lane) != TMC_OPEN) {
-        reply_err(line, tmc_health_name(tmc_health(lane)));
+    if (tmc_faulted(lane)) {
+        reply_err(line, "driver fault");
         return;
     }
     espool_move_cfg(lane, line);
@@ -380,12 +379,20 @@ cmds_task(void)
         && (motion_any_active() || spool_any_active() || jobs_any_active())
         && uptime() - link_last_rx() > link_timeout_ms) {
         lost_rx = link_last_rx();
+        int assisted = 0;
         for (i = 0; i < NUM_LANES; i++) {
-            jobs_abort(i, "link_lost");
+            if (assist_active(i))
+                assisted |= 1 << i;
+            jobs_abort(i, "link_lost", 0);
             assist_stop(i);
             espool_set(i, 0, 0);
         }
         motion_stop(-1, END_LINK);
+        // Let go of the lanes that fed the print, so the extruder does not
+        // pull against a locked lane. The others keep holding.
+        for (i = 0; i < NUM_LANES; i++)
+            if (assisted & (1 << i))
+                motion_enable(i, 0);
         ev_fault("link_lost", -1, "no word from the host; all motors stopped");
     }
 }

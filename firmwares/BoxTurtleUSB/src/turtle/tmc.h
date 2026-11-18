@@ -40,12 +40,16 @@ int tmc_setup(int lane, const struct tmc_cfg *cfg);
 // Default config (stock BoxTurtle: 0.8 A, 0.110 ohm, 16 microsteps, spreadCycle).
 void tmc_default_cfg(struct tmc_cfg *cfg);
 
-// Last health state per lane, updated by the monitor task.
+// Last health state per lane, updated by the monitor task. TMC_OPEN is
+// only sent as a fault event, never kept as a state.
 enum {
     TMC_OK = 0, TMC_NO_UART, TMC_OT, TMC_OTPW, TMC_SHORT, TMC_OPEN,
     TMC_RESET, TMC_UV,
 };
 int tmc_health(int lane);
+// 1 from a hard fault until tmc_ok: moves, jobs and assist on the lane
+// are refused ("driver fault").
+int tmc_faulted(int lane);
 void tmc_init(void);
 // New settings for a lane; the monitor task writes them to the driver.
 void tmc_reconfigure(int lane, const struct tmc_cfg *cfg);

@@ -38,6 +38,8 @@ void motion_stop(int lane, int end);
 // Stops a lane because of a fault and reports it (task context).
 void motion_fault(int lane, const char *code);
 int motion_is_moving(int lane);
+// Steps per second the lane is stepping at now, 0 when it is not stepping.
+uint32_t motion_step_rate(int lane);
 int motion_any_active(void);
 // Last finished move: reason and distance actually moved (milli-mm).
 // Returns 1 once per finished move (the "done" flag clears on read).

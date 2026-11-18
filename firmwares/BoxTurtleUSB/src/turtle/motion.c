@@ -289,6 +289,17 @@ motion_is_moving(int lane)
     return lanes[lane].mode != MODE_IDLE;
 }
 
+uint32_t
+motion_step_rate(int lane)
+{
+    struct lane *l = &lanes[lane];
+    if (!l->stepping)
+        return 0;
+    if (l->mode == MODE_MOVE)
+        return l->v;
+    return l->vel_now < 0 ? -l->vel_now : l->vel_now;
+}
+
 int
 motion_any_active(void)
 {
