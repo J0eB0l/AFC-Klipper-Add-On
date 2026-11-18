@@ -1997,7 +1997,7 @@ class TestHandleLinkUp:
             "assist_max_speed": 80.0, "espool_kick_ms": 70, "espool_brake_ms": 200,
             "espool_cycle_us": 100000, "job_tries": 2}
         assert unit.link.requests[1][1] == {"job_backoff_mm": 20.0, "job_snag_backoff_mm": 30.0,
-                                            "job_repush_mm": 10.0}
+                                            "job_repush_mm": 10.0, "verify_mm": 20.0}
         assert unit.link.requests[3][1] == {"sw": "prep1", "invert": True, "debounce_ms": 15}
         # Every header, an unused one with no LEDs so it goes dark.
         assert [f for c, f in unit.link.requests if c == "led_cfg"] == [

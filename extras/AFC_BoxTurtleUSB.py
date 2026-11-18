@@ -1105,6 +1105,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.job_backoff_mm = config.getfloat('job_backoff_mm', 20., minval=0.)
         self.job_snag_backoff_mm = config.getfloat('job_snag_backoff_mm', 30., minval=0.)
         self.job_repush_mm = config.getfloat('job_repush_mm', 10., minval=0.)
+        # The toolhead check's push after the TurtleNeck lets go must fill it again within this.
+        self.job_verify_mm = config.getfloat('job_verify_mm', 20., above=0.)
 
         # Espooler PWM cycle (AFC's cycle_time for the motor pins)
         self.espool_cycle_time = config.getfloat('espool_cycle_time', 0.100, above=0.)
@@ -1372,7 +1374,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                "job_tries": int(self.job_tries),
                "job_backoff_mm": float(self.job_backoff_mm),
                "job_snag_backoff_mm": float(self.job_snag_backoff_mm),
-               "job_repush_mm": float(self.job_repush_mm)}
+               "job_repush_mm": float(self.job_repush_mm),
+               "verify_mm": float(self.job_verify_mm)}
         requests = [("cfg", part) for part in split_fields("cfg", cfg)]
         for lane in self.all_lanes():
             requests += [("lane_cfg", part) for part in
@@ -2331,7 +2334,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
                             moved: float, *, gcmd: AFCGcmd) -> tuple:
         """
         The TurtleNeck filled on a feed toward the toolhead. The board's verify job pulls back
-        until it relaxes and pushes again, which must fill it within verify_mm, so a drag in the
+        until it relaxes and pushes again, which must fill it within job_verify_mm, so a drag in the
         bowden is not taken for the filament reaching the extruder: a drag gives way and the job
         feeds on until the TurtleNeck fills at the gears.
 
