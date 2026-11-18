@@ -11,8 +11,8 @@ int jobs_busy(int lane);
 int jobs_owns_motion(int lane);
 int jobs_any_active(void);
 void jobs_cancel(int lane);
-// Ends a lane's job with a failed job_done carrying code.
-void jobs_abort(int lane, const char *code);
+// Ends a lane's job with a failed job_done carrying code and msg (or 0).
+void jobs_abort(int lane, const char *code, const char *msg);
 const char *jobs_name(int lane);
 
 #endif // jobs.h

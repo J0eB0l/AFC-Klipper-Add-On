@@ -27,6 +27,7 @@
 #include "motion.h"
 #include "proto.h"
 #include "spool.h"
+#include "tmc.h"
 
 enum { JOB_NONE, JOB_FEED, JOB_UNLOAD, JOB_VERIFY };
 enum {
@@ -145,7 +146,7 @@ job_done(int lane, int ok, const char *code, const char *msg)
 }
 
 void
-jobs_abort(int lane, const char *code)
+jobs_abort(int lane, const char *code, const char *msg)
 {
     struct job *j = &jobs[lane];
     if (j->type == JOB_NONE)
@@ -154,13 +155,13 @@ jobs_abort(int lane, const char *code)
     int end;
     int32_t moved;
     motion_take_done(lane, &end, &moved);
-    job_done(lane, 0, code, 0);
+    job_done(lane, 0, code, msg);
 }
 
 void
 jobs_cancel(int lane)
 {
-    jobs_abort(lane, "cancelled");
+    jobs_abort(lane, "cancelled", 0);
 }
 
 static int
@@ -383,6 +384,10 @@ cmd_job(char *line)
     struct job *j = &jobs[lane];
     if (j->type != JOB_NONE || motion_is_moving(lane)) {
         reply_err(line, "lane busy");
+        return;
+    }
+    if (tmc_faulted(lane)) {
+        reply_err(line, "driver fault");
         return;
     }
     char name[12];

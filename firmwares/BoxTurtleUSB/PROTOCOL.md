@@ -21,7 +21,7 @@ and carries `"ok"`; a failed request also carries `"err"`.
 
 ```
 > {"id":1,"cmd":"info"}
-< {"id":1,"ok":true,"name":"AFC-Turtle","fw":"0.1.0","proto":"boxturtle-1","board":"afc-lite","lanes":4,"uid":"...","reset":"power_on","up":5123,"dropped":0,"rx":1,"tx":0,"trial":false,"boot_fails":0}
+< {"id":1,"ok":true,"name":"AFC-Turtle","fw":"0.1.1","proto":"boxturtle-1","board":"afc-lite","lanes":4,"uid":"...","reset":"power_on","up":5123,"dropped":0,"rx":1,"tx":0,"trial":false,"boot_fails":0}
 ```
 
 `reset` is why the board last started: `power_on`, `reset_pin`, `software`,
@@ -46,7 +46,7 @@ ignored.
 | `assist` | `lane`, `on`, `mode` (`tn` default, `follow`, `ext`), `espool_fwd`, `espool_rwd`, `espool_kick` | `tn`: TurtleNeck feed assist while printing: the lane tracks the extruder position both ways, each change scaled exactly like a lane synced to the extruder under AFC_buffer: `assist_low` after the advance switch changes (pressed or released), `assist_high` after the trailing switch changes, and `assist_high` before either has changed since power up. Each multiplier holds until the other switch changes, so the TurtleNeck sweeps between its switches. While `assist_fault_mm` is above 0 (AFC's fault detection) a pressed switch scales harder, advance `assist_low` x 2/5 and trailing `assist_high` x 1.5, and a start uses the harder one for the last switch until a switch changes. The lane stops when the extruder stops. `follow`: the lane tracks the extruder position both ways (AFC's sync_to_extruder during a load or unload), no faults; the espooler follows the lane. `ext`: printing with a buffer the host reads (an AFC_buffer on a Klipper MCU): the lane tracks the position the host sends, already scaled by that buffer's multiplier, with print assist pulses; the host's buffer checks for faults. Sending it again switches modes. Every start waits for a new `e` before it moves |
 | `e` | `pos`, `lane` | the position the lane follows in mm (the extruder's, or in `ext` mode the host's scaled one), sent a few times a second while assist runs. With no `lane` it goes to every lane. No reply |
 | `espool` | `lane`, `duty` (-1..1), `kick` | sets an espooler by hand; 0 brakes and hands it back to the automatic mode |
-| `lane_cfg` | `lane`, `steps_per_mm`, `dir_invert`, `run_current`, `hold_current`, `sense_resistor`, `microsteps`, `stealthchop`, `sgthrs`, `espool_pulse_mm`, `espool_pulse_ms` | lane and driver settings; the pulse keys are this lane's print assist pulses (negative = back to the `cfg` value) |
+| `lane_cfg` | `lane`, `steps_per_mm`, `dir_invert`, `run_current`, `hold_current`, `sense_resistor`, `microsteps`, `stealthchop`, `sgthrs`, `espool_pulse_mm`, `espool_pulse_ms` | lane and driver settings; the pulse keys are this lane's print assist pulses (negative = back to the `cfg` value). `sgthrs` is written to the driver, but nothing reads StallGuard: there is no stall detection |
 | `cfg` | see Settings | unit-wide settings |
 | `sw_cfg` | `sw`, `invert`, `debounce_ms` | switch polarity and debounce |
 | `led_cfg` | `strip` (1-4 = RGB1-RGB4), `count`, `order` (`GRB`, `GRBW`, `RGB`, `RGBW`) | LED string layout; every header has no LEDs until this sets it |
@@ -68,7 +68,7 @@ Sent unasked:
 | ev | fields | when |
 |---|---|---|
 | `sw` | `sw`, `v` | a switch changed (after debounce) |
-| `move_done` | `lane`, `end`, `mm`, `seq` | a `move` ended. `end`: `done`, `triggered`, `no_trigger` (full distance, `until` never reached), `watch` (the watch switch left its state), `stopped`, `fault` (driver), `link_lost` (stopped on link loss; the driver keeps holding). `seq` is the move's own, when it had one |
+| `move_done` | `lane`, `end`, `mm`, `seq` | a `move` ended. `end`: `done`, `triggered`, `no_trigger` (full distance, `until` never reached), `watch` (the watch switch left its state), `stopped`, `fault` (driver), `link_lost` (stopped on link loss; the driver keeps holding unless the lane was assisting). `seq` is the move's own, when it had one |
 | `job` | `lane`, `job`, `state` (`started`, `recovering`), `try`, `why` | a job started or is retrying on its own |
 | `job_done` | `lane`, `job`, `ok`, `tries`, `mm`, `seq`, `code`, `msg` | a job finished; `ok:false` comes with a `fault` too |
 | `fault` | `code`, `lane`, `msg` | see Faults |
@@ -106,24 +106,41 @@ how many tries the job took.
 | `runout` | the prep switch opened during a feed or assist | yes |
 | `clog` | assist: TurtleNeck full while the extruder moved `assist_fault_mm` | yes |
 | `not_feeding` | assist: TurtleNeck pulled tight while the extruder moved `assist_fault_mm` | yes |
-| `tmc_uart` | the driver does not answer (no motor power?), or answers but drops writes | yes |
-| `tmc_reset` | the driver lost power; it is set up again | yes |
-| `tmc_ot`, `tmc_short`, `tmc_uv` | driver over temperature, short, charge pump | yes |
-| `tmc_otpw`, `tmc_open` | over temperature warning, open coil while moving | no |
-| `tmc_ok` | the driver is healthy again | |
+| `tmc_uart` | the driver does not answer (no motor power?), or answers but drops writes | until `tmc_ok` |
+| `tmc_reset` | the driver lost power; it is set up again | until `tmc_ok` |
+| `tmc_ot`, `tmc_short`, `tmc_uv` | driver over temperature, short, charge pump | until `tmc_ok` |
+| `tmc_open` | both coils open (motor not connected?) on 2 checks in a row while the lane moved at 1300 full steps/s or slower (30 mm/s on a stock lane) | yes |
+| `tmc_otpw` | over temperature warning | no |
+| `tmc_ok` | the driver is healthy again after a `tmc_` fault or warning other than `tmc_open` | |
 | `link_lost` | no line from the host for `link_timeout_ms` while anything ran | all |
 | `move_refused`, `cancelled`, `fault` | a job could not move, was stopped, or hit a driver fault | |
 | `link_lost` (job) | a job stopped on link loss | |
+
+A driver fault (`tmc_` above, except `tmc_otpw`) stops the lane: its move
+ends with `end:"fault"`, its job with `code:"fault"`, its assist stops, and
+its driver is turned off even after `hold`. After `tmc_uart`, `tmc_reset`,
+`tmc_ot`, `tmc_short` or `tmc_uv`, `move`, `job` and `assist` with
+`on:true` on that lane reply `{"ok":false,"err":"driver fault"}` until
+`tmc_ok`; `stop`, `enable`, `status` and the other commands still work. The
+firmware does not start assist again by itself: the host sends `assist`
+again after `tmc_ok`. `tmc_open` refuses nothing and no `tmc_ok` follows it:
+the driver's open load flags only mean something while the lane moves slowly
+(a healthy motor can show them at standstill and in fast moves), so the next
+move checks again. Every lane starts healthy at power up, so requests are
+taken before the drivers are first set up; a driver that does not answer
+reports `tmc_uart` within about 2 s.
 
 ## Link loss
 
 While any motor, espooler, job or assist runs, the host must send a line at
 least every `link_timeout_ms` (2000). Otherwise everything stops and
 `link_lost` is sent once; moves end with `end:"link_lost"` and jobs with
-`code:"link_lost"`, and the drivers that held keep holding. Lines sent
-while the USB link is down can be lost, so after a reconnect the host asks
-`replay` for the result of a move or job it was waiting on, matched by its
-`seq`. `{"cmd":"cfg","link_timeout_ms":0}` turns this off for bench tests.
+`code:"link_lost"`. Lanes that were assisting (any mode) are let go (driver
+off), so the extruder does not pull against a locked lane; the other drivers
+that held keep holding. Lines sent while the USB link is down can be lost,
+so after a reconnect the host asks `replay` for the result of a move or job
+it was waiting on, matched by its `seq`. `{"cmd":"cfg","link_timeout_ms":0}`
+turns this off for bench tests.
 
 ## Boot guard
 
