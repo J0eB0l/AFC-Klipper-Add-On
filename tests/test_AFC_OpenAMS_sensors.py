@@ -16,6 +16,8 @@ state verification after every call, branch-complete coverage:
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from extras.AFC_OpenAMS import afcAMS
 from extras.AFC_lane import AFCLaneState
 
@@ -262,6 +264,10 @@ def _advance_unit():
     return unit
 
 
+#: The command a load runs through.
+GCMD = MagicMock()
+
+
 def _advance_lane(ext):
     lane = FakeLane("lane0", extruder_obj=ext)
     return lane
@@ -269,9 +275,9 @@ def _advance_lane(ext):
 
 def test_tool_stn_advance_full_distance():
     unit = _advance_unit()
-    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(100.0, 25.0)))
+    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(100.0, 25.0)), gcmd=GCMD)
     assert unit._oams_extrude.calls == [
-        ((100.0, 25.0 * 60.0, "tool_stn_to_nozzle"), {})]
+        ((100.0, 25.0 * 60.0, "tool_stn_to_nozzle"), {"gcmd": GCMD})]
 
 
 def test_tool_stn_advance_credits_engagement():
@@ -279,28 +285,28 @@ def test_tool_stn_advance_credits_engagement():
     only the remainder is extruded."""
     unit = _advance_unit()
     unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(100.0, 25.0)),
-                                     already_advanced=30.0)
+                                     already_advanced=30.0, gcmd=GCMD)
     assert unit._oams_extrude.last_args[0] == 70.0
 
 
 def test_tool_stn_advance_noop_when_fully_covered():
     unit = _advance_unit()
     unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(50.0, 25.0)),
-                                     already_advanced=60.0)
+                                     already_advanced=60.0, gcmd=GCMD)
     assert not unit._oams_extrude.called
 
 
 def test_tool_stn_advance_noop_without_tool_stn():
     unit = _advance_unit()
-    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(0, 25.0)))
+    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(0, 25.0)), gcmd=GCMD)
     assert not unit._oams_extrude.called
     # Attribute missing entirely -> getattr default 0 -> no-op
-    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext()))
+    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext()), gcmd=GCMD)
     assert not unit._oams_extrude.called
 
 
 def test_tool_stn_advance_default_speed():
     """tool_load_speed missing -> 25mm/s default (x60 for mm/min)."""
     unit = _advance_unit()
-    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(tool_stn=40.0)))
+    unit._advance_tool_stn_to_nozzle(_advance_lane(_Ext(tool_stn=40.0)), gcmd=GCMD)
     assert unit._oams_extrude.last_args == (40.0, 1500.0, "tool_stn_to_nozzle")

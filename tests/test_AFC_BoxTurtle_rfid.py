@@ -92,6 +92,25 @@ def bt_rfid_record(uid: Optional[str]) -> Dict[str, Any]:
     return record
 
 
+def bt_rfid_gcmd_spy(monkeypatch: pytest.MonkeyPatch, obj: Any, name: str) -> List[Any]:
+    """
+    Record the gcmd each call of one of obj's methods is given, then run it.
+
+    :param monkeypatch: the test's monkeypatch
+    :param obj: the object whose method is watched
+    :param name: the method's name
+    :return list: the gcmd of each call, in order
+    """
+    seen: List[Any] = []
+    real = getattr(obj, name)
+
+    def _spy(*args: Any, gcmd: Any, **kwargs: Any) -> Any:
+        seen.append(gcmd)
+        return real(*args, gcmd=gcmd, **kwargs)
+    monkeypatch.setattr(obj, name, _spy)
+    return seen
+
+
 class BtRfidCompletion(FakeCompletion):
     """A reactor completion whose wait() runs the reactor until it completes,
     the way Klipper's does while a worker thread finishes."""
@@ -340,22 +359,31 @@ class BtRfidUnitObj:
 
     def __init__(self) -> None:
         self.calls: List[str] = []
+        self.gcmds: List[Any] = []
 
-    def prep_load(self, lane: "BtRfidLane") -> None:
-        """:param lane: the lane to home onto its load switch"""
+    def prep_load(self, lane: "BtRfidLane", gcmd: Any) -> None:
+        """
+        :param lane: the lane to home onto its load switch
+        :param gcmd: the command context, recorded and passed to the moves
+        """
         self.calls.append("prep_load")
-        lane.move_to(400.0, None, endstop=lane.load_es, use_homing=True)
+        self.gcmds.append(gcmd)
+        lane.move_to(400.0, None, endstop=lane.load_es, use_homing=True, gcmd=gcmd)
         for _ in range(40):
             if lane.raw_load_state:
                 break
-            lane.move(lane.short_move_dis, 500.0, 400)
+            lane.move(lane.short_move_dis, 500.0, 400, gcmd=gcmd)
 
-    def prep_post_load(self, lane: "BtRfidLane") -> None:
-        """:param lane: the lane to stage at the hub"""
+    def prep_post_load(self, lane: "BtRfidLane", gcmd: Any) -> None:
+        """
+        :param lane: the lane to stage at the hub
+        :param gcmd: the command context, recorded and passed to the move
+        """
         self.calls.append("prep_post_load")
+        self.gcmds.append(gcmd)
         if lane.loaded_to_hub or not lane.raw_load_state:
             return
-        lane.move(lane.dist_hub, 100.0, 400, False)
+        lane.move(lane.dist_hub, 100.0, 400, False, gcmd=gcmd)
         lane.loaded_to_hub = True
 
 
@@ -400,6 +428,7 @@ class BtRfidLane:
         self.unit_obj = BtRfidUnitObj()
         self.moves: List[Tuple[float, float, float, Any]] = []
         self.homing_moves: List[Tuple[float, Any, Any, bool, Any]] = []
+        self.gcmds: List[Any] = []
         self.feed_starts: List[Tuple[float, bool]] = []
         self.after_feed: Optional[Callable[[], None]] = None
         self.fail_after: Optional[int] = None
@@ -420,34 +449,38 @@ class BtRfidLane:
             raise RuntimeError(self.fault)
 
     def move(self, distance: float, speed: float, accel: float,
-             assist_active: Any = False) -> None:
+             assist_active: Any = False, *, gcmd: Any) -> None:
         """
         :param distance: signed mm
         :param speed: mm/s
         :param accel: mm/s^2
         :param assist_active: whether the espooler runs
+        :param gcmd: the command context, recorded in gcmds
         """
         self._check_fault()
         if distance > 0:
             self.feed_starts.append((self.pos, self.loaded_to_hub))
         self.moves.append((distance, speed, accel, assist_active))
+        self.gcmds.append(gcmd)
         self.pos += distance * (1.0 - self.slip) if distance > 0 else distance
         if distance > 0 and self.after_feed is not None:
             self.after_feed()
 
     def move_to(self, distance: float, speed_mode: Any, endstop: Any = None,
                 assist_active: Any = None,
-                use_homing: bool = True) -> Tuple[bool, float, None]:
+                use_homing: bool = True, *, gcmd: Any) -> Tuple[bool, float, None]:
         """
         :param distance: signed mm
         :param speed_mode: AFC's speed mode
         :param endstop: the endstop to home to
         :param assist_active: the espooler mode
         :param use_homing: home on the endstop
+        :param gcmd: the command context, recorded in gcmds
         :return tuple: (homed, distance, None)
         """
         self.homing_moves.append(
             (distance, speed_mode, endstop, use_homing, assist_active))
+        self.gcmds.append(gcmd)
         if distance > 0:
             if self.raw_load_state:
                 return True, 0.0, None
@@ -889,7 +922,10 @@ class TestAFCBoxTurtlerfidApplyWrittenTag:
     def test_the_written_tag_is_applied_and_noted(self, monkeypatch):
         lane9 = BtRfidLane("lane9")
         rig = build_bt_rfid(monkeypatch, lanes=[lane9])
-        rig.unit.apply_written_tag("lane9", {"uid": "04AB", "filament": {}})
+        applied = bt_rfid_gcmd_spy(monkeypatch, rig.unit, "apply_to_lane")
+        gcmd = FakeGcmd()
+        rig.unit.apply_written_tag("lane9", {"uid": "04AB", "filament": {}}, gcmd)
+        assert applied == [gcmd]
         assert rig.console == [bt_rfid_read_out("lane9", "04AB")]
         assert lane9.weight == 1000
         assert rig.unit.last_reads_status() == {"lane9": bt_rfid_record("04AB")}
@@ -899,7 +935,7 @@ class TestAFCBoxTurtlerfidApplyWrittenTag:
     def test_a_tag_without_a_uid_is_noted_as_blank(self, monkeypatch):
         lane9 = BtRfidLane("lane9")
         rig = build_bt_rfid(monkeypatch, lanes=[lane9])
-        rig.unit.apply_written_tag("lane9", {"uid": None})
+        rig.unit.apply_written_tag("lane9", {"uid": None}, "callback")
         assert rig.console == [bt_rfid_read_out("lane9", None)]
         assert rig.unit.last_reads_status() == {"lane9": bt_rfid_record(None)}
         assert rig.unit._last_uid_by_lane == {"lane9": ""}
@@ -908,7 +944,7 @@ class TestAFCBoxTurtlerfidApplyWrittenTag:
     def test_a_name_that_is_not_an_afc_lane_raises(self, monkeypatch):
         rig = build_bt_rfid(monkeypatch)
         with pytest.raises(RuntimeError) as err:
-            rig.unit.apply_written_tag("lane12", {"uid": "04AB"})
+            rig.unit.apply_written_tag("lane12", {"uid": "04AB"}, "callback")
         assert str(err.value) == "lane12 is not an AFC lane"
         assert rig.console == []
         assert rig.unit.last_reads_status() == {}
@@ -929,7 +965,8 @@ class TestAFCBoxTurtlerfidStageForWrite:
             self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch, staged=True)
         unit = rig.unit
-        token = unit._stage_for_write("lane9")
+        gcmd = FakeGcmd()
+        token = unit._stage_for_write("lane9", gcmd=gcmd)
         assert token == (lane, pytest.approx(2 * BT_RFID_TURN_MM), True, None)
         # Homed back first: the sweep began on the load switch edge, unstaged.
         assert lane.homing_moves[0][:4] == (-170.0, SpeedMode.LONG, "load", True)
@@ -937,9 +974,11 @@ class TestAFCBoxTurtlerfidStageForWrite:
         assert sum(lane.feeds()) == pytest.approx(2 * BT_RFID_TURN_MM)
         assert unit._sweeping is True
         assert rig.logged() == [self.NOT_FOUND]
-        unit._unstage_after_write(token)
+        unit._unstage_after_write(token, gcmd=gcmd)
         assert lane.loaded_to_hub is True
         assert lane.unit_obj.calls == ["prep_load", "prep_load", "prep_post_load"]
+        assert lane.unit_obj.gcmds == [gcmd] * 3
+        assert lane.gcmds == [gcmd] * (len(lane.moves) + len(lane.homing_moves))
         assert lane.pos == pytest.approx(0.5 + 150.0)
         assert unit._sweeping is False
         assert rig.logged() == [self.NOT_FOUND]
@@ -947,13 +986,13 @@ class TestAFCBoxTurtlerfidStageForWrite:
     def test_write_staging_rolls_the_sister_tag_off_and_back(self, monkeypatch):
         rig, lane, sib = bt_rfid_sister_rig(monkeypatch)
         unit = rig.unit
-        token = unit._stage_for_write("lane8")
+        token = unit._stage_for_write("lane8", gcmd="callback")
         rolled = [(-10.0, 100.0, 400, True)] * 7 + [(-5.0, 100.0, 400, True)]
         assert sib.moves == rolled
         assert token[3] == (sib, 75.0, 100.0)
         # The parked-tag probe ran before lane8 fed anything.
         assert rig.field.calls[0][1] is True
-        unit._unstage_after_write(token)
+        unit._unstage_after_write(token, gcmd="callback")
         assert sib.moves == rolled + [(75.0, 100.0, 400, False),
                                       (200.0, 100.0, 400, False)]
         assert sib.loaded_to_hub is True
@@ -972,7 +1011,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         lane.tool_loaded = True
         with pytest.raises(StageError) as err:
-            rig.unit._stage_for_write("lane9")
+            rig.unit._stage_for_write("lane9", gcmd="callback")
         assert str(err.value) == ("lane9 is loaded in the toolhead. The write "
                                   "turns the spool by moving its filament, so "
                                   "unload it first.")
@@ -983,7 +1022,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
     def test_write_staging_refuses_a_staged_lane_without_homing(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch, staged=True, homing=False)
         with pytest.raises(StageError) as err:
-            rig.unit._stage_for_write("lane9")
+            rig.unit._stage_for_write("lane9", gcmd="callback")
         assert str(err.value) == ("lane9 is staged at the hub and homing is off, "
                                   "so there is no load switch to bring it back "
                                   "to. Eject it and insert it again to write it.")
@@ -993,7 +1032,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
 
     def test_an_unstaged_lane_without_homing_is_swept(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch, homing=False)
-        token = rig.unit._stage_for_write("lane9")
+        token = rig.unit._stage_for_write("lane9", gcmd="callback")
         assert token == (lane, pytest.approx(2 * BT_RFID_TURN_MM), False, None)
         assert lane.homing_moves == []
         assert rig.logged() == [self.NOT_FOUND]
@@ -1002,11 +1041,11 @@ class TestAFCBoxTurtlerfidStageForWrite:
             self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch, staged=True, busy=True)
         unit = rig.unit
-        token = unit._stage_for_write("lane9")
+        token = unit._stage_for_write("lane9", gcmd="callback")
         # 150mm dist_hub less the 25mm margin, counted from the load switch.
         assert lane.feeds() == [20.0] * 6 + [5.0]
         assert token[1] == 125.0
-        unit._unstage_after_write(token)
+        unit._unstage_after_write(token, gcmd="callback")
         assert lane.loaded_to_hub is True
         assert rig.logged() == [
             ("info", "AFC_BT_RFID: stage-for-write limited: hub Turtle_1 is in "
@@ -1018,7 +1057,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
     def test_write_staging_refuses_when_there_is_no_room(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch, busy=True, dist_hub=20.0)
         with pytest.raises(StageError) as err:
-            rig.unit._stage_for_write("lane9")
+            rig.unit._stage_for_write("lane9", gcmd="callback")
         assert str(err.value) == ("hub Turtle_1 is in use (lane8 is loaded through "
                                   "it), so the sweep stops 25mm short of it, and "
                                   "lane9's dist_hub leaves no room before it. "
@@ -1031,7 +1070,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         rig, lane = bt_rfid_hub_rig(monkeypatch, staged=True)
         lane.fail_after, lane.fault = 0, "stepper fault"
         with pytest.raises(RuntimeError) as err:
-            rig.unit._stage_for_write("lane9")
+            rig.unit._stage_for_write("lane9", gcmd="callback")
         assert str(err.value) == "stepper fault"
         assert rig.unit._sweeping is False
         assert lane.loaded_to_hub is False
@@ -1042,7 +1081,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         rig, lane, sib = bt_rfid_sister_rig(monkeypatch)
         lane.fail_after = 0
         with pytest.raises(RuntimeError) as err:
-            rig.unit._stage_for_write("lane8")
+            rig.unit._stage_for_write("lane8", gcmd="callback")
         assert str(err.value) == "stepper gone"
         assert lane.moves == []
         assert sib.moves == ([(-10.0, 100.0, 400, True)] * 7
@@ -1065,7 +1104,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         lane.long_moves_accel = 250
         rig = build_bt_rfid(monkeypatch, lanes=[lane], options={
             "tag_sweep_step_mm": 0.0, "tag_sweep_speed": 100.0})
-        token = rig.unit._stage_for_write("lane9")
+        token = rig.unit._stage_for_write("lane9", gcmd="callback")
         # (100^2 / 250) / 0.4 = 100mm chunks over the 1256.6mm bound.
         assert lane.feeds() == [100.0] * 12 + [pytest.approx(56.637061)]
         assert token == (lane, pytest.approx(1256.637061), False, None)
@@ -1076,12 +1115,13 @@ class TestAFCBoxTurtlerfidStageForWrite:
         rig, lane = bt_rfid_hub_rig(monkeypatch, staged=True)
         # prep_load's forward home never makes the switch.
         lane.unit_obj.prep_load = Recorder()
+        gcmd = FakeGcmd()
         with pytest.raises(StageError) as err:
-            rig.unit._stage_for_write("lane9")
+            rig.unit._stage_for_write("lane9", gcmd=gcmd)
         assert str(err.value) == ("lane9 did not come back onto its load switch. "
                                   "Check the spool; its next load will re-home it")
         assert rig.unit._sweeping is False
-        assert lane.unit_obj.prep_load.calls == [((lane,), {})]
+        assert lane.unit_obj.prep_load.calls == [((lane,), {"gcmd": gcmd})]
         assert lane.loaded_to_hub is False
         assert lane.moves == []
         assert rig.field.calls == []
@@ -1093,14 +1133,14 @@ class TestAFCBoxTurtlerfidStageForWrite:
             ("reader0", 0, ("lane8", "lane9")),
             ("reader1", 1, ("lane10", "lane11"))))
         with pytest.raises(StageError) as err:
-            rig.unit._stage_for_write("lane9", rig.readers["reader1"])
+            rig.unit._stage_for_write("lane9", rig.readers["reader1"], gcmd="callback")
         assert str(err.value) == "lane9 is not on reader1; write it with READER=bt:reader0"
         assert lane.moves == []
         assert rig.logged() == []
 
     def test_the_reader_it_was_sent_to_is_accepted(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch)
-        token = rig.unit._stage_for_write("lane9", rig.readers["reader0"])
+        token = rig.unit._stage_for_write("lane9", rig.readers["reader0"], gcmd="callback")
         assert token[0] is lane
         assert rig.logged() == [self.NOT_FOUND]
 
@@ -1110,10 +1150,10 @@ class TestAFCBoxTurtlerfidStageForWrite:
         lane12 = BtRfidLane("lane12")            # an AFC lane no reader serves
         rig.printer.afc.lanes["lane12"] = lane12
         # Each of the three conditions alone skips it.
-        assert unit._stage_for_write("lane8") is None
-        assert unit._stage_for_write("lane12") is None
+        assert unit._stage_for_write("lane8", gcmd="callback") is None
+        assert unit._stage_for_write("lane12", gcmd="callback") is None
         rig.readers["reader0"].version = None
-        assert unit._stage_for_write("lane9") is None
+        assert unit._stage_for_write("lane9", gcmd="callback") is None
         assert lane.moves == [] and lane12.moves == []
         assert unit._sweeping is False
         assert rig.logged() == [
@@ -1127,7 +1167,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
     def test_a_target_for_a_lane_no_reader_serves_is_skipped_not_refused(
             self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch)
-        assert rig.unit._stage_for_write("lane12", rig.readers["reader0"]) is None
+        assert rig.unit._stage_for_write("lane12", rig.readers["reader0"], gcmd="callback") is None
         assert rig.logged() == [
             ("info", "AFC_BT_RFID: stage-for-write skipped lane12 (lane=False, "
                      "rdr=False, ver=None)")]
@@ -1135,7 +1175,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
     def test_a_sweep_already_running_is_not_joined(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         rig.unit._sweeping = True
-        assert rig.unit._stage_for_write("lane9") is None
+        assert rig.unit._stage_for_write("lane9", gcmd="callback") is None
         assert lane.moves == []
         assert rig.unit._sweeping is True
         assert rig.logged() == [
@@ -1144,7 +1184,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
     def test_write_staging_settles_on_a_found_tag(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         rig.field.appear(lane, after_mm=10.0, until_mm=100.0)
-        token = rig.unit._stage_for_write("lane9")
+        token = rig.unit._stage_for_write("lane9", gcmd="callback")
         # Found after the first 20mm chunk, then eased back: three 3mm steps
         # hold, the fourth loses it and is undone, so 20 - 9 = 11mm.
         assert lane.moves == [(20.0, 20.0, 400, False)] + [
@@ -1153,7 +1193,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         assert rig.logged() == [
             ("info", "AFC_BT_RFID: staged lane9 for write: tag found DEADBEEF "
                      "after 11mm (re-centred -9mm); holding for the write.")]
-        rig.unit._unstage_after_write(token)
+        rig.unit._unstage_after_write(token, gcmd="callback")
         assert rig.unit._sweeping is False
 
     @staticmethod
@@ -1177,7 +1217,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         rig.field.appear(lane, after_mm=50.0)
         self._read_once_then_gone(rig, lane)
-        token = rig.unit._stage_for_write("lane9")
+        token = rig.unit._stage_for_write("lane9", gcmd="callback")
         # Read on the third 20mm chunk, then never again: the settle searches
         # back the 20mm chunk plus 25mm, fifteen 3mm steps, so 60 - 45 = 15mm.
         assert lane.moves == [(20.0, 20.0, 400, False)] * 3 + [
@@ -1187,7 +1227,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         assert rig.logged() == [
             ("info", "AFC_BT_RFID: staged lane9 for write: tag found DEADBEEF "
                      "after 15mm (re-centred -45mm); holding for the write.")]
-        rig.unit._unstage_after_write(token)
+        rig.unit._unstage_after_write(token, gcmd="callback")
         assert lane.homing_moves == [
             (-35.0, SpeedMode.LONG, "load", True, AssistActive.YES),
             (400.0, None, "load", True, None)]
@@ -1199,7 +1239,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         rig.field.appear(lane, after_mm=10.0)
         self._read_once_then_gone(rig, lane)
-        token = rig.unit._stage_for_write("lane9")
+        token = rig.unit._stage_for_write("lane9", gcmd="callback")
         # The 45mm search leaves 20 - 45 = -25mm, the tip 20mm behind its
         # load switch, so the restore homes it forward onto the switch.
         assert lane.moves == [(20.0, 20.0, 400, False)] + [
@@ -1209,7 +1249,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
             ("info", "AFC_BT_RFID: staged lane9 for write: tag found DEADBEEF "
                      "after -25mm (re-centred -45mm); holding for the write.")]
         assert lane.raw_load_state is False
-        rig.unit._unstage_after_write(token)
+        rig.unit._unstage_after_write(token, gcmd="callback")
         assert lane.unit_obj.calls == ["prep_load"]
         assert lane.homing_moves == [(400.0, None, "load", True, None)]
         assert lane.pos == 0.5
@@ -1230,7 +1270,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
                 lane.after_feed = None
 
         lane.after_feed = settle_reads
-        token = rig.unit._stage_for_write("lane9")
+        token = rig.unit._stage_for_write("lane9", gcmd="callback")
         # 20mm fed, 21mm searched and 18mm eased back: 20 - 39 = -19mm.
         assert lane.moves == [(20.0, 20.0, 400, False)] + [
             (-3.0, 25.0, 400, True)] * 13
@@ -1240,7 +1280,7 @@ class TestAFCBoxTurtlerfidStageForWrite:
             ("info", "AFC_BT_RFID: staged lane9 for write: tag found DEADBEEF "
                      "after -19mm (re-centred -39mm); holding for the write.")]
         assert lane.raw_load_state is False
-        rig.unit._unstage_after_write(token)
+        rig.unit._unstage_after_write(token, gcmd="callback")
         assert lane.unit_obj.calls == ["prep_load"]
         assert lane.homing_moves == [(400.0, None, "load", True, None)]
         assert lane.pos == 0.5
@@ -1257,13 +1297,14 @@ class TestAFCBoxTurtlerfidSettleOnTag:
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         rig.field.script = list(reads)
         moved = rig.unit._settle_on_tag(lane, "lane9", rig.readers["reader0"],
-                                        back_limit)
+                                        back_limit, gcmd="callback")
         return moved, lane, rig
 
     def test_a_tag_still_in_range_is_eased_to_mid_field(self, monkeypatch):
         # Reads at once, holds two more steps, drops on the third.
         moved, lane, rig = self._settle(monkeypatch, [True, True, True, False])
         assert lane.moves == [(-3.0, 25.0, 400, True)] * 3 + [(3.0, 25.0, 400, True)]
+        assert lane.gcmds == ["callback"] * 4
         assert moved == -6.0
         assert rig.field.script == []
         assert rig.logged() == []
@@ -1302,7 +1343,8 @@ class TestAFCBoxTurtlerfidSettleOnTag:
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         lane.short_moves_speed = None
         rig.field.script = [True, False]
-        moved = rig.unit._settle_on_tag(lane, "lane9", rig.readers["reader0"], 30.0)
+        moved = rig.unit._settle_on_tag(lane, "lane9", rig.readers["reader0"], 30.0,
+                                        gcmd="callback")
         assert lane.moves == [(-3.0, 20.0, 400, True), (3.0, 20.0, 400, True)]
         assert moved == 0.0
         assert rig.logged() == []
@@ -1314,7 +1356,8 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
 
     def test_write_staging_leaves_an_unstaged_lane_unstaged(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch)
-        rig.unit._unstage_after_write(rig.unit._stage_for_write("lane9"))
+        rig.unit._unstage_after_write(rig.unit._stage_for_write("lane9", gcmd="callback"),
+                                      gcmd="callback")
         assert lane.loaded_to_hub is False
         assert lane.unit_obj.calls == ["prep_load"]
         # Homed back, then forward onto the load switch edge.
@@ -1328,7 +1371,7 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
     def test_no_token_only_releases_the_guard(self, monkeypatch):
         rig, lane = bt_rfid_hub_rig(monkeypatch)
         rig.unit._sweeping = True
-        rig.unit._unstage_after_write(None)
+        rig.unit._unstage_after_write(None, gcmd="callback")
         assert rig.unit._sweeping is False
         assert lane.moves == [] and lane.homing_moves == []
         assert rig.logged() == []
@@ -1339,12 +1382,14 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
         rig = build_bt_rfid(monkeypatch, lanes=[lane], homing=False,
                             options={"tag_retract_speed": 60.0})
         rig.unit._sweeping = True
-        rig.unit._unstage_after_write((lane, 100.0, False, None))
+        gcmd = FakeGcmd()
+        rig.unit._unstage_after_write((lane, 100.0, False, None), gcmd=gcmd)
         # Without homing: the bulk at the retract speed, the 30mm tail in
         # short steps, then a creep back onto the switch.
         assert lane.moves == ([(-70.0, 60.0, 400, True)]
                               + [(-10.0, 25.0, 400, True)] * 4
                               + [(10.0, 25.0, 400, False)])
+        assert lane.gcmds == [gcmd] * 6
         assert lane.pos == 5.0
         assert rig.unit._sweeping is False
         assert rig.logged() == []
@@ -1354,7 +1399,7 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
         lane = BtRfidLane("lane9", pos=105.0)
         rig = build_bt_rfid(monkeypatch, lanes=[lane], homing=False)
         rig.unit._sweeping = True
-        rig.unit._unstage_after_write((lane, 100.0, False, None))
+        rig.unit._unstage_after_write((lane, 100.0, False, None), gcmd="callback")
         # No retract speed configured: the lane's 100mm/s, not the 20mm/s sweep.
         assert lane.moves == ([(-70.0, 100.0, 400, True)]
                               + [(-10.0, 25.0, 400, True)] * 4
@@ -1368,7 +1413,7 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
         lane.pos = 105.0
         lane.unit_obj.prep_load = Recorder()     # the forward home never lands
         rig.unit._sweeping = True
-        rig.unit._unstage_after_write((lane, 100.0, True, None))
+        rig.unit._unstage_after_write((lane, 100.0, True, None), gcmd="callback")
         assert lane.homing_moves == [
             (-120.0, SpeedMode.LONG, "load", True, AssistActive.YES)]
         assert lane.loaded_to_hub is False
@@ -1383,7 +1428,7 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
         lane = BtRfidLane("lane9", pos=105.0)
         lane.long_moves_speed = None
         rig = build_bt_rfid(monkeypatch, lanes=[lane], homing=False)
-        rig.unit._unstage_after_write((lane, 100.0, False, None))
+        rig.unit._unstage_after_write((lane, 100.0, False, None), gcmd="callback")
         assert lane.moves[0] == (-70.0, 20.0, 400, True)
         assert rig.logged() == []
 
@@ -1392,7 +1437,7 @@ class TestAFCBoxTurtlerfidUnstageAfterWrite:
         lane.pos, lane.fail_after = 105.0, 0
         rig.unit._sweeping = True
         with pytest.raises(RuntimeError) as err:
-            rig.unit._unstage_after_write((lane, 100.0, True, None))
+            rig.unit._unstage_after_write((lane, 100.0, True, None), gcmd="callback")
         assert str(err.value) == "stepper gone"
         assert rig.unit._sweeping is False
         assert lane.unit_obj.calls == []
@@ -1470,9 +1515,12 @@ class TestAFCBoxTurtlerfidHandleReady:
         r0.link = link0
         # Each entry stages for its own reader.
         with pytest.raises(StageError) as err:
-            entry1.stage("lane8")
+            entry1.stage("lane8", "callback")
         assert str(err.value) == "lane8 is not on reader1; write it with READER=bt:reader0"
-        assert entry0.stage("lane8") is None
+        staged = bt_rfid_gcmd_spy(monkeypatch, rig.unit, "_stage_for_write")
+        gcmd = FakeGcmd()
+        assert entry0.stage("lane8", gcmd) is None
+        assert staged == [gcmd]
         assert rig.logged() == [
             ("info", "AFC_BT_RFID: stage-for-write skipped lane8 (lane=False, "
                      "rdr=True, ver=None)")]
@@ -2067,7 +2115,10 @@ class TestAFCBoxTurtlerfidOnLanePrepLoaded:
 
     def test_an_insert_scans_and_applies_the_tag(self, monkeypatch):
         rig, lane = self._rig(monkeypatch)
+        applied = bt_rfid_gcmd_spy(monkeypatch, rig.unit, "apply_to_lane")
         rig.unit._on_lane_prep_loaded(lane)
+        assert applied == ["callback"]
+        assert lane.gcmds == ["callback"] * (len(lane.moves) + len(lane.homing_moves))
         assert rig.console == [self.READ_OUT]
         assert lane.weight == 1000
         assert rig.unit.last_reads_status() == {"lane8": bt_rfid_record("AA")}
@@ -2275,8 +2326,13 @@ class TestAFCBoxTurtlerfidClearSibling:
                         "holds no seated spool: it is lane8's own, reading it.")
 
     @staticmethod
-    def _clear(rig: BtRfidRig) -> Optional[tuple]:
-        return rig.unit._clear_sibling("lane8", rig.readers["reader0"])
+    def _clear(rig: BtRfidRig, gcmd: Any = "callback") -> Optional[tuple]:
+        """
+        :param rig: the sister rig
+        :param gcmd: the command context the roll-back runs through
+        :return Optional[tuple]: _clear_sibling's restore token
+        """
+        return rig.unit._clear_sibling("lane8", rig.readers["reader0"], gcmd=gcmd)
 
     def test_a_clear_antenna_means_the_sister_is_not_touched(self, monkeypatch):
         rig, lane, sib = bt_rfid_sister_rig(monkeypatch, parked=None)
@@ -2299,8 +2355,10 @@ class TestAFCBoxTurtlerfidClearSibling:
     def test_the_sisters_known_tag_still_is_one(self, monkeypatch):
         rig, lane, sib = bt_rfid_sister_rig(monkeypatch)
         rig.unit._last_uid_by_lane = {"lane8": "7bf0afff", "lane9": "cafe1234"}
-        assert self._clear(rig) == (sib, 75.0, 100.0)
+        gcmd = FakeGcmd()
+        assert self._clear(rig, gcmd) == (sib, 75.0, 100.0)
         assert sib.moves == self.ROLL_BACK
+        assert sib.gcmds == [gcmd] * len(self.ROLL_BACK)
         assert rig.logged() == [self.PARKED, self.ROLLED]
 
     def test_an_unknown_parked_tag_is_treated_as_a_collision(self, monkeypatch):
@@ -2516,7 +2574,10 @@ class TestAFCBoxTurtlerfidRestoreSibling:
 
     def test_and_put_back_afterwards(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
-        rig.unit._restore_sibling(token)
+        gcmd = FakeGcmd()
+        rig.unit._restore_sibling(token, gcmd=gcmd)
+        assert sib.gcmds == [gcmd] * (len(sib.moves) + len(sib.homing_moves))
+        assert sib.unit_obj.gcmds == [gcmd] * len(sib.unit_obj.calls)
         assert sib.pos == 200.5                  # load switch edge + dist_hub
         assert sib.hub_obj.state is False
         assert sib.loaded_to_hub is True
@@ -2524,14 +2585,14 @@ class TestAFCBoxTurtlerfidRestoreSibling:
 
     def test_a_hub_that_never_clears_still_terminates(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch, hub_at=-1e9)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0, 200.0]
         assert len(sib.homing_moves) == 2
         assert rig.logged() == [self.RESTAGED]
 
     def test_the_restage_never_drives_filament_at_the_hub(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.hub_obj.state is False
         assert sib.pos <= sib.hub_obj.at
         assert [m[2] for m in sib.homing_moves] == ["load", "load"]
@@ -2539,7 +2600,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
 
     def test_the_retracts_run_the_espooler(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [(m[0], m[4]) for m in sib.homing_moves if m[0] < 0] == [
             (-200.0, AssistActive.YES)]
         assert sib.moves[0] == (75.0, 100.0, 400, False)
@@ -2547,7 +2608,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
 
     def test_it_re_stages_the_way_a_load_does(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.homing_moves == [
             (-200.0, SpeedMode.LONG, "load", True, AssistActive.YES),
             (400.0, None, "load", True, None)]
@@ -2559,7 +2620,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     @pytest.mark.parametrize("slip", [0.0, 0.2, 0.5])
     def test_it_lands_exactly_where_a_fresh_insert_would(self, monkeypatch, slip):
         rig, sib, token = self._rolled(monkeypatch, slip=slip)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         # The last move is prep_post_load's dist_hub feed from the switch edge.
         assert sib.moves[-1][0] == 200.0
         assert sib.pos - 200.0 * (1.0 - slip) == pytest.approx(0.5)
@@ -2569,13 +2630,13 @@ class TestAFCBoxTurtlerfidRestoreSibling:
 
     def test_nothing_is_inserted_between_the_two_proven_moves(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0, 200.0]
         assert rig.logged() == [self.RESTAGED]
 
     def test_without_homing_it_re_feeds_and_clears_the_flag(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch, homing=False)
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.homing_moves == []
         assert sib.moves == [(75.0, 100.0, 400, False)]
         assert sib.loaded_to_hub is False
@@ -2587,7 +2648,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_lane_configured_not_to_stage_is_left_where_it_lands(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.load_to_hub = False
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0]
         assert sib.homing_moves == []
         assert sib.loaded_to_hub is True
@@ -2596,7 +2657,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_lane_with_no_hub_object_is_left_after_the_refeed(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.hub_obj = None
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0]
         assert sib.homing_moves == []
         assert rig.logged() == []
@@ -2604,7 +2665,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_restore_failure_is_logged_not_raised(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.fail_after = 0
-        rig.unit._restore_sibling(token)           # must not raise
+        rig.unit._restore_sibling(token, gcmd="callback")           # must not raise
         assert sib.loaded_to_hub is False
         assert rig.logged() == [
             ("warning", "AFC_BT_RFID: could not restore lane9 after the read "
@@ -2613,7 +2674,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_it_says_so_when_the_sister_cannot_be_recovered(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.pos = -500.0                         # came out of the lane entirely
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         # The give-back, then int(75 / 10) + 4 creeps of 10mm.
         assert sib.moves == [(75.0, 100.0, 400, False)] + [
             (10.0, 25.0, 400, False)] * 11
@@ -2629,7 +2690,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_it_homes_the_sister_back_onto_the_switch(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.pos = -100.0                         # the give-back lands short
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0, 10.0, 10.0, 10.0, 200.0]
         assert rig.unit._seated(sib) is True
         assert sib.loaded_to_hub is True
@@ -2641,7 +2702,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_sister_the_homing_moves_cannot_seat_is_not_staged(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.unit_obj.prep_load = Recorder()     # the forward home never lands
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0]
         assert sib.loaded_to_hub is False
         assert sib.unit_obj.calls == []
@@ -2653,7 +2714,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_sister_with_no_unit_is_left_after_the_refeed(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.unit_obj = None
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert [m[0] for m in sib.moves] == [75.0]
         assert sib.homing_moves == []
         assert sib.loaded_to_hub is True
@@ -2662,7 +2723,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_direct_hub_sister_is_left_after_the_refeed(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.is_direct_hub = lambda: True
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.moves == [(75.0, 100.0, 400, False)]
         assert sib.homing_moves == []
         assert sib.unit_obj.calls == []
@@ -2672,7 +2733,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_sister_with_no_dist_hub_is_left_after_the_refeed(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.dist_hub = 0.0
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.moves == [(75.0, 100.0, 400, False)]
         assert sib.homing_moves == []
         assert sib.unit_obj.calls == []
@@ -2683,7 +2744,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
             self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.unit_obj.prep_post_load = None
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.moves == [(75.0, 100.0, 400, False)]
         assert sib.homing_moves == []
         assert sib.unit_obj.calls == []
@@ -2693,7 +2754,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
     def test_a_unit_without_prep_load_is_left_after_the_refeed(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
         sib.unit_obj.prep_load = None
-        rig.unit._restore_sibling(token)
+        rig.unit._restore_sibling(token, gcmd="callback")
         assert sib.moves == [(75.0, 100.0, 400, False)]
         assert sib.homing_moves == []
         assert sib.unit_obj.calls == []
@@ -2702,7 +2763,7 @@ class TestAFCBoxTurtlerfidRestoreSibling:
 
     def test_none_token_restores_nothing(self, monkeypatch):
         rig, sib, token = self._rolled(monkeypatch)
-        rig.unit._restore_sibling(None)
+        rig.unit._restore_sibling(None, gcmd="callback")
         assert sib.moves == [] and sib.homing_moves == []
         assert rig.logged() == []
 
@@ -2715,9 +2776,11 @@ class TestAFCBoxTurtlerfidHomeBackToLoad:
         # A reverse home stops where the switch releases, so on its own it
         # leaves the tip behind the switch.
         rig, lane, sib = bt_rfid_sister_rig(monkeypatch)
-        rig.unit._home_back_to_load(sib, 200.0)
+        gcmd = FakeGcmd()
+        rig.unit._home_back_to_load(sib, 200.0, gcmd=gcmd)
         assert sib.homing_moves == [
             (-200.0, SpeedMode.LONG, "load", True, AssistActive.YES)]
+        assert sib.gcmds == [gcmd]
         assert sib.raw_load_state is False
         assert sib.moves == []
         assert rig.logged() == []
@@ -2726,7 +2789,7 @@ class TestAFCBoxTurtlerfidHomeBackToLoad:
         # Only the retract is driven here, with the espooler on: the forward
         # home is prep_load's, which feeds a free-wheeling spool.
         rig, lane, sib = bt_rfid_sister_rig(monkeypatch)
-        rig.unit._home_back_to_load(lane, 37.5)
+        rig.unit._home_back_to_load(lane, 37.5, gcmd="callback")
         assert lane.homing_moves == [
             (-37.5, SpeedMode.LONG, "load", True, AssistActive.YES)]
         assert lane.unit_obj.calls == []
@@ -2767,9 +2830,11 @@ class TestAFCBoxTurtlerfidRestore:
         rig = self._rig(monkeypatch, lane)
         # The 370mm bulk overshoots the switch; six slipping 8mm creeps
         # bring it back on: 370 - 60 given back.
-        assert rig.unit._restore(lane, 400.0, 100.0) == 310.0
+        gcmd = FakeGcmd()
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd=gcmd) == 310.0
         assert lane.moves == [(-370.0, 100.0, 400, True)] + [
             (10.0, 25.0, 400, False)] * 6
+        assert lane.gcmds == [gcmd] * 7
         assert lane.raw_load_state is True
         assert lane.pos == pytest.approx(3.0)
         assert rig.logged() == []
@@ -2777,21 +2842,21 @@ class TestAFCBoxTurtlerfidRestore:
     def test_a_clean_feed_also_ends_at_the_sensor(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane)
-        assert rig.unit._restore(lane, 400.0, 100.0) == 400.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 400.0
         assert lane.pos == 5.0
         assert rig.logged() == []
 
     def test_the_bulk_is_one_move_and_only_the_tail_is_stepped(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane)
-        rig.unit._restore(lane, 400.0, 100.0)
+        rig.unit._restore(lane, 400.0, 100.0, gcmd="callback")
         assert lane.moves == self.STEPPED
         assert rig.logged() == []
 
     def test_the_tail_steps_bound_how_far_it_can_overshoot(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane)
-        rig.unit._restore(lane, 400.0, 100.0)
+        rig.unit._restore(lane, 400.0, 100.0, gcmd="callback")
         assert min(m[0] for m in lane.moves[1:]) == -10.0
         assert 0.0 < lane.pos <= 10.0
         assert rig.logged() == []
@@ -2799,7 +2864,7 @@ class TestAFCBoxTurtlerfidRestore:
     def test_a_short_feed_is_all_tail(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=25.0)
         rig = self._rig(monkeypatch, lane)
-        assert rig.unit._restore(lane, 20.0, 100.0) == 20.0
+        assert rig.unit._restore(lane, 20.0, 100.0, gcmd="callback") == 20.0
         assert lane.moves == [(-10.0, 25.0, 400, True)] * 3 + [
             (10.0, 25.0, 400, False)]
         assert rig.logged() == []
@@ -2808,7 +2873,7 @@ class TestAFCBoxTurtlerfidRestore:
             self, monkeypatch):
         lane = BtRfidLane("lane8", pos=-50.0)
         rig = self._rig(monkeypatch, lane, homing=True)
-        assert rig.unit._restore(lane, 120.0, 100.0) == 120.0
+        assert rig.unit._restore(lane, 120.0, 100.0, gcmd="callback") == 120.0
         assert lane.moves == [(-120.0, 100.0, 400, True)]
         assert lane.homing_moves == []
         assert rig.logged() == []
@@ -2817,7 +2882,7 @@ class TestAFCBoxTurtlerfidRestore:
         # Prep stays true throughout; only the load switch stops the restore.
         lane = BtRfidLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane)
-        rig.unit._restore(lane, 400.0, 100.0)
+        rig.unit._restore(lane, 400.0, 100.0, gcmd="callback")
         assert lane.prep_state is True
         assert lane.raw_load_state is True
         assert lane.pos == 5.0
@@ -2826,7 +2891,7 @@ class TestAFCBoxTurtlerfidRestore:
     def test_a_lane_with_only_load_state_still_homes(self, monkeypatch):
         lane = self._LoadStateOnlyLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane)
-        assert rig.unit._restore(lane, 400.0, 100.0) == 400.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 400.0
         assert lane.moves == self.STEPPED
         assert lane.load_state is True
         assert rig.logged() == []
@@ -2834,14 +2899,14 @@ class TestAFCBoxTurtlerfidRestore:
     def test_nothing_fed_moves_nothing(self, monkeypatch):
         lane = BtRfidLane("lane8")
         rig = self._rig(monkeypatch, lane)
-        assert rig.unit._restore(lane, 0.0, 100.0) == 0.0
+        assert rig.unit._restore(lane, 0.0, 100.0, gcmd="callback") == 0.0
         assert lane.moves == [] and lane.homing_moves == []
         assert rig.logged() == []
 
     def test_a_net_retract_still_on_the_switch_moves_nothing(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=5.0)
         rig = self._rig(monkeypatch, lane, homing=True)
-        assert rig.unit._restore(lane, -3.0, 100.0) == 0.0
+        assert rig.unit._restore(lane, -3.0, 100.0, gcmd="callback") == 0.0
         assert lane.moves == [] and lane.homing_moves == []
         assert lane.unit_obj.calls == []
         assert rig.logged() == []
@@ -2849,7 +2914,7 @@ class TestAFCBoxTurtlerfidRestore:
     def test_a_tip_behind_the_switch_is_homed_forward_onto_it(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=-15.0)
         rig = self._rig(monkeypatch, lane, homing=True)
-        assert rig.unit._restore(lane, -20.0, 100.0) == -20.0
+        assert rig.unit._restore(lane, -20.0, 100.0, gcmd="callback") == -20.0
         assert lane.unit_obj.calls == ["prep_load"]
         assert lane.homing_moves == [(400.0, None, "load", True, None)]
         assert lane.moves == []
@@ -2860,7 +2925,7 @@ class TestAFCBoxTurtlerfidRestore:
             self, monkeypatch):
         lane = BtRfidLane("lane8", pos=-15.0)
         rig = self._rig(monkeypatch, lane)
-        assert rig.unit._restore(lane, -20.0, 100.0) == -20.0
+        assert rig.unit._restore(lane, -20.0, 100.0, gcmd="callback") == -20.0
         assert lane.moves == [(10.0, 25.0, 400, False)] * 2
         assert lane.homing_moves == [] and lane.unit_obj.calls == []
         assert lane.pos == 5.0
@@ -2872,7 +2937,7 @@ class TestAFCBoxTurtlerfidRestore:
         lane.short_moves_speed = None
         lane.short_move_dis = None
         rig = self._rig(monkeypatch, lane)
-        assert rig.unit._restore(lane, -5.0, 100.0) == -10.0
+        assert rig.unit._restore(lane, -5.0, 100.0, gcmd="callback") == -10.0
         assert lane.moves == [(10.0, 100.0, 400, False)]
         assert lane.pos == 5.0
         assert rig.logged() == []
@@ -2881,7 +2946,7 @@ class TestAFCBoxTurtlerfidRestore:
         lane = BtRfidLane("lane8", pos=-15.0, slip=1.0)    # feeds go nowhere
         rig = self._rig(monkeypatch, lane)
         # int(20 / 10) + 4 steps, then it stops with the switch still open.
-        assert rig.unit._restore(lane, -20.0, 100.0) == -60.0
+        assert rig.unit._restore(lane, -20.0, 100.0, gcmd="callback") == -60.0
         assert lane.moves == [(10.0, 25.0, 400, False)] * 6
         assert lane.raw_load_state is False
         assert rig.logged() == []
@@ -2889,7 +2954,7 @@ class TestAFCBoxTurtlerfidRestore:
     def test_the_return_runs_the_espooler_but_the_creep_does_not(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane)
-        rig.unit._restore(lane, 400.0, 100.0)
+        rig.unit._restore(lane, 400.0, 100.0, gcmd="callback")
         assert [(m[0] < 0, m[3]) for m in lane.moves] == [(True, True)] * 5 + [
             (False, False)]
         assert rig.logged() == []
@@ -2899,7 +2964,7 @@ class TestAFCBoxTurtlerfidRestore:
         lane.load_at = -1e9                      # always reads filament
         rig = self._rig(monkeypatch, lane)
         # The tail steps stop once fed + tail (430mm) has been given back.
-        assert rig.unit._restore(lane, 400.0, 100.0) == 430.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 430.0
         assert lane.moves == [(-370.0, 100.0, 400, True)] + [
             (-10.0, 25.0, 400, True)] * 6
         assert rig.logged() == []
@@ -2908,7 +2973,7 @@ class TestAFCBoxTurtlerfidRestore:
         lane = BtRfidLane("lane8", pos=405.0, slip=1.0)    # feeds go nowhere
         rig = self._rig(monkeypatch, lane)
         # The tail overshoots to -5; int(30 / 10) + 4 creeps cannot bring it back.
-        assert rig.unit._restore(lane, 400.0, 100.0) == 410.0 - 70.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 410.0 - 70.0
         assert lane.moves[5:] == [(10.0, 25.0, 400, False)] * 7
         assert lane.raw_load_state is False
         assert rig.logged() == []
@@ -2916,7 +2981,7 @@ class TestAFCBoxTurtlerfidRestore:
     def test_with_homing_it_homes_back_then_onto_the_switch(self, monkeypatch):
         lane = BtRfidLane("lane8", pos=405.0)
         rig = self._rig(monkeypatch, lane, homing=True)
-        assert rig.unit._restore(lane, 400.0, 100.0) == 400.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 400.0
         assert lane.homing_moves == [
             (-420.0, SpeedMode.LONG, "load", True, AssistActive.YES),
             (400.0, None, "load", True, None)]
@@ -2928,7 +2993,7 @@ class TestAFCBoxTurtlerfidRestore:
         lane = BtRfidLane("lane8", pos=405.0)
         lane.unit_obj = None
         rig = self._rig(monkeypatch, lane, homing=True)
-        assert rig.unit._restore(lane, 400.0, 100.0) == 400.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 400.0
         assert lane.homing_moves == []
         assert lane.moves == self.STEPPED
         assert rig.logged() == []
@@ -2937,7 +3002,7 @@ class TestAFCBoxTurtlerfidRestore:
         lane = BtRfidLane("lane8", pos=405.0)
         lane.move_to = None
         rig = self._rig(monkeypatch, lane, homing=True)
-        assert rig.unit._restore(lane, 400.0, 100.0) == 400.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 400.0
         assert lane.homing_moves == []
         assert lane.unit_obj.calls == []
         assert lane.moves == self.STEPPED
@@ -2950,7 +3015,7 @@ class TestAFCBoxTurtlerfidRestore:
         rig = self._rig(monkeypatch, lane)
         # Three 15mm steps (45mm) beat the 30mm floor: a 355mm bulk, then the
         # tail in 15mm steps and one creep back onto the switch.
-        assert rig.unit._restore(lane, 400.0, 100.0) == 400.0
+        assert rig.unit._restore(lane, 400.0, 100.0, gcmd="callback") == 400.0
         assert lane.moves == ([(-355.0, 100.0, 400, True)]
                               + [(-15.0, 25.0, 400, True)] * 4
                               + [(15.0, 25.0, 400, False)])
@@ -3053,17 +3118,19 @@ class TestAFCBoxTurtlerfidLaneMove:
         # commanded distance walks the tip out past the load switch.
         lane = BtRfidLane("lane8", slip=0.2)
         rig = build_bt_rfid(monkeypatch, lanes=[lane])
-        rig.unit._lane_move(lane, 400.0, 100.0, assist=False)
-        rig.unit._lane_move(lane, -400.0, 100.0, assist=True)
+        gcmd = FakeGcmd()
+        rig.unit._lane_move(lane, 400.0, 100.0, assist=False, gcmd=gcmd)
+        rig.unit._lane_move(lane, -400.0, 100.0, assist=True, gcmd=gcmd)
         assert lane.moves == [(400.0, 100.0, 400, False),
                               (-400.0, 100.0, 400, True)]
+        assert lane.gcmds == [gcmd, gcmd]
         assert lane.raw_load_state is False
         assert rig.logged() == []
 
     def test_the_lane_decides_the_assist_for_a_retract(self, monkeypatch):
         lane = self._AssistLane("lane8", result=False)
         rig = build_bt_rfid(monkeypatch, lanes=[lane])
-        rig.unit._lane_move(lane, -50.0, 60.0, assist=True)
+        rig.unit._lane_move(lane, -50.0, 60.0, assist=True, gcmd="callback")
         assert lane.get_active_assist.calls == [((-50.0, AssistActive.YES), {})]
         assert lane.moves == [(-50.0, 60.0, 400, False)]
         assert rig.logged() == []
@@ -3071,7 +3138,7 @@ class TestAFCBoxTurtlerfidLaneMove:
     def test_an_assist_lookup_that_fails_runs_the_espooler(self, monkeypatch):
         lane = self._AssistLane("lane8", raises=ValueError("no spooler"))
         rig = build_bt_rfid(monkeypatch, lanes=[lane])
-        rig.unit._lane_move(lane, -50.0, 60.0, assist=True)
+        rig.unit._lane_move(lane, -50.0, 60.0, assist=True, gcmd="callback")
         assert lane.moves == [(-50.0, 60.0, 400, True)]
         assert rig.logged() == []
 
@@ -3079,7 +3146,7 @@ class TestAFCBoxTurtlerfidLaneMove:
         lane = self._AssistLane("lane8", result=True)
         lane.long_moves_accel = 250
         rig = build_bt_rfid(monkeypatch, lanes=[lane])
-        rig.unit._lane_move(lane, 50.0, 60.0, assist=False)
+        rig.unit._lane_move(lane, 50.0, 60.0, assist=False, gcmd="callback")
         assert lane.get_active_assist.calls == []
         assert lane.moves == [(50.0, 60.0, 250, False)]
         assert rig.logged() == []
@@ -3088,7 +3155,7 @@ class TestAFCBoxTurtlerfidLaneMove:
         lane = BtRfidLane("lane8")
         del lane.long_moves_accel
         rig = build_bt_rfid(monkeypatch, lanes=[lane])
-        rig.unit._lane_move(lane, 50.0, 60.0, assist=False)
+        rig.unit._lane_move(lane, 50.0, 60.0, assist=False, gcmd="callback")
         assert lane.moves == [(50.0, 60.0, 400, False)]
         assert rig.logged() == []
 
@@ -3266,6 +3333,7 @@ class TestAFCBoxTurtlerfidCmdAFCBTRFIDStage:
         rig, lane = self._rig(monkeypatch)
         gcmd = self._stage(rig)
         assert lane.feeds() == [20.0, 20.0, 20.0]       # not the 1257mm bound
+        assert lane.gcmds == [gcmd] * (len(lane.moves) + len(lane.homing_moves))
         assert rig.console == [self.READ8]
         assert lane.weight == 1000
         assert rig.unit.last_reads_status() == {"lane8": bt_rfid_record("DEADBEEF")}
@@ -3667,7 +3735,7 @@ class TestAFCBoxTurtlerfidCmdAFCBTRFIDStage:
         # prep_post_load leaves it unstaged without a word, so the scan logs the
         # warning the reply points at.
         assert lane.loaded_to_hub is False
-        assert lane.unit_obj.prep_post_load.calls == [((lane,), {})]
+        assert lane.unit_obj.prep_post_load.calls == [((lane,), {"gcmd": gcmd})]
         assert gcmd.messages == [
             self._announce("lane9", "1257", "2.0", "20", "100", self.STAGED_TOO),
             ("respond_info", "AFC_BT_RFID_STAGE: tag answered after 120mm of feed "
@@ -3687,7 +3755,7 @@ class TestAFCBoxTurtlerfidCmdAFCBTRFIDStage:
                            "switch. Check the spool; its next load will re-home it")
         assert rig.unit._sweeping is False
         assert lane.loaded_to_hub is False
-        assert lane.unit_obj.prep_load.calls == [((lane,), {})]
+        assert lane.unit_obj.prep_load.calls == [((lane,), {"gcmd": gcmd})]
         assert lane.moves == []
         assert gcmd.messages == [
             self._announce("lane9", "1257", "2.0", "20", "100", self.STAGED_TOO)]

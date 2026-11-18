@@ -15,6 +15,7 @@ from configparser import Error as error
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple)
 
 if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
     from extras.AFC import afc
@@ -507,7 +508,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                 self, lambda s=slot: _open(s),
                 prepare=lambda link, s=slot: _prepare(link, s),
                 release=lambda link, s=slot: _release(link, s),
-                stage_around=lambda ln, body, s=slot: self._stage_write_around(
+                stage_around=lambda ln, body, gcmd, s=slot: self._stage_write_around(
                     ln, s, body),
                 serves=lambda ln, s=slot: self._physical_slot(ln) == s)
 
@@ -716,13 +717,14 @@ class AFC_ACE2_RFID(AFCUnitRFID):
 
     # The unit's auto_spoolman_create wins; [AFC_ACE2_rfid]'s is the fallback.
 
-    def read_lane(self, lane_name: str) -> Optional[dict]:
+    def read_lane(self, lane_name: str, gcmd: AFCGcmd) -> Optional[dict]:
         """
         Read the tag on the reader slot mapped to the given lane and, when
         that lane exists in AFC, apply the tag's filament to it. Raises a command
         error if the lane has no slot mapped (set lane_slot_map).
 
         :param lane_name: Name of the AFC lane to read the tag for
+        :param gcmd: command context the spool assignment is run through
         :return dict: Tag data that was read, or None when no tag is present
         """
         slot = self._slot_for_lane(lane_name)
@@ -737,7 +739,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if self.afc is not None:
             lane = self.afc.lanes.get(lane_name) if hasattr(self.afc, "lanes") else None
         if lane is not None:
-            self.apply_to_lane(lane, tag)
+            self.apply_to_lane(lane, tag, gcmd=gcmd)
         return tag
 
     def _scan_slot(self, slot: int, duration: float, lane_name: str = "") -> Optional[dict]:
@@ -848,7 +850,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                         self.logger.error("ACE2 RFID scan: re-enable identify failed",
                                           traceback=traceback.format_exc())
 
-    def scan_lane(self, lane_name: str, seconds: Optional[float] = None) -> Optional[dict]:
+    def scan_lane(self, lane_name: str, seconds: Optional[float] = None, *,
+                  gcmd: AFCGcmd) -> Optional[dict]:
         """
         Scan the lane's reader for a presented tag and stage it as the next spool id.
 
@@ -857,6 +860,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
 
         :param lane_name: the scanner lane
         :param seconds: how long to scan, defaults to scan_seconds
+        :param gcmd: command context the spool staging is run through
         :return Optional[dict]: the tag read, or None
         """
         if self.ace2 is None:
@@ -887,7 +891,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             and getattr(self.afc, "spoolman", None)):
             try:
                 sync_rfid_to_spoolman(self.afc, lane, slot_info, self.logger, "ACE2 RFID scan",
-                                      allow_create=allow_create, set_next=True)
+                                      allow_create=allow_create, set_next=True, gcmd=gcmd)
             except Exception as e:
                 self.logger.warning(f"ACE2 RFID scan Spoolman sync failed: {e}")
         spool = getattr(self.afc, "spool", None) if self.afc is not None else None
@@ -1014,7 +1018,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if (name is None
             or not self._rfid_enabled(name)):
             return
-        self.reactor.register_callback(lambda et, n=name: self._auto_read(n))
+        self.reactor.register_callback(lambda et, n=name: self._auto_read(n, gcmd="callback"))
 
     def _apply_untagged_defaults(self, lane: Any) -> None:
         """
@@ -1056,16 +1060,17 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             self.logger.error("ACE2 RFID: applying defaults failed",
                               traceback=traceback.format_exc())
 
-    def _auto_read(self, name: str) -> None:
+    def _auto_read(self, name: str, gcmd: AFCGcmd) -> None:
         """
         Read the lane's tag, retrying a few times to catch the tag as the
         spool settles. Stops on the first successful read.
 
         :param name: lane name
+        :param gcmd: command context the spool assignment is run through
         """
         for attempt in range(self.read_on_insert_attempts):
             try:
-                tag = self.read_lane(name)
+                tag = self.read_lane(name, gcmd=gcmd)
             except self.printer.command_error as e:
                 self.logger.info(f"ACE2 RFID auto-read {name}: {e}")
                 return
@@ -1237,7 +1242,8 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             # watching the encoder it trips the stuck-spool error (fast flash).
             self._suppress_assist(shared)
             ctx["active"] = True
-            ctx["fed"] = self._run_stage_scan(lane, ctx)
+            # Staging that sends this event only runs from insert callbacks.
+            ctx["fed"] = self._run_stage_scan(lane, ctx, gcmd="callback")
         except Exception:
             self.logger.error("ACE2 RFID: stage_probe_begin failed",
                               traceback=traceback.format_exc())
@@ -1310,7 +1316,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             return None
         return lambda uid: self._is_sibling_tag(active_slot, sibling_slot, uid)
 
-    def _run_stage_scan(self, lane: "AFCLane", ctx: dict) -> float:
+    def _run_stage_scan(self, lane: "AFCLane", ctx: dict, gcmd: AFCGcmd) -> float:
         """
         Feed the lane at scan speed while polling, and read its own tag.
 
@@ -1321,6 +1327,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
 
         :param lane: the lane being staged
         :param ctx: shared staging context, updated in place
+        :param gcmd: command context the spool assignment is run through
         :return float: net distance fed, less any re-centering retract
         """
         p = self._probe
@@ -1459,7 +1466,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                     if (self.afc is not None
                         and hasattr(self.afc, "lanes")):
                         lane = self.afc.lanes.get(getattr(lane, "name", None), lane)
-                    self.apply_to_lane(lane, tag)
+                    self.apply_to_lane(lane, tag, gcmd=gcmd)
                     f = tag.get("filament") or {}
                     self.logger.debug(
                         f"ACE2 RFID: read {getattr(lane, 'name', '?')} during staging, uid="
@@ -1765,7 +1772,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             reg_slot = gcmd.get_int("REG", -1)
             reg_slot = None if reg_slot < 0 else reg_slot
             if lane_name is not None:
-                tag = self.read_lane(lane_name)
+                tag = self.read_lane(lane_name, gcmd=gcmd)
             else:
                 slot = gcmd.get_int("SLOT", 0)
                 tag = self.read_slot(slot, reg_slot=reg_slot)
@@ -1886,7 +1893,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         staged, and while the ACE is loading or unloading.
 
         :param lane_name: the lane to rescan
-        :param gcmd: the command, for DIST=/SPEED= and the console
+        :param gcmd: the command, for DIST=/SPEED=, the console and the spool assignment
         """
         lane, slot = self._rescan_target(lane_name, gcmd.error)
         dist = self._rescan_dist(lane, lane_name,
@@ -1904,7 +1911,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         uid = tag.get("uid")
         if uid is not None:
             self._slot_uid[slot] = uid
-        self.apply_to_lane(lane, tag)
+        self.apply_to_lane(lane, tag, gcmd=gcmd)
 
     def _rescan_target(self, lane_name: str, fail: Callable[[str], Exception]) -> Tuple[Any, int]:
         """
@@ -2093,13 +2100,14 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                          + "; the lane is back where it was")
             raise StageError(error_str)
 
-    def apply_written_tag(self, lane_name: str, tag: dict) -> None:
+    def apply_written_tag(self, lane_name: str, tag: dict, gcmd: AFCGcmd) -> None:
         """
         Give a lane the tag AFC_RFID_WRITE / AFC_RFID_ENROLL just wrote to
         its spool, as a rescan would, and note its UID for the slot.
 
         :param lane_name: the lane whose spool carries the tag
         :param tag: the written tag, shaped like a read
+        :param gcmd: command context the spool assignment is run through
         """
         lane = (getattr(self.afc, "lanes", None) or {}).get(lane_name)
         if lane is None:
@@ -2109,7 +2117,7 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         if (slot is not None
             and tag.get("uid") is not None):
             self._slot_uid[int(slot)] = tag["uid"]
-        self.apply_to_lane(lane, tag)
+        self.apply_to_lane(lane, tag, gcmd=gcmd)
 
     def _rescan_move(self, slot: int, mm: float, gcmd: "GCodeCommand",
                      speed: Optional[float] = None,
@@ -2325,18 +2333,20 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         # pause() is legal. Holding the g-code queue for the whole scan read as a frozen
         # printer. Results go to the console since there is no command left to answer.
         self._scan_running = True
-        self.reactor.register_callback(lambda et: self._scan_in_background(lane_name, seconds))
+        self.reactor.register_callback(
+            lambda et: self._scan_in_background(lane_name, seconds, gcmd="callback"))
 
-    def _scan_in_background(self, lane_name: str, seconds: float) -> None:
+    def _scan_in_background(self, lane_name: str, seconds: float, gcmd: AFCGcmd) -> None:
         """
         Run one scan off the g-code queue and report to the console.
 
         :param lane_name: the scanner lane to watch
         :param seconds: how long to watch for
+        :param gcmd: command context the spool staging is run through
         """
         say = self.gcode.respond_info
         try:
-            tag = self.scan_lane(lane_name, seconds)
+            tag = self.scan_lane(lane_name, seconds, gcmd=gcmd)
         except Exception as e:
             # A reader glitch must never shut Klipper down, and there is no
             # command left to raise to, so even a command_error is reported.

@@ -412,6 +412,26 @@ def ace2_rfid_rescan_logs(*steps: str) -> List[Tuple[str, str]]:
                ("debug", "ACE2 RFID: feed assist restored on slot 1")])
 
 
+def ace2_rfid_gcmd_spy(monkeypatch: pytest.MonkeyPatch, reader: AFC_ACE2_RFID,
+                       name: str) -> List[Any]:
+    """
+    Record the gcmd each call of one of the reader's methods is given, then run it.
+
+    :param monkeypatch: the test's monkeypatch
+    :param reader: the reader whose method is watched
+    :param name: the method's name
+    :return list: the gcmd of each call, in order
+    """
+    seen: List[Any] = []
+    real = getattr(reader, name)
+
+    def _spy(*args: Any, gcmd: Any, **kwargs: Any) -> Any:
+        seen.append(gcmd)
+        return real(*args, gcmd=gcmd, **kwargs)
+    monkeypatch.setattr(reader, name, _spy)
+    return seen
+
+
 class TestAce2LinkBuildFrame:
     def test_frame_crc_matches_firmware_algo(self):
         link = make_ace2_link()
@@ -897,7 +917,7 @@ class TestAFCACE2RFIDReadLane:
     def test_missing_slot_raises(self):
         reader, unit = ace2_rfid_rig()
         with pytest.raises(CommandError) as err:
-            reader.read_lane("ghost")
+            reader.read_lane("ghost", gcmd="callback")
         assert str(err.value) == "lane 'ghost' has no ACE2 reader slot (set lane_slot_map)"
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
@@ -905,7 +925,7 @@ class TestAFCACE2RFIDReadLane:
     def test_no_tag_logs(self, monkeypatch):
         reader, unit = ace2_rfid_rig({"lane_slot_map": "laneA:0"})
         Ace2RfidTagScript(monkeypatch, None)
-        assert reader.read_lane("laneA") is None
+        assert reader.read_lane("laneA", gcmd="callback") is None
         assert unit.printer.logger.messages == [("info", "ACE2 RFID: no tag read on slot 0")]
 
     def test_applies_to_lane(self, monkeypatch):
@@ -914,7 +934,10 @@ class TestAFCACE2RFIDReadLane:
                "filament": {"type": "PLA", "manufacturer": "Bambu", "color_argb": 0xFF112233}}
         Ace2RfidTagScript(monkeypatch, tag)
         lane = unit.printer.afc.lanes["laneA"]
-        assert reader.read_lane("laneA") is tag
+        applied = ace2_rfid_gcmd_spy(monkeypatch, reader, "apply_to_lane")
+        gcmd = make_gcmd()
+        assert reader.read_lane("laneA", gcmd=gcmd) is tag
+        assert applied == [gcmd]
         assert lane.material == "PLA"
         assert lane.color == "#112233"
         assert reader.last_reads_status()["laneA"]["uid"] == "aa"
@@ -927,7 +950,7 @@ class TestAFCACE2RFIDReadLane:
         reader, unit = ace2_rfid_rig(lanes=[LaneSpec("laneA", prep=True)])
         Ace2RfidTagScript(monkeypatch, ACE2_RFID_PLA)
         reader.afc = None
-        assert reader.read_lane("laneA") is ACE2_RFID_PLA
+        assert reader.read_lane("laneA", gcmd="callback") is ACE2_RFID_PLA
         assert unit.printer.afc.lanes["laneA"].material is None
         assert reader.last_reads_status() == {}
         assert unit.printer.gcode.messages == []
@@ -1053,7 +1076,8 @@ class TestAFCACE2RFIDScanLane:
         Ace2RfidTagScript(monkeypatch, self.TAG)
         sync = Recorder()
         monkeypatch.setattr(ace2_rfid_module, "sync_rfid_to_spoolman", sync)
-        assert reader.scan_lane("scan_lane", 5) is self.TAG
+        gcmd = make_gcmd()
+        assert reader.scan_lane("scan_lane", 5, gcmd=gcmd) is self.TAG
         assert len(sync.calls) == 1
         args, kwargs = sync.calls[0]
         assert args[0] is afc
@@ -1061,7 +1085,8 @@ class TestAFCACE2RFIDScanLane:
         assert args[2]["uid"] == "abcd" and args[2]["material"] == "PLA"
         assert args[3] is unit.printer.logger
         assert args[4] == "ACE2 RFID scan"
-        assert kwargs == {"allow_create": False, "set_next": True}   # staged, not applied
+        assert kwargs == {"allow_create": False, "set_next": True,   # staged, not applied
+                          "gcmd": gcmd}
         assert afc.lanes["scan_lane"].material is None   # the scanner lane keeps nothing
         assert reader.last_reads_status()["scan_lane"]["uid"] == "abcd"
         assert unit.printer.logger.messages == []
@@ -1075,7 +1100,7 @@ class TestAFCACE2RFIDScanLane:
         printer.afc.spool.next_spool_id = 120
         Ace2RfidTagScript(monkeypatch, self.TAG)
         monkeypatch.setattr(ace2_rfid_module, "sync_rfid_to_spoolman", Recorder())
-        reader.scan_lane("scan_lane", 5)
+        reader.scan_lane("scan_lane", 5, gcmd="callback")
         assert printer.gcode.messages == (
             ace2_rfid_hold_prompt("scan_lane")
             + ace2_rfid_scan_popup(ACE2_RFID_SCAN_TITLE, self.LINES + ["Spoolman ID: 120"]))
@@ -1089,7 +1114,7 @@ class TestAFCACE2RFIDScanLane:
         Ace2RfidTagScript(monkeypatch, None)
         sync = Recorder()
         monkeypatch.setattr(ace2_rfid_module, "sync_rfid_to_spoolman", sync)
-        assert reader.scan_lane("scan_lane", 5) is None
+        assert reader.scan_lane("scan_lane", 5, gcmd="callback") is None
         assert sync.calls == []                          # nothing staged
         assert reader.last_reads_status() == {}
         assert unit.printer.logger.messages == [
@@ -1099,7 +1124,7 @@ class TestAFCACE2RFIDScanLane:
     def test_scan_lane_missing_slot_raises(self):
         reader, unit = ace2_rfid_rig({"scanner_lanes": "nolane"})
         with pytest.raises(CommandError) as err:
-            reader.scan_lane("nolane", 5)
+            reader.scan_lane("nolane", 5, gcmd="callback")
         assert str(err.value) == "lane 'nolane' has no ACE2 reader slot (set lane_slot_map)"
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
@@ -1108,14 +1133,14 @@ class TestAFCACE2RFIDScanLane:
         reader, unit = self._rig()
         reader.ace2 = None
         with pytest.raises(CommandError, match="^ACE2 not available$"):
-            reader.scan_lane("scan_lane")
+            reader.scan_lane("scan_lane", gcmd="callback")
         assert unit._ace.commands == []
         assert unit.printer.logger.messages == []
 
     def test_no_tag_logs_and_returns_none(self, monkeypatch):
         reader, unit = self._rig({"scan_seconds": 30.0})
         Ace2RfidTagScript(monkeypatch, None)
-        assert reader.scan_lane("scan_lane") is None     # SECONDS defaults to scan_seconds
+        assert reader.scan_lane("scan_lane", gcmd="callback") is None  # SECONDS defaults
         assert unit.printer.logger.messages == [
             ("info", "ACE2 RFID scan: no tag on lane scan_lane in 30s")]
 
@@ -1127,7 +1152,7 @@ class TestAFCACE2RFIDScanLane:
                             Recorder(raises=RuntimeError("x")))
         monkeypatch.setattr(ace2_rfid_module, "sync_rfid_to_spoolman",
                             Recorder(raises=RuntimeError("sync boom")))
-        assert reader.scan_lane("scan_lane", 5) is self.TAG
+        assert reader.scan_lane("scan_lane", 5, gcmd="callback") is self.TAG
         assert unit.printer.logger.messages == [
             ("warning", "ACE2 RFID scan Spoolman sync failed: sync boom")]
         assert unit.printer.gcode.messages == (
@@ -1277,11 +1302,13 @@ class TestAFCACE2RFIDOnPostInsert:
         reader, unit = self._rig()
         printer = unit.printer
         tags = Ace2RfidTagScript(monkeypatch, ACE2_RFID_PLA)
+        applied = ace2_rfid_gcmd_spy(monkeypatch, reader, "apply_to_lane")
         reader._on_post_insert(printer.afc.lanes["lane1"])
         assert tags.slots == []                          # deferred onto the reactor
         assert len(printer.reactor.pending) == 1
         printer.reactor.run_callbacks()
         assert tags.slots == [0]
+        assert applied == ["callback"]
         assert printer.afc.lanes["lane1"].material == "PLA"
         assert printer.logger.messages == []
         assert printer.gcode.messages == [
@@ -1329,7 +1356,7 @@ class TestAFCACE2RFIDAutoRead:
     def test_command_error_logged_and_returns(self, monkeypatch):
         reader, unit = ace2_rfid_rig({"read_on_insert_attempts": 3})
         tags = Ace2RfidTagScript(monkeypatch, ACE2_RFID_PLA)
-        reader._auto_read("ghost")
+        reader._auto_read("ghost", gcmd="callback")
         assert unit.printer.logger.messages == [
             ("info", "ACE2 RFID auto-read ghost: lane 'ghost' has no ACE2 reader slot (set "
                      "lane_slot_map)")]                  # once: no retry after a user error
@@ -1341,7 +1368,7 @@ class TestAFCACE2RFIDAutoRead:
                                           read_on_insert_delay=0.1))
         printer = unit.printer
         tags = Ace2RfidTagScript(monkeypatch, RuntimeError("glitch"))
-        reader._auto_read("lane1")
+        reader._auto_read("lane1", gcmd="callback")
         assert tags.slots == [0, 0]
         assert printer.logger.messages == [
             ("error", "ACE2 RFID auto-read failed for lane1"),
@@ -1357,7 +1384,7 @@ class TestAFCACE2RFIDAutoRead:
                                           read_on_insert_attempts=2,
                                           read_on_insert_delay=0.0))
         Ace2RfidTagScript(monkeypatch, None)
-        reader._auto_read("lane1")
+        reader._auto_read("lane1", gcmd="callback")
         assert unit.printer.reactor.now == pytest.approx(100.4)
         assert unit.printer.logger.messages == [
             ("info", "ACE2 RFID: no tag read on slot 0"),
@@ -1367,8 +1394,11 @@ class TestAFCACE2RFIDAutoRead:
     def test_success_stops_without_logging(self, monkeypatch):
         reader, unit = ace2_rfid_rig({"lane_slot_map": "lane1:0", "read_on_insert_attempts": 3})
         tags = Ace2RfidTagScript(monkeypatch, ACE2_RFID_PLA)
-        reader._auto_read("lane1")
+        reads = ace2_rfid_gcmd_spy(monkeypatch, reader, "read_lane")
+        gcmd = make_gcmd()
+        reader._auto_read("lane1", gcmd=gcmd)
         assert tags.slots == [0]
+        assert reads == [gcmd]
         assert unit.printer.logger.messages == []
 
 
@@ -1523,8 +1553,10 @@ class TestAFCACE2RFIDStageProbeBegin:
         lane = unit.printer.afc.lanes["lane1"]
         self._field(monkeypatch, ["beef"])               # tag seen on the first poll
         Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
+        applied = ace2_rfid_gcmd_spy(monkeypatch, reader, "apply_to_lane")
         ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
         reader._stage_probe_begin(lane, ctx)
+        assert applied == ["callback"]
         # one 0.1s poll at 25 mm/s before the stop
         assert ctx == {"active": True, "done": True, "initial": 500.0,
                        "fed": pytest.approx(2.5)}
@@ -2165,7 +2197,9 @@ class TestAFCACE2RFIDCmdACERFIDRead:
         reader, unit = ace2_rfid_rig({"lane_slot_map": "laneA:3"})
         tags = Ace2RfidTagScript(monkeypatch, None)
         gcmd = make_gcmd(LANE="laneA", SLOT=0)           # LANE wins over SLOT
+        reads = ace2_rfid_gcmd_spy(monkeypatch, reader, "read_lane")
         reader.cmd_ACE_RFID_READ(gcmd)
+        assert reads == [gcmd]
         assert tags.slots == [1]
         assert gcmd.messages == [("info", "ACE2 RFID: no tag found")]
         assert unit.printer.logger.messages == [("info", "ACE2 RFID: no tag read on slot 3")]
@@ -2591,10 +2625,13 @@ class TestAFCACE2RFIDStageWriteAround:
 
 
 class TestAFCACE2RFIDApplyWrittenTag:
-    def test_the_written_tag_is_applied_and_noted_for_the_slot(self):
+    def test_the_written_tag_is_applied_and_noted_for_the_slot(self, monkeypatch):
         reader, unit, motion = ace2_rfid_rescan_rig()
+        applied = ace2_rfid_gcmd_spy(monkeypatch, reader, "apply_to_lane")
+        gcmd = make_gcmd()
         reader.apply_written_tag("lane1", {"uid": "04ab", "tag_type": "MifareClassic1k",
-                                           "filament": {"type": "PETG"}})
+                                           "filament": {"type": "PETG"}}, gcmd)
+        assert applied == [gcmd]
         assert reader._slot_uid == {0: "04ab"}
         assert unit.printer.afc.lanes["lane1"].material == "PETG"
         assert unit.printer.logger.messages == []
@@ -2605,7 +2642,7 @@ class TestAFCACE2RFIDApplyWrittenTag:
     def test_a_tag_without_uid_is_applied_but_not_noted(self):
         reader, unit, motion = ace2_rfid_rescan_rig()
         reader.apply_written_tag("lane1", {"tag_type": "MifareClassic1k",
-                                           "filament": {"type": "PETG"}})
+                                           "filament": {"type": "PETG"}}, "callback")
         assert reader._slot_uid == {}
         assert unit.printer.afc.lanes["lane1"].material == "PETG"
         assert unit.printer.logger.messages == []
@@ -2616,7 +2653,7 @@ class TestAFCACE2RFIDApplyWrittenTag:
     def test_an_unknown_lane_raises(self):
         reader, unit, motion = ace2_rfid_rescan_rig()
         with pytest.raises(RuntimeError, match="^ghost is not an AFC lane$"):
-            reader.apply_written_tag("ghost", {"uid": "04ab"})
+            reader.apply_written_tag("ghost", {"uid": "04ab"}, "callback")
         assert reader._slot_uid == {}
         assert unit.printer.logger.messages == []
 
@@ -2670,14 +2707,17 @@ class TestAFCACE2RFIDCmdACERFIDScan:
         printer = unit.printer
         tags = Ace2RfidTagScript(monkeypatch, self.TAG)
         gcmd = make_gcmd(LANE="scan_lane")
+        scans = ace2_rfid_gcmd_spy(monkeypatch, reader, "scan_lane")
         reader.cmd_ACE_RFID_SCAN(gcmd)
         assert tags.calls == []                          # the command did not scan
+        assert scans == []
         assert reader._scan_running is True
         assert len(printer.reactor.pending) == 1         # handed to the reactor
         assert printer.reactor.now == 100.0
         assert gcmd.messages == self._started(30)
         assert printer.gcode.messages == []              # nothing shown before the scan
         printer.reactor.run_callbacks()
+        assert scans == ["callback"]
         assert tags.slots == [0]
         assert reader._scan_running is False
         assert gcmd.messages == self._started(30)        # nothing more on the command
@@ -2812,22 +2852,22 @@ class TestAFCACE2RFIDUntaggedDefaults:
 
     def test_auto_read_with_no_tag_applies_defaults(self, monkeypatch):
         reader, _, lane = self._rig()
-        monkeypatch.setattr(reader, "read_lane", lambda name: None)
-        reader._auto_read("lane0")
+        monkeypatch.setattr(reader, "read_lane", lambda name, gcmd: None)
+        reader._auto_read("lane0", gcmd="callback")
         assert lane.material == "PLA"
 
     def test_auto_read_of_an_undecodable_tag_applies_defaults(self, monkeypatch):
         reader, _, lane = self._rig()
         monkeypatch.setattr(reader, "read_lane",
-                            lambda name: {"uid": "04a1b2c3", "filament": None})
-        reader._auto_read("lane0")
+                            lambda name, gcmd: {"uid": "04a1b2c3", "filament": None})
+        reader._auto_read("lane0", gcmd="callback")
         assert lane.material == "PLA"
 
     def test_a_decoded_tag_gets_no_defaults(self, monkeypatch):
         reader, _, lane = self._rig()
         monkeypatch.setattr(reader, "read_lane",
-                            lambda name: {"uid": "04a1b2c3", "filament": {"type": "ABS"}})
-        reader._auto_read("lane0")
+                            lambda name, gcmd: {"uid": "04a1b2c3", "filament": {"type": "ABS"}})
+        reader._auto_read("lane0", gcmd="callback")
         assert lane.material == ""
 
 

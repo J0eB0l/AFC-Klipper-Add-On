@@ -12,11 +12,12 @@
 from __future__ import annotations
 import threading
 import chelper
-from typing import Any, Callable, Dict, Literal, Optional, Set, Tuple, TYPE_CHECKING, Union
+from typing import Any, Callable, Dict, Optional, Set, Tuple, TYPE_CHECKING
 
 from extras.AFC_RFID import SpoolmanClient
 
 if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
 
@@ -391,7 +392,7 @@ class AFC_autocal:
                 self._set_lane_k(lane, k)
         return k
 
-    def _calibrate(self, cur_lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
+    def _calibrate(self, cur_lane: Any, gcmd: AFCGcmd,
                    runner: Optional[Callable] = None) -> Optional[float]:
         """
         Run the calibration command, then store/apply/persist the new K.
@@ -457,7 +458,7 @@ class AFC_autocal:
             lambda et, lane=cur_lane: self._do_tool_loaded(lane, "callback"))
 
     def _do_tool_loaded(self, cur_lane: Any,
-                        gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
+                        gcmd: AFCGcmd) -> None:
         """
         Deferred body of the tool-loaded handler.
 
@@ -581,7 +582,7 @@ class AFC_autocal:
         threading.Thread(target=worker, name="afc_autocal_stg", daemon=True).start()
 
     def _staged_k_ready(self, lane_name: str, sid: int, k: Optional[float], read_ok: bool,
-                        gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
+                        gcmd: AFCGcmd) -> None:
         """
         Runs on the reactor with the staged spool's K.
 
@@ -615,7 +616,7 @@ class AFC_autocal:
         except Exception as e:
             self.logger.warning(f"AFC_autocal: staged load error: {e}")
 
-    def _fetch_k_async(self, cur_lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
+    def _fetch_k_async(self, cur_lane: Any, gcmd: AFCGcmd) -> None:
         """
         Read this lane's K from Spoolman in a worker thread, then hand the result to the reactor.
 
@@ -664,7 +665,7 @@ class AFC_autocal:
         threading.Thread(target=worker, name="afc_autocal_k", daemon=True).start()
 
     def _k_applied(self, lane_name: str, sid: int, k: Optional[float],
-                   gcmd: Union[GCodeCommand, Literal["callback"]]) -> None:
+                   gcmd: AFCGcmd) -> None:
         """
         Runs on the reactor with the K read off-thread.
 
@@ -716,7 +717,7 @@ class AFC_autocal:
         except Exception:
             return False
 
-    def _calibrate_when_loaded(self, lane: Any, gcmd: Union[GCodeCommand, Literal["callback"]],
+    def _calibrate_when_loaded(self, lane: Any, gcmd: AFCGcmd,
                                attempts: int = 0) -> None:
         """
         Run the flow calibration once the printer settles to idle after the load.

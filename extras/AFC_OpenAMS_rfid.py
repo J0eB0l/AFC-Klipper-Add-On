@@ -28,6 +28,7 @@ except:
     raise error(error_str)
 
 if TYPE_CHECKING:
+    from extras.AFC_utils import AFCGcmd
     from configfile import ConfigWrapper
     from gcode import GCodeCommand
 
@@ -232,14 +233,15 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
                 f"OpenAMS {rdr.name} (slots "
                 f"{', '.join(str(s) for s in rdr.slots)})",
                 self, lambda r=rdr: r.link,
-                stage_around=lambda ln, body, r=rdr: self._stage_write_around(
-                    ln, r, body),
+                stage_around=lambda ln, body, gcmd, r=rdr: self._stage_write_around(
+                    ln, r, body, gcmd=gcmd),
                 serves=lambda ln, r=rdr: self._lane_slot.get(ln) in r.slots)
         if not self._slot_reader:
             self.logger.warning("AFC_OpenAMS_rfid: no [AFC_OpenAMS_rfid <name>] reader sections "
                                 "found. RFID reads will no-op")
 
-    def _stage_write_around(self, lane_name: str, rdr: Any, body: Callable[..., Any]) -> None:
+    def _stage_write_around(self, lane_name: str, rdr: Any, body: Callable[..., Any], *,
+                            gcmd: AFCGcmd) -> None:
         """
         AFC_RFID_WRITE / AFC_RFID_ENROLL LANE= on an OpenAMS lane: run the
         unit's scan feed (AFC_OAMS_RFID_SCAN), write the tag where the scan
@@ -248,6 +250,7 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
         :param lane_name: the lane whose spool carries the tag
         :param rdr: the reader the write was sent to
         :param body: the write, called with the sister-tag excluder
+        :param gcmd: command context the scan is run through
         :raises StageError: when the spool must not or cannot be turned
         """
         lanes = getattr(self.afc, "lanes", None) or {}
@@ -290,7 +293,7 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
             body(excluded)
 
         unit._rfid_scanned.discard(lane_name)
-        unit._do_rfid_scan(lane, hold=_hold)
+        unit._do_rfid_scan(lane, hold=_hold, gcmd=gcmd)
         if not held:
             error_str = (f"no tag on {lane_name} came to rest at the "
                          f"reader; the lane is back in its bay")
@@ -394,12 +397,13 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
             self._last[slot] = tag
         return tag
 
-    def read_lane(self, lane_name: str) -> Optional[dict]:
+    def read_lane(self, lane_name: str, gcmd: AFCGcmd) -> Optional[dict]:
         """
         Read a lane's tag (by its mapped slot) and apply it. Returns slot_info
         or None.
 
         :param lane_name: AFC lane name.
+        :param gcmd: Command context the spool assignment is run through.
         :return dict: The applied slot_info, or None if unmapped / no tag.
         """
         slot = self._get_slot(lane_name)
@@ -424,7 +428,7 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
             slot_info = self._map(tag)
             self.record_tag_read(lane_name, slot_info)
             return slot_info
-        return self.apply_to_lane(lane, tag)
+        return self.apply_to_lane(lane, tag, gcmd=gcmd)
 
     def _map(self, tag: dict) -> dict:
         """
@@ -471,7 +475,7 @@ class AFC_OpenAMS_rfid(AFCUnitRFID):
             error_str = "OAMS_RFID_READ requires LANE= or SLOT="
             raise gcmd.error(error_str)
         if lane_name is not None:
-            si = self.read_lane(lane_name)
+            si = self.read_lane(lane_name, gcmd=gcmd)
             if si is None:
                 hint = self.undecoded_hint(lane_name)
                 gcmd.respond_info(f"OpenAMS RFID: no tag decoded on {lane_name}{hint}")

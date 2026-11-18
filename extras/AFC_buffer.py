@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from extras.AFC_lane import AFCLane
     from extras.AFC_stepper import AFCExtruderStepper
     from gcode import GCodeCommand
+    from extras.AFC_utils import AFCGcmd
     from configfile import ConfigWrapper
     from mcu import MCU_adc
 
@@ -301,18 +302,19 @@ class AFCBuffer:
             and self.filament_error_pos is not None):
             if extruder_pos > self.filament_error_pos:
                 msg = "AFC filament fault detected! Take necessary action."
-                self.pause_on_error(msg, True)
+                self.pause_on_error(msg, True, gcmd="callback")
                 # Update error position after triggering to prevent repeated triggers
                 self.update_filament_error_pos()
 
         return eventtime + CHECK_RUNOUT_TIMEOUT
 
-    def pause_on_error(self, msg, pause=False):
+    def pause_on_error(self, msg: str, pause: bool=False, *, gcmd: AFCGcmd) -> None:
         """
         Pause the print with an error message if fault is detected, prevents duplicate triggers.
 
         :param msg: Error message to display
         :param pause: Boolean, if True triggers pause with error message
+        :param gcmd: command context the pause is run through
         """
         eventtime = self.reactor.monotonic()
         if (eventtime < self.min_event_systime
@@ -326,7 +328,7 @@ class AFCBuffer:
                 msg += '\nAFC NOT FEEDING'
             # Only a print can be paused; a PAUSE outside one raises on some printers
             # (Snapmaker U1), and from this timer that shuts Klipper down
-            self.afc.error.AFC_error( msg, self.afc.function.in_print() )
+            self.afc.error.AFC_error( msg, self.afc.function.in_print(), gcmd=gcmd)
 
     def enable_buffer(self, lane: AFCLane):
         """
@@ -1441,7 +1443,7 @@ class AFCFPSBuffer(AFCBuffer):
                 return eventtime + CHECK_RUNOUT_TIMEOUT
             if extruder_pos > self.filament_error_pos:
                 msg = "AFC FPS buffer filament fault detected! Take necessary action."
-                self.pause_on_error(msg, True)
+                self.pause_on_error(msg, True, gcmd="callback")
                 self.update_filament_error_pos()
 
         return eventtime + CHECK_RUNOUT_TIMEOUT
@@ -1550,7 +1552,8 @@ def load_config_prefix(config):
     if buffer_type == "switched":
         return AFCBuffer(config)
 
-    if buffer_type == "FPS_PSF":
+    if (buffer_type == "COMP"
+        or buffer_type == "FPS_PSF"):
         return AFCFPSBuffer(config)
 
     if buffer_type == "bambu":

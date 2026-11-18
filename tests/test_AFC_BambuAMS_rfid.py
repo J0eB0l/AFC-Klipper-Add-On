@@ -21,6 +21,7 @@ from tests.bambu_helpers import (
     BambuLogger,
     FakeAfcSpool,
     FakeBridge,
+    FakeGcmd,
     FakeSpoolmanClient,
     LaneSpec,
     make_bambu_spoolman,
@@ -71,6 +72,13 @@ def brfid_unit(monkeypatch: pytest.MonkeyPatch, name: str = "Bambu_AMS_1", *,
     unit.afc.spoolman = spoolman
     unit.logger.messages.clear()
     return unit
+
+
+def brfid_binder(calls: List[Tuple[tuple, dict]]) -> Any:
+    """A sync_rfid_to_spoolman that records each call, gcmd required as AFC_RFID's is."""
+    def _bind(*args: Any, gcmd: Any, **kwargs: Any) -> None:
+        calls.append((args, dict(kwargs, gcmd=gcmd)))
+    return _bind
 
 
 def brfid_spool(spool_id: int, *, uids: Sequence[str] = (),
@@ -396,9 +404,9 @@ class TestBambuSpoolmanBindByUidBg:
             self.fetching: List[Tuple[Any, Any, Any]] = []
 
         def set_spoolID(self, lane: Any, spool_id: Any,  # type: ignore[override]
-                        save_vars: bool = True, on_done: Any = None) -> None:
+                        save_vars: bool = True, on_done: Any = None, *, gcmd: Any) -> None:
             """Record the bind; it lands with land()."""
-            super().set_spoolID(lane, spool_id, on_done=on_done)
+            super().set_spoolID(lane, spool_id, on_done=on_done, gcmd=gcmd)
             self.fetching.append((lane, spool_id, on_done))
 
         def land(self) -> None:
@@ -443,6 +451,8 @@ class TestBambuSpoolmanBindByUidBg:
         assert sp._bind_pending == {2}
         unit.afc.reactor.run_callbacks()
         assert unit.afc.spool.calls == [("set_spoolID", (lane, 132), {})]
+        # The bind lands on the reactor, under no command.
+        assert unit.afc.spool.gcmds == ["callback"]
         assert client.calls == [("write_spool_metadata",
                                  (132, {"uid": "13f56d32"}))]
         assert sp._bound_uid == {2: "13f56d32"}
@@ -843,10 +853,10 @@ class TestBambuSpoolmanBindLanded:
             self.fetching: List[Tuple[Any, Any, Any]] = []
 
         def set_spoolID(self, lane: Any, spool_id: Any, save_vars: bool = True,
-                        on_done: Any = None) -> None:
+                        on_done: Any = None, *, gcmd: Any) -> None:
             """Record the binding and start its fetch."""
             super().set_spoolID(lane, spool_id, save_vars=save_vars,
-                                on_done=on_done)
+                                on_done=on_done, gcmd=gcmd)
             self.fetching.append((lane, spool_id, on_done))
 
         def land(self) -> None:
@@ -986,12 +996,15 @@ class TestBambuSpoolmanBindLanded:
         unit = self._flap_unit(monkeypatch)
         lane, sp = unit.lanes["lane15"], unit._measure
         answers: List[Any] = []
+        gcmds: List[Any] = []
         if path == "create":
             unit.auto_spoolman_create = True
 
             def _bind(afc: Any, ln: Any, si: Any, logger: Any, prefix: str,
                       allow_create: bool = False, reactor: Any = None,
-                      on_done: Any = None) -> None:
+                      on_done: Any = None, *, gcmd: Any) -> None:
+                gcmds.append(gcmd)
+
                 def _answer() -> None:
                     ln.spool_id, ln.material, ln.color = 136, "PLA", "#0086D6"
                     on_done()
@@ -1038,6 +1051,8 @@ class TestBambuSpoolmanBindLanded:
         assert unit._bridge.sent == []
         assert [c[:2] for c in unit.afc.spool.calls] == (
             [("set_spoolID", (lane, 136))] if path == "match" else [])
+        # Both binds start from the bridge's status listener, under no command.
+        assert (unit.afc.spool.gcmds if path == "match" else gcmds) == ["callback"]
 
     @pytest.mark.parametrize("lands", ["while-booting", "after-first-poll"])
     def test_a_link_in_flight_across_a_bridge_reboot_stays_kept(
@@ -1128,10 +1143,10 @@ class TestBambuSpoolmanSpoolmanSync:
                           slots=[record])
 
     def _sync(self, unit: afcBambuAMS, record: Dict[str, Any],
-              lane: str = "lane1", restored: bool = False) -> None:
+              lane: str = "lane1", restored: bool = False, gcmd: Any = "callback") -> None:
         """One pass of the bind for bay 0, then whatever it queued on the reactor."""
         unit._measure._spoolman_sync(unit.lanes[lane], record,
-                                     restored=restored)
+                                     restored=restored, gcmd=gcmd)
         unit.afc.reactor.run_callbacks()
 
     def test_a_uid_only_miss_is_remembered(self, monkeypatch):
@@ -1257,8 +1272,7 @@ class TestBambuSpoolmanSpoolmanSync:
         # The create path hands the whole bind to AFC_RFID's binder, off the reactor, and settles it
         # in _bind_landed when it answers.
         calls: List[Tuple[tuple, dict]] = []
-        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman",
-                            lambda *a, **k: calls.append((a, k)))
+        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman", brfid_binder(calls))
         record = slot_info(0, material="PLA Basic", color="0086D6FF",
                            uid="ecb61cd0", weight=1000, tmin=190, tmax=230,
                            tray_uid=BRFID_TRAY)
@@ -1266,7 +1280,8 @@ class TestBambuSpoolmanSpoolmanSync:
         unit.auto_spoolman_create = True
         sp, lane = unit._measure, unit.lanes["lane1"]
         sp._bind_owed = {0: (74, 1000, None, False)}
-        self._sync(unit, record)
+        gcmd = FakeGcmd({}, command="AFC_BAMBU_SCAN")
+        self._sync(unit, record, gcmd=gcmd)
         assert len(calls) == 1
         args, kwargs = calls[0]
         assert args[:2] == (unit.afc, lane)
@@ -1277,7 +1292,9 @@ class TestBambuSpoolmanSpoolmanSync:
             "extruder_temp_max": 230, "weight_g": 1000,
             "tray_uid": "cf34cf1d212f46b5bc8561e05eb644c8"}
         assert isinstance(args[3], _QuietInfo) and args[4] == "Bambu RFID"
-        assert set(kwargs) == {"allow_create", "reactor", "on_done"}
+        assert set(kwargs) == {"allow_create", "reactor", "on_done", "gcmd"}
+        # The caller's command reaches the binder.
+        assert kwargs["gcmd"] is gcmd
         assert kwargs["allow_create"] is True
         assert kwargs["reactor"] is unit.afc.reactor
         # The claim is now owed to this bind, which is out.
@@ -1292,8 +1309,7 @@ class TestBambuSpoolmanSpoolmanSync:
     def test_a_black_tag_reaches_the_binder_as_black(self, monkeypatch):
         # A black tag's record has no colour, only color_black.
         calls: List[Tuple[tuple, dict]] = []
-        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman",
-                            lambda *a, **k: calls.append((a, k)))
+        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman", brfid_binder(calls))
         record = slot_info(0, material="PLA Matte", color="000000FF",
                            uid="da11e5ac", weight=1000)
         unit = self._sync_unit(monkeypatch, record)
@@ -1305,8 +1321,7 @@ class TestBambuSpoolmanSpoolmanSync:
     def test_a_restored_lane_is_only_ever_matched(self, monkeypatch):
         # A lookup for a lane AFC restored never creates, whatever auto_spoolman_create says.
         calls: List[Tuple[tuple, dict]] = []
-        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman",
-                            lambda *a, **k: calls.append((a, k)))
+        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman", brfid_binder(calls))
         client = self._CountingClient()
         record = slot_info(0, material="PLA Basic", uid="ecb61cd0",
                            weight=1000)
@@ -1322,8 +1337,7 @@ class TestBambuSpoolmanSpoolmanSync:
             self, monkeypatch):
         # No decoded profile: nothing to create a spool from, whatever auto_spoolman_create says.
         calls: List[Tuple[tuple, dict]] = []
-        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman",
-                            lambda *a, **k: calls.append((a, k)))
+        monkeypatch.setattr(rfid_mod, "sync_rfid_to_spoolman", brfid_binder(calls))
         client = self._CountingClient()
         record = slot_info(0, uid="deadbeef")
         unit = self._sync_unit(monkeypatch, record, client=client)
@@ -1380,7 +1394,7 @@ class TestBambuSpoolmanSpoolmanSync:
         with pytest.raises(RuntimeError):
             unit._measure._spoolman_sync(
                 unit.lanes["lane12"],
-                self._VanishingRecord(index=0, rfid_uid="c32a080a"))
+                self._VanishingRecord(index=0, rfid_uid="c32a080a"), gcmd="callback")
         assert unit._measure._pending_summary == {}
         assert unit.logger.messages == [("info", BRFID_ABS_HELD_LINE)]
 
