@@ -30,7 +30,8 @@ from extras.AFC_BoxTurtleUSB import (
     parse_turtle_led,
     split_fields,
 )
-from extras.AFC_lane import AFCLaneState
+from extras.AFC_lane import (AFCLaneState, AFCMoveWarning, AssistActive, MoveDirection,
+                              SpeedMode)
 from extras.AFC_unit import afcUnit
 from tests.conftest import MockConfig, MockGCodeCommand, MockLogger, MockPrinter
 
@@ -1622,7 +1623,7 @@ class TestHandleLinkDown:
         unit = make_unit()
         with patch.object(unit, "_link_lost") as lost:
             unit.handle_link_down("gone", True)
-            assert unit.reactor.callback_times == [unit.reactor.now + unit.RECONNECT_WAIT]
+            assert unit.reactor.callback_times == [unit.reactor.now + unit.LINK_PAUSE_WAIT]
             unit.reactor.run_callbacks()
         lost.assert_called_once_with("gone")
 
@@ -1726,7 +1727,7 @@ class TestSwitchChanged:
         lane = make_lane(unit)
         with patch.object(unit, "prep_removed") as removed:
             unit.switch_changed("prep1", 0, 5.0)
-        removed.assert_called_once_with(lane, 5.0, gcmd="callback")
+        removed.assert_called_once_with(lane, 5.0)
 
     def test_unknown_lane(self):
         unit = make_unit()
@@ -1816,17 +1817,42 @@ class TestPrepRemoved:
     def test_runout_to_next_lane(self):
         unit = make_unit()
         lane = self._lane(unit, runout_lane="lane9")
-        unit.prep_removed(lane, 5.0, gcmd=GCMD)
+        unit.switches["prep1"] = 0
+        unit.prep_removed(lane, 5.0)
         assert lane.prep_state is False
-        lane._perform_infinite_runout.assert_called_once_with(GCMD)
+        assert unit.reactor.callback_times == [unit.reactor.now + unit.RUNOUT_CONFIRM]
+        lane._perform_infinite_runout.assert_not_called()
+        unit.reactor.run_callbacks()
+        lane._perform_infinite_runout.assert_called_once_with("callback")
         lane.handle_prep_runout.assert_not_called()
 
     def test_runout_pause(self):
         unit = make_unit()
         lane = self._lane(unit)
-        unit.prep_removed(lane, 5.0, gcmd=GCMD)
-        lane._perform_pause_runout.assert_called_once_with(GCMD)
+        unit.switches["prep1"] = 0
+        unit.prep_removed(lane, 5.0)
+        unit.reactor.run_callbacks()
+        lane._perform_pause_runout.assert_called_once_with("callback")
         lane._perform_infinite_runout.assert_not_called()
+
+    def test_a_glitch_is_not_a_runout(self):
+        unit = make_unit()
+        lane = self._lane(unit)
+        unit.switches["prep1"] = 0
+        unit.prep_removed(lane, 5.0)
+        unit.switches["prep1"] = 1
+        unit.reactor.run_callbacks()
+        lane._perform_pause_runout.assert_not_called()
+        lane._perform_infinite_runout.assert_not_called()
+
+    def test_no_runout_once_the_lane_stopped_feeding(self):
+        unit = make_unit()
+        lane = self._lane(unit)
+        unit.switches["prep1"] = 0
+        unit.prep_removed(lane, 5.0)
+        unit.afc.current = "lane9"
+        unit.reactor.run_callbacks()
+        lane._perform_pause_runout.assert_not_called()
 
     @pytest.mark.parametrize("change", [
         {"printer_state": "Printer is starting"},
@@ -1849,7 +1875,8 @@ class TestPrepRemoved:
         for key in ("_afc_prep_done", "status", "raw_load_state"):
             if key in change:
                 setattr(lane, key, change[key])
-        unit.prep_removed(lane, 5.0, gcmd=GCMD)
+        unit.prep_removed(lane, 5.0)
+        assert unit.reactor.callbacks == []
         lane.handle_prep_runout.assert_called_once_with(5.0, False)
         lane._perform_pause_runout.assert_not_called()
 
@@ -1909,15 +1936,44 @@ class TestFault:
         unit.fault({"code": "tmc_ot", "lane": 1, "msg": "hot"}, 5.0)
         unit.afc.error.AFC_error.assert_called_once_with("lane8: hot (tmc_ot)", pause=False, gcmd="callback")
 
+    def test_open_coil(self):
+        unit = make_unit()
+        make_lane(unit)
+        unit.fault({"code": "tmc_open", "lane": 1, "msg": "open coil: motor not connected?"}, 5.0)
+        unit.afc.error.AFC_error.assert_called_once_with(
+            "lane8: open coil: motor not connected? (tmc_open)", pause=False, gcmd="callback")
+
     def test_link_lost(self):
         unit = make_unit()
-        unit.fault({"code": "link_lost", "msg": "no host"}, 5.0)
+        with patch.object(unit, "_resume_after_reconnect") as resume:
+            unit.fault({"code": "link_lost", "msg": "no host"}, 5.0)
         assert unit.logger.messages == [("warning", "Turtle_1: no host (link_lost)")]
+        resume.assert_called_once_with()
 
     def test_warning(self):
         unit = make_unit()
         unit.fault({"code": "tmc_otpw", "lane": 0, "msg": "warm"}, 5.0)
         assert unit.logger.messages == [("info", "Turtle_1: warm (tmc_otpw)")]
+
+    def test_healthy_driver_gets_its_assist_back(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.sync["lane8"] = True
+        with patch.object(unit, "_send_assist") as assist:
+            unit.fault({"code": "tmc_ok", "lane": 1}, 5.0)
+        assert unit.logger.messages == [("info", "lane8: tmc_ok")]
+        assist.assert_called_once_with(lane)
+
+    @pytest.mark.parametrize("synced,moving", [(False, False), (True, True)])
+    def test_healthy_driver_without_assist(self, synced, moving):
+        unit = make_unit()
+        make_lane(unit)
+        unit.sync["lane8"] = synced
+        if moving:
+            unit.moving.add("lane8")
+        with patch.object(unit, "_send_assist") as assist:
+            unit.fault({"code": "tmc_ok", "lane": 1}, 5.0)
+        assist.assert_not_called()
 
     def test_unknown_code(self):
         unit = make_unit()
@@ -2539,14 +2595,15 @@ class TestFwHome:
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("triggered", -12.0)) as move:
             assert unit.fw_home(lane, "hub", -100, 50, 400, False, True, True, gcmd=GCMD) == (True, 12.0, False)
-        move.assert_called_once_with(lane, -100, 50, 400, True, until="hub", until_v=0, gcmd=GCMD)
+        move.assert_called_once_with(lane, -100, 50, 400, True, until="hub", until_v=0, watch=None,
+                                     gcmd=GCMD)
 
     def test_board_switch_triggered(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("triggered", 5.0)) as move:
             unit.fw_home(lane, "load", 100, 50, 400, True, True, False, gcmd=GCMD)
-        assert move.call_args[1] == {"until": "load", "until_v": 1, "gcmd": GCMD}
+        assert move.call_args[1] == {"until": "load", "until_v": 1, "watch": None, "gcmd": GCMD}
 
     def test_klipper_sensor(self):
         unit = make_unit()
@@ -2582,6 +2639,162 @@ class TestFwHome:
         lane = make_lane(unit)
         with patch.object(unit, "fw_move", return_value=("fault", -3.0)):
             assert unit.fw_home(lane, "hub", -100, 50, 400, True, True, True, gcmd=GCMD) == (False, 3.0, True)
+
+    def test_hub_retract_watches_the_load_switch(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.switches = {"load1": 1, "hub": 1}
+        with patch.object(unit, "fw_move", return_value=("triggered", -40.0)) as move:
+            assert unit.fw_home(lane, "hub", -100, 50, 400, False, False, True, gcmd=GCMD) == (True, 40.0, False)
+        assert move.call_args[1]["watch"] == "load"
+
+    def test_hub_stuck_before_the_retract(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.switches = {"load1": 0, "hub": 1}
+        with patch.object(unit, "fw_move") as move, patch.object(unit, "_report") as report:
+            assert unit.fw_home(lane, "hub", -100, 50, 400, False, False, True, gcmd=GCMD) == (False, 0.0, True)
+        move.assert_not_called()
+        report.assert_called_once_with(lane, mod.HUB_STUCK, gcmd=GCMD)
+
+    def test_hub_already_clear_has_no_watch(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.switches = {"load1": 0, "hub": 0}
+        with patch.object(unit, "fw_move", return_value=("triggered", 0.0)) as move:
+            unit.fw_home(lane, "hub", -100, 50, 400, False, False, True, gcmd=GCMD)
+        assert move.call_args[1]["watch"] is None
+
+    def test_tail_left_the_lane_first(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.switches = {"load1": 1, "hub": 1}
+        with patch.object(unit, "fw_move", return_value=("watch", -60.0)), \
+                patch.object(unit, "_report") as report:
+            assert unit.fw_home(lane, "hub", -100, 50, 400, False, False, True, gcmd=GCMD) == (False, 60.0, True)
+        report.assert_called_once_with(lane, mod.HUB_STUCK, gcmd=GCMD)
+
+    def test_feed_onto_a_switch_already_triggered_warns(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_move", return_value=("triggered", 0.0)), \
+                patch.object(unit, "logger") as logger:
+            assert unit.fw_home(lane, "load", 100, 50, 400, True, True, False, gcmd=GCMD) == (True, 0.0, False)
+        logger.warning.assert_called_once_with(
+            "lane8: load already read triggered when the move to it started")
+
+    def test_toolhead_buffer_is_verified(self):
+        unit = make_unit()
+        lane = make_lane(unit, buffer=TurtleNeck(unit))
+        with patch.object(unit, "fw_move", return_value=("triggered", 120.0)), \
+                patch.object(unit, "_verify_at_extruder", return_value=(True, 125.0, False)) as verify:
+            assert unit.fw_home(lane, "buffer", 500, 50, 400, True, True, False, gcmd=GCMD) == (True, 125.0, False)
+        verify.assert_called_once_with(lane, 380.0, 50, 400, 120.0, gcmd=GCMD)
+
+    def test_no_verify_while_calibrating(self):
+        unit = make_unit()
+        lane = make_lane(unit, buffer=TurtleNeck(unit))
+        lane.status = AFCLaneState.CALIBRATING
+        with patch.object(unit, "fw_move", return_value=("triggered", 120.0)), \
+                patch.object(unit, "_verify_at_extruder") as verify:
+            assert unit.fw_home(lane, "buffer", 500, 50, 400, True, True, False, gcmd=GCMD) == (True, 120.0, False)
+        verify.assert_not_called()
+
+    def test_no_verify_on_a_retract(self):
+        unit = make_unit()
+        lane = make_lane(unit, buffer=TurtleNeck(unit))
+        with patch.object(unit, "fw_move", return_value=("triggered", -20.0)), \
+                patch.object(unit, "_verify_at_extruder") as verify:
+            unit.fw_home(lane, "buffer_trailing", -100, 50, 400, True, True, False, gcmd=GCMD)
+        verify.assert_not_called()
+
+
+class TestVerifyAtExtruder:
+    def test_ok(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_job", return_value={"ok": True, "mm": 6.0}) as job:
+            assert unit._verify_at_extruder(lane, 120.0, 50.0, 400.0, 300.0, gcmd=GCMD) == (True, 306.0, False)
+        job.assert_called_once_with(lane, "verify", mm=120.0, speed=50.0, accel=400.0, hold=True)
+
+    @pytest.mark.parametrize("remaining,mm", [(5.0, 50.0), (900.0, 300.0)])
+    def test_search_distance_is_bounded(self, remaining, mm):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_job", return_value={"ok": True, "mm": -2.0}) as job:
+            assert unit._verify_at_extruder(lane, remaining, 50.0, 400.0, 10.0, gcmd=GCMD) == (True, 10.0, False)
+        assert job.call_args[1]["mm"] == mm
+
+    def test_not_at_extruder(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_job", return_value={"ok": False, "code": "not_at_extruder"}), \
+                patch.object(unit, "_report") as report:
+            assert unit._verify_at_extruder(lane, 120.0, 50.0, 400.0, 300.0, gcmd=GCMD) == (False, 300.0, True)
+        report.assert_called_once_with(
+            lane, "filament did not reach the extruder, the TurtleNeck filled early "
+            "(not_at_extruder)", gcmd=GCMD)
+
+
+class TestMoveToHub:
+    @staticmethod
+    def _lane(unit):
+        lane = make_lane(unit)
+        lane.hub_endstop_name = "hub"
+        lane.homing_overshoot = 50.0
+        lane.homing_delta = 300.0
+        lane.get_active_assist = MagicMock(return_value=True)
+        return lane
+
+    def test_feeds_with_the_board_job(self):
+        unit = make_unit()
+        lane = self._lane(unit)
+        with patch.object(unit, "select_lane") as select, \
+                patch.object(unit, "fw_job", return_value={"ok": True, "mm": 640.0}) as job:
+            assert unit.move_to_hub(lane, 700.0, MoveDirection.POS, gcmd=GCMD) == (
+                True, 640.0, AFCMoveWarning.NONE)
+        select.assert_called_once_with(lane, gcmd=GCMD)
+        lane.get_speed_accel.assert_called_once_with(SpeedMode.HUB)
+        lane.get_active_assist.assert_called_once_with(700.0, AssistActive.DYNAMIC)
+        job.assert_called_once_with(lane, "feed", until="hub", mm=750.0, speed=60.0, accel=300.0,
+                                    watch="prep", hold=True, espool_fwd=0.6, espool_rwd=0.4,
+                                    espool_kick=True)
+
+    def test_short_of_the_distance_warns(self):
+        unit = make_unit()
+        lane = self._lane(unit)
+        with patch.object(unit, "select_lane"), \
+                patch.object(unit, "fw_job", return_value={"ok": True, "mm": 300.0}):
+            assert unit.move_to_hub(lane, 700.0, MoveDirection.POS, gcmd=GCMD) == (
+                True, 300.0, AFCMoveWarning.WARN)
+
+    def test_failed_feed_is_an_error(self):
+        unit = make_unit()
+        lane = self._lane(unit)
+        with patch.object(unit, "select_lane"), \
+                patch.object(unit, "fw_job", return_value={"ok": False, "code": "no_hub", "mm": 790.0}), \
+                patch.object(unit, "_report") as report:
+            assert unit.move_to_hub(lane, 700.0, MoveDirection.POS, gcmd=GCMD) == (
+                False, 790.0, AFCMoveWarning.ERROR)
+        report.assert_called_once_with(
+            lane, "can't feed to the hub sensor, check the filament path (no_hub)", gcmd=GCMD)
+
+    @pytest.mark.parametrize("dir,homing,mode,hub", [
+        (MoveDirection.NEG, True, SpeedMode.HUB, "hub"),
+        (MoveDirection.POS, False, SpeedMode.HUB, "hub"),
+        (MoveDirection.POS, True, SpeedMode.CALIBRATION, "hub"),
+        (MoveDirection.POS, True, SpeedMode.HUB, "tool"),
+    ])
+    def test_other_moves_go_through_afc(self, dir, homing, mode, hub):
+        unit = make_unit()
+        lane = self._lane(unit)
+        lane.hub_endstop_name = hub
+        lane.move_to.return_value = (True, 0, AFCMoveWarning.NONE)
+        with patch.object(unit, "fw_job") as job:
+            assert unit.move_to_hub(lane, 700.0, dir, homing, mode, gcmd=GCMD) == (
+                True, 0, AFCMoveWarning.NONE)
+        job.assert_not_called()
+        lane.move_to.assert_called_once()
 
 
 # ── sync and assist ───────────────────────────────────────────────────────────
@@ -2974,7 +3187,7 @@ class TestPrepLoad:
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", return_value={"ok": True}) as job:
             unit.prep_load(lane, gcmd=GCMD)
-        job.assert_called_once_with(lane, "feed", until="load", mm=400.0, speed=50.0,
+        job.assert_called_once_with(lane, "feed", until="load", mm=100.0, speed=50.0,
                                     accel=400.0, watch="prep", hold=True, espool_fwd=0.0,
                                     espool_rwd=0.0, espool_kick=False)
         unit.afc.error.AFC_error.assert_not_called()
@@ -3080,7 +3293,14 @@ class TestFwJob:
         lane = make_lane(unit)
         assert unit.fw_job(lane, "feed", speed=0) == {"ok": False, "code": "timeout"}
         assert unit.link.sent == [("stop", {"lane": 1})]
-        # 3 tries of 200 mm at the 50 mm/s fallback plus 10 s each
+        # 3 tries of 200 mm at 50, 25 and 12.5 mm/s (the 50 mm/s fallback, halved each retry)
+        # plus 10 s each
+        assert unit.reactor.now == pytest.approx(100.0 + 14.0 + 18.0 + 26.0, abs=0.01)
+
+    def test_timeout_without_slowdown(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.fw_job(lane, "unload", speed=50.0, mm=100.0)
         assert unit.reactor.now == pytest.approx(100.0 + 3 * 14.0, abs=0.01)
 
     def test_timeout_from_job_fields(self):
