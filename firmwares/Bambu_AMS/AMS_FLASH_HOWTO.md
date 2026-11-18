@@ -45,14 +45,6 @@ while drying as stalled, and a dry started with a lane loaded as refused.
    nothing is sent to the AMS.
 5. Add `[include ams_firmware/ams_flash.cfg]` to `printer.cfg`, then
    `FIRMWARE_RESTART`.
-6. **Let the update run on its own.** It outlives the shell command that
-   starts it, so a Klipper restart cannot stop it partway. Run this once:
-
-       sudo loginctl enable-linger $USER
-
-   Passwordless `sudo`, the default on Raspberry Pi OS, works too. Otherwise
-   put your sudo password in `ams_sudo.pw` beside `ams_flash.py`; it is read
-   once and deleted. A Snapmaker U1 needs none of this.
 
 ## Update a unit
 
@@ -109,11 +101,12 @@ A file in the folder is used in place of downloading the same version.
 
 ## If it does not finish
 
-The bootloader is never erased, so an update that stops partway leaves the
-unit waiting in its bootloader, not bricked. **Keep the unit powered**: it has
-no firmware to boot until an update completes. Open the menu again; it shows
-**Finish ...** for that unit, which writes the same image again from the
-start.
+The update runs on its own, so it outlives the shell command that starts it,
+but restarting the Klipper service during an update stops it. The bootloader
+is never erased, so an update that stops partway leaves the unit waiting in
+its bootloader, not bricked. **Keep the unit powered**: it has no firmware to
+boot until an update completes. Open the menu again; it shows **Finish ...**
+for that unit, which writes the same image again from the start.
 
 | the popup or log says | what to do |
 |---|---|
