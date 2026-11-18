@@ -20,6 +20,7 @@ from pathlib import Path
 import signal
 import socket
 import struct
+import subprocess
 import sys
 from types import ModuleType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -496,8 +497,8 @@ class _Rig:
         self.flash_rc = 0
         self.flash_hook: Optional[Callable[[Any, Callable[[], None]], int]] = None
         self.new_version = "01.02.03.04"
-        self.relaunch: Tuple[int, str] = (0, "detached via systemd-run --user\n")
-        self.relaunched: List[str] = []
+        self.relaunch_error: Optional[OSError] = None
+        self.relaunched = 0
         self.result: Dict[str, Any] = {}
         self.out = self.err = ""
         self.log: Optional[str] = None
@@ -526,15 +527,15 @@ class _Rig:
                 unit.mode, unit.version = "app", self.new_version
         return self.flash_rc
 
-    def _relaunch(self, pass_file: str) -> Tuple[int, str]:
-        self.relaunched.append(pass_file)
-        return self.relaunch
+    def _relaunch(self) -> None:
+        self.relaunched += 1
+        if self.relaunch_error is not None:
+            raise self.relaunch_error
 
     def args(self, **kw: Any) -> argparse.Namespace:
         """The detached update of Bambu_AMS_1 to 01.02.03.04, with `kw` over it."""
         a = dict(unit="Bambu_AMS_1", version="01.02.03.04", file=None, board=None, mode="go",
-                 cfg_dir=str(self.cfg), target=None, key=None,
-                 sudo_pass_file=str(self.here / "ams_sudo.pw"), detached=True)
+                 cfg_dir=str(self.cfg), target=None, key=None, detached=True)
         a.update(kw)
         return argparse.Namespace(**a)
 
@@ -1911,6 +1912,19 @@ class TestHoldBridge:
         assert moon.scripts == [f"AFC_BAMBU_FIRMWARE UNIT=Bambu_AMS_1 HOLD={seconds}"]
 
 
+
+class TestRelaunchDetached:
+    """relaunch_detached: the same command line again, marked detached, in its own session."""
+
+    def test_the_copy_runs_in_its_own_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: List[Tuple[List[str], Dict[str, Any]]] = []
+        monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)))
+        monkeypatch.setattr(sys, "argv", ["ams_flash.py", *GO])
+        ams_flash.relaunch_detached()
+        [(cmd, kw)] = started
+        assert cmd[1:] == [os.path.abspath(str(ams_flash.__file__)), *DETACHED]
+        assert (kw["start_new_session"], kw["stdout"]) == (True, subprocess.DEVNULL)
+
 class TestBridgeKeys:
     """bridge_keys: every Bambu bridge in the live config, with its link key."""
 
@@ -2716,7 +2730,7 @@ class TestUpdate:
         assert (rig.out, rig.err) == (_Said.checks(rig) + _Said.CHECKED, "")
         assert rig.result == {"unit": "Bambu_AMS_1", "ok": False, "from": "01.02.03.00",
                               "to": "01.02.03.04", "message": ""}
-        assert (rig.moon.scripts, rig.bus.log, rig.relaunched) == ([], [], [])
+        assert (rig.moon.scripts, rig.bus.log, rig.relaunched) == ([], [], 0)
         assert (rig.state(), rig.saved_result()) == (None, None)
         assert not (rig.root / "logs").exists()
 
@@ -2744,19 +2758,18 @@ class TestUpdate:
                               "it is done.", "running": True}
         assert rig.result == running
         assert rig.saved_result() == dict(running, when="2000-01-02 03:04")
-        assert rig.relaunched == [str(rig.here / "ams_sudo.pw")]
+        assert rig.relaunched == 1
         assert not (rig.here / AMS2_FILE).exists()       # the update it started downloads it
         assert (rig.moon.scripts, rig.bus.log) == ([], [])
 
     def test_an_update_that_cannot_start_on_its_own_says_why(self, rig: _Rig) -> None:
-        rig.relaunch = (2, "could not detach without root:\n  made-up reason")
+        rig.relaunch_error = OSError("made-up reason")
         assert rig.update(rig.args(detached=False)) == (
-            "abort", "could not start the update on its own:\ncould not detach without root:\n"
-                     "  made-up reason")
+            "abort", "could not start the update on its own: made-up reason")
         assert (rig.out, rig.err) == (_Said.checks(rig), "")
         assert rig.result["running"] is False
         assert rig.saved_result()["running"] is True     # left by the launch, main() redoes it
-        assert rig.relaunched == [str(rig.here / "ams_sudo.pw")]
+        assert rig.relaunched == 1
 
     def test_without_a_lock_folder_it_runs_unguarded(self, rig: _Rig) -> None:
         (rig.root / "logs").write_text("")
@@ -3254,14 +3267,13 @@ class TestMain:
             "unit": "Bambu_AMS_1", "ok": False, "from": "01.02.03.00", "to": "01.02.03.04",
             "message": "Updating Bambu_AMS_1. The units on its bridge read offline until it is "
                        "done.", "running": True, "when": "2000-01-02 03:04"}
-        assert rig.relaunched == [str(rig.here / "ams_sudo.pw")]
+        assert rig.relaunched == 1
         assert (rig.moon.scripts, rig.moon.state_calls) == ([], 0)
 
     def test_an_update_that_could_not_start_is_the_result(self, rig: _Rig) -> None:
-        rig.relaunch = (2, "could not detach without root:\n  made-up reason")
+        rig.relaunch_error = OSError("made-up reason")
         assert rig.main(*GO) == ("rc", 1)
-        why = ("could not start the update on its own:\n"
-               "could not detach without root:\n  made-up reason")
+        why = "could not start the update on its own: made-up reason"
         expected = BANNER + _Said.checks(rig) + f"    ABORT: {why}\n"
         assert (rig.out, rig.err, rig.log) == (expected, "", expected)
         assert rig.saved_result() == {"unit": "Bambu_AMS_1", "ok": False, "from": "01.02.03.00",
@@ -3274,9 +3286,8 @@ class TestMain:
         ended = {"unit": "Bambu_AMS_1", "ok": False, "message": "made-up early end",
                  "when": "1999-12-31 23:59"}
 
-        def relaunch(pass_file: str) -> Tuple[int, str]:
+        def relaunch() -> None:
             rig.result_path.write_text(json.dumps(ended))  # it ended before the launch is back
-            return 0, ""
 
         monkeypatch.setattr(ams_flash, "relaunch_detached", relaunch)
         assert rig.main(*GO) == ("rc", 0)
