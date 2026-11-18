@@ -2398,6 +2398,49 @@ class TestBridgeOf:
         assert str(raised.value) == (f"bridge port {gone} does not exist; name the port with "
                                      f"--target")
 
+    @staticmethod
+    def _wifi_state(usb_port: str, addr: str = "tcp://bridge.invalid:8888") -> str:
+        """A chain on connection: wifi as its #~# block saves it."""
+        return ("[AFC_BridgeBox Chain_1]\nserial_port: auto\nconnection: wifi\n\n"
+                f"{ams_flash.STATE_MARK}\n#~# [AFC_BridgeBox Chain_1]\n"
+                "#~# wifi_key = made-up-key\n#~# lane_base : 12\n"
+                f"#~# usb_port : {usb_port}\n#~# wifi_addr : {addr}\n#~# \n")
+
+    def test_a_wifi_bridge_off_usb_is_reached_at_its_saved_address(self, cfg: Path,
+                                                                   tmp_path: Path) -> None:
+        gone = str(tmp_path / "gone")
+        (cfg / "AFC_BridgeBox_1.cfg").write_text(self._wifi_state(gone))
+        assert self._of(cfg, gone, {}) == ("tcp://bridge.invalid:8888", "made-up-key")
+
+    def test_a_wifi_bridge_in_a_state_file_is_found_too(self, cfg: Path, tmp_path: Path) -> None:
+        gone = str(tmp_path / "gone")
+        state = tmp_path / "bridge.state"
+        state.write_text(self._wifi_state(gone))
+        settings = {"afc_bridgebox chain_1": {"serial_port": "auto", "state_file": str(state)}}
+        assert self._of(cfg, gone, settings) == ("tcp://bridge.invalid:8888", "made-up-key")
+
+    def test_a_key_given_wins_over_the_saved_one(self, cfg: Path, tmp_path: Path) -> None:
+        gone = str(tmp_path / "gone")
+        (cfg / "AFC_BridgeBox_1.cfg").write_text(self._wifi_state(gone))
+        assert self._of(cfg, gone, {}, key="") == ("tcp://bridge.invalid:8888", "")
+
+    def test_a_wifi_bridge_on_usb_keeps_its_usb_port(self, cfg: Path, port: str) -> None:
+        (cfg / "AFC_BridgeBox_1.cfg").write_text(self._wifi_state(port))
+        assert self._of(cfg, port, {}) == (port, "")
+
+    def test_another_bridges_saved_address_is_not_taken(self, cfg: Path, tmp_path: Path) -> None:
+        gone = str(tmp_path / "gone")
+        (cfg / "AFC_BridgeBox_1.cfg").write_text(self._wifi_state(str(tmp_path / "other")))
+        with pytest.raises(ams_flash.Abort, match="does not exist"):
+            self._of(cfg, gone, {})
+
+    def test_a_target_given_is_not_swapped_for_a_saved_address(self, cfg: Path,
+                                                              tmp_path: Path) -> None:
+        gone = str(tmp_path / "gone")
+        (cfg / "AFC_BridgeBox_1.cfg").write_text(self._wifi_state(gone))
+        with pytest.raises(ams_flash.Abort, match="does not exist"):
+            self._of(cfg, None, {}, target=gone)
+
     @pytest.mark.parametrize("target", ["tcp://bridge.invalid", "tcp://bridge.invalid:1",
                                         "tcp://bridge.invalid:65535"],
                              ids=["default-port", "lowest", "highest"])
