@@ -4144,6 +4144,144 @@ class TestDoPoopKickWipe:
 
 
 
+class TestLoadSequenceToolheadRetry:
+    """The toolhead retries of load_sequence when homing to the toolhead sensor."""
+
+    def _make(self, reached_after):
+        """
+        A load whose toolhead sensor triggers after reached_after forward homing moves.
+
+        :param reached_after: Forward moves before the sensor triggers, None for never
+        """
+        afc = _make_afc()
+        afc._check_extruder_temp = MagicMock(return_value=False)
+        afc.save_vars = MagicMock()
+        afc.homing_enabled = True
+        afc.home_to_tool = True
+        afc.tool_homing_distance = 100.0
+        lane = _make_afc_lane()
+        lane.custom_load_cmd = None
+        lane.unit_obj = MagicMock(spec=["load_then_home", "lane_tool_loaded_gears"])
+        lane.unit_obj.load_then_home.return_value = (None, None, AFCMoveWarning.NONE)
+        lane.hub_obj = None
+        lane.loaded_to_hub = True
+        lane.is_direct_hub = MagicMock(return_value=True)
+        lane.dist_hub = 500.0
+        lane.short_move_dis = 10.0
+        lane.get_toolhead_endstop = MagicMock(return_value="tool_start")
+        lane.sync_to_extruder = MagicMock()
+        lane.set_tool_loaded = MagicMock()
+        lane.enable_buffer = MagicMock()
+        homes = []
+
+        def move_to(distance, *args, **kwargs):
+            if distance > 0:
+                homes.append(distance)
+            return True, 60.0, AFCMoveWarning.NONE
+
+        lane.move_to = MagicMock(side_effect=move_to)
+        lane.get_toolhead_pre_sensor_state = MagicMock(
+            side_effect=lambda: reached_after is not None and len(homes) >= reached_after)
+        extruder = MagicMock()
+        extruder.has_toolhead_sensor = True
+        return afc, lane, extruder, homes
+
+    def test_a_last_try_that_reaches_the_sensor_loads(self):
+        gcmd = MagicMock()
+        afc, lane, extruder, homes = self._make(reached_after=2)
+
+        result = afc.load_sequence(lane, MagicMock(), extruder, load_to_gears=True, gcmd=gcmd)
+
+        assert result is True
+        assert homes == [500.0, 500.0]
+        afc.error.handle_lane_failure.assert_not_called()
+        lane.set_tool_loaded.assert_called_once_with(normal_toolchange=True, gcmd=gcmd)
+
+    def test_a_last_try_that_misses_the_sensor_fails(self):
+        gcmd = MagicMock()
+        afc, lane, extruder, homes = self._make(reached_after=None)
+
+        result = afc.load_sequence(lane, MagicMock(), extruder, load_to_gears=True, gcmd=gcmd)
+
+        assert result is False
+        assert homes == [500.0, 500.0]
+        assert afc.error.handle_lane_failure.call_count == 1
+        assert afc.error.handle_lane_failure.call_args.args[0] is lane
+        lane.set_tool_loaded.assert_not_called()
+
+
+# ── cmd_HUB_LOAD: move limit ─────────────────────────────────────────────────
+
+class TestCmdHubLoadMoveLimit:
+    """HUB_LOAD gives up when the filament never reaches a sensor."""
+
+    MESSAGE = "lane1 did not reach its {} sensor during HUB_LOAD, check the filament path"
+
+    @staticmethod
+    def _make(load_state):
+        """
+        :param load_state: Whether the lane's load sensor reads filament
+        :return tuple: (afc, lane, gcmd)
+        """
+        obj = _make_afc()
+        obj.homing_enabled = True
+        obj.save_vars = MagicMock()
+        obj.function.is_printing.return_value = False
+        lane = MagicMock()
+        lane.name = "lane1"
+        lane.prep_state = True
+        lane.load_state = load_state
+        lane.loaded_to_hub = True
+        lane.hub_obj.state = False
+        lane.hub_obj.move_dis = 65.0
+        lane.hub_obj.hub_clear_move_dis = 35.0
+        obj.lanes = {"lane1": lane}
+        gcmd = MagicMock()
+        gcmd.get.return_value = "lane1"
+        return obj, lane, gcmd
+
+    def test_a_lane_that_never_reaches_its_load_sensor_stops(self):
+        obj, lane, gcmd = self._make(load_state=False)
+
+        obj.cmd_HUB_LOAD(gcmd)
+
+        assert lane.move_to.call_count == afc.HUB_LOAD_MAX_MOVES
+        lane.unit_obj.move_to_hub.assert_not_called()
+        assert lane.status == AFCLaneState.NONE
+        lane.do_enable.assert_called_once_with(False)
+        assert obj.error.AFC_error.call_args_list == [
+            call(self.MESSAGE.format("load"), pause=False, gcmd=gcmd)]
+        obj.save_vars.assert_not_called()
+
+    def test_a_lane_that_never_reaches_the_hub_stops(self):
+        obj, lane, gcmd = self._make(load_state=True)
+
+        obj.cmd_HUB_LOAD(gcmd)
+
+        assert lane.unit_obj.move_to_hub.call_count == afc.HUB_LOAD_MAX_MOVES
+        lane.move_to.assert_not_called()
+        assert lane.status == AFCLaneState.NONE
+        lane.do_enable.assert_called_once_with(False)
+        assert obj.error.AFC_error.call_args_list == [
+            call(self.MESSAGE.format("hub"), pause=False, gcmd=gcmd)]
+        obj.save_vars.assert_not_called()
+
+    def test_a_lane_that_reaches_the_hub_loads(self):
+        obj, lane, gcmd = self._make(load_state=True)
+
+        def reach_hub(*args, **kwargs):
+            lane.hub_obj.state = lane.unit_obj.move_to_hub.call_count >= 3
+
+        lane.unit_obj.move_to_hub.side_effect = reach_hub
+
+        obj.cmd_HUB_LOAD(gcmd)
+
+        assert lane.unit_obj.move_to_hub.call_count == 3
+        obj.error.AFC_error.assert_not_called()
+        assert lane.loaded_to_hub is True
+        obj.save_vars.assert_called_once_with()
+
+
 class TestLoadSequenceDefaultPathSuccess:
     """Covers the default (no unit_load_lane hook) hub/toolhead move path in
     load_sequence all the way to its finalize step, distinct from

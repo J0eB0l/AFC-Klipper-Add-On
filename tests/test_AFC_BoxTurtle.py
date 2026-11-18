@@ -264,6 +264,21 @@ class TestPrepLoad:
         unit.afc.error.AFC_error.assert_not_called()
 
 
+class TestMoveUntilStateStuckSwitch:
+    def test_stuck_switch_gives_up_after_four_retracts(self):
+        unit = _make_box_turtle()
+        lane = _make_lane()
+        state = MagicMock(return_value=True)
+
+        dis, check_p, ok = unit.move_until_state(lane, state, 10, 1, 5, checkpoint="hub",
+                                                 gcmd=MagicMock())
+
+        assert ok is False
+        assert dis == 20
+        assert "switch did not go false" in check_p
+        assert lane.move.call_count == 4
+
+
 class TestCalibrateBowdenNegativeDistance:
     """Regression coverage for AFCProject/AFC-Klipper-Add-On#800: a negative
     bowden_dist was written into live lane/hub state before the < 0 check

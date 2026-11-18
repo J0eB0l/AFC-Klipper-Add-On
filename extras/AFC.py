@@ -86,6 +86,8 @@ def load_config(config):
 
 class afc:
     class sentinel: pass
+    # Short moves HUB_LOAD makes toward a sensor before it gives up, as TOOL_LOAD's hub check
+    HUB_LOAD_MAX_MOVES = 20
     def __init__(self, config: ConfigWrapper):
         self.config  = config
         self.printer = config.get_printer()
@@ -1532,8 +1534,12 @@ class afc:
         if not cur_lane.prep_state: return
         cur_lane.status = AFCLaneState.HUB_LOADING
         if not cur_lane.load_state:
+            load_attempts = 0
             while not cur_lane.load_state:
-                # TODO: add timout routine here
+                load_attempts += 1
+                if load_attempts > self.HUB_LOAD_MAX_MOVES:
+                    self._hub_load_failed(cur_lane, "load", gcmd)
+                    return
                 cur_lane.move_to(cur_hub.move_dis, SpeedMode.SHORT,
                                  endstop=cur_lane.load_es,
                                  assist_active=AssistActive.DYNAMIC,
@@ -1546,8 +1552,12 @@ class afc:
             cur_lane.unit_obj.move_to_hub(cur_lane, dist_to_hub, MoveDirection.POS,
                                           self.homing_enabled, gcmd=gcmd)
 
+        hub_attempts = 0
         while not cur_hub.state:
-            # TODO: add timout routine here
+            hub_attempts += 1
+            if hub_attempts > self.HUB_LOAD_MAX_MOVES:
+                self._hub_load_failed(cur_lane, "hub", gcmd)
+                return
             cur_lane.unit_obj.move_to_hub(cur_lane, cur_hub.move_dis, MoveDirection.POS,
                                           self.homing_enabled, gcmd=gcmd)
 
@@ -1561,6 +1571,19 @@ class afc:
         cur_lane.unit_obj.return_to_home(gcmd=gcmd)
         # Put CAM back to lane if its loaded to toolhead
         self.function.select_loaded_lane(gcmd=gcmd)
+
+    def _hub_load_failed(self, cur_lane: AFCLane, sensor: str, gcmd: AFCGcmd) -> None:
+        """
+        Stops HUB_LOAD when the filament never reaches a sensor.
+
+        :param cur_lane: Lane being loaded
+        :param sensor: Sensor it never reached, "load" or "hub"
+        :param gcmd: Command context the error is reported through
+        """
+        cur_lane.status = AFCLaneState.NONE
+        cur_lane.do_enable(False)
+        self.error.AFC_error(f"{cur_lane.name} did not reach its {sensor} sensor during HUB_LOAD, "
+                             "check the filament path", pause=False, gcmd=gcmd)
 
     cmd_LANE_UNLOAD_help = "Unload lane from extruder"
     def cmd_LANE_UNLOAD(self, gcmd):
@@ -2073,7 +2096,9 @@ class afc:
                     if (dist > 50.0
                         and self.homing_enabled):
                         warn = AFCMoveWarning.NONE
-                    if tool_attempts >= max_attempts:
+                    if (tool_attempts >= max_attempts
+                        and (not cur_lane.get_toolhead_pre_sensor_state()
+                             or warn == AFCMoveWarning.WARN)):
                         message = 'filament failed to trigger pre extruder gear toolhead sensor, CHECK FILAMENT PATH\n||=====||====||==>--||\nTRG   LOAD   HUB   TOOL'
                         message += f'\nTo resolve set lane loaded with `SET_LANE_LOADED LANE={cur_lane.name}` macro.'
                         message += f'\nManually move filament with LANE_MOVE macro for {cur_lane.name} until filament is right before toolhead extruder gears,'
