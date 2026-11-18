@@ -158,6 +158,17 @@ flash.
 AFC answers this by itself, since it sends `info` on every connect. After a
 bench flash, send any request within a minute.
 
+## Updates
+
+`boxturtle.bin` comes with a manifest, `boxturtle.bin.json`, which `build.sh`
+writes: `format` (`BTFW1`), `version` (as `info` reports it), `proto`, `len`
+and `sha256`. `AFC_TURTLE_FLASH UNIT=<unit> [FILE=<image>]` (default
+`boxturtle/boxturtle.bin` in the config folder) checks the image
+against it and flashes only an image that speaks the host's protocol. It sends
+`bootloader`, writes the image through the board's USB Katapult with
+Katapult's `flashtool.py`, and waits for the board to come back reporting the
+manifest's version. A board left waiting in Katapult is finished the same way.
+
 ## Settings (`cfg`)
 
 | key | default | AFC option it comes from |
