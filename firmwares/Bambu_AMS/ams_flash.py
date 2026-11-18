@@ -18,6 +18,7 @@ logs/ams_flash.log and how the run ended to ams_flash_result.json.
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import hmac
 import io
@@ -1405,6 +1406,39 @@ def get_image(a, here: str, board: str, state, fetch: bool) -> tuple:
         return f.read(), os.path.basename(path), path
 
 
+STATE_MARK = "#~# --- AFC_BridgeBox managed state -- everything below is auto-written ---"
+
+
+def wifi_bridge(cfg_dir: str, settings, usb_port: str) -> tuple:
+    """
+    (address, link key) a chain on connection: wifi saved for its bridge, found by the bridge's
+    USB port in the chain's #~# state block, or (None, None).
+    """
+    files = [str(opts.get("state_file")) for sec, opts in (settings or {}).items()
+             if sec.startswith("afc_bridgebox") and (opts or {}).get("state_file")]
+    for root, _dirs, names in os.walk(cfg_dir):
+        files += [os.path.join(root, n) for n in names if n.endswith(".cfg")]
+    for path in files:
+        try:
+            with open(os.path.expanduser(path), errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if STATE_MARK not in text:
+            continue
+        cp = configparser.RawConfigParser(delimiters=(":", "="))
+        try:
+            cp.read_string("\n".join(ln[4:] for ln in text.split(STATE_MARK, 1)[1].splitlines()
+                                     if ln.startswith("#~# ")))
+        except configparser.Error:
+            continue
+        for sec in cp.sections():
+            addr = cp.get(sec, "wifi_addr", fallback="").strip()
+            if cp.get(sec, "usb_port", fallback="").strip() == usb_port and addr.startswith("tcp://"):
+                return addr, _clean_key(cp.get(sec, "wifi_key", fallback=None))
+    return None, None
+
+
 def bridge_of(a, row: dict, settings) -> tuple:
     """
     (port, link key) of the bridge a unit is on.
@@ -1426,6 +1460,11 @@ def bridge_of(a, row: dict, settings) -> tuple:
     key = a.key if a.key is not None else (
         (bridge_keys(settings).get(port) if settings is not None else None)
         or _clean_key(find_in_cfg(a.cfg_dir, "tcp_key")) or "")
+    if not a.target and not port.startswith("tcp://") and not os.path.exists(port):
+        # A bridge on connection: wifi keeps its USB name as its port, unplugged or not.
+        addr, saved = wifi_bridge(a.cfg_dir, settings, port)
+        if addr:
+            port, key = addr, a.key if a.key is not None else (saved or "")
     if not port.startswith("tcp://"):
         key = ""        # the link key is a network feature.
         if not os.path.exists(port):
