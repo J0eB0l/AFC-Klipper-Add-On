@@ -20,6 +20,9 @@ int get_lane(const char *line, int *lane);
 // Switch id by name ("hub", "prep1", ...), or -1.
 int sw_lookup(const char *name);
 
+// Leaves USB and restarts into the bootloader once one was asked for.
+void boot_task(void);
+
 // Implemented by motion.c: extra commands and status fields.
 int proto_handle_extra(const char *cmd, char *line);
 void status_extra(struct jw *w);

@@ -52,7 +52,7 @@ ignored.
 | `led_cfg` | `strip` (1-4 = RGB1-RGB4), `count`, `order` (`GRB`, `GRBW`, `RGB`, `RGBW`) | LED string layout; every header has no LEDs until this sets it |
 | `led` | `strip`, `i` (first, 1-based), `n`, `color` (`RRGGBB` or `RRGGBBWW`), `send` | sets LEDs; `send:false` holds the update for the next `led` |
 | `tmc_read` | `lane`, `reg` | raw driver register as `hi` and `lo` 16-bit halves |
-| `bootloader` | | reboots into the bootloader (Katapult or DFU) |
+| `bootloader` | | stops the motors, replies, leaves USB for half a second, then reboots into the bootloader (Katapult or DFU) |
 | `reboot` | | reboots |
 | `tmc_wtest` | `lane`, `reg`, `hi`, `lo`, `n`, `gap`, `flags` | bench: writes the register `n` times with `gap` idle bit times before each datagram, replies the driver's write counter (IFCNT) `before` and `after` |
 | `rxlog` | | bench: the first 20 bytes (hex) of the last 6 lines received, as `lines` |

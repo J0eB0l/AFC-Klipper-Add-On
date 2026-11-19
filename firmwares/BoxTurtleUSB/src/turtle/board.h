@@ -11,7 +11,7 @@
 #define TGPIO(PORT, NUM) (((PORT)-'A') * 16 + (NUM))
 
 #define FW_NAME "AFC-Turtle"
-#define FW_VERSION "0.1.1"
+#define FW_VERSION "0.1.2"
 #define FW_PROTO "boxturtle-1"
 
 #define NUM_LANES 4
@@ -66,6 +66,12 @@ extern const char * const SW_NAMES[SW_COUNT];
 void sensors_init(void);
 // Milliseconds since power up (counted by the sensor timer).
 uint32_t uptime(void);
+
+#ifndef TURTLE_OTGD
+// The USB device registers: the H723's OTG HS core, at full speed on PA11/PA12.
+#define TURTLE_OTGD ((USB_OTG_DeviceTypeDef *)(USB_OTG_HS_PERIPH_BASE \
+                                               + USB_OTG_DEVICE_BASE))
+#endif
 // Debounced state, bit n = switch n triggered.
 uint32_t sensors_state(void);
 static inline int sensor(int sw) { return (sensors_state() >> sw) & 1; }

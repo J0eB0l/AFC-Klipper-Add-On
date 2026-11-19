@@ -3165,6 +3165,19 @@ class TestSystemTest:
         assert unit.logger.messages == [
             ("info", "lane8 <span class=error--text>Turtle_1: BoxTurtle not found on USB</span>")]
 
+    def test_board_in_its_bootloader(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        unit.link.last_error = "cannot open"
+        with patch.object(unit, "_wait_for_board", return_value=False), \
+                patch.object(unit, "_katapult_port", return_value="/dev/katapult"), \
+                patch.object(unit, "lane_fault") as fault:
+            assert unit.system_Test(lane, 0, True, True, gcmd=GCMD) is False
+        assert unit.logger.messages == [
+            ("info", "lane8 <span class=error--text>Turtle_1: BoxTurtle is waiting in its "
+                     "bootloader; run AFC_TURTLE_FLASH to finish its update</span>")]
+        fault.assert_called_once_with(lane, gcmd=GCMD)
+
     def test_board(self):
         unit = make_unit()
         lane = make_lane(unit)
@@ -3767,7 +3780,9 @@ class TestCmdAfcTurtleFlash:
                 unit.cmd_AFC_TURTLE_FLASH(gcmd)
         popen.assert_not_called()
         assert unit.flash["state"] == "failed"
-        assert unit.flash["message"] == "Turtle_1: the BoxTurtle did not start its bootloader"
+        assert unit.flash["message"] == (
+            "Turtle_1: the BoxTurtle did not start its bootloader; reboot the host or power the "
+            "BoxTurtle off and on, then update it again")
 
     def test_flashtool_fails(self, tmp_path, monkeypatch):
         unit, gcmd, _, kat = self._setup(tmp_path, monkeypatch)
