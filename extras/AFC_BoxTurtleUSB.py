@@ -2634,8 +2634,13 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         PREP's lane check, after the board is up.
         """
         if not self._wait_for_board():
-            msg = (f"<span class=error--text>{self.name}: BoxTurtle not found on USB"
-                   f"{' (' + self.link.last_error + ')' if self.link.last_error else ''}</span>")
+            if self._katapult_port():
+                why = ("BoxTurtle is waiting in its bootloader; run AFC_TURTLE_FLASH to finish "
+                       "its update")
+            else:
+                why = ("BoxTurtle not found on USB"
+                       f"{' (' + self.link.last_error + ')' if self.link.last_error else ''}")
+            msg = f"<span class=error--text>{self.name}: {why}</span>"
             self.logger.info(f"{cur_lane.name} {msg}")
             self.lane_fault(cur_lane, gcmd=gcmd)
             cur_lane.set_afc_prep_done()
@@ -2877,7 +2882,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             reactor.pause(reactor.monotonic() + 0.25)
             port = self._katapult_port()
         if port is None:
-            return "the BoxTurtle did not start its bootloader"
+            return ("the BoxTurtle did not start its bootloader; reboot the host or power the "
+                    "BoxTurtle off and on, then update it again")
         self.logger.info(f"{self.name}: writing {os.path.basename(path)} ({version}) through {port}")
         self._flash_step("Writing the firmware", 0, version)
         try:

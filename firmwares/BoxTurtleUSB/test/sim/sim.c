@@ -77,7 +77,9 @@ sched_check_wake(struct task_wake *w)
 struct sim_rcc sim_rcc = { RCC_RSR_PORRSTF };
 uint32_t sim_uid[3] = { 0x00390041, 0x3433510a, 0x32303536 };
 void NVIC_SystemReset(void) {}
-void bootloader_request(void) {}
+static int bootloader_asked;
+void bootloader_request(void) { bootloader_asked++; }
+struct sim_otgd sim_otgd;
 struct sim_guard_mem sim_guard;
 void try_request_canboot(void) {}
 
@@ -458,6 +460,7 @@ void cmds_task(void);
 void spool_task(void);
 void jobs_task(void);
 void tmc_task(void);
+void boot_task(void);
 
 static char out_log[1 << 20];
 static int out_len;
@@ -487,6 +490,7 @@ run_tasks(void)
     cmds_task();
     spool_task();
     tmc_task();
+    boot_task();
     read_skew = 0;
     drain_output();
 }
@@ -1577,6 +1581,26 @@ t_open_coil(void)
     ft[0].unplugged = 0;
 }
 
+static void
+t_bootloader(void)
+{
+    printf("bootloader: reply, then off USB, then the restart\n");
+    reset_model();
+    park_lane(0, 0);
+    send("{\"cmd\":\"move\",\"lane\":1,\"mm\":300,\"speed\":50,\"accel\":400}");
+    run_ms(100);
+    int mark = out_len;
+    send("{\"id\":9,\"cmd\":\"bootloader\"}");
+    CHECK(strstr(out_log + mark, "\"id\":9,\"ok\":true"), "bootloader ok");
+    CHECK(!(sim_otgd.DCTL & USB_OTG_DCTL_SDIS), "still on USB for the reply");
+    run_ms(50);
+    CHECK(strstr(out_log + mark, "\"end\":\"stopped\""), "the move stops");
+    CHECK(sim_otgd.DCTL & USB_OTG_DCTL_SDIS, "off USB after the reply");
+    CHECK(!bootloader_asked, "no restart while the host lets go");
+    run_ms(500);
+    CHECK(bootloader_asked == 1, "restarts into the bootloader (%d)", bootloader_asked);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1630,6 +1654,7 @@ main(int argc, char **argv)
     t_driver_fault_refuse();
     t_link_loss_assist();
     t_open_coil();
+    t_bootloader();
     printf("%d/%d checks passed\n", checks - fails, checks);
     return fails != 0;
 }

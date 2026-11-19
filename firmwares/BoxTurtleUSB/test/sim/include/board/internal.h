@@ -17,3 +17,7 @@ struct sim_guard_mem { uint32_t w[8]; };
 extern struct sim_guard_mem sim_guard;
 #define TURTLE_GUARD_ADDR (&sim_guard)
 #define SCB_CleanDCache_by_Addr(a, n) ((void)(a), (void)(n))
+struct sim_otgd { volatile uint32_t DCTL; };
+extern struct sim_otgd sim_otgd;
+#define TURTLE_OTGD (&sim_otgd)
+#define USB_OTG_DCTL_SDIS (1u<<1)

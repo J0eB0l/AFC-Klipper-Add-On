@@ -12,6 +12,7 @@
 #include "board.h"
 #include "events.h"
 #include "guard.h"
+#include "jobs.h"
 #include "json.h"
 #include "link.h"
 #include "motion.h"
@@ -279,12 +280,45 @@ cmd_sw_cfg(char *line)
     reply_ok(line);
 }
 
+// A bootloader request stops the motors, lets its reply out, then leaves USB
+// for BOOT_DETACH_MS before the restart, so the host is done with this device
+// before the bootloader's takes its place on the port.
+#define BOOT_REPLY_MS 20
+#define BOOT_DETACH_MS 500
+
+static uint8_t boot_stage; // 1: the reply is going out, 2: off USB
+static uint32_t boot_at;
+
 static void
 cmd_bootloader(char *line)
 {
+    int i;
+    for (i = 0; i < NUM_LANES; i++) {
+        jobs_abort(i, "stopped", 0);
+        assist_stop(i);
+        espool_set(i, 0, 0);
+    }
+    motion_stop(-1, END_STOPPED);
     reply_ok(line);
+    boot_stage = 1;
+    boot_at = uptime() + BOOT_REPLY_MS;
+}
+
+void
+boot_task(void)
+{
+    if (!boot_stage || (int32_t)(uptime() - boot_at) < 0)
+        return;
+    if (boot_stage == 1) {
+        TURTLE_OTGD->DCTL |= USB_OTG_DCTL_SDIS;
+        boot_stage = 2;
+        boot_at = uptime() + BOOT_DETACH_MS;
+        return;
+    }
+    boot_stage = 0;
     bootloader_request();
 }
+DECL_TASK(boot_task);
 
 static void
 cmd_reboot(char *line)
