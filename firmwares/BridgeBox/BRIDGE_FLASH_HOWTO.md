@@ -7,13 +7,17 @@ updates.
 
 ## What you need
 
-Two files, which always travel together:
+Two files, which always travel together. Which two depends on the chip on
+your BridgeBox board (`AFC_BAMBU_UIDS` names it):
 
-| image | manifest |
-|---|---|
-| `signed_s3.bin` | `signed_s3.bin.manifest.json` |
+| BridgeBox | image | manifest |
+|---|---|---|
+| ESP32-S3 | `signed_s3.bin` | `signed_s3.bin.manifest.json` |
+| ESP32-C3 | `signed_c3.bin` | `signed_c3.bin.manifest.json` |
 
-Both are included in this folder, `firmwares/BridgeBox/`. They are AFC-2.96.
+All four are included in this folder, `firmwares/BridgeBox/`. They are
+AFC-2.96. AFC reads the chip from the image and refuses one made for the other
+board before anything is sent.
 The BridgeBox runs only signed images, and the manifest is the signature:
 without it the BridgeBox refuses the update. AFC needs to understand the
 `.bin`: an AFC too old for it answers `block 0 has no UF2 magic`.
@@ -30,7 +34,9 @@ paths to edit. Without it, the `AFC_BAMBU_FLASH` lines below do the same.
 | `BRIDGEBOX_FLASH MODE=go` | update: write and reboot |
 | `BRIDGEBOX_FLASH_ABORT` | clear a stuck transfer |
 
-`FILE=` picks a different file. With more than one Bambu AMS unit in your
+`BRIDGEBOX_FLASH` picks `signed_s3.bin` or `signed_c3.bin` by the chip the
+BridgeBox reports. `BOARD=s3` or `BOARD=c3` picks one by hand, and `FILE=` picks
+any other file. With more than one Bambu AMS unit in your
 config, add `UNIT=` with any unit on the BridgeBox you mean, e.g.
 `UNIT=Bambu_AMS_1`; the command lists your units if you leave it out.
 
@@ -45,7 +51,7 @@ config, add `UNIT=` with any unit on the BridgeBox you mean, e.g.
 
    The firmware line reads something like `AFC-2.83`.
 
-3. **Upload both files** into your Klipper config folder, the one that holds
+3. **Upload both files** for your board into your Klipper config folder, the one that holds
    `printer.cfg`. In Mainsail or Fluidd that is the Machine tab's file list;
    upload into the top level, not a subfolder.
 
@@ -57,6 +63,8 @@ config, add `UNIT=` with any unit on the BridgeBox you mean, e.g.
    or, without the cfg:
 
        AFC_BAMBU_FLASH UNIT=Bambu_AMS_1 FILE=signed_s3.bin APPLY=0
+
+   (`signed_c3.bin` on a C3 BridgeBox.)
 
    `UNIT=` can be any Bambu AMS unit on that BridgeBox; it picks the
    BridgeBox, not the AMS. Look for:
