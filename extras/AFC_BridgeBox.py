@@ -2170,6 +2170,10 @@ class afcBridgeBox:
                          "and spools: AFC_BRIDGEBOX_STATUS")
             except Exception:
                 pass
+        self._register_mux("AFC_BRIDGEBOX_SWITCH", self.cmd_AFC_BRIDGEBOX_SWITCH,
+                           "Set or show the filament switch on a chain's bus: "
+                           "AFC_BRIDGEBOX_SWITCH [CHAIN=<chain>] [ROUTE=<0-3>]. ROUTE=0 "
+                           "releases it, 1 and 2 move one actuator each, 3 moves both.")
         self._register_mux("AFC_BRIDGEBOX_REPLACE", self.cmd_AFC_BRIDGEBOX_REPLACE,
                            "Forget an offline unit and put a new unit on its bay, live: "
                            "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> "
@@ -2239,6 +2243,69 @@ class afcBridgeBox:
         elif not getattr(self, "_pool_units", None):
             lines.append("  no pool bays (pool_ams / pool_ht)")
         return lines
+
+    _SWITCH_AT = ("released", "actuator 1", "actuator 2", "both actuators")
+
+    def _switch_state(self) -> Optional[Dict[str, Any]]:
+        """
+        The filament switch as the bridge last reported it.
+
+        :return dict: on, route, position, inlets and values, or None when no switch has answered
+        on this chain's bus since the bridge started
+        """
+        bridge = self._chain_bridge()
+        fs = (bridge.latest_status() or {}).get("fs") if bridge is not None else None
+        if not isinstance(fs, dict):
+            return None
+        flag = int(fs.get("flag") or 0)
+        return {"on": bool(fs.get("on")),
+                "route": int(fs.get("route") or 0),
+                "position": flag & 3,
+                "inlets": [bool(flag & 4), bool(flag & 8)],
+                "values": list(fs.get("val") or [])}
+
+    def cmd_AFC_BRIDGEBOX_SWITCH(self, gcmd: Any) -> None:
+        """
+        Set or show the filament switch on this chain's bus.
+
+        ROUTE=0 releases it, 1 and 2 move one actuator each and 3 moves both. The bridge sends the
+        route with every poll, so it holds until it is changed, and a bridge restart releases it.
+        Without ROUTE it reports the route, where the actuators are and which inlets have filament.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_SWITCH [CHAIN=<chain>] [ROUTE=<0-3>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_SWITCH CHAIN=chain1 ROUTE=3
+        ```
+        """
+        bridge = self._chain_bridge()
+        if (bridge is None
+            or not bridge.is_connected()):
+            error_str = f"AFC_BRIDGEBOX_SWITCH: no link to the BridgeBox of {self.name}"
+            raise gcmd.error(error_str)
+        route = gcmd.get_int("ROUTE", None, minval=0, maxval=3)
+        if route is not None:
+            bridge.send({"cmd": "fswitch", "route": route})
+            gcmd.respond_info(f"{self.name}: filament switch route {route} "
+                              f"({self._SWITCH_AT[route]})")
+            return
+        st = self._switch_state()
+        if st is None:
+            gcmd.respond_info(f"{self.name}: no filament switch has answered on this bus")
+            return
+        if not st["on"]:
+            gcmd.respond_info(f"{self.name}: the filament switch stopped answering")
+            return
+        loaded = [str(i + 1) for i, on in enumerate(st["inlets"]) if on]
+        inlets = (f"filament at inlet{'s' if len(loaded) > 1 else ''} {' and '.join(loaded)}"
+                  if loaded else "no filament at its inlets")
+        gcmd.respond_info(f"{self.name}: filament switch route {st['route']}, at "
+                          f"{self._SWITCH_AT[st['position']]}, {inlets} "
+                          f"(readings {', '.join(str(v) for v in st['values'])})")
 
     def cmd_AFC_BRIDGEBOX_RESET_WIFI(self, gcmd: Any) -> None:
         """
@@ -6584,7 +6651,24 @@ class afcBridgeBox:
                 "watch_ticks": getattr(self, "_tick_count", 0),
                 "held_bays": {bay: e.get("uid") for bay, e in
                               (getattr(self, "_held", None) or {}).items()},
-                "watch_state": getattr(self, "_watch_state", "not-started")}
+                "watch_state": getattr(self, "_watch_state", "not-started"),
+                "filament_switch": self._switch_status()}
+
+    def _switch_status(self) -> Optional[Dict[str, Any]]:
+        """
+        The filament switch for the status API, without its raw readings, which change on every
+        frame.
+
+        :return dict: on, route, position and inlets, or None when no switch has answered
+        """
+        try:
+            st = self._switch_state()
+        except Exception:
+            return None
+        if st is None:
+            return None
+        st.pop("values", None)
+        return st
 
 
 class BridgeBoxOverrideHolder:
