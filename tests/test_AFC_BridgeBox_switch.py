@@ -131,6 +131,10 @@ class FakePathUnit(FakeUnit):
         self.path: Optional[float] = None
         # The lengths it was told to keep.
         self.kept: List[Tuple[float, float]] = []
+        # How often it was told to forget its path.
+        self.forgot = 0
+        # The lengths it held as each of its loads set off.
+        self.began: List[Tuple[float, float]] = []
 
     def load_path_mm(self) -> Optional[float]:
         return self.path
@@ -138,6 +142,11 @@ class FakePathUnit(FakeUnit):
     def keep_path(self, load: float, unload: float) -> None:
         self.afc_bowden_length, self.afc_unload_bowden_length = load, unload
         self.kept.append((load, unload))
+
+    def forget_path(self) -> None:
+        # The length a unit holds for a path it never measured.
+        self.afc_bowden_length = self.afc_unload_bowden_length = 3000.0
+        self.forgot += 1
 
 
 class FakeHub:
@@ -378,6 +387,7 @@ def loading(switch: afcBridgeBoxSwitch, lane: FakeLane, *loads: Load) -> List[Tu
         if not switch.handle_tool_load_prepare(cur_lane, gcmd):
             return False
         through.append((cur_lane.extruder_obj.name, switch.state()["inlets"][inlet]["outlet"]))
+        cur_lane.unit_obj.began.append(tube_of(cur_lane.unit_obj))
         if not load.loads:
             return False
         if load.shows is not None:
@@ -505,6 +515,7 @@ class TestAfcBridgeBoxSwitchInit:
         assert switch._offsets == {}
         assert switch._seen == {"A": False, "B": False}
         assert switch._lengthless == []
+        assert switch._measuring is None
         assert (switch._moving, switch._told) == (False, "")
 
     def test_it_registers_its_handlers_and_commands(self):
@@ -1737,6 +1748,26 @@ class TestAfcBridgeBoxSwitchSetLength:
         switch._set_length(lane)
         assert tube_of(hub) == (900.0, 880.0)
         assert switch._offsets == {hub: 0.0}
+
+    def test_a_lane_that_is_being_measured_by_loading_it_gets_no_difference(self):
+        switch = plumbed(**LENGTHS)
+        lane = lane_of(switch, "Bambu_AMS_1")
+        unit = add_path_unit(switch, lane)
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._measuring = lane
+        switch._set_length(lane)
+        assert tube_of(unit) == (2000.0, 1990.0)
+        assert switch._offsets == {unit: 0.0}
+
+    def test_another_lane_gets_the_difference_while_that_one_is_measured(self):
+        switch = plumbed(**LENGTHS)
+        lane = lane_of(switch, "Turtle_1")
+        hub = add_hub(lane)
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._measuring = lane_of(switch, "Bambu_AMS_1")
+        switch._set_length(lane)
+        assert tube_of(hub) == (1060.0, 1040.0)
+        assert switch._offsets == {hub: 160.0}
 
     def test_a_lane_without_a_hub_is_left_alone(self):
         switch = plumbed(**LENGTHS)
@@ -3427,6 +3458,24 @@ class TestAfcBridgeBoxSwitchMeasure:
         switch._watch(0.0)
         assert tube_of(hub) == (852.0, 852.0)
 
+    def test_a_lane_its_unit_calibrates_is_not_one_that_is_measured_by_loading(self):
+        # So the watch adds the difference during its run through the other outlet, as for
+        # any lane on its way there.
+        switch, lane, hub = self._switch(**LENGTHS)
+        measuring(switch, lane, Run(852.0), Run(1013.0))
+        scripted = lane.unit_obj.calibrate_bowden.side_effect
+        during: List[Tuple[Optional[FakeLane], float]] = []
+
+        def noted(cur_lane: FakeLane, dis: float, tol: float,
+                  gcmd: Any) -> Tuple[bool, str, float]:
+            answer = scripted(cur_lane, dis, tol, gcmd)
+            during.append((switch._measuring, switch._offsets[hub]))
+            return answer
+
+        lane.unit_obj.calibrate_bowden = MagicMock(side_effect=noted)
+        switch._measure(lane, MockGCodeCommand())
+        assert during == [(None, 0.0), (None, 160.0)]
+
     def test_what_was_added_to_the_tube_is_taken_off_before_it_is_measured(self):
         switch, lane, hub = self._switch(**LENGTHS)
         switch._offset(hub, 160.0)
@@ -3558,8 +3607,37 @@ class TestAfcBridgeBoxSwitchMeasureByLoading:
         assert switch._offsets == {unit: 0.0}
         assert switch.confirmed == ["Bambu_AMS_1"]
 
-    def test_the_difference_a_load_added_for_the_other_outlet_is_not_left_on_the_unit(self):
-        # With both lengths set, a load through the other outlet adds their difference first.
+    def test_each_load_sets_off_from_a_path_the_unit_does_not_know(self):
+        # With both lengths set, a load through the other outlet has their difference added
+        # to the unit's length first. A load that measures has not.
+        switch, lane, unit = self._switch(**LENGTHS)
+        loading(switch, lane, Load(2104.0), Load(2251.0))
+        switch._measure(lane, MockGCodeCommand())
+        assert unit.forgot == 2
+        assert unit.began == [(3000.0, 3000.0), (3000.0, 3000.0)]
+        assert switch._offsets == {unit: 0.0}
+        assert switch._measuring is None
+
+    def test_a_watch_that_comes_by_while_the_lane_is_in_a_toolhead_adds_nothing(self):
+        switch, lane, unit = self._switch(**LENGTHS)
+        loading(switch, lane, Load(2104.0), Load(2251.0))
+        scripted = switch.afc.TOOL_UNLOAD.side_effect
+        held: List[Tuple[Optional[FakeLane], Tuple[float, float]]] = []
+
+        def watched(cur_lane: FakeLane, set_start_time: bool, force_unload: bool,
+                    gcmd: Any) -> bool:
+            switch._watch(0.0)
+            held.append((switch._measuring, tube_of(unit)))
+            return scripted(cur_lane, set_start_time, force_unload, gcmd)
+
+        switch.afc.TOOL_UNLOAD = MagicMock(side_effect=watched)
+        switch._measure(lane, MockGCodeCommand())
+        assert held == [(lane, (2104.0, 2104.0)), (lane, (2251.0, 2251.0))]
+        assert switch._offsets == {unit: 0.0}
+
+    def test_a_second_load_that_measured_nothing_leaves_what_the_first_load_measured(self):
+        # The unit forgot its path for that load, so the one the first load measured is put
+        # back where the unit saves it.
         switch, lane, unit = self._switch(**LENGTHS)
         loading(switch, lane, Load(2104.0), Load(None))
         with pytest.raises(SwitchError) as err:
@@ -3600,8 +3678,11 @@ class TestAfcBridgeBoxSwitchMeasureByLoading:
             "A. It could not be loaded. Reset lane_Bambu_AMS_1 before the next try.")
         assert switch.afc.TOOL_LOAD.call_count == 1
         switch.afc.TOOL_UNLOAD.assert_not_called()
+        # The unit forgot its path for the load, so its own lengths are put back where it
+        # saves them.
         assert tube_of(unit) == (2000.0, 1990.0)
-        assert unit.kept == []
+        assert unit.kept == [(2000.0, 1990.0)]
+        assert switch._measuring is None
         assert switch.confirmed == []
 
 
@@ -3823,6 +3904,14 @@ class TestAfcBridgeBoxSwitchLoadToMeasure:
         assert switch._seen == {"A": True, "B": False}
         switch.reactor.pause.assert_not_called()
         assert switch.logger.messages == []
+
+    def test_the_unit_forgets_the_path_it_knew_before_the_lane_is_loaded(self):
+        switch, lane, unit = self._switch()
+        loading(switch, lane, Load(2104.0))
+        switch._load_to_measure(lane, "A", MockGCodeCommand())
+        assert unit.forgot == 1
+        assert unit.began == [(3000.0, 3000.0)]
+        assert unit.kept == []
 
     def test_a_lane_that_does_not_load_is_not_unloaded(self):
         switch, lane, _unit = self._switch()

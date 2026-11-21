@@ -28686,6 +28686,39 @@ class TestAfcBambuAMSKeepPath:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSForgetPath:
+    def test_both_lengths_go_back_to_the_ones_of_a_path_never_measured(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        unit.afc_bowden_length, unit.afc_unload_bowden_length = 2104.0, 2080.0
+        unit.forget_path()
+        assert (unit.afc_bowden_length, unit.afc_unload_bowden_length) == (3000.0, 3000.0)
+        assert unit.logger.messages == []
+
+    def test_what_the_last_load_measured_is_dropped(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        unit._load_odom_start, unit._load_odom_at_sensor = 0.0, 3338.0
+        unit.forget_path()
+        assert (unit._load_odom_start, unit._load_odom_at_sensor) == (None, None)
+        assert unit.load_path_mm() is None
+        assert unit.logger.messages == []
+
+    def test_the_next_load_is_waited_for_and_its_path_adopted(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        unit._path_adopted, unit._path_wait_load = True, False
+        unit.forget_path()
+        assert (unit._path_adopted, unit._path_wait_load) == (False, True)
+        assert unit.logger.messages == []
+
+    def test_nothing_is_saved(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        master = TestAfcBambuAMSKeepPath._Master()
+        unit.set_master(master)
+        unit.afc_bowden_length, unit.afc_unload_bowden_length = 2104.0, 2080.0
+        unit.forget_path()
+        assert master.saved == []
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSAdoptMeasuredPath:
     """
     The unit's own path measurement replaces the configured bowden, once, in memory, and is

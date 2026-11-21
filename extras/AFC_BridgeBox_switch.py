@@ -174,6 +174,8 @@ class afcBridgeBoxSwitch:
         self._seen: Dict[str, bool] = {letter: False for letter in LETTERS}
         # The units whose own calibration gave no tube length.
         self._lengthless: List[str] = []
+        # The lane that is being measured by loading it: nothing is added to its tube.
+        self._measuring: Optional[AFCLane] = None
         self._moving = False
         self._told = ""
         # Reactor time the switch's section is printed by at the latest, None when none is due.
@@ -690,7 +692,8 @@ class afcBridgeBoxSwitch:
         """
         Give a lane's tube the length for the outlet the lane goes through: its own, plus the
         difference between the two outlets' tubes when that is not the outlet its unit starts
-        on.
+        on. A lane that is being measured by loading it gets no difference: its loads start
+        from no length at all.
 
         :param lane: a lane that is loaded or about to be
         """
@@ -702,7 +705,8 @@ class afcBridgeBoxSwitch:
         start = self.start[self.inlet_of(lane.unit)]
         offset = 0.0
         if (outlet != start
-            and self.calibrated()):
+            and self.calibrated()
+            and lane is not self._measuring):
             offset = self.lengths[outlet] - self.lengths[start]
         self._offset(tube, offset)
 
@@ -1278,6 +1282,7 @@ class afcBridgeBoxSwitch:
         self._offset(tube, 0.0)
         own = (tube.afc_bowden_length, tube.afc_unload_bowden_length)
         lengths: Dict[str, float] = {}
+        self._measuring = lane if self._by_load(lane) else None
         try:
             # The unit's own outlet goes first: a unit that measures no length stops there,
             # before anything of its own was calibrated through the other outlet.
@@ -1285,6 +1290,7 @@ class afcBridgeBoxSwitch:
             own = (tube.afc_bowden_length, tube.afc_unload_bowden_length)
             lengths[other(start)] = self._measure_outlet(lane, inlet, other(start), gcmd)
         finally:
+            self._measuring = None
             # The other outlet's run saved its length as the unit's own.
             self._restore_tube(tube, own)
             # The watch may have added the outlets' difference during that run.
@@ -1362,13 +1368,15 @@ class afcBridgeBoxSwitch:
                          gcmd: GCodeCommand) -> Tuple[bool, str, float]:
         """
         Load a lane into its toolhead and back out, and take the path its unit measured on the
-        way in.
+        way in. The unit forgets the path it knew first, so the load is one to a toolhead at
+        an unknown distance and measures the whole way.
 
         :param lane: the lane to measure with, on the extruder to measure to
         :param inlet: the lane's inlet
         :param gcmd: the command the load and the unload run through
         :return tuple: whether it measured, why not, and the mm from the unit to the toolhead
         """
+        lane.unit_obj.forget_path()
         if not self.afc.TOOL_LOAD(lane, gcmd=gcmd):
             return False, "It could not be loaded", 0.0
         self._look()

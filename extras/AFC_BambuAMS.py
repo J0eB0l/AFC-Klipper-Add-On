@@ -11738,6 +11738,14 @@ class afcBambuAMS(afcUnit):
             master.persist_learned(self.name, "afc_bowden_length", round(load, 1))
             master.persist_learned(self.name, "afc_unload_bowden_length", round(unload, 1))
 
+    def forget_path(self) -> None:
+        """
+        Go back to a path that was never measured, for this session: both lengths are the
+        ones a unit with nothing learned starts with, and the next load measures the path
+        again. Nothing is saved.
+        """
+        self.apply_learned({})
+
     def measured_path_mm(self) -> Optional[float]:
         """
         This unit's PTFE path length as the AMS itself measured it, in mm.
