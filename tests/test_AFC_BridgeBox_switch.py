@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from configfile import error
@@ -141,12 +141,13 @@ class FakePathUnit(FakeUnit):
 
 
 class FakeHub:
-    """A hub with only the tube lengths the switch changes."""
+    """A hub with only the tube lengths the switch changes and whether it reads filament."""
 
     def __init__(self, name: str, length: float = 900.0, unload: float = 880.0) -> None:
         self.fullname = f"AFC_hub {name}"
         self.afc_bowden_length = length
         self.afc_unload_bowden_length = unload
+        self.state = False
 
 
 class FakeExtruder:
@@ -3580,6 +3581,38 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
         assert str(err.value) == (
             "Switch_1: lane_Turtle_1 did not measure the tube to extruder1 through outlet B. "
             "Reset lane_Turtle_1 before the next try.")
+
+    @pytest.mark.parametrize("moved", [300.0, -300.0])
+    def test_a_run_that_fails_past_the_hub_offers_the_lane_reset(self, moved):
+        switch, lane = self._switch()
+        lane.hub_obj.state = True
+        measuring(switch, lane, Run(moved, done=False, why="Error occurred"))
+        gcmd = MockGCodeCommand()
+        with patch.object(switch.afc, "run_script") as run_script, \
+                pytest.raises(SwitchError):
+            switch._measure_outlet(lane, "A", "B", gcmd)
+        run_script.assert_called_once_with(
+            "AFC_CALI_FAIL TITLE='Switch_1 Calibration Failed' FAIL=lane_Turtle_1 "
+            "DISTANCE=300.0 RESET=1", gcmd=gcmd)
+
+    @pytest.mark.parametrize("moved,at_hub", [(300.0, False), (0.0, True)])
+    def test_a_run_that_fails_with_the_hub_clear_or_before_it_fed_offers_none(self, moved,
+                                                                             at_hub):
+        switch, lane = self._switch()
+        lane.hub_obj.state = at_hub
+        measuring(switch, lane, Run(moved, done=False, why="Error occurred"))
+        with patch.object(switch.afc, "run_script") as run_script, \
+                pytest.raises(SwitchError):
+            switch._measure_outlet(lane, "A", "B", MockGCodeCommand())
+        run_script.assert_not_called()
+
+    def test_a_run_that_measures_offers_no_lane_reset(self):
+        switch, lane = self._switch()
+        lane.hub_obj.state = True
+        measuring(switch, lane, Run(1013.0))
+        with patch.object(switch.afc, "run_script") as run_script:
+            switch._measure_outlet(lane, "A", "B", MockGCodeCommand())
+        run_script.assert_not_called()
 
     @pytest.mark.parametrize("length", [0, 0.0, -5.0])
     @pytest.mark.parametrize("shows", ["A", None])

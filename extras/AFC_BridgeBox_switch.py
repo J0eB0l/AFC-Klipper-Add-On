@@ -1292,6 +1292,7 @@ class afcBridgeBoxSwitch:
             error_str = (f"{self.name}: {lane.name} did not measure the tube to {extruder} "
                          f"through outlet {outlet}.{reason} Reset {lane.name} before the next "
                          "try.")
+            self._offer_reset(lane, length, gcmd)
         elif length <= 0:
             if lane.unit not in self._lengthless:
                 self._lengthless.append(lane.unit)
@@ -1306,6 +1307,23 @@ class afcBridgeBoxSwitch:
         if error_str:
             raise SwitchError(error_str)
         return float(length)
+
+    def _offer_reset(self, lane: AFCLane, moved: float, gcmd: GCodeCommand) -> None:
+        """
+        Open AFC's failed calibration prompt for a lane that stopped on its way to the toolhead
+        and left filament past its hub. The prompt's button pulls the lane back to the hub,
+        which frees the inlet and lets the next try start from there.
+
+        :param lane: the lane that did not measure
+        :param moved: mm the lane's calibration says it fed before it stopped
+        :param gcmd: the command the prompt answers
+        """
+        if not moved:
+            return
+        if not getattr(lane.hub_obj, "state", False):
+            return
+        self.afc.run_script(f"AFC_CALI_FAIL TITLE='{self.name} Calibration Failed' "
+                            f"FAIL={lane.name} DISTANCE={abs(moved):.1f} RESET=1", gcmd=gcmd)
 
     def _load_to_measure(self, lane: AFCLane, inlet: str,
                          gcmd: GCodeCommand) -> Tuple[bool, str, float]:
