@@ -2465,6 +2465,70 @@ class TestToolLoad_DestExtruderAlreadyLoaded:
         obj.TOOL_UNLOAD.assert_called_once_with(loaded_lane, set_start_time=False, gcmd=gcmd)
 
 
+class TestToolLoadPrepareEvent:
+    """TOOL_LOAD sends `afc:tool_load_prepare` before it touches a toolhead."""
+
+    def _swap_needed(self):
+        obj, target_lane, loaded_lane, _ = _make_afc_for_dest_extruder_loaded()
+        obj.function.get_current_extruder.return_value = "extruder"
+        target_lane.tool_swap = MagicMock()
+        return obj, target_lane, loaded_lane
+
+    def test_handler_gets_the_lane_and_gcmd_before_the_tool_swap(self):
+        gcmd = MagicMock()
+        obj, target_lane, loaded_lane = self._swap_needed()
+        seen = []
+        obj.printer.register_event_handler(
+            "afc:tool_load_prepare",
+            lambda lane, cmd: seen.append((lane, cmd, target_lane.tool_swap.call_count)))
+
+        obj.TOOL_LOAD(target_lane, gcmd=gcmd)
+
+        assert seen == [(target_lane, gcmd, 0)]
+        target_lane.tool_swap.assert_called_once_with(gcmd=gcmd)
+        obj.TOOL_UNLOAD.assert_called_once_with(loaded_lane, set_start_time=False, gcmd=gcmd)
+
+    def test_false_answer_stops_the_load(self):
+        gcmd = MagicMock()
+        obj, target_lane, _ = self._swap_needed()
+        obj.printer.register_event_handler("afc:tool_load_prepare", lambda lane, cmd: False)
+
+        assert obj.TOOL_LOAD(target_lane, gcmd=gcmd) is False
+
+        target_lane.tool_swap.assert_not_called()
+        obj.TOOL_UNLOAD.assert_not_called()
+        obj.error.AFC_error.assert_not_called()
+
+    def test_one_false_among_several_answers_stops_the_load(self):
+        gcmd = MagicMock()
+        obj, target_lane, _ = self._swap_needed()
+        obj.printer.register_event_handler("afc:tool_load_prepare", lambda lane, cmd: True)
+        obj.printer.register_event_handler("afc:tool_load_prepare", lambda lane, cmd: False)
+
+        assert obj.TOOL_LOAD(target_lane, gcmd=gcmd) is False
+
+        target_lane.tool_swap.assert_not_called()
+
+    def test_true_answer_lets_the_load_go_on(self):
+        gcmd = MagicMock()
+        obj, target_lane, loaded_lane = self._swap_needed()
+        obj.printer.register_event_handler("afc:tool_load_prepare", lambda lane, cmd: True)
+
+        obj.TOOL_LOAD(target_lane, gcmd=gcmd)
+
+        target_lane.tool_swap.assert_called_once_with(gcmd=gcmd)
+        obj.TOOL_UNLOAD.assert_called_once_with(loaded_lane, set_start_time=False, gcmd=gcmd)
+
+    def test_load_goes_on_with_nothing_listening(self):
+        gcmd = MagicMock()
+        obj, target_lane, loaded_lane = self._swap_needed()
+
+        obj.TOOL_LOAD(target_lane, gcmd=gcmd)
+
+        target_lane.tool_swap.assert_called_once_with(gcmd=gcmd)
+        obj.TOOL_UNLOAD.assert_called_once_with(loaded_lane, set_start_time=False, gcmd=gcmd)
+
+
 # ── td1_present property ─────────────────────────────────────────────────────
 
 def _make_afc_for_td1(*, td1_present=False, last_td1_query=0.0,

@@ -17786,6 +17786,19 @@ class TestAfcBridgeBoxSwitchState:
                                     "inlets": [False, False], "values": []}
 
 
+class TestAfcBridgeBoxUnitNames:
+    def test_the_units_made_for_the_bays_in_bay_order(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster="", pool_ams=2, pool_ht=1,
+                      ams_names="One, Two", ht_names="Hot")
+        assert m.unit_names() == ["One", "Two", "Hot"]
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_with_no_bay_has_none(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        m._pool_units = []
+        assert m.unit_names() == []
+
+
 class TestAfcBridgeBoxSwitchSetRoute:
     def test_the_route_goes_to_the_bridge(self, tmp_path, monkeypatch):
         m = _wifi_master(tmp_path, monkeypatch)

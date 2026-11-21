@@ -266,6 +266,8 @@ class afcPrep:
             else:
                 self.logger.raw(cur_unit.logo_error)
             overrall_status = overrall_status and LaneCheck
+        # Modules that are not units check and report their own hardware here.
+        self.printer.send_event("afc:prep", gcmd)
         try:
             if self.afc.get_bypass_state():
                 self.logger.info("Filament loaded in bypass, toolchanges deactivated")

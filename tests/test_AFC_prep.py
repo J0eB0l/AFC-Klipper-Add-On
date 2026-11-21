@@ -306,6 +306,17 @@ class TestPREP:
         assert lane.filament_id == ""
         assert prep.logger.messages == []
 
+    def test_other_modules_are_told_before_prep_is_done(self, tmp_path):
+        prep, _lane = self._prep(tmp_path, {"material": "PLA"})
+        gcmd = MagicMock()
+        told = []
+        prep.printer.register_event_handler(
+            "afc:prep", lambda got: told.append((got, prep.afc.prep_done)))
+        prep.PREP(gcmd)
+        assert told == [(gcmd, False)]
+        assert prep.afc.prep_done is True
+        assert prep.logger.messages == []
+
 
 class TestPrepSelectCurrentLane(TestPrepRestoreFilamentInfo):
     """Regression test for GH #778: PREP's select_lane call must not pass

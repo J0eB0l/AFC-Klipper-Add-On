@@ -1804,6 +1804,10 @@ class afc:
         # Verify that printer is in absolute mode
         self.function.check_absolute_mode("TOOL_LOAD")
 
+        # Modules ready the lane's filament path here, a False answer stops the load.
+        if False in self.printer.send_event("afc:tool_load_prepare", cur_lane, gcmd):
+            return False
+
         # If the current extruder is not the one associated with the lane, switch to it.
         if self.function.get_current_extruder() != cur_lane.extruder_obj.th_extruder_name:
             cur_lane.tool_swap(gcmd=gcmd)

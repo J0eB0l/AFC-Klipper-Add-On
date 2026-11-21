@@ -2296,6 +2296,14 @@ class afcBridgeBox:
             lines.append("  no pool bays (pool_ams / pool_ht)")
         return lines
 
+    def unit_names(self) -> List[str]:
+        """
+        The AFC units this chain makes for its bays.
+
+        :return list: unit names, in bay order
+        """
+        return [str(pu["name"]) for pu in self._pool_units]
+
     _SWITCH_AT = ("released", "actuator 1", "actuator 2", "both actuators")
 
     def switch_state(self) -> Optional[Dict[str, Any]]:

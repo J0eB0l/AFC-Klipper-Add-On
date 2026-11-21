@@ -1556,6 +1556,8 @@ class afcFunction:
             button_style = "primary" if index % 2 == 0 else "secondary"
             buttons.append((button_label, button_command, button_style))
 
+        # Modules that are not units add their own calibration here.
+        self.printer.send_event("afc:calibration_buttons", buttons)
         button_style = "secondary" if button_style == "primary" else button_style
         buttons.append(("Toolhead Calibration", "AFC_TOOLHEAD_CALIBRATION", "info"))
 

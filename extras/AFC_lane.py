@@ -2034,6 +2034,26 @@ class AFCLane:
         if self.extruder_obj.tc_unit_obj is not None:
             self.extruder_obj.tc_unit_obj.tool_swap(self, set_start_time=False, gcmd=gcmd)
 
+    def set_extruder(self, extruder_obj: AFCExtruder) -> bool:
+        """
+        Moves this lane to another extruder, for a lane whose filament path can be routed to
+        more than one toolhead.
+
+        :param extruder_obj: extruder this lane feeds from now on
+        :return bool: False when the lane is loaded in its toolhead and so stays where it is
+        """
+        if extruder_obj is self.extruder_obj:
+            return True
+        if self.tool_loaded:
+            return False
+        # A pooled lane is in no extruder's lanes until it is claimed.
+        if self.extruder_obj.lanes.pop(self.name, None) is not None:
+            extruder_obj.lanes[self.name] = self
+            extruder_obj.check_lanes()
+        self.extruder_obj = extruder_obj
+        self.afc_extruder_name = extruder_obj.name
+        return True
+
 
     def _mapped_keys(self) -> list:
         """

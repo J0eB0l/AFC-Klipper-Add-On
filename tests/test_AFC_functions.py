@@ -1162,6 +1162,21 @@ class TestCmdAfcCalibration:
         assert any("second|UNIT_CALIBRATION UNIT=second|secondary" in message
                    for message in raw_messages)
 
+    def test_another_module_adds_its_calibration_before_the_toolhead_one(self) -> None:
+        func, _ = _make_calibration_func()
+        func.afc.units = {}
+        func.printer.register_event_handler(
+            "afc:calibration_buttons",
+            lambda buttons: buttons.append(("Switch_1", "CALIBRATE_SWITCH", "primary")))
+
+        func.cmd_AFC_CALIBRATION(_make_gcmd())
+
+        raw_messages = [message for level, message in func.logger.messages if level == "raw"]
+        shown = [message for message in raw_messages
+                 if "CALIBRATE_SWITCH" in message or "AFC_TOOLHEAD_CALIBRATION" in message]
+        assert shown[0].endswith("Switch_1|CALIBRATE_SWITCH|primary")
+        assert "Toolhead Calibration|AFC_TOOLHEAD_CALIBRATION" in shown[1]
+
 
 class TestCmdAfcToolheadCalibration:
     def test_toolhead_menu_includes_both_stn_values(self) -> None:

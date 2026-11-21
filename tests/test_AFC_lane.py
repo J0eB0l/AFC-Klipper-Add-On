@@ -686,6 +686,68 @@ class TestToolSwap:
             lane, set_start_time=False, gcmd=gcmd)
 
 
+class TestSetExtruder:
+    def _lane_on(self, registered=True):
+        lane = _make_real_afc_lane(name="lane7")
+        old = MagicMock()
+        old.name = "extruder4"
+        old.lanes = {"lane6": object()}
+        new = MagicMock()
+        new.name = "extruder5"
+        new.lanes = {"lane8": object()}
+        lane.extruder_obj = old
+        lane.afc_extruder_name = "extruder4"
+        if registered:
+            old.lanes["lane7"] = lane
+        return lane, old, new
+
+    def test_moves_a_registered_lane_to_the_other_extruder(self):
+        lane, old, new = self._lane_on()
+
+        assert lane.set_extruder(new) is True
+
+        assert lane.extruder_obj is new
+        assert lane.afc_extruder_name == "extruder5"
+        assert list(old.lanes) == ["lane6"]
+        assert list(new.lanes) == ["lane8", "lane7"]
+        assert new.lanes["lane7"] is lane
+        new.check_lanes.assert_called_once_with()
+
+    def test_pooled_lane_joins_no_extruders_lanes(self):
+        lane, old, new = self._lane_on(registered=False)
+
+        assert lane.set_extruder(new) is True
+
+        assert lane.extruder_obj is new
+        assert lane.afc_extruder_name == "extruder5"
+        assert list(old.lanes) == ["lane6"]
+        assert list(new.lanes) == ["lane8"]
+        new.check_lanes.assert_not_called()
+
+    def test_loaded_lane_stays_where_it_is(self):
+        lane, old, new = self._lane_on()
+        lane.tool_loaded = True
+
+        assert lane.set_extruder(new) is False
+
+        assert lane.extruder_obj is old
+        assert lane.afc_extruder_name == "extruder4"
+        assert list(old.lanes) == ["lane6", "lane7"]
+        assert list(new.lanes) == ["lane8"]
+        new.check_lanes.assert_not_called()
+
+    def test_same_extruder_changes_nothing_even_when_loaded(self):
+        lane, old, _ = self._lane_on()
+        lane.tool_loaded = True
+
+        assert lane.set_extruder(old) is True
+
+        assert lane.extruder_obj is old
+        assert lane.afc_extruder_name == "extruder4"
+        assert list(old.lanes) == ["lane6", "lane7"]
+        old.check_lanes.assert_not_called()
+
+
 # ── _attach_tool_start_endstop_to_stepper ─────────────────────────────────────
 # Lanes with no extruder of their own (e.g. Vivid) never set a TOOL endstop in
 # __init__; handle_unit_connect attaches the extruder's U1 endstop instead.

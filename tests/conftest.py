@@ -703,8 +703,7 @@ class MockPrinter:
         self._event_handlers.setdefault(event, []).append(callback)
 
     def send_event(self, event, *args):
-        for handler in self._event_handlers.get(event, []):
-            handler(*args)
+        return [handler(*args) for handler in self._event_handlers.get(event, [])]
 
     def get_start_args(self):
         return self.start_args
