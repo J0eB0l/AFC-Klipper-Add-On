@@ -15,6 +15,7 @@ from extras.AFC_BridgeBox_switch import (
     LETTERS,
     SwitchError,
     afcBridgeBoxSwitch,
+    in_order,
     load_config_prefix,
     other,
     outlet_at,
@@ -310,6 +311,20 @@ def measuring(switch: afcBridgeBoxSwitch, lane: FakeLane, *runs: Run) -> List[Tu
 class TestOther:
     def test_each_letter_gives_the_other(self):
         assert (other("A"), other("B")) == ("B", "A")
+
+
+class TestInOrder:
+    def test_a_name_is_split_into_its_text_and_its_numbers(self):
+        assert in_order("lane12") == ["lane", 12, ""]
+        assert in_order("lane_Turtle_1b") == ["lane_Turtle_", 1, "b"]
+
+    def test_a_name_without_a_number_is_its_text(self):
+        assert in_order("bypass") == ["bypass"]
+
+    def test_names_sort_by_number_and_not_by_digit(self):
+        names = ["lane12", "lane8", "lane100", "lane9", "lane_b", "lane_a"]
+        assert sorted(names, key=in_order) == ["lane8", "lane9", "lane12", "lane100", "lane_a",
+                                               "lane_b"]
 
 
 class TestOutletAt:
@@ -2396,7 +2411,21 @@ class TestAfcBridgeBoxSwitchReport:
             "Inlet A: Bambu_AMS_1, Turtle_1, at outlet B, lane_Turtle_1 loaded\n"
             "Inlet B: Ace2_1, at outlet B, empty\n"
             "Outlet A: extruder (lane_Bambu_AMS_1)\n"
-            "Outlet B: extruder1 (lane_Turtle_1, lane_Ace2_1)")
+            "Outlet B: extruder1 (lane_Ace2_1, lane_Turtle_1)")
+
+    def test_an_outlets_lanes_are_listed_in_number_order(self):
+        printer = make_printer([SimChain(route=2)])
+        for name, unit in (("lane12", "Bambu_AMS_1"), ("lane13", "Bambu_AMS_1"),
+                           ("lane8", "Turtle_1"), ("lane9", "Turtle_1")):
+            add_lane(printer, name, unit)
+        switch = make_switch(printer, **LENGTHS)
+        switch.confirmed = ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
+        assert [lane.name for lane in switch.lanes] == ["lane12", "lane13", "lane8", "lane9"]
+        assert switch._report() == (
+            "Inlet A: Bambu_AMS_1, Turtle_1, at outlet A, empty\n"
+            "Inlet B: Ace2_1, at outlet B, empty\n"
+            "Outlet A: extruder (lane8, lane9, lane12, lane13)\n"
+            "Outlet B: extruder1 (no lane)")
 
     def test_only_the_units_that_are_still_to_be_seen_are_listed(self):
         switch = plumbed(SimChain(route=2), **LENGTHS)

@@ -34,6 +34,7 @@ be set by hand.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 
@@ -92,6 +93,16 @@ def other(letter: str) -> str:
     :return str: `B` for `A`, `A` for `B`
     """
     return "B" if letter == "A" else "A"
+
+
+def in_order(name: str) -> List[Any]:
+    """
+    A sort key that puts names in number order, so `lane8` comes before `lane12`.
+
+    :param name: a lane name
+    :return list: the name's text and numbers in turn
+    """
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name)]
 
 
 def outlet_at(route: int, inlet: str) -> str:
@@ -919,9 +930,9 @@ class afcBridgeBoxSwitch:
             lines.append(f"Inlet {letter}: {units}, at outlet {inlet['outlet']}, {holds}")
         for letter in LETTERS:
             name = self.outlets[letter]
-            lanes = ", ".join(lane.name for lane in self.lanes
-                              if (lane.unit in live
-                                  and lane.extruder_obj.name == name))
+            lanes = ", ".join(sorted((lane.name for lane in self.lanes
+                                      if (lane.unit in live
+                                          and lane.extruder_obj.name == name)), key=in_order))
             lines.append(f"Outlet {letter}: {name or 'no extruder'} ({lanes or 'no lane'})")
         if not self.calibrated():
             lines.append("Tube lengths not set: run AFC_CALIBRATION, or set outlet_a_length and "
