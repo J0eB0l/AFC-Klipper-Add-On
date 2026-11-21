@@ -2399,7 +2399,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             if (switch == "tn_adv" and distance > 0
                     and lane.status != AFCLaneState.CALIBRATING):
                 return self._verify_at_extruder(lane, abs(distance) - abs(moved), speed, accel,
-                                                abs(moved), gcmd=gcmd)
+                                                abs(moved), check_trigger, assist, gcmd=gcmd)
             return True, abs(moved), False
         if end in ("done", "no_trigger"):
             if check_trigger:
@@ -2408,29 +2408,54 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         return False, abs(moved), True
 
     def _verify_at_extruder(self, lane: AFCLane, remaining: float, speed: float, accel: float,
-                            moved: float, *, gcmd: AFCGcmd) -> tuple:
+                            moved: float, check_trigger: bool, assist: bool, *,
+                            gcmd: AFCGcmd) -> tuple:
         """
         The TurtleNeck filled on a feed toward the toolhead. The board's verify job pulls back
         until it relaxes and pushes again, which must fill it within job_verify_mm, so a drag in the
         bowden is not taken for the filament reaching the extruder: a drag gives way and the job
-        feeds on until the TurtleNeck fills at the gears.
+        feeds on until the TurtleNeck fills at the gears. A job that ends with the filament short
+        of the gears while the feed has distance left sends the feed on to the next fill, which is
+        checked the same way, at most job_tries times.
 
         :param lane: Lane that fed
         :param remaining: What was left of the move, mm
         :param speed: mm/s
         :param accel: mm/s^2
         :param moved: mm the feed moved
+        :param check_trigger: Whether a feed that ends without a fill counts as not homed
+        :param assist: Run the espooler when the feed goes on
         :param gcmd: Command context errors are reported through
         :return tuple: (homed, distance moved, error) like fw_home
         """
-        mm = min(max(remaining, 50.0), self.VERIFY_MAX_MM)
-        result = self.fw_job(lane, "verify", mm=float(mm), speed=float(speed),
-                             accel=float(accel), hold=True)
-        if not result.get("ok"):
-            self._report(lane, "filament did not reach the extruder, the TurtleNeck filled early "
-                         f"({result.get('msg') or result.get('code')})", gcmd=gcmd)
-            return False, moved, True
-        return True, moved + max(0.0, float(result.get("mm", 0.0))), False
+        feeds_left = self.job_tries
+        while True:
+            mm = min(max(remaining, 50.0), self.VERIFY_MAX_MM)
+            result = self.fw_job(lane, "verify", mm=float(mm), speed=float(speed),
+                                 accel=float(accel), hold=True)
+            fed = max(0.0, float(result.get("mm", 0.0)))
+            moved += fed
+            remaining -= fed
+            if result.get("ok"):
+                return True, moved, False
+            if (result.get("code") != "not_at_extruder"
+                    or remaining <= 0.0
+                    or not feeds_left):
+                break
+            feeds_left -= 1
+            self.logger.info(f"{lane.name}: the filament was not at the extruder when the "
+                             f"TurtleNeck filled, feeding on for the {remaining:.0f} mm left")
+            end, more = self.fw_move(lane, remaining, speed, accel, assist, until="tn_adv",
+                                     gcmd=gcmd)
+            moved += abs(more)
+            remaining -= abs(more)
+            if end in ("done", "no_trigger"):
+                return not check_trigger, moved, False
+            if end != "triggered":
+                return False, moved, True
+        self._report(lane, "filament did not reach the extruder, the TurtleNeck filled early "
+                     f"({result.get('msg') or result.get('code')})", gcmd=gcmd)
+        return False, moved, True
 
     def move_to_hub(self, lane: AFCLane, dist: float, dir: MoveDirection,
                     use_homing: bool = True, speed_mode: SpeedMode = SpeedMode.HUB,

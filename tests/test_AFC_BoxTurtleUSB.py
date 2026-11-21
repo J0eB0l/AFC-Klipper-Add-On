@@ -3206,7 +3206,7 @@ class TestFwHome:
         with patch.object(unit, "fw_move", return_value=("triggered", 120.0)), \
                 patch.object(unit, "_verify_at_extruder", return_value=(True, 125.0, False)) as verify:
             assert unit.fw_home(lane, "buffer", 500, 50, 400, True, True, False, gcmd=GCMD) == (True, 125.0, False)
-        verify.assert_called_once_with(lane, 380.0, 50, 400, 120.0, gcmd=GCMD)
+        verify.assert_called_once_with(lane, 380.0, 50, 400, 120.0, True, False, gcmd=GCMD)
 
     def test_no_verify_while_calibrating(self):
         unit = make_unit()
@@ -3227,11 +3227,16 @@ class TestFwHome:
 
 
 class TestVerifyAtExtruder:
+    DRAG = {"ok": False, "code": "not_at_extruder", "mm": 800.0}
+    FED_ON = "lane8: the filament was not at the extruder when the TurtleNeck filled, " \
+             "feeding on for the 1850 mm left"
+
     def test_ok(self):
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", return_value={"ok": True, "mm": 6.0}) as job:
-            assert unit._verify_at_extruder(lane, 120.0, 50.0, 400.0, 300.0, gcmd=GCMD) == (True, 306.0, False)
+            assert unit._verify_at_extruder(lane, 120.0, 50.0, 400.0, 300.0, True, False,
+                                            gcmd=GCMD) == (True, 306.0, False)
         job.assert_called_once_with(lane, "verify", mm=120.0, speed=50.0, accel=400.0, hold=True)
 
     @pytest.mark.parametrize("remaining,mm", [(5.0, 50.0), (900.0, 300.0)])
@@ -3239,15 +3244,90 @@ class TestVerifyAtExtruder:
         unit = make_unit()
         lane = make_lane(unit)
         with patch.object(unit, "fw_job", return_value={"ok": True, "mm": -2.0}) as job:
-            assert unit._verify_at_extruder(lane, remaining, 50.0, 400.0, 10.0, gcmd=GCMD) == (True, 10.0, False)
+            assert unit._verify_at_extruder(lane, remaining, 50.0, 400.0, 10.0, True, False,
+                                            gcmd=GCMD) == (True, 10.0, False)
         assert job.call_args[1]["mm"] == mm
 
-    def test_not_at_extruder(self):
+    @pytest.mark.parametrize("result,why", [
+        ({"ok": False, "code": "not_at_extruder", "mm": 130.0}, "not_at_extruder"),
+        ({"ok": False, "code": "not_at_extruder", "mm": 120.0, "msg": "TurtleNeck never filled"},
+         "TurtleNeck never filled"),
+    ])
+    def test_not_at_extruder_at_the_end_of_the_feed(self, result, why):
         unit = make_unit()
         lane = make_lane(unit)
-        with patch.object(unit, "fw_job", return_value={"ok": False, "code": "not_at_extruder"}), \
+        with patch.object(unit, "fw_job", return_value=result), \
+                patch.object(unit, "fw_move") as move, \
                 patch.object(unit, "_report") as report:
-            assert unit._verify_at_extruder(lane, 120.0, 50.0, 400.0, 300.0, gcmd=GCMD) == (False, 300.0, True)
+            assert unit._verify_at_extruder(lane, 120.0, 50.0, 400.0, 300.0, True, False,
+                                            gcmd=GCMD) == (False, 300.0 + result["mm"], True)
+        move.assert_not_called()
+        report.assert_called_once_with(
+            lane, f"filament did not reach the extruder, the TurtleNeck filled early ({why})",
+            gcmd=GCMD)
+
+    def test_another_failure_does_not_feed_on(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_job", return_value={"ok": False, "code": "buffer_stuck"}), \
+                patch.object(unit, "fw_move") as move, \
+                patch.object(unit, "_report") as report:
+            assert unit._verify_at_extruder(lane, 2650.0, 50.0, 400.0, 350.0, True, False,
+                                            gcmd=GCMD) == (False, 350.0, True)
+        move.assert_not_called()
+        report.assert_called_once_with(
+            lane, "filament did not reach the extruder, the TurtleNeck filled early "
+            "(buffer_stuck)", gcmd=GCMD)
+
+    def test_a_drag_with_distance_left_feeds_on_to_the_gears(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        jobs = [self.DRAG, {"ok": True, "mm": 4.0}]
+        with patch.object(unit, "fw_job", side_effect=jobs) as job, \
+                patch.object(unit, "fw_move", return_value=("triggered", 1300.0)) as move, \
+                patch.object(unit, "logger") as logger:
+            assert unit._verify_at_extruder(lane, 2650.0, 50.0, 400.0, 350.0, True, True,
+                                            gcmd=GCMD) == (True, 2454.0, False)
+        assert [call[1]["mm"] for call in job.call_args_list] == [300.0, 300.0]
+        move.assert_called_once_with(lane, 1850.0, 50.0, 400.0, True, until="tn_adv", gcmd=GCMD)
+        logger.info.assert_called_once_with(self.FED_ON)
+
+    @pytest.mark.parametrize("end", ["done", "no_trigger"])
+    @pytest.mark.parametrize("check_trigger,homed", [(True, False), (False, True)])
+    def test_feeding_on_to_the_end_without_a_fill(self, end, check_trigger, homed):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_job", return_value=self.DRAG) as job, \
+                patch.object(unit, "fw_move", return_value=(end, 1850.0)), \
+                patch.object(unit, "_report") as report:
+            assert unit._verify_at_extruder(lane, 2650.0, 50.0, 400.0, 350.0, check_trigger, True,
+                                            gcmd=GCMD) == (homed, 3000.0, False)
+        job.assert_called_once()
+        report.assert_not_called()
+
+    def test_feeding_on_into_a_fault(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        with patch.object(unit, "fw_job", return_value=self.DRAG) as job, \
+                patch.object(unit, "fw_move", return_value=("fault", -20.0)), \
+                patch.object(unit, "_report") as report:
+            assert unit._verify_at_extruder(lane, 2650.0, 50.0, 400.0, 350.0, True, True,
+                                            gcmd=GCMD) == (False, 1170.0, True)
+        job.assert_called_once()
+        report.assert_not_called()
+
+    @pytest.mark.parametrize("tries,jobs,moved", [(0, 1, 450.0), (1, 2, 650.0), (2, 3, 850.0)])
+    def test_feeds_on_at_most_job_tries_times(self, tries, jobs, moved):
+        unit = make_unit({"job_tries": tries})
+        lane = make_lane(unit)
+        drag = {"ok": False, "code": "not_at_extruder", "mm": 100.0}
+        with patch.object(unit, "fw_job", return_value=drag) as job, \
+                patch.object(unit, "fw_move", return_value=("triggered", 100.0)) as move, \
+                patch.object(unit, "_report") as report:
+            assert unit._verify_at_extruder(lane, 2650.0, 50.0, 400.0, 350.0, True, True,
+                                            gcmd=GCMD) == (False, moved, True)
+        assert job.call_count == jobs
+        assert move.call_count == tries
         report.assert_called_once_with(
             lane, "filament did not reach the extruder, the TurtleNeck filled early "
             "(not_at_extruder)", gcmd=GCMD)
