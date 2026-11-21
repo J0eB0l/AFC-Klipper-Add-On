@@ -1129,9 +1129,9 @@ class afcBridgeBoxSwitch:
                         f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}", "primary"))
 
     cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help = ("AFC_BRIDGEBOX_SWITCH_CALIBRATION "
-                                                 "[SWITCH=<switch>] [LANE=<lane>]. Measures "
-                                                 "the tube from each outlet of a filament "
-                                                 "switch to its toolhead")
+                                                 "[SWITCH=<switch>] [UNIT=<unit>] "
+                                                 "[LANE=<lane>]. Measures the tube from each "
+                                                 "outlet of a filament switch to its toolhead")
 
     def cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(self, gcmd: GCodeCommand) -> None:
         """
@@ -1142,11 +1142,11 @@ class afcBridgeBoxSwitch:
         has to be loaded in its unit and the toolheads empty. A unit that measures its own
         path when it loads has the lane loaded into each toolhead and unloaded again instead.
         Each run also checks the lane shows at the inlet its unit is configured on. Without
-        LANE a prompt offers the lanes that can measure.
+        LANE a prompt offers the units that can measure, and with UNIT the lanes of that unit.
 
         Usage
         -------
-        `AFC_BRIDGEBOX_SWITCH_CALIBRATION [SWITCH=<switch>] [LANE=<lane>]`
+        `AFC_BRIDGEBOX_SWITCH_CALIBRATION [SWITCH=<switch>] [UNIT=<unit>] [LANE=<lane>]`
 
         Example
         -------
@@ -1155,8 +1155,12 @@ class afcBridgeBoxSwitch:
         ```
         """
         name = gcmd.get("LANE", None)
+        unit = gcmd.get("UNIT", None)
         if name is None:
-            self._calibration_menu(gcmd)
+            if unit is None:
+                self._calibration_menu(gcmd)
+            else:
+                self._lane_menu(unit, gcmd)
             return
         lane = self.lane(name)
         try:
@@ -1175,18 +1179,18 @@ class afcBridgeBoxSwitch:
 
     def _calibration_menu(self, gcmd: GCodeCommand) -> None:
         """
-        Open the prompt that offers one lane per unit to measure the outlets with.
+        Open the prompt that offers the units whose lanes can measure the outlets.
 
         :param gcmd: the command the prompt answers
         """
         lanes = self._measuring_lanes()
-        buttons = [(f"{lane.unit} {lane.name}",
-                    f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name} LANE={lane.name}",
-                    "primary") for lane in lanes]
+        command = f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}"
+        buttons = [(unit, f"{command} UNIT={unit}", "primary" if index % 2 == 0 else "secondary")
+                   for index, unit in enumerate(lanes)]
         text = ("Measures the tube from each outlet to its toolhead with one lane, so a lane "
                 "loads the right distance through either outlet. Unload the toolheads, then "
-                "pick the lane to measure with.")
-        loads = [lane.unit for lane in lanes if self._by_load(lane)]
+                "pick the unit to measure with.")
+        loads = [unit for unit, held in lanes.items() if self._by_load(held[0])]
         if loads:
             text += (f" A lane of {' or '.join(loads)} is loaded into each toolhead and "
                      "unloaded again to measure.")
@@ -1197,21 +1201,50 @@ class afcBridgeBoxSwitch:
         AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Calibration", text, buttons,
                                                      True, None, back)
 
-    def _measuring_lanes(self) -> List[AFCLane]:
+    def _lane_menu(self, unit: str, gcmd: GCodeCommand) -> None:
         """
-        The lanes the outlets can be measured with: the first lane of each unit that is loaded
-        in the unit and has a tube length to measure. A unit whose calibration gave no length
-        is not offered again.
+        Open the prompt that offers a unit's lanes to measure the outlets with, two to a row.
 
-        :return list: one lane per unit
+        :param unit: the unit picked in the switch's calibration prompt
+        :param gcmd: the command the prompt answers
         """
-        lanes: Dict[str, AFCLane] = {}
+        lanes = self._measuring_lanes().get(unit, [])
+        error_str = ""
+        if unit not in self.units():
+            error_str = f"{self.name}: {unit} is not a unit of this switch"
+        elif not lanes:
+            error_str = (f"{self.name}: no lane that can measure is loaded in {unit}. Load one, "
+                         "pick another unit, or set outlet_a_length and outlet_b_length by "
+                         "hand.")
+        if error_str:
+            raise gcmd.error(error_str)
+        command = f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}"
+        buttons = [(lane.name, f"{command} LANE={lane.name}",
+                    "primary" if index % 2 == 0 else "secondary")
+                   for index, lane in enumerate(lanes)]
+        rows = [buttons[first:first + 2] for first in range(0, len(buttons), 2)]
+        text = f"Select a loaded lane from {unit} to measure the tube from each outlet with."
+        if self._by_load(lanes[0]):
+            text += " It is loaded into each toolhead and unloaded again to measure."
+        back = [("Back", command, "info")]
+        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Calibration {unit}", text,
+                                                     None, True, rows, back)
+
+    def _measuring_lanes(self) -> Dict[str, List[AFCLane]]:
+        """
+        The lanes the outlets can be measured with, by unit: the lanes that are loaded in their
+        unit and have a tube length to measure. A unit whose calibration gave no length is not
+        offered again.
+
+        :return dict: unit -> its lanes that can measure, in the order of the switch's lanes
+        """
+        lanes: Dict[str, List[AFCLane]] = {}
         for lane in self.lanes:
             if (lane.load_state
                 and self._tube(lane) is not None
                 and lane.unit not in self._lengthless):
-                lanes.setdefault(lane.unit, lane)
-        return list(lanes.values())
+                lanes.setdefault(lane.unit, []).append(lane)
+        return lanes
 
     def _measure(self, lane: AFCLane, gcmd: GCodeCommand) -> Dict[str, float]:
         """

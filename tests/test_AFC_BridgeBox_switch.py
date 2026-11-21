@@ -3018,6 +3018,45 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
         switch.afc.function.ConfigRewrite.assert_not_called()
         gcmd.respond_info.assert_not_called()
 
+    def test_with_a_unit_it_opens_that_units_lanes(self):
+        switch = plumbed(**LENGTHS)
+        switch._measure = MagicMock()
+        lane = lane_of(switch, "Ace2_1")
+        lane.load_state = True
+        add_hub(lane)
+        gcmd = MockGCodeCommand({"UNIT": "Ace2_1"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        menu = TestAfcBridgeBoxSwitchLaneMenu
+        assert switch.logger.messages == [
+            ("raw", "// action:prompt_begin Switch_1 Calibration Ace2_1"),
+            ("raw", "// action:prompt_text Select a loaded lane from Ace2_1 to measure the tube "
+                    "from each outlet with."),
+            menu.ROW, menu.button("lane_Ace2_1", "primary"), menu.ROW_END] + menu.FOOT
+        switch._measure.assert_not_called()
+        assert switch.lengths == {"A": 850.0, "B": 1010.0}
+        switch.afc.function.ConfigRewrite.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+
+    def test_a_unit_that_cannot_be_offered_is_the_commands_error(self):
+        switch = plumbed(**LENGTHS)
+        switch._measure = MagicMock()
+        gcmd = MockGCodeCommand({"UNIT": "Turtle_9"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        assert str(err.value) == "Switch_1: Turtle_9 is not a unit of this switch"
+        switch._measure.assert_not_called()
+        assert switch.logger.messages == []
+
+    def test_a_lane_is_measured_whatever_unit_is_named_with_it(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Ace2_1")
+        switch._measure = MagicMock(return_value={"A": 850.0, "B": 1010.0})
+        gcmd = MockGCodeCommand({"LANE": "lane_Ace2_1", "UNIT": "Turtle_1"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        switch._measure.assert_called_once_with(lane, gcmd)
+        assert switch.lengths == {"A": 850.0, "B": 1010.0}
+        assert switch.logger.messages == []
+
     def test_a_lane_that_is_not_on_this_switch(self):
         switch = plumbed(**LENGTHS)
         switch._measure = MagicMock()
@@ -3081,7 +3120,7 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
     BEGIN = ("raw", "// action:prompt_begin Switch_1 Calibration")
     PICK = ("raw", "// action:prompt_text Measures the tube from each outlet to its toolhead "
                    "with one lane, so a lane loads the right distance through either outlet. "
-                   "Unload the toolheads, then pick the lane to measure with.")
+                   "Unload the toolheads, then pick the unit to measure with.")
     NO_LANE = ("raw", "// action:prompt_text No lane that can measure is loaded in its unit. "
                       "Load one, or set outlet_a_length and outlet_b_length in the switch's "
                       "section by hand.")
@@ -3090,32 +3129,37 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
                     "MSG=action:prompt_end|warning"),
             ("raw", "// action:prompt_show")]
 
-    def test_one_button_for_each_lane_that_can_measure(self):
+    @staticmethod
+    def _button(unit: str, style: str) -> Tuple[str, str]:
+        """:return tuple: the line of the button that opens a unit's lanes"""
+        return ("raw", f"// action:prompt_button {unit}|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                       f"SWITCH=Switch_1 UNIT={unit}|{style}")
+
+    def test_one_button_for_each_unit_that_can_measure_primary_and_secondary_in_turn(self):
         switch = plumbed()
-        for unit in ("Turtle_1", "Ace2_1"):
+        for unit in VALUES["inlet_a"] + VALUES["inlet_b"]:
             lane_of(switch, unit).load_state = True
             add_hub(lane_of(switch, unit))
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [
-            self.BEGIN, self.PICK,
-            ("raw", "// action:prompt_button Turtle_1 lane_Turtle_1|"
-                    "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1 LANE=lane_Turtle_1|"
-                    "primary"),
-            ("raw", "// action:prompt_button Ace2_1 lane_Ace2_1|"
-                    "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1 LANE=lane_Ace2_1|"
-                    "primary")] + self.FOOT
+            self.BEGIN, self.PICK, self._button("Bambu_AMS_1", "primary"),
+            self._button("Turtle_1", "secondary"), self._button("Ace2_1", "primary")] + self.FOOT
+
+    def test_a_unit_is_offered_once_however_many_of_its_lanes_can_measure(self):
+        printer = make_printer([SimChain()])
+        for name in ("lane1", "lane2", "lane3"):
+            lane = add_lane(printer, name, "Turtle_1")
+            lane.load_state = True
+            add_hub(lane)
+        switch = make_switch(printer)
+        switch._calibration_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self._button("Turtle_1", "primary")] + self.FOOT
 
     def test_with_no_lane_that_can_measure_it_says_what_to_do(self):
         switch = plumbed()
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [self.BEGIN, self.NO_LANE] + self.FOOT
-
-    @staticmethod
-    def _button(unit: str) -> Tuple[str, str]:
-        """:return tuple: the line of the button for the lane ``plumbed`` made for a unit"""
-        return ("raw", f"// action:prompt_button {unit} lane_{unit}|"
-                       f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1 LANE=lane_{unit}|"
-                       "primary")
 
     def test_a_unit_that_measures_by_loading_is_said_to(self):
         switch = plumbed()
@@ -3127,7 +3171,8 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
         said = ("raw", self.PICK[1] + " A lane of Bambu_AMS_1 is loaded into each toolhead and "
                                       "unloaded again to measure.")
         assert switch.logger.messages == [
-            self.BEGIN, said, self._button("Bambu_AMS_1"), self._button("Turtle_1")] + self.FOOT
+            self.BEGIN, said, self._button("Bambu_AMS_1", "primary"),
+            self._button("Turtle_1", "secondary")] + self.FOOT
 
     def test_so_is_each_of_several(self):
         switch = plumbed()
@@ -3138,7 +3183,78 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
         said = ("raw", self.PICK[1] + " A lane of Bambu_AMS_1 or Ace2_1 is loaded into each "
                                       "toolhead and unloaded again to measure.")
         assert switch.logger.messages == [
-            self.BEGIN, said, self._button("Bambu_AMS_1"), self._button("Ace2_1")] + self.FOOT
+            self.BEGIN, said, self._button("Bambu_AMS_1", "primary"),
+            self._button("Ace2_1", "secondary")] + self.FOOT
+
+
+class TestAfcBridgeBoxSwitchLaneMenu:
+    BEGIN = ("raw", "// action:prompt_begin Switch_1 Calibration Turtle_1")
+    PICK = ("raw", "// action:prompt_text Select a loaded lane from Turtle_1 to measure the "
+                   "tube from each outlet with.")
+    ROW = ("raw", "// action:prompt_button_group_start")
+    ROW_END = ("raw", "// action:prompt_button_group_end")
+    FOOT = [("raw", "// action:prompt_footer_button Back|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                    "SWITCH=Switch_1|info"),
+            ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
+                    "MSG=action:prompt_end|warning"),
+            ("raw", "// action:prompt_show")]
+
+    @staticmethod
+    def button(lane: str, style: str) -> Tuple[str, str]:
+        """:return tuple: the line of the button that measures with a lane"""
+        return ("raw", f"// action:prompt_button {lane}|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                       f"SWITCH=Switch_1 LANE={lane}|{style}")
+
+    @staticmethod
+    def _turtle(loaded: Tuple[str, ...]) -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch whose Turtle_1 has lanes 1 to 4, these loaded"""
+        printer = make_printer([SimChain()])
+        for name in ("lane1", "lane2", "lane3", "lane4"):
+            lane = add_lane(printer, name, "Turtle_1")
+            lane.load_state = name in loaded
+            add_hub(lane)
+        return make_switch(printer)
+
+    def test_every_lane_that_can_measure_two_to_a_row_primary_then_secondary(self):
+        switch = self._turtle(("lane1", "lane2", "lane4"))
+        switch._lane_menu("Turtle_1", MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK,
+            self.ROW, self.button("lane1", "primary"), self.button("lane2", "secondary"),
+            self.ROW_END,
+            self.ROW, self.button("lane4", "primary"), self.ROW_END] + self.FOOT
+
+    def test_a_unit_that_measures_by_loading_is_said_to(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        lane.load_state = True
+        add_path_unit(switch, lane)
+        switch._lane_menu("Turtle_1", MockGCodeCommand())
+        said = ("raw", self.PICK[1] + " It is loaded into each toolhead and unloaded again to "
+                                      "measure.")
+        assert switch.logger.messages == [
+            self.BEGIN, said, self.ROW, self.button("lane_Turtle_1", "primary"),
+            self.ROW_END] + self.FOOT
+
+    def test_a_unit_that_is_not_on_this_switch(self):
+        switch = self._turtle(("lane1",))
+        gcmd = MockGCodeCommand()
+        with pytest.raises(CommandError) as err:
+            switch._lane_menu("Turtle_9", gcmd)
+        assert str(err.value) == "Switch_1: Turtle_9 is not a unit of this switch"
+        gcmd.error.assert_called_once_with("Switch_1: Turtle_9 is not a unit of this switch")
+        assert switch.logger.messages == []
+
+    def test_a_unit_with_no_lane_that_can_measure(self):
+        switch = self._turtle(())
+        gcmd = MockGCodeCommand()
+        with pytest.raises(CommandError) as err:
+            switch._lane_menu("Turtle_1", gcmd)
+        said = ("Switch_1: no lane that can measure is loaded in Turtle_1. Load one, pick "
+                "another unit, or set outlet_a_length and outlet_b_length by hand.")
+        assert str(err.value) == said
+        gcmd.error.assert_called_once_with(said)
+        assert switch.logger.messages == []
 
 
 class TestAfcBridgeBoxSwitchMeasuringLanes:
@@ -3146,26 +3262,26 @@ class TestAfcBridgeBoxSwitchMeasuringLanes:
         switch = plumbed()
         for lane in switch.lanes:
             add_hub(lane)
-        assert switch._measuring_lanes() == []
+        assert switch._measuring_lanes() == {}
 
     def test_a_lane_that_is_loaded_in_its_unit_and_has_a_hub(self):
         switch = plumbed()
         lane = lane_of(switch, "Ace2_1")
         lane.load_state = True
         add_hub(lane)
-        assert switch._measuring_lanes() == [lane]
+        assert switch._measuring_lanes() == {"Ace2_1": [lane]}
 
     def test_a_loaded_lane_without_a_hub_cannot_measure(self):
         switch = plumbed()
         lane_of(switch, "Ace2_1").load_state = True
-        assert switch._measuring_lanes() == []
+        assert switch._measuring_lanes() == {}
 
     def test_a_lane_of_a_unit_that_keeps_its_own_length_needs_no_hub(self):
         switch = plumbed()
         lane = lane_of(switch, "Ace2_1")
         lane.load_state = True
         add_path_unit(switch, lane)
-        assert switch._measuring_lanes() == [lane]
+        assert switch._measuring_lanes() == {"Ace2_1": [lane]}
 
     def test_a_unit_whose_calibration_gave_no_length_is_not_offered_again(self):
         switch = plumbed()
@@ -3173,9 +3289,9 @@ class TestAfcBridgeBoxSwitchMeasuringLanes:
             lane_of(switch, unit).load_state = True
             add_hub(lane_of(switch, unit))
         switch._lengthless = ["Ace2_1"]
-        assert switch._measuring_lanes() == [lane_of(switch, "Turtle_1")]
+        assert switch._measuring_lanes() == {"Turtle_1": [lane_of(switch, "Turtle_1")]}
 
-    def test_the_first_lane_of_each_unit_that_can(self):
+    def test_every_lane_of_each_unit_that_can_in_the_order_of_the_lanes(self):
         printer = make_printer([SimChain()])
         lanes = [add_lane(printer, name, unit) for name, unit in (
             ("lane1", "Turtle_1"), ("lane2", "Turtle_1"), ("lane3", "Turtle_1"),
@@ -3185,7 +3301,9 @@ class TestAfcBridgeBoxSwitchMeasuringLanes:
             add_hub(lane)
         for lane in lanes[1:]:
             lane.load_state = True
-        assert switch._measuring_lanes() == [lanes[1], lanes[3]]
+        found = switch._measuring_lanes()
+        assert found == {"Turtle_1": [lanes[1], lanes[2]], "Ace2_1": [lanes[3]]}
+        assert list(found) == ["Turtle_1", "Ace2_1"]
 
 
 class TestAfcBridgeBoxSwitchMeasure:
