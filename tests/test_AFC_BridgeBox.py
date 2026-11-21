@@ -2461,6 +2461,10 @@ class TestAfcBridgeBoxInit:
             "Wipe the BridgeBox's WiFi network and link key, for a move to "
             "another printer or network; it restarts with its setup hotspot: "
             "AFC_BRIDGEBOX_RESET_WIFI [CHAIN=<chain>]"),
+        "AFC_BRIDGEBOX_SWITCH": (
+            "Set or show the filament switch on a chain's bus: "
+            "AFC_BRIDGEBOX_SWITCH [CHAIN=<chain>] [ROUTE=<0-3>]. ROUTE=0 "
+            "releases it, 1 and 2 move one actuator each, 3 moves both."),
     }
 
     @staticmethod
@@ -2482,7 +2486,8 @@ class TestAfcBridgeBoxInit:
                     "AFC_BRIDGEBOX_RESET_WIFI":
                         m.cmd_AFC_BRIDGEBOX_RESET_WIFI,
                     "AFC_BRIDGEBOX_FORGET_BOARD":
-                        m.cmd_AFC_BRIDGEBOX_FORGET_BOARD}
+                        m.cmd_AFC_BRIDGEBOX_FORGET_BOARD,
+                    "AFC_BRIDGEBOX_SWITCH": m.cmd_AFC_BRIDGEBOX_SWITCH}
         assert self._bridgebox_mux(m.printer) == {
             cmd: ("CHAIN", {"chain1": fn, None: fn})
             for cmd, fn in handlers.items()}
@@ -17344,7 +17349,7 @@ class TestAfcBridgeBoxGetStatus:
             "lane_base": 24, "dialect": {}, "roster_source": "option",
             "tombstones": [], "missing": {}, "waiting_for_bay": [],
             "pending_restart": [], "watch_ticks": 0, "held_bays": {},
-            "watch_state": "not-started"}
+            "watch_state": "not-started", "filament_switch": None}
         assert _p6_log(m) == []
 
     def test_status_rows_come_from_one_snapshot(self, tmp_path, monkeypatch):
@@ -17683,6 +17688,72 @@ class TestAfcBridgeBoxSaveWifiAddr:
         m._board_forgotten = True
         m._save_wifi_addr(WIFI_TCP)
         assert m._state_get(SEC, "wifi_addr") is None
+
+
+class TestAfcBridgeBoxCmdAFCBridgeboxSwitch:
+    FS = {"on": True, "route": 3, "flag": 0x0B,
+          "val": [2142, 1878, 2384, 3281, 5395, 5285]}
+
+    @staticmethod
+    def _bridge(monkeypatch: pytest.MonkeyPatch, fs: Optional[dict] = None,
+                connected: bool = True) -> FakeBridge:
+        """:return FakeBridge: the chain's bridge, its last status carrying ``fs``"""
+        status: dict = {"units": []}
+        if fs is not None:
+            status["fs"] = fs
+        bridge = FakeBridge(status=status, connected=connected)
+        use_bridges(monkeypatch, {WIFI_USB: bridge})
+        return bridge
+
+    def test_a_route_goes_to_the_bridge(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        bridge = self._bridge(monkeypatch)
+        cmd = _p3_cmd(ROUTE="1")
+        m.cmd_AFC_BRIDGEBOX_SWITCH(cmd)
+        assert bridge.sent == [{"cmd": "fswitch", "route": 1}]
+        assert cmd.messages == [
+            ("respond_info", "chain1: filament switch route 1 (actuator 1)")]
+
+    def test_a_route_out_of_range_is_refused(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        bridge = self._bridge(monkeypatch)
+        with pytest.raises(Exception):
+            m.cmd_AFC_BRIDGEBOX_SWITCH(_p3_cmd(ROUTE="4"))
+        assert bridge.sent == []
+
+    def test_it_needs_a_connected_bridge(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        self._bridge(monkeypatch, connected=False)
+        with pytest.raises(Exception) as err:
+            m.cmd_AFC_BRIDGEBOX_SWITCH(_p3_cmd(ROUTE="3"))
+        assert str(err.value) == (
+            "AFC_BRIDGEBOX_SWITCH: no link to the BridgeBox of chain1")
+
+    @pytest.mark.parametrize("fs, said", [
+        (None, "chain1: no filament switch has answered on this bus"),
+        (dict(FS, on=False), "chain1: the filament switch stopped answering"),
+        (FS, "chain1: filament switch route 3, at both actuators, filament at "
+             "inlet 2 (readings 2142, 1878, 2384, 3281, 5395, 5285)"),
+        (dict(FS, route=0, flag=0x0C), "chain1: filament switch route 0, at "
+         "released, filament at inlets 1 and 2 (readings 2142, 1878, 2384, "
+         "3281, 5395, 5285)"),
+    ])
+    def test_without_a_route_it_reports(self, tmp_path, monkeypatch, fs, said):
+        m = _wifi_master(tmp_path, monkeypatch)
+        bridge = self._bridge(monkeypatch, fs)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_SWITCH(cmd)
+        assert bridge.sent == []
+        assert cmd.messages == [("respond_info", said)]
+
+    def test_the_status_api_carries_it_without_readings(self, tmp_path,
+                                                        monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        self._bridge(monkeypatch, self.FS)
+        assert m.get_status()["filament_switch"] == {
+            "on": True, "route": 3, "position": 3, "inlets": [False, True]}
+        self._bridge(monkeypatch)
+        assert m.get_status()["filament_switch"] is None
 
 
 class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
