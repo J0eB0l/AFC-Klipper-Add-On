@@ -16,7 +16,7 @@ your BridgeBox board (`AFC_BAMBU_UIDS` names it):
 | ESP32-C3 | `signed_c3.bin` | `signed_c3.bin.manifest.json` |
 
 All four are included in this folder, `firmwares/BridgeBox/`: the S3
-image is AFC-2.96, the C3 image AFC-2.97. AFC reads the chip from the image and refuses one made for the other
+image is AFC-2.99, the C3 image AFC-2.97. AFC reads the chip from the image and refuses one made for the other
 board before anything is sent.
 The BridgeBox runs only signed images, and the manifest is the signature:
 without it the BridgeBox refuses the update. AFC needs to understand the
