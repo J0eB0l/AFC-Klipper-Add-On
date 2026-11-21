@@ -172,6 +172,8 @@ class afcBridgeBoxSwitch:
         self._offsets: Dict[Any, float] = {}
         # The inlets that read filament since this was last cleared.
         self._seen: Dict[str, bool] = {letter: False for letter in LETTERS}
+        # The units whose own calibration gave no tube length.
+        self._lengthless: List[str] = []
         self._moving = False
         self._told = ""
         # Reactor time the switch's section is printed by at the latest, None when none is due.
@@ -639,11 +641,13 @@ class afcBridgeBoxSwitch:
     def _settle_lengths(self) -> None:
         """
         Give each tube the length for the lane that is loaded or on its way through it, and its
-        own length back once there is none.
+        own length back once there is none. A unit that is still coming into AFC is left out:
+        it gets its own lengths on the way in.
         """
         active = [lane for lane in self.lanes
-                  if (lane.tool_loaded
-                      or lane in self._routed.values())]
+                  if ((lane.tool_loaded
+                       or lane in self._routed.values())
+                      and not getattr(lane.unit_obj, "arriving", False))]
         for lane in active:
             self._set_length(lane)
         tubes = [self._tube(lane) for lane in active]
@@ -661,13 +665,26 @@ class afcBridgeBoxSwitch:
 
     def _tube(self, lane: AFCLane) -> Optional[Any]:
         """
-        The hub that holds the length of a lane's tube to the toolhead.
+        What holds the length of a lane's tube to the toolhead: the lane's unit when it keeps
+        that length itself, else the lane's hub.
 
         :param lane: a lane of this switch
-        :return AFCHub: the hub, None for a lane that has none
+        :return Any: the unit or the hub, None for a lane that has neither
         """
-        hub = lane.hub_obj
-        return hub if hasattr(hub, "afc_bowden_length") else None
+        for holder in (lane.unit_obj, lane.hub_obj):
+            if hasattr(holder, "afc_bowden_length"):
+                return holder
+        return None
+
+    def _by_load(self, lane: AFCLane) -> bool:
+        """
+        Whether a lane's unit measures its own path when it loads, so the lane is measured by
+        loading it.
+
+        :param lane: a lane of this switch
+        :return bool: True for a unit that reports the path of its last load
+        """
+        return hasattr(lane.unit_obj, "load_path_mm")
 
     def _set_length(self, lane: AFCLane) -> None:
         """
@@ -693,7 +710,7 @@ class afcBridgeBoxSwitch:
         """
         Change what is added to a tube's own length, for loading and for unloading.
 
-        :param tube: a hub `_tube` returned
+        :param tube: what `_tube` returned
         :param offset: mm to have added from now on
         """
         change = offset - self._offsets.get(tube, 0.0)
@@ -1122,9 +1139,10 @@ class afcBridgeBoxSwitch:
         and save both lengths.
 
         The lane's unit runs its own tube length calibration through each outlet, so the lane
-        has to be loaded in its unit and the toolheads empty. Each run also checks the lane
-        shows at the inlet its unit is configured on. Without LANE a prompt offers the lanes
-        that can measure.
+        has to be loaded in its unit and the toolheads empty. A unit that measures its own
+        path when it loads has the lane loaded into each toolhead and unloaded again instead.
+        Each run also checks the lane shows at the inlet its unit is configured on. Without
+        LANE a prompt offers the lanes that can measure.
 
         Usage
         -------
@@ -1161,12 +1179,17 @@ class afcBridgeBoxSwitch:
 
         :param gcmd: the command the prompt answers
         """
+        lanes = self._measuring_lanes()
         buttons = [(f"{lane.unit} {lane.name}",
                     f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name} LANE={lane.name}",
-                    "primary") for lane in self._measuring_lanes()]
+                    "primary") for lane in lanes]
         text = ("Measures the tube from each outlet to its toolhead with one lane, so a lane "
                 "loads the right distance through either outlet. Unload the toolheads, then "
                 "pick the lane to measure with.")
+        loads = [lane.unit for lane in lanes if self._by_load(lane)]
+        if loads:
+            text += (f" A lane of {' or '.join(loads)} is loaded into each toolhead and "
+                     "unloaded again to measure.")
         if not buttons:
             text = ("No lane that can measure is loaded in its unit. Load one, or set "
                     "outlet_a_length and outlet_b_length in the switch's section by hand.")
@@ -1177,24 +1200,27 @@ class afcBridgeBoxSwitch:
     def _measuring_lanes(self) -> List[AFCLane]:
         """
         The lanes the outlets can be measured with: the first lane of each unit that is loaded
-        in the unit and has a hub.
+        in the unit and has a tube length to measure. A unit whose calibration gave no length
+        is not offered again.
 
         :return list: one lane per unit
         """
         lanes: Dict[str, AFCLane] = {}
         for lane in self.lanes:
             if (lane.load_state
-                and self._tube(lane) is not None):
+                and self._tube(lane) is not None
+                and lane.unit not in self._lengthless):
                 lanes.setdefault(lane.unit, lane)
         return list(lanes.values())
 
     def _measure(self, lane: AFCLane, gcmd: GCodeCommand) -> Dict[str, float]:
         """
-        Measure a lane's tube through each outlet with its unit's own calibration, leaving the
-        lane, its unit's length and the switch as they were.
+        Measure a lane's tube through each outlet with its unit's own calibration, or for a
+        unit that measures its path when it loads by loading the lane, leaving the lane, its
+        unit's length and the switch as they were.
 
         :param lane: the lane to measure with
-        :param gcmd: the command the calibrations run through
+        :param gcmd: the command the calibrations or loads run through
         :return dict: outlet letter -> mm
         """
         inlet = self.inlet_of(lane.unit)
@@ -1238,14 +1264,14 @@ class afcBridgeBoxSwitch:
     def _measure_outlet(self, lane: AFCLane, inlet: str, outlet: str,
                         gcmd: GCodeCommand) -> float:
         """
-        Run the unit's own tube length calibration with a lane through one outlet, and check
-        the lane showed at its inlet on the way.
+        Measure a lane's tube through one outlet, with the unit's own tube length calibration
+        or by loading the lane, and check the lane showed at its inlet on the way.
 
         :param lane: the lane to measure with
         :param inlet: the lane's inlet
         :param outlet: the outlet to measure through
-        :param gcmd: the command the calibration runs through
-        :return float: mm from the lane's hub to the outlet's toolhead
+        :param gcmd: the command the calibration or the load runs through
+        :return float: mm from the lane's hub or unit to the outlet's toolhead
         """
         extruder = self.outlets[outlet]
         lane.set_extruder(self._extruder(extruder))
@@ -1254,8 +1280,11 @@ class afcBridgeBoxSwitch:
         with self._own():
             self.set_inlet(inlet, outlet)
         self._seen = {letter: False for letter in LETTERS}
-        done, why, length = lane.unit_obj.calibrate_bowden(lane, _MEASURE_STEP,
-                                                           _MEASURE_TOLERANCE, gcmd=gcmd)
+        if self._by_load(lane):
+            done, why, length = self._load_to_measure(lane, inlet, gcmd)
+        else:
+            done, why, length = lane.unit_obj.calibrate_bowden(lane, _MEASURE_STEP,
+                                                               _MEASURE_TOLERANCE, gcmd=gcmd)
         self._look()
         error_str = ""
         if not done:
@@ -1264,6 +1293,8 @@ class afcBridgeBoxSwitch:
                          f"through outlet {outlet}.{reason} Reset {lane.name} before the next "
                          "try.")
         elif length <= 0:
+            if lane.unit not in self._lengthless:
+                self._lengthless.append(lane.unit)
             error_str = (f"{self.name}: the unit of {lane.name} measures no tube length. Use a "
                          "lane of another unit, or set outlet_a_length and outlet_b_length by "
                          "hand.")
@@ -1276,15 +1307,41 @@ class afcBridgeBoxSwitch:
             raise SwitchError(error_str)
         return float(length)
 
+    def _load_to_measure(self, lane: AFCLane, inlet: str,
+                         gcmd: GCodeCommand) -> Tuple[bool, str, float]:
+        """
+        Load a lane into its toolhead and back out, and take the path its unit measured on the
+        way in.
+
+        :param lane: the lane to measure with, on the extruder to measure to
+        :param inlet: the lane's inlet
+        :param gcmd: the command the load and the unload run through
+        :return tuple: whether it measured, why not, and the mm from the unit to the toolhead
+        """
+        if not self.afc.TOOL_LOAD(lane, gcmd=gcmd):
+            return False, "It could not be loaded", 0.0
+        self._look()
+        length = lane.unit_obj.load_path_mm()
+        if not self._unload(lane, gcmd):
+            return False, "It could not be unloaded again", 0.0
+        self._wait_clear(inlet)
+        if length is None:
+            return False, f"{lane.unit} measured no path at that load", 0.0
+        return True, "", float(length)
+
     def _restore_tube(self, tube: Any, lengths: Tuple[float, float]) -> None:
         """
-        Put a tube's own lengths back, in memory and in its config, when a measurement through
-        the other outlet left that outlet's length in them.
+        Put a tube's own lengths back, in memory and where it saves them, when a measurement
+        through the other outlet left that outlet's length in them.
 
-        :param tube: the hub
+        :param tube: what `_tube` returned
         :param lengths: its own load and unload lengths
         """
         if (tube.afc_bowden_length, tube.afc_unload_bowden_length) == lengths:
+            return
+        keep = getattr(tube, "keep_path", None)
+        if keep is not None:
+            keep(*lengths)
             return
         tube.afc_bowden_length, tube.afc_unload_bowden_length = lengths
         self.afc.function.ConfigRewrite(tube.fullname, "afc_bowden_length", lengths[0])

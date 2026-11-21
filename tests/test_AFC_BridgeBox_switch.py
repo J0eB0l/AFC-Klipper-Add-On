@@ -120,6 +120,26 @@ class FakeUnit(afcUnit):
         self.calibrate_bowden = MagicMock()
 
 
+class FakePathUnit(FakeUnit):
+    """A unit that keeps its own tube length and measures its path whenever it loads."""
+
+    def __init__(self, name: str, length: float = 2000.0, unload: float = 1990.0) -> None:
+        super().__init__(name)
+        self.afc_bowden_length = length
+        self.afc_unload_bowden_length = unload
+        # What its last load measured.
+        self.path: Optional[float] = None
+        # The lengths it was told to keep.
+        self.kept: List[Tuple[float, float]] = []
+
+    def load_path_mm(self) -> Optional[float]:
+        return self.path
+
+    def keep_path(self, load: float, unload: float) -> None:
+        self.afc_bowden_length, self.afc_unload_bowden_length = load, unload
+        self.kept.append((load, unload))
+
+
 class FakeHub:
     """A hub with only the tube lengths the switch changes."""
 
@@ -195,8 +215,17 @@ def add_hub(lane: FakeLane, length: float = 900.0, unload: float = 880.0) -> Fak
     return lane.hub_obj
 
 
-def tube_of(hub: FakeHub) -> Tuple[float, float]:
-    """:return tuple: the load and unload lengths a hub holds now"""
+def add_path_unit(switch: afcBridgeBoxSwitch, lane: FakeLane, length: float = 2000.0,
+                  unload: float = 1990.0) -> FakePathUnit:
+    """:return FakePathUnit: put in place of the unit of ``lane``"""
+    unit = FakePathUnit(lane.unit, length, unload)
+    lane.unit_obj = unit
+    switch.afc.units[lane.unit] = unit
+    return unit
+
+
+def tube_of(hub: Any) -> Tuple[float, float]:
+    """:return tuple: the load and unload lengths a hub or a unit holds now"""
     return hub.afc_bowden_length, hub.afc_unload_bowden_length
 
 
@@ -308,6 +337,74 @@ def measuring(switch: afcBridgeBoxSwitch, lane: FakeLane, *runs: Run) -> List[Tu
     return through
 
 
+class Load:
+    """One load of a lane whose unit measures its own path, and the unload after it."""
+
+    def __init__(self, path: Optional[float], loads: bool = True, unloads: bool = True,
+                 shows: Optional[str] = "A", lingers: bool = False) -> None:
+        # What the unit measured on the way in, None for nothing.
+        self.path = path
+        self.loads = loads
+        self.unloads = unloads
+        # The inlet the filament shows at while the lane is loaded, None for neither.
+        self.shows = shows
+        # Whether that inlet still reads filament once the lane is unloaded.
+        self.lingers = lingers
+
+
+def loading(switch: afcBridgeBoxSwitch, lane: FakeLane, *loads: Load) -> List[Tuple[str, str]]:
+    """
+    Script AFC's loads and unloads of a lane whose unit measures its own path, one ``Load``
+    per load. A load asks the switch first and tells it after, as AFC does, and a path that
+    was measured is left as the unit's own lengths, as a real unit does.
+
+    :return list: filled per load with the extruder the lane was on and the outlet its inlet
+    was at
+    """
+    script = list(loads)
+    through: List[Tuple[str, str]] = []
+    under_way: List[Load] = []
+    # As after PREP's section, so a watch that comes by has no unit to report.
+    switch._reported = switch.live_units()
+    # A lane's toolhead is the active one once the lane is loaded.
+    switch.afc.function.get_current_extruder.side_effect = (
+        lambda: lane.extruder_obj.th_extruder_name)
+
+    def tool_load(cur_lane: FakeLane, gcmd: Any) -> bool:
+        load = script.pop(0)
+        under_way[:] = [load]
+        inlet = switch.inlet_of(cur_lane.unit)
+        if not switch.handle_tool_load_prepare(cur_lane, gcmd):
+            return False
+        through.append((cur_lane.extruder_obj.name, switch.state()["inlets"][inlet]["outlet"]))
+        if not load.loads:
+            return False
+        if load.shows is not None:
+            chain_of(switch).fill(**{load.shows.lower(): True})
+        cur_lane.tool_loaded = True
+        cur_lane.unit_obj.path = load.path
+        if load.path is not None:
+            cur_lane.unit_obj.afc_bowden_length = load.path
+            cur_lane.unit_obj.afc_unload_bowden_length = load.path
+        switch.handle_tool_loaded(cur_lane)
+        return True
+
+    def tool_unload(cur_lane: FakeLane, set_start_time: bool, force_unload: bool,
+                    gcmd: Any) -> bool:
+        load = under_way[0]
+        if not load.unloads:
+            return False
+        cur_lane.tool_loaded = False
+        if (load.shows is not None
+            and not load.lingers):
+            chain_of(switch).fill(**{load.shows.lower(): False})
+        return True
+
+    switch.afc.TOOL_LOAD = MagicMock(side_effect=tool_load)
+    switch.afc.TOOL_UNLOAD = MagicMock(side_effect=tool_unload)
+    return through
+
+
 class TestOther:
     def test_each_letter_gives_the_other(self):
         assert (other("A"), other("B")) == ("B", "A")
@@ -406,6 +503,7 @@ class TestAfcBridgeBoxSwitchInit:
         assert switch.confirmed == []
         assert switch._offsets == {}
         assert switch._seen == {"A": False, "B": False}
+        assert switch._lengthless == []
         assert (switch._moving, switch._told) == (False, "")
 
     def test_it_registers_its_handlers_and_commands(self):
@@ -1486,6 +1584,36 @@ class TestAfcBridgeBoxSwitchSettleLengths:
         switch._settle_lengths()
         assert switch._offsets == {}
 
+    @pytest.mark.parametrize("loaded", [True, False])
+    def test_a_unit_that_is_still_coming_in_is_left_out(self, loaded):
+        # Loaded or on its way: neither counts before the unit has its own lengths.
+        switch, lane, hub = self._switch()
+        lane.tool_loaded = loaded
+        switch._routed["A"] = None if loaded else lane
+        lane.unit_obj.arriving = True
+        switch._settle_lengths()
+        assert tube_of(hub) == (900.0, 880.0)
+        assert switch._offsets == {}
+
+    def test_it_gets_its_length_once_it_is_in(self):
+        switch, lane, hub = self._switch()
+        lane.tool_loaded = True
+        lane.unit_obj.arriving = True
+        switch._settle_lengths()
+        lane.unit_obj.arriving = False
+        switch._settle_lengths()
+        assert tube_of(hub) == (1060.0, 1040.0)
+        assert switch._offsets == {hub: 160.0}
+
+    def test_a_unit_that_keeps_its_own_length_gets_it_there(self):
+        switch, lane, hub = self._switch()
+        unit = add_path_unit(switch, lane)
+        lane.tool_loaded = True
+        switch._settle_lengths()
+        assert tube_of(unit) == (2160.0, 2150.0)
+        assert tube_of(hub) == (900.0, 880.0)
+        assert switch._offsets == {unit: 160.0}
+
 
 class TestAfcBridgeBoxSwitchCalibrated:
     def test_with_a_length_for_each_outlet(self):
@@ -1523,6 +1651,31 @@ class TestAfcBridgeBoxSwitchTube:
         lane = lane_of(switch, "Turtle_1")
         lane.hub_obj = BareHub()
         assert switch._tube(lane) is None
+
+    def test_a_unit_that_keeps_the_length_itself_is_the_tube(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        unit = add_path_unit(switch, lane)
+        assert switch._tube(lane) is unit
+
+    def test_such_a_unit_comes_before_the_hub_of_the_lane(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        add_hub(lane)
+        unit = add_path_unit(switch, lane)
+        assert switch._tube(lane) is unit
+
+
+class TestAfcBridgeBoxSwitchByLoad:
+    def test_a_unit_that_reports_the_path_of_its_last_load(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        add_path_unit(switch, lane)
+        assert switch._by_load(lane) is True
+
+    def test_any_other_unit_measures_with_its_calibration(self):
+        switch = plumbed()
+        assert switch._by_load(lane_of(switch, "Turtle_1")) is False
 
 
 class TestAfcBridgeBoxSwitchSetLength:
@@ -2956,6 +3109,36 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [self.BEGIN, self.NO_LANE] + self.FOOT
 
+    @staticmethod
+    def _button(unit: str) -> Tuple[str, str]:
+        """:return tuple: the line of the button for the lane ``plumbed`` made for a unit"""
+        return ("raw", f"// action:prompt_button {unit} lane_{unit}|"
+                       f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1 LANE=lane_{unit}|"
+                       "primary")
+
+    def test_a_unit_that_measures_by_loading_is_said_to(self):
+        switch = plumbed()
+        for unit in ("Bambu_AMS_1", "Turtle_1"):
+            lane_of(switch, unit).load_state = True
+        add_path_unit(switch, lane_of(switch, "Bambu_AMS_1"))
+        add_hub(lane_of(switch, "Turtle_1"))
+        switch._calibration_menu(MockGCodeCommand())
+        said = ("raw", self.PICK[1] + " A lane of Bambu_AMS_1 is loaded into each toolhead and "
+                                      "unloaded again to measure.")
+        assert switch.logger.messages == [
+            self.BEGIN, said, self._button("Bambu_AMS_1"), self._button("Turtle_1")] + self.FOOT
+
+    def test_so_is_each_of_several(self):
+        switch = plumbed()
+        for unit in ("Bambu_AMS_1", "Ace2_1"):
+            lane_of(switch, unit).load_state = True
+            add_path_unit(switch, lane_of(switch, unit))
+        switch._calibration_menu(MockGCodeCommand())
+        said = ("raw", self.PICK[1] + " A lane of Bambu_AMS_1 or Ace2_1 is loaded into each "
+                                      "toolhead and unloaded again to measure.")
+        assert switch.logger.messages == [
+            self.BEGIN, said, self._button("Bambu_AMS_1"), self._button("Ace2_1")] + self.FOOT
+
 
 class TestAfcBridgeBoxSwitchMeasuringLanes:
     def test_no_lane_is_loaded_in_its_unit(self):
@@ -2975,6 +3158,21 @@ class TestAfcBridgeBoxSwitchMeasuringLanes:
         switch = plumbed()
         lane_of(switch, "Ace2_1").load_state = True
         assert switch._measuring_lanes() == []
+
+    def test_a_lane_of_a_unit_that_keeps_its_own_length_needs_no_hub(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Ace2_1")
+        lane.load_state = True
+        add_path_unit(switch, lane)
+        assert switch._measuring_lanes() == [lane]
+
+    def test_a_unit_whose_calibration_gave_no_length_is_not_offered_again(self):
+        switch = plumbed()
+        for unit in ("Turtle_1", "Ace2_1"):
+            lane_of(switch, unit).load_state = True
+            add_hub(lane_of(switch, unit))
+        switch._lengthless = ["Ace2_1"]
+        assert switch._measuring_lanes() == [lane_of(switch, "Turtle_1")]
 
     def test_the_first_lane_of_each_unit_that_can(self):
         printer = make_printer([SimChain()])
@@ -3205,6 +3403,89 @@ class TestAfcBridgeBoxSwitchMeasure:
         assert switch.confirmed == []
 
 
+class TestAfcBridgeBoxSwitchMeasureByLoading:
+    """`_measure` with a lane whose unit keeps its own length and measures its path at a load."""
+
+    @staticmethod
+    def _switch(**values: Any) -> Tuple[afcBridgeBoxSwitch, FakeLane, FakePathUnit]:
+        """:return tuple: a switch at rest after PREP, Bambu_AMS_1's lane and its unit"""
+        switch = plumbed(SimChain(route=2), **values)
+        switch.afc.prep_done = True
+        lane = lane_of(switch, "Bambu_AMS_1")
+        return switch, lane, add_path_unit(switch, lane)
+
+    def test_the_lane_is_loaded_through_its_own_outlet_and_then_the_other(self):
+        switch, lane, unit = self._switch()
+        through = loading(switch, lane, Load(2104.0), Load(2251.0))
+        gcmd = MockGCodeCommand()
+        assert switch._measure(lane, gcmd) == {"A": 2104.0, "B": 2251.0}
+        assert through == [("extruder", "A"), ("extruder1", "B")]
+        assert switch.afc.TOOL_LOAD.call_args_list == [call(lane, gcmd=gcmd)] * 2
+        unit.calibrate_bowden.assert_not_called()
+        assert switch.logger.messages == []
+
+    def test_the_lane_and_its_units_length_are_left_as_they_were(self):
+        switch, lane, unit = self._switch()
+        loading(switch, lane, Load(2104.0), Load(2251.0))
+        switch._measure(lane, MockGCodeCommand())
+        # The second load left the other outlet's path as the unit's own, so the one the
+        # first load measured is put back where the unit saves it.
+        assert tube_of(unit) == (2104.0, 2104.0)
+        assert unit.kept == [(2104.0, 2104.0)]
+        switch.afc.function.ConfigRewrite.assert_not_called()
+        assert lane.tool_loaded is False
+        assert lane.extruder_obj is extruder_of(switch, "extruder")
+        assert switch._routed == {"A": None, "B": None}
+        assert switch._offsets == {unit: 0.0}
+        assert switch.confirmed == ["Bambu_AMS_1"]
+
+    def test_the_difference_a_load_added_for_the_other_outlet_is_not_left_on_the_unit(self):
+        # With both lengths set, a load through the other outlet adds their difference first.
+        switch, lane, unit = self._switch(**LENGTHS)
+        loading(switch, lane, Load(2104.0), Load(None))
+        with pytest.raises(SwitchError) as err:
+            switch._measure(lane, MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: lane_Bambu_AMS_1 did not measure the tube to extruder1 through outlet "
+            "B. Bambu_AMS_1 measured no path at that load. Reset lane_Bambu_AMS_1 before the "
+            "next try.")
+        assert tube_of(unit) == (2104.0, 2104.0)
+        assert unit.kept == [(2104.0, 2104.0)]
+        assert switch._offsets == {unit: 0.0}
+        switch._watch(0.0)
+        assert tube_of(unit) == (2104.0, 2104.0)
+
+    def test_a_lane_that_stays_in_the_other_toolhead_stays_on_its_extruder(self):
+        switch, lane, unit = self._switch()
+        loading(switch, lane, Load(2104.0), Load(2251.0, unloads=False))
+        with pytest.raises(SwitchError) as err:
+            switch._measure(lane, MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: lane_Bambu_AMS_1 did not measure the tube to extruder1 through outlet "
+            "B. It could not be unloaded again. Reset lane_Bambu_AMS_1 before the next try.")
+        assert lane.tool_loaded is True
+        assert lane.extruder_obj is extruder_of(switch, "extruder1")
+        assert tube_of(unit) == (2104.0, 2104.0)
+        assert switch._routed == {"A": None, "B": None}
+        # Still at outlet B, where its filament is.
+        switch._watch(0.0)
+        assert switch.state()["inlets"]["A"]["outlet"] == "B"
+
+    def test_a_first_load_that_fails_stops_the_measurement_there(self):
+        switch, lane, unit = self._switch()
+        loading(switch, lane, Load(2104.0, loads=False))
+        with pytest.raises(SwitchError) as err:
+            switch._measure(lane, MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: lane_Bambu_AMS_1 did not measure the tube to extruder through outlet "
+            "A. It could not be loaded. Reset lane_Bambu_AMS_1 before the next try.")
+        assert switch.afc.TOOL_LOAD.call_count == 1
+        switch.afc.TOOL_UNLOAD.assert_not_called()
+        assert tube_of(unit) == (2000.0, 1990.0)
+        assert unit.kept == []
+        assert switch.confirmed == []
+
+
 class TestAfcBridgeBoxSwitchMeasureOutlet:
     @staticmethod
     def _switch(chain: Optional[SimChain] = None) -> Tuple[afcBridgeBoxSwitch, FakeLane]:
@@ -3310,6 +3591,51 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
         assert str(err.value) == (
             "Switch_1: the unit of lane_Turtle_1 measures no tube length. Use a lane of "
             "another unit, or set outlet_a_length and outlet_b_length by hand.")
+        assert switch._lengthless == ["Turtle_1"]
+
+    def test_a_unit_that_measures_no_length_is_noted_once(self):
+        switch, lane = self._switch()
+        measuring(switch, lane, Run(0), Run(0))
+        for _try in range(2):
+            with pytest.raises(SwitchError):
+                switch._measure_outlet(lane, "A", "A", MockGCodeCommand())
+        assert switch._lengthless == ["Turtle_1"]
+
+    @pytest.mark.parametrize("run", [Run(1013.0), Run(0.0, done=False, why="Failed"),
+                                     Run(1013.0, shows=None)])
+    def test_a_unit_that_measured_failed_or_never_showed_is_not_noted(self, run):
+        switch, lane = self._switch()
+        measuring(switch, lane, run)
+        try:
+            switch._measure_outlet(lane, "A", "B", MockGCodeCommand())
+        except SwitchError:
+            pass
+        assert switch._lengthless == []
+
+    def test_a_unit_that_measures_its_own_path_has_the_lane_loaded_instead(self):
+        switch = plumbed(SimChain(route=2))
+        lane = lane_of(switch, "Bambu_AMS_1")
+        unit = add_path_unit(switch, lane)
+        through = loading(switch, lane, Load(2251.0))
+        gcmd = MockGCodeCommand()
+        assert switch._measure_outlet(lane, "A", "B", gcmd) == 2251.0
+        unit.calibrate_bowden.assert_not_called()
+        switch.afc.TOOL_LOAD.assert_called_once_with(lane, gcmd=gcmd)
+        assert through == [("extruder1", "B")]
+        assert switch._seen == {"A": True, "B": False}
+        assert switch._lengthless == []
+
+    def test_a_load_that_did_not_measure_says_why(self):
+        switch = plumbed(SimChain(route=2))
+        lane = lane_of(switch, "Bambu_AMS_1")
+        add_path_unit(switch, lane)
+        loading(switch, lane, Load(2251.0, loads=False))
+        with pytest.raises(SwitchError) as err:
+            switch._measure_outlet(lane, "A", "B", MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: lane_Bambu_AMS_1 did not measure the tube to extruder1 through outlet "
+            "B. It could not be loaded. Reset lane_Bambu_AMS_1 before the next try.")
+        assert switch._lengthless == []
 
     def test_an_inlet_that_cannot_be_pointed_stops_before_the_unit_feeds(self):
         switch, lane = self._switch(SimChain(route=2, a=True))
@@ -3322,7 +3648,79 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
         assert switch._moving is False
 
 
+class TestAfcBridgeBoxSwitchLoadToMeasure:
+    @staticmethod
+    def _switch() -> Tuple[afcBridgeBoxSwitch, FakeLane, FakePathUnit]:
+        """:return tuple: a switch at rest, Bambu_AMS_1's lane and its unit"""
+        switch = plumbed(SimChain(route=2))
+        lane = lane_of(switch, "Bambu_AMS_1")
+        return switch, lane, add_path_unit(switch, lane)
+
+    def test_the_lane_is_loaded_measured_and_unloaded_again(self):
+        switch, lane, _unit = self._switch()
+        through = loading(switch, lane, Load(2104))
+        gcmd = MockGCodeCommand()
+        answer = switch._load_to_measure(lane, "A", gcmd)
+        assert answer == (True, "", 2104.0)
+        assert type(answer[2]) is float
+        switch.afc.TOOL_LOAD.assert_called_once_with(lane, gcmd=gcmd)
+        switch.afc.TOOL_UNLOAD.assert_called_once_with(lane, set_start_time=False,
+                                                       force_unload=True, gcmd=gcmd)
+        assert through == [("extruder", "A")]
+        assert lane.tool_loaded is False
+        # Read while the lane was loaded: the inlet is empty again by now.
+        assert switch._seen == {"A": True, "B": False}
+        switch.reactor.pause.assert_not_called()
+        assert switch.logger.messages == []
+
+    def test_a_lane_that_does_not_load_is_not_unloaded(self):
+        switch, lane, _unit = self._switch()
+        loading(switch, lane, Load(2104.0, loads=False))
+        assert switch._load_to_measure(lane, "A", MockGCodeCommand()) == (
+            False, "It could not be loaded", 0.0)
+        switch.afc.TOOL_UNLOAD.assert_not_called()
+        assert switch._seen == {"A": False, "B": False}
+
+    @pytest.mark.parametrize("path", [2104.0, None])
+    def test_a_lane_that_does_not_unload_again_is_said_first(self, path):
+        switch, lane, _unit = self._switch()
+        loading(switch, lane, Load(path, unloads=False))
+        assert switch._load_to_measure(lane, "A", MockGCodeCommand()) == (
+            False, "It could not be unloaded again", 0.0)
+        assert lane.tool_loaded is True
+        # Its inlet still holds filament and is not waited for.
+        switch.reactor.pause.assert_not_called()
+
+    def test_a_load_that_measured_no_path_is_unloaded_and_says_so(self):
+        switch, lane, _unit = self._switch()
+        loading(switch, lane, Load(None))
+        assert switch._load_to_measure(lane, "A", MockGCodeCommand()) == (
+            False, "Bambu_AMS_1 measured no path at that load", 0.0)
+        assert lane.tool_loaded is False
+        switch.afc.TOOL_UNLOAD.assert_called_once()
+
+    def test_the_inlet_is_given_time_to_read_empty_after_the_unload(self):
+        switch, lane, _unit = self._switch()
+        loading(switch, lane, Load(2104.0, lingers=True))
+        assert switch._load_to_measure(lane, "A", MockGCodeCommand()) == (True, "", 2104.0)
+        assert switch.reactor.pause.call_count == switch_mod._CLEAR_POLLS
+
+
 class TestAfcBridgeBoxSwitchRestoreTube:
+    def test_a_unit_that_keeps_its_own_length_saves_what_is_put_back(self):
+        switch = make_switch()
+        unit = FakePathUnit("Bambu_AMS_1", 2251.0, 2251.0)
+        switch._restore_tube(unit, (2104.0, 2090.0))
+        assert tube_of(unit) == (2104.0, 2090.0)
+        assert unit.kept == [(2104.0, 2090.0)]
+        switch.afc.function.ConfigRewrite.assert_not_called()
+
+    def test_such_a_unit_that_holds_its_own_lengths_is_left_alone(self):
+        switch = make_switch()
+        unit = FakePathUnit("Bambu_AMS_1", 2104.0, 2090.0)
+        switch._restore_tube(unit, (2104.0, 2090.0))
+        assert unit.kept == []
+
     def test_a_tube_that_holds_its_own_lengths_is_left_alone(self):
         switch = make_switch()
         hub = FakeHub("Turtle_1")

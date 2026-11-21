@@ -11715,6 +11715,29 @@ class afcBambuAMS(afcUnit):
             return mm, "tube_len"
         return None, ""
 
+    def load_path_mm(self) -> Optional[float]:
+        """
+        The filament path this unit measured at its last load.
+
+        :return Optional[float]: mm from the bay to the toolhead, None when it measured none
+        """
+        return self._path_measurement()[0]
+
+    def keep_path(self, load: float, unload: float) -> None:
+        """
+        Take a path length for loading and one for unloading, and save both as the learned
+        ones.
+
+        :param load: afc_bowden_length in mm
+        :param unload: afc_unload_bowden_length in mm
+        """
+        self.afc_bowden_length = load
+        self.afc_unload_bowden_length = unload
+        master = getattr(self, "_master", None)
+        if master is not None:
+            master.persist_learned(self.name, "afc_bowden_length", round(load, 1))
+            master.persist_learned(self.name, "afc_unload_bowden_length", round(unload, 1))
+
     def measured_path_mm(self) -> Optional[float]:
         """
         This unit's PTFE path length as the AMS itself measured it, in mm.

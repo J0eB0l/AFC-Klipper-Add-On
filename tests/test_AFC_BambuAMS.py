@@ -28644,6 +28644,48 @@ class TestAfcBambuAMSMeasurePathFromOdom:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSLoadPathMm:
+    def test_the_path_the_last_load_measured(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        unit._load_odom_start, unit._load_odom_at_sensor = 0.0, 3338.0
+        assert unit.load_path_mm() == 3338.0
+        assert unit.logger.messages == []
+
+    def test_a_load_that_measured_nothing_gives_none(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        assert unit.load_path_mm() is None
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSKeepPath:
+    class _Master:
+        """Records what a unit asks its master to save."""
+
+        def __init__(self) -> None:
+            self.saved: List[Tuple[str, str, Any]] = []
+
+        def persist_learned(self, unit: str, key: str, value: Any) -> bool:
+            self.saved.append((unit, key, value))
+            return True
+
+    def test_both_lengths_are_taken_and_saved_through_the_master(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        master = self._Master()
+        unit.set_master(master)
+        unit.keep_path(2104.26, 2080.04)
+        assert (unit.afc_bowden_length, unit.afc_unload_bowden_length) == (2104.26, 2080.04)
+        assert master.saved == [(unit.name, "afc_bowden_length", 2104.3),
+                                (unit.name, "afc_unload_bowden_length", 2080.0)]
+        assert unit.logger.messages == []
+
+    def test_without_a_master_they_are_taken_for_this_session(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, lanes=())
+        assert getattr(unit, "_master", None) is None
+        unit.keep_path(2104.0, 2080.0)
+        assert (unit.afc_bowden_length, unit.afc_unload_bowden_length) == (2104.0, 2080.0)
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSAdoptMeasuredPath:
     """
     The unit's own path measurement replaces the configured bowden, once, in memory, and is
