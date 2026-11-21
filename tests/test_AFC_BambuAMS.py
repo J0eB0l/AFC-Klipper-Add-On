@@ -5058,7 +5058,10 @@ class TestAfcBambuAMSPrimeScanBaseline:
         lane15, lane16 = unit.lanes["lane15"], unit.lanes["lane16"]
         assert (lane15.spool_id, lane15.material) == (159, "PLA")
         assert (lane16.spool_id, lane16.material) == (None, None)
+        assert (unit.arriving, unit._prep_seen) == (True, False)
         unit._prime_scan_baseline(gcmd="callback")
+        # Its PREP block is printed.
+        assert (unit.arriving, unit._prep_seen) == (False, True)
         assert unit._restored_bays == {0}
         assert unit._defaulted_bays == {1}
         assert (lane15.spool_id, lane15.sub_type) == (159, "Matte")
@@ -6974,6 +6977,20 @@ class TestAfcBambuAMSClaim:
             ("debug", f"AMS: claimed UID {self.UID} as {model} and "
                      f"brought online live (ams_index=0).")]
 
+    def test_a_first_claim_is_arriving_until_its_prep_block(self, monkeypatch):
+        unit = self._pool(monkeypatch)
+        assert (unit.arriving, unit._prep_seen) == (False, False)
+        assert unit.claim(self.UID, "ams1", "callback") is True
+        assert (unit.pool, unit.arriving) == (False, True)
+        assert unit.logger.messages == self._claimed_lines()
+
+    def test_a_claim_after_its_prep_block_was_printed_is_not_arriving(self, monkeypatch):
+        unit = self._pool(monkeypatch)
+        unit._prep_seen = True
+        assert unit.claim(self.UID, "ams1", "callback") is True
+        assert (unit.pool, unit.arriving) == (False, False)
+        assert unit.logger.messages == self._claimed_lines()
+
     def test_a_claim_and_a_reconnect_start_a_new_look(self, monkeypatch):
         # A reclaim keeps _scan_primed set and a reconnect never clears it, so a measurement stamp's
         # first look is keyed on these resets.
@@ -7228,6 +7245,14 @@ class TestAfcBambuAMSClaim:
 
 class TestAfcBambuAMSRelease:
     """A claimed unit dropped back to the idle pool."""
+
+    def test_a_unit_released_before_its_prep_block_is_no_longer_arriving(self):
+        unit = _held_claim(None)
+        assert (unit.pool, unit.arriving) == (False, True)
+        unit.logger.messages.clear()
+        unit.release()
+        assert (unit.pool, unit.arriving) == (True, False)
+        assert unit.logger.messages == []
 
     def test_release_clears_the_delegates_memos(self, monkeypatch):
         # A released unit may be reclaimed by a different AMS whose bays share the slot numbers.

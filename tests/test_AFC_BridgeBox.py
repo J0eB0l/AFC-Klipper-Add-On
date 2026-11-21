@@ -17799,6 +17799,52 @@ class TestAfcBridgeBoxUnitNames:
         assert m.unit_names() == []
 
 
+class TestAfcBridgeBoxUnitsArriving:
+    UID = "AAAA00000000000000000001"
+
+    @staticmethod
+    def _chain(tmp_path, monkeypatch):
+        """:return afcBridgeBox: a chain with one bay that holds no unit"""
+        m = _wifi_master(tmp_path, monkeypatch)
+        m._pool_units = [{"name": "One", "bound": None}]
+        m._no_bay = {}
+        return m
+
+    def test_a_chain_that_has_not_looked_yet_has_none(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        assert not hasattr(m, "_online_since")
+        assert m.units_arriving() is False
+
+    def test_no_unit_online_is_none_arriving(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._online_since = {}
+        assert m.units_arriving() is False
+
+    def test_a_unit_online_with_no_bay_yet_is_arriving(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._online_since = {self.UID: 5.0}
+        assert m.units_arriving() is True
+
+    def test_a_unit_a_bay_holds_is_in(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._online_since = {self.UID: 5.0}
+        m._pool_units[0]["bound"] = self.UID
+        assert m.units_arriving() is False
+
+    def test_a_unit_that_was_refused_a_bay_is_not_waited_for(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        m._online_since = {self.UID: 5.0}
+        m._no_bay = {self.UID: "ams1"}
+        assert m.units_arriving() is False
+
+    def test_one_unit_still_to_come_in_is_enough(self, tmp_path, monkeypatch):
+        m = self._chain(tmp_path, monkeypatch)
+        other = "BBBB00000000000000000002"
+        m._online_since = {self.UID: 5.0, other: 6.0}
+        m._pool_units[0]["bound"] = self.UID
+        assert m.units_arriving() is True
+
+
 class TestAfcBridgeBoxSwitchSetRoute:
     def test_the_route_goes_to_the_bridge(self, tmp_path, monkeypatch):
         m = _wifi_master(tmp_path, monkeypatch)

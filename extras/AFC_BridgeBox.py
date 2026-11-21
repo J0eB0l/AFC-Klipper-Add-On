@@ -2304,6 +2304,19 @@ class afcBridgeBox:
         """
         return [str(pu["name"]) for pu in self._pool_units]
 
+    def units_arriving(self) -> bool:
+        """
+        Whether a unit that answers on the bus is still to be given its bay.
+
+        :return bool: True while a unit is online that no bay holds and none was refused
+        """
+        held = {_norm_uid(pu.get("bound")) for pu in self._pool_units}
+        online = getattr(self, "_online_since", None) or {}
+        waiting = [uid for uid in online
+                   if (uid not in held
+                       and uid not in self._no_bay)]
+        return bool(waiting)
+
     _SWITCH_AT = ("released", "actuator 1", "actuator 2", "both actuators")
 
     def switch_state(self) -> Optional[Dict[str, Any]]:

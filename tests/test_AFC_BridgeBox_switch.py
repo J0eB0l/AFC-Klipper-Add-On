@@ -53,9 +53,14 @@ class FakeChain(afcBridgeBox):
         self.bays = list(bays or [])
         self.routes: List[int] = []
         self.polls = 0
+        # Whether a unit that answers on the bus has no bay yet.
+        self.arriving = False
 
     def unit_names(self) -> List[str]:
         return list(self.bays)
+
+    def units_arriving(self) -> bool:
+        return self.arriving
 
     def switch_state(self) -> Optional[Dict[str, Any]]:
         if not self.routes:
@@ -276,6 +281,8 @@ def measuring(switch: afcBridgeBoxSwitch, lane: FakeLane, *runs: Run) -> List[Tu
     """
     script = list(runs)
     through: List[Tuple[str, str]] = []
+    # As after PREP's section, so a watch that comes by has no unit to report.
+    switch._reported = switch.live_units()
 
     def calibrate_bowden(cur_lane: FakeLane, dis: float, tol: float,
                          gcmd: Any) -> Tuple[bool, str, float]:
@@ -334,6 +341,7 @@ class TestAfcBridgeBoxSwitchInit:
         assert (switch.chain_name, switch.chain) == (None, None)
         assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1"], "B": ["Ace2_1"]}
         assert switch.outlets == {"A": "extruder", "B": "extruder1"}
+        assert (switch._report_by, switch._reported) == (None, [])
 
     def test_the_chain_is_kept_as_named(self):
         assert make_switch(connect=False, chain="Chain_2").chain_name == "Chain_2"
@@ -1170,11 +1178,20 @@ class TestAfcBridgeBoxSwitchWatch:
         switch = make_switch()
         switch.afc.prep_done = True
         switch._look = MagicMock()
+        switch._note_arrivals = MagicMock()
         switch._settle = MagicMock(return_value=["a problem"])
-        switch._tell = MagicMock()
+        switch._say = MagicMock()
         return switch
 
-    def test_it_looks_then_settles_and_tells_while_holding_the_switch(self):
+    @staticmethod
+    def _only_looked(switch: afcBridgeBoxSwitch) -> None:
+        """Assert the watch looked at the inlets and did nothing else."""
+        switch._look.assert_called_once_with()
+        switch._note_arrivals.assert_not_called()
+        switch._settle.assert_not_called()
+        switch._say.assert_not_called()
+
+    def test_it_looks_notes_who_came_in_then_settles_and_says_while_holding_the_switch(self):
         switch = self._switch()
         held = []
 
@@ -1182,50 +1199,60 @@ class TestAfcBridgeBoxSwitchWatch:
             held.append(("settle", switch._moving, switch._look.call_count))
             return ["a problem"]
 
+        switch._note_arrivals.side_effect = lambda: held.append(("arrivals", switch._moving))
         switch._settle.side_effect = settle
-        switch._tell.side_effect = lambda problems: held.append(("tell", switch._moving))
+        switch._say.side_effect = lambda problems: held.append(("say", switch._moving))
         assert switch._watch(55.0) == 101.0
         switch._look.assert_called_once_with()
-        switch._tell.assert_called_once_with(["a problem"])
-        assert held == [("settle", True, 1), ("tell", True)]
+        switch._say.assert_called_once_with(["a problem"])
+        assert held == [("arrivals", False), ("settle", True, 1), ("say", True)]
         assert switch._moving is False
 
     def test_before_prep_is_done_it_only_looks(self):
         switch = self._switch()
         switch.afc.prep_done = False
         assert switch._watch(55.0) == 101.0
-        switch._look.assert_called_once_with()
-        switch._settle.assert_not_called()
-        switch._tell.assert_not_called()
+        self._only_looked(switch)
 
     @pytest.mark.parametrize("state", ["Loading", "Unloading", "Error"])
     def test_while_afc_is_busy_it_only_looks(self, state):
         switch = self._switch()
         switch.afc.current_state = state
         assert switch._watch(55.0) == 101.0
-        switch._look.assert_called_once_with()
-        switch._settle.assert_not_called()
-        switch._tell.assert_not_called()
+        self._only_looked(switch)
 
     def test_while_another_job_moves_the_switch_it_only_looks(self):
         switch = self._switch()
         switch._moving = True
         assert switch._watch(55.0) == 101.0
-        switch._look.assert_called_once_with()
-        switch._settle.assert_not_called()
-        switch._tell.assert_not_called()
+        self._only_looked(switch)
         assert switch._moving is True
 
     def test_what_it_sees_and_what_is_wrong_are_noted(self):
         chain = SimChain(route=0, b=True)
         switch = plumbed(chain)
         switch.afc.prep_done = True
+        # As after PREP's section.
+        switch._reported = switch.live_units()
         assert switch._watch(55.0) == 101.0
         assert switch._seen == {"A": False, "B": True}
         assert chain.routes == [2]
         held = TestAfcBridgeBoxSwitchSettle.HELD_B
         assert switch.logger.messages == [("warning", held)]
         assert switch._told == held
+
+    def test_a_unit_that_came_in_since_the_section_has_it_printed_again(self):
+        switch = plumbed(SimChain(route=2))
+        switch.afc.prep_done = True
+        switch._reported = ["Turtle_1", "Ace2_1"]
+        assert switch._watch(55.0) == 101.0
+        assert switch.logger.messages == [
+            TestAfcBridgeBoxSwitchHandlePrep.PREPPING,
+            ("raw", "Inlet A: Bambu_AMS_1, Turtle_1, at outlet A, empty\n"
+                    "Inlet B: Ace2_1, at outlet B, empty\n"
+                    + TestAfcBridgeBoxSwitchHandlePrep.OUTLETS)]
+        assert switch._reported == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
+        assert switch._report_by is None
 
 
 class TestAfcBridgeBoxSwitchLook:
@@ -1676,6 +1703,220 @@ class TestAfcBridgeBoxSwitchHandlePrep:
                     "answering</span>")]
         assert switch._told == "Switch_1: the filament switch is not answering"
         assert switch._moving is False
+
+    def test_the_section_is_printed_at_once_when_every_unit_is_in(self):
+        switch = plumbed(SimChain(route=2))
+        switch.handle_prep(MockGCodeCommand())
+        assert switch._report_by is None
+        assert switch._reported == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
+
+    def test_the_section_waits_for_a_unit_that_comes_in_after_prep(self):
+        chain = SimChain(route=0)
+        chain.arriving = True
+        switch = plumbed(chain)
+        switch._told = "said before"
+        switch.handle_prep(MockGCodeCommand())
+        # The switch is settled all the same.
+        assert chain.routes == [2]
+        assert switch.logger.messages == []
+        # 30 s from the reactor's 100.0.
+        assert switch._report_by == 130.0
+        assert switch._reported == []
+        assert switch._told == "said before"
+        assert switch._moving is False
+        assert switch_mod._REPORT_WAIT == 30.0
+
+    def test_a_section_that_waited_is_printed_by_the_watch_once_the_unit_is_in(self):
+        chain = SimChain(route=2)
+        chain.arriving = True
+        switch = plumbed(chain)
+        switch.afc.prep_done = True
+        switch.handle_prep(MockGCodeCommand())
+        switch._watch(0.0)
+        assert switch.logger.messages == []
+        chain.arriving = False
+        switch._watch(0.0)
+        assert switch.logger.messages == [
+            self.PREPPING,
+            ("raw", "Inlet A: Bambu_AMS_1, Turtle_1, at outlet A, empty\n"
+                    "Inlet B: Ace2_1, at outlet B, empty\n" + self.OUTLETS)]
+        assert switch._report_by is None
+        # Printed once.
+        switch._watch(0.0)
+        assert len(switch.logger.messages) == 2
+
+
+class TestAfcBridgeBoxSwitchArriving:
+    def test_no_unit_on_its_way_is_none_arriving(self):
+        switch = plumbed()
+        assert not hasattr(switch.afc.units["Turtle_1"], "arriving")
+        assert switch._arriving() is False
+
+    def test_a_unit_the_chain_has_no_bay_for_yet_is_arriving(self):
+        chain = SimChain()
+        chain.arriving = True
+        assert plumbed(chain)._arriving() is True
+
+    @pytest.mark.parametrize("unit", ["Bambu_AMS_1", "Turtle_1", "Ace2_1"])
+    def test_a_unit_of_the_switch_that_is_being_brought_in_is_arriving(self, unit):
+        switch = plumbed()
+        switch.afc.units[unit].arriving = True
+        assert switch._arriving() is True
+        switch.afc.units[unit].arriving = False
+        assert switch._arriving() is False
+
+    def test_a_unit_of_another_switch_is_not_waited_for(self):
+        first, second, _lane = two_switches()
+        first.afc.units["Other"].arriving = True
+        assert first._arriving() is False
+        assert second._arriving() is True
+
+    def test_a_unit_that_afc_does_not_hold_is_not_arriving(self):
+        printer = make_printer(connected=False)
+        assert printer._afc.units == {}
+        assert make_switch(printer)._arriving() is False
+
+
+class TestAfcBridgeBoxSwitchNoteArrivals:
+    ALL = ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
+
+    def test_no_new_unit_leaves_no_section_due(self):
+        switch = plumbed()
+        switch._reported = list(self.ALL)
+        switch._note_arrivals()
+        assert switch._report_by is None
+        assert switch._reported == self.ALL
+
+    def test_a_unit_that_came_in_makes_a_section_due(self):
+        switch = plumbed()
+        switch._reported = ["Turtle_1", "Ace2_1"]
+        switch._note_arrivals()
+        # 30 s from the reactor's 100.0.
+        assert switch._report_by == 130.0
+        # Until the section is printed.
+        assert switch._reported == ["Turtle_1", "Ace2_1"]
+
+    def test_a_section_that_is_due_already_keeps_its_time(self):
+        switch = plumbed()
+        switch._reported = ["Turtle_1", "Ace2_1"]
+        switch._report_by = 110.0
+        switch._note_arrivals()
+        assert switch._report_by == 110.0
+
+    def test_a_bay_that_holds_no_unit_is_not_new(self):
+        switch = plumbed()
+        switch.afc.units["Bambu_AMS_1"].pool = True
+        switch._reported = ["Turtle_1", "Ace2_1"]
+        switch._note_arrivals()
+        assert switch._report_by is None
+
+    def test_a_unit_that_left_is_new_when_it_is_back(self):
+        switch = plumbed()
+        switch._reported = list(self.ALL)
+        switch.afc.units["Turtle_1"].pool = True
+        switch._note_arrivals()
+        assert switch._report_by is None
+        assert switch._reported == ["Bambu_AMS_1", "Ace2_1"]
+        switch.afc.units["Turtle_1"].pool = False
+        switch._note_arrivals()
+        assert switch._report_by == 130.0
+
+
+class TestAfcBridgeBoxSwitchSay:
+    @staticmethod
+    def _switch(due: Optional[float], arriving: bool = False) -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch whose section is due by a time, or not due"""
+        chain = SimChain(route=2)
+        chain.arriving = arriving
+        switch = plumbed(chain)
+        switch._report_by = due
+        switch._tell = MagicMock()
+        switch._section = MagicMock()
+        return switch
+
+    def test_with_no_section_due_a_problem_is_a_warning(self):
+        switch = self._switch(None)
+        switch._say(["a problem"])
+        switch._tell.assert_called_once_with(["a problem"])
+        switch._section.assert_not_called()
+
+    def test_with_no_section_due_a_unit_on_its_way_changes_nothing(self):
+        switch = self._switch(None, arriving=True)
+        switch._say([])
+        switch._tell.assert_called_once_with([])
+        switch._section.assert_not_called()
+
+    def test_a_section_that_is_due_is_printed_when_no_unit_is_on_its_way(self):
+        switch = self._switch(130.0)
+        switch._say(["a problem"])
+        switch._section.assert_called_once_with(["a problem"])
+        switch._tell.assert_not_called()
+
+    def test_a_section_that_is_due_waits_for_a_unit_on_its_way(self):
+        switch = self._switch(130.0, arriving=True)
+        switch._say(["a problem"])
+        switch._section.assert_not_called()
+        switch._tell.assert_not_called()
+        assert switch._report_by == 130.0
+
+    @pytest.mark.parametrize("now", [130.0, 131.5])
+    def test_the_wait_ends_at_the_time_the_section_is_due_by(self, now):
+        switch = self._switch(130.0, arriving=True)
+        switch.reactor._monotonic = now
+        switch._say(["a problem"])
+        switch._section.assert_called_once_with(["a problem"])
+        switch._tell.assert_not_called()
+
+    def test_just_before_that_time_it_still_waits(self):
+        switch = self._switch(130.0, arriving=True)
+        switch.reactor._monotonic = 129.9
+        switch._say([])
+        switch._section.assert_not_called()
+
+
+class TestAfcBridgeBoxSwitchSection:
+    PREPPING = ("info", "Filament switch Switch_1 Prepping inlets")
+
+    def test_it_lists_the_switch_and_no_section_is_due_any_more(self):
+        switch = plumbed(SimChain(route=2))
+        switch.afc.units["Bambu_AMS_1"].pool = True
+        switch._report_by = 130.0
+        switch._told = "said before"
+        switch._section([])
+        assert switch.logger.messages == [
+            self.PREPPING,
+            ("raw", "Inlet A: Turtle_1, at outlet A, empty\n"
+                    "Inlet B: Ace2_1, at outlet B, empty\n"
+                    "Outlet A: extruder (lane_Turtle_1)\n"
+                    "Outlet B: extruder1 (lane_Ace2_1)\n"
+                    "Tube lengths not set: run AFC_CALIBRATION, or set outlet_a_length and "
+                    "outlet_b_length\n"
+                    "Not seen at their inlet yet: Turtle_1, Ace2_1")]
+        assert switch._report_by is None
+        assert switch._reported == ["Turtle_1", "Ace2_1"]
+        assert switch._told == ""
+
+    def test_each_problem_is_listed_under_it_and_counts_as_said(self):
+        switch = plumbed(SimChain(route=2))
+        switch._report = MagicMock(return_value="the report")
+        switch._section(["inlet A is stuck", "inlet B is stuck"])
+        assert switch.logger.messages == [
+            self.PREPPING,
+            ("raw", "the report"),
+            ("raw", "<span class=error--text>inlet A is stuck</span>"),
+            ("raw", "<span class=error--text>inlet B is stuck</span>")]
+        assert switch._told == "inlet A is stuck\ninlet B is stuck"
+
+    def test_a_switch_that_is_not_answering_has_only_its_problems(self):
+        switch = plumbed(FakeChain(state=None))
+        switch._report_by = 130.0
+        switch._section(["Switch_1: the filament switch is not answering"])
+        assert switch.logger.messages == [
+            self.PREPPING,
+            ("raw", "<span class=error--text>Switch_1: the filament switch is not "
+                    "answering</span>")]
+        assert switch._report_by is None
+        assert switch._reported == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
 
 
 class TestAfcBridgeBoxSwitchSettleInlet:

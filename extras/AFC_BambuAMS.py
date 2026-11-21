@@ -1355,6 +1355,8 @@ class afcBambuAMS(afcUnit):
         self._afc_owned: set = set()
         # The bridge polls before PREP restores the var file, so filament data waits for PREP.
         self._prep_seen: bool = False
+        # From a live claim until the unit has printed the PREP block it missed at boot.
+        self.arriving: bool = False
         # When the scan's motion began.
         self._scan_motion_t0: List[Optional[float]] = ([None] * self.SLOTS_PER_UNIT)
         # Set once the boot presence baseline is taken, so spools in at boot don't scan.
@@ -3172,6 +3174,7 @@ class afcBambuAMS(afcUnit):
             self._prep_claimed_lanes(gcmd)
             self._prep_seen = True
             self._print_claimed_prep()
+            self.arriving = False
         self._reconcile_empty_bays()
         self._restore_untagged_defaults(claimed_live=claimed_live)
         # Once only: a reconnect must not bring back a lane the user has cleared.
@@ -4157,6 +4160,7 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
         self.pool = False
+        self.arriving = not self._prep_seen
         try:
             self._slot_map = build_slot_map(self.lanes, self.SLOTS_PER_UNIT)
         except Exception as e:
@@ -4243,6 +4247,7 @@ class afcBambuAMS(afcUnit):
         except Exception:
             pass
         self.pool = True
+        self.arriving = False
 
     def _resolve_uid_index(self, tries: int) -> None:
         """

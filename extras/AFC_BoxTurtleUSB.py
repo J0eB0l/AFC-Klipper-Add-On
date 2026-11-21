@@ -1210,6 +1210,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         # its lanes while they are out.
         self.board: Optional[str] = None
         self.claimed = not self.hotswap
+        # While a hot swap slot's lanes are being brought into AFC.
+        self._claiming = False
         self.slot_lanes: List[AFCLane] = []
         self.held: Dict[str, Dict[str, Any]] = {}
         self.spare_told: Set[str] = set()
@@ -1256,6 +1258,17 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         :return bool: True while a hot swap slot's lanes are out of AFC, so PREP skips the unit
         """
         return self.hotswap and not self.claimed
+
+    @property
+    def arriving(self) -> bool:
+        """
+        :return bool: True while a hot swap slot's board is up and its lanes are not in AFC yet
+        """
+        if not (self.hotswap
+                and self.link.connected):
+            return False
+        return (not self.claimed
+                or self._claiming)
 
     def _read_lane_settings(self, config) -> Dict[str, Dict[str, Any]]:
         """
@@ -1704,6 +1717,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         self.reactor.update_timer(self.release_timer, self.reactor.NEVER)
         held, self.held = self.held, {}
         self.claimed = True
+        self._claiming = True
         for lane in self.slot_lanes:
             activate_from_pool(lane)
             restore_lane(lane, held.get(lane.name) or {}, self.afc, gcmd=gcmd)
@@ -1718,6 +1732,7 @@ class afcBoxTurtleUSB(afcBoxTurtle):
             ok = self.system_Test(lane, delay, False, enable, gcmd) and ok
         self.logger.raw(self.logo if ok else self.logo_error)
         self.afc.save_vars()
+        self._claiming = False
         self.logger.info(f"{self.name}: BoxTurtle {self.board} plugged in, its lanes are in AFC")
 
     def _map_lanes(self, held: Dict[str, Dict[str, Any]]) -> None:

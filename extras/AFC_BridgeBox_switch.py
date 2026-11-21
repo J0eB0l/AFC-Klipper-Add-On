@@ -72,6 +72,8 @@ _ROUTE_HOLD = 0.5
 
 #: Seconds between looks at the switch while nothing is being loaded.
 _WATCH_PERIOD = 1.0
+# The most seconds the switch's section waits for a unit that is on its way into AFC.
+_REPORT_WAIT = 30.0
 
 #: Step and tolerance, in mm, a unit's own tube length calibration is run with.
 _MEASURE_STEP = 25.0
@@ -161,6 +163,10 @@ class afcBridgeBoxSwitch:
         self._seen: Dict[str, bool] = {letter: False for letter in LETTERS}
         self._moving = False
         self._told = ""
+        # Reactor time the switch's section is printed by at the latest, None when none is due.
+        self._report_by: Optional[float] = None
+        # The units that were in AFC when the section was last printed.
+        self._reported: List[str] = []
 
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
@@ -571,8 +577,9 @@ class afcBridgeBoxSwitch:
         if (self.afc.prep_done
             and self.afc.current_state == State.IDLE
             and not self._moving):
+            self._note_arrivals()
             with self._own():
-                self._tell(self._settle())
+                self._say(self._settle())
         return self.reactor.monotonic() + _WATCH_PERIOD
 
     def _look(self) -> None:
@@ -686,13 +693,59 @@ class afcBridgeBoxSwitch:
     def handle_prep(self, gcmd: AFCGcmd) -> None:
         """
         PREP's section for the switch: bring it in line with the lanes that are loaded, then
-        list its inlets and outlets and what is wrong with them.
+        list it. A unit that only comes into AFC once PREP has run is waited for first.
 
         :param gcmd: the PREP command, unused
         """
-        self.logger.info(f"Filament switch {self.name} Prepping inlets")
+        self._report_by = self.reactor.monotonic() + _REPORT_WAIT
         with self._own():
-            problems = self._settle()
+            self._say(self._settle())
+
+    def _arriving(self) -> bool:
+        """
+        Whether a unit is on its way into AFC: one that answers on the chain and has no bay
+        yet, or a unit of this switch that is being brought in.
+
+        :return bool: True while the switch's section should wait
+        """
+        units = [self.afc.units.get(unit) for unit in self.units()]
+        return (self.chain.units_arriving()
+                or any(getattr(unit, "arriving", False) for unit in units))
+
+    def _note_arrivals(self) -> None:
+        """
+        Have the switch's section printed again when a unit came into AFC since it last was.
+        """
+        live = self.live_units()
+        new = [unit for unit in live if unit not in self._reported]
+        if (new
+            and self._report_by is None):
+            self._report_by = self.reactor.monotonic() + _REPORT_WAIT
+        # A unit that left counts as new when it is back.
+        self._reported = [unit for unit in self._reported if unit in live]
+
+    def _say(self, problems: List[str]) -> None:
+        """
+        Say what keeps the switch from settling: in its section when one is due, else as a
+        warning. A section that is due waits for the units on their way into AFC.
+
+        :param problems: what `_settle` returned
+        """
+        if self._report_by is None:
+            self._tell(problems)
+        elif (not self._arriving()
+              or self.reactor.monotonic() >= self._report_by):
+            self._section(problems)
+
+    def _section(self, problems: List[str]) -> None:
+        """
+        Print the switch's section: its inlets and outlets, then what is wrong with them.
+
+        :param problems: what `_settle` returned
+        """
+        self._report_by = None
+        self._reported = self.live_units()
+        self.logger.info(f"Filament switch {self.name} Prepping inlets")
         try:
             self.logger.raw(self._report())
         except SwitchError:

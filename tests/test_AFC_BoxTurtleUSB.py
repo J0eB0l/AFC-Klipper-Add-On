@@ -4592,9 +4592,19 @@ class TestClaim:
         unit.afc.lanes["lane1"] = MagicMock(map=["T0"], _map=[])
         unit.afc.tool_cmds["T0"] = "lane1"
         unit.printer._objects["AFC_BridgeBox Chain_1"] = OtherHotSwapUnit({"T1", "T2"})
-        with patch.object(afcBoxTurtleUSB, "system_Test", return_value=True) as test:
+        during = []
+
+        def system_test(*_args: Any) -> bool:
+            during.append((unit.claimed, unit._claiming, unit.arriving))
+            return True
+
+        assert (unit._claiming, unit.arriving) == (False, True)
+        with patch.object(afcBoxTurtleUSB, "system_Test", side_effect=system_test) as test:
             unit._claim(gcmd=GCMD)
         assert unit.claimed is True and unit.pool is False and unit.held == {}
+        # Its lanes count as on their way until each one is checked.
+        assert during == [(True, True, True)] * 3
+        assert (unit._claiming, unit.arriving) == (False, False)
         assert list(unit.lanes) == ["lane8", "lane9", "lane10"]
         assert all(unit.afc.lanes.get(n) is lane for n, lane in
                    (("lane8", a), ("lane9", b), ("lane10", c)))
@@ -4825,6 +4835,43 @@ class TestPool:
         unit = make_unit()
         unit.claimed = False
         assert unit.pool is False
+
+
+class TestArriving:
+    @staticmethod
+    def _slot(tmp_path):
+        """:return afcBoxTurtleUSB: a hot swap slot with its board up and its lanes out of AFC"""
+        unit, _ = hotswap_unit(tmp_path, lanes=("lane8",))
+        unit.link = FakeLink(unit.reactor)
+        assert (unit.hotswap, unit.link.connected) == (True, True)
+        assert (unit.claimed, unit._claiming) == (False, False)
+        return unit
+
+    def test_a_slot_with_its_board_up_and_its_lanes_out_is_arriving(self, tmp_path):
+        assert self._slot(tmp_path).arriving is True
+
+    def test_it_still_is_while_its_lanes_are_brought_in(self, tmp_path):
+        unit = self._slot(tmp_path)
+        unit.claimed = True
+        unit._claiming = True
+        assert unit.arriving is True
+
+    def test_a_slot_whose_lanes_are_in_is_not(self, tmp_path):
+        unit = self._slot(tmp_path)
+        unit.claimed = True
+        assert unit.arriving is False
+
+    def test_a_slot_with_no_board_is_not(self, tmp_path):
+        unit = self._slot(tmp_path)
+        unit.link.connected = False
+        assert unit.arriving is False
+
+    def test_a_unit_without_hotswap_never_is(self):
+        unit = make_unit()
+        unit.link = FakeLink(unit.reactor)
+        unit.claimed = False
+        assert unit.hotswap is False
+        assert unit.arriving is False
 
 
 class TestAllLanes:
