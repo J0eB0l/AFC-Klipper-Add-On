@@ -2298,7 +2298,7 @@ class afcBridgeBox:
 
     _SWITCH_AT = ("released", "actuator 1", "actuator 2", "both actuators")
 
-    def _switch_state(self) -> Optional[Dict[str, Any]]:
+    def switch_state(self) -> Optional[Dict[str, Any]]:
         """
         The filament switch as the bridge last reported it.
 
@@ -2315,6 +2315,20 @@ class afcBridgeBox:
                 "position": flag & 3,
                 "inlets": [bool(flag & 4), bool(flag & 8)],
                 "values": list(fs.get("val") or [])}
+
+    def switch_set_route(self, route: int) -> bool:
+        """
+        Send the filament switch a route. The bridge repeats it with every poll.
+
+        :param route: 0 releases, 1 and 2 move one actuator each, 3 moves both
+        :return bool: False when there is no link to the bridge to send it over
+        """
+        bridge = self._chain_bridge()
+        if (bridge is None
+            or not bridge.is_connected()):
+            return False
+        bridge.send({"cmd": "fswitch", "route": route})
+        return True
 
     def cmd_AFC_BRIDGEBOX_SWITCH(self, gcmd: Any) -> None:
         """
@@ -2345,7 +2359,7 @@ class afcBridgeBox:
             gcmd.respond_info(f"{self.name}: filament switch route {route} "
                               f"({self._SWITCH_AT[route]})")
             return
-        st = self._switch_state()
+        st = self.switch_state()
         if st is None:
             gcmd.respond_info(f"{self.name}: no filament switch has answered on this bus")
             return
@@ -6703,7 +6717,7 @@ class afcBridgeBox:
         :return dict: on, route, position and inlets, or None when no switch has answered
         """
         try:
-            st = self._switch_state()
+            st = self.switch_state()
         except Exception:
             return None
         if st is None:

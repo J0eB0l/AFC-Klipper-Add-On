@@ -17756,6 +17756,57 @@ class TestAfcBridgeBoxCmdAFCBridgeboxSwitch:
         assert m.get_status()["filament_switch"] is None
 
 
+class TestAfcBridgeBoxSwitchState:
+    FS = TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS
+
+    def test_no_bridge(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {})
+        assert m.switch_state() is None
+
+    @pytest.mark.parametrize("status", [None, {"units": []}, {"fs": "FS01"}])
+    def test_a_status_without_a_switch(self, tmp_path, monkeypatch, status):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status=status)})
+        assert m.switch_state() is None
+
+    def test_the_flag_gives_the_position_and_each_inlet(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        # Bit 2 is the first inlet sensor, bit 3 the second.
+        fs = dict(self.FS, route=1, flag=0x06)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status={"fs": fs})})
+        assert m.switch_state() == {"on": True, "route": 1, "position": 2,
+                                    "inlets": [True, False],
+                                    "values": [2142, 1878, 2384, 3281, 5395, 5285]}
+
+    def test_missing_fields_read_as_off_and_released(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status={"fs": {}})})
+        assert m.switch_state() == {"on": False, "route": 0, "position": 0,
+                                    "inlets": [False, False], "values": []}
+
+
+class TestAfcBridgeBoxSwitchSetRoute:
+    def test_the_route_goes_to_the_bridge(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        bridge = FakeBridge()
+        use_bridges(monkeypatch, {WIFI_USB: bridge})
+        assert m.switch_set_route(2) is True
+        assert bridge.sent == [{"cmd": "fswitch", "route": 2}]
+
+    def test_no_bridge(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {})
+        assert m.switch_set_route(2) is False
+
+    def test_a_bridge_that_is_not_connected(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        bridge = FakeBridge(connected=False)
+        use_bridges(monkeypatch, {WIFI_USB: bridge})
+        assert m.switch_set_route(2) is False
+        assert bridge.sent == []
+
+
 class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
     WIPE = [{"cmd": "wifi", "clear": 1}, {"cmd": "reset"}]
     SAID = ("chain1: the BridgeBox's WiFi and link key are "
