@@ -3244,14 +3244,20 @@ class afcBridgeBox:
         """
         Tell the bridge firmware to forget a uid: stop re-asserting it on the bus so a
         gone-but-still-enrolled unit stops reading its own re-assert back and flapping online.
+        A bridge whose uid table does not hold the uid has nothing to forget and is not asked.
 
         :param uid: 24-hex unit uid
         """
         try:
             bridge = (self._chain_bridge()
                       or getattr(self, "_bridge", None))
-            if bridge is not None:
-                bridge.send({"cmd": "forget", "uid": (uid or "").strip().lower()})
+            if bridge is None:
+                return
+            known = {_norm_uid(u) for u in bridge.chain_uids() if u}
+            if (known
+                and _norm_uid(uid) not in known):
+                return
+            bridge.send({"cmd": "forget", "uid": (uid or "").strip().lower()})
         except Exception:
             pass
 
