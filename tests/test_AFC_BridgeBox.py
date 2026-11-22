@@ -6229,6 +6229,50 @@ class TestAfcBridgeBoxCmdAFCBridgeboxForget:
         assert _p3_console(m) == []
 
 
+class TestAfcBridgeBoxBridgeForget:
+    """_bridge_forget asks the chain's bridge to forget a uid its table holds."""
+
+    def test_no_bridge_is_asked_nothing(self, tmp_path, monkeypatch):
+        m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}")
+        _p3_quiet(m)
+        m._bridge_forget(A)
+        assert _p3_log(m) == []
+
+    def test_the_bridge_the_master_holds_is_asked_when_none_is_registered(
+            self, tmp_path, monkeypatch):
+        m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}")
+        m._bridge = FakeBridge(uids=[A])
+        m._bridge_forget(A)
+        assert m._bridge.sent == [{"cmd": "forget", "uid": "aaaa"}]
+
+    def test_a_uid_in_the_bridge_table_is_forgotten(
+            self, tmp_path, monkeypatch):
+        m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}", online=(A,))
+        m._bridge_forget(" aaaa ")
+        assert _p3_bridge(m).sent == [{"cmd": "forget", "uid": "aaaa"}]
+
+    def test_a_uid_the_bridge_table_lacks_is_not_asked_for(
+            self, tmp_path, monkeypatch):
+        m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}", online=(B,),
+                      uids=("", B))
+        m._bridge_forget(A)
+        assert _p3_bridge(m).sent == []
+
+    def test_a_bridge_with_no_table_yet_is_asked(self, tmp_path, monkeypatch):
+        m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}", online=(),
+                      uids=())
+        m._bridge_forget(A)
+        assert _p3_bridge(m).sent == [{"cmd": "forget", "uid": "aaaa"}]
+
+    def test_a_bridge_that_fails_is_left_alone(self, tmp_path, monkeypatch):
+        m = _p3_chain(tmp_path, monkeypatch, roster=f"boxed:{A}", online=(A,))
+        _p3_bridge(m).raising["chain_uids"] = RuntimeError("link down")
+        _p3_quiet(m)
+        m._bridge_forget(A)
+        assert _p3_bridge(m).sent == []
+        assert _p3_log(m) == []
+
+
 class TestAfcBridgeBoxDropPin:
     """_drop_pin unpins a uid, first writing the owners a restart guesses."""
 
