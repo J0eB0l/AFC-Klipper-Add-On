@@ -162,6 +162,7 @@ except:
 
 try: from extras.AFC_BambuAMS_bridge import (
     BambuBridge,
+    TRAY_NONE,
     TcpPort,
     routine_info,
     split_tcp_key,
@@ -856,6 +857,14 @@ AMS_MODE_FOLLOWING = 4
 
 #: Hard ceiling on any single move's watchdog, in seconds.
 MOVE_DEADLINE_MAX_S = 35.0
+
+#: How far before a retract wait its ran-out report reaches back for the unit's narration, in
+#: seconds.
+DEADLINE_REPORT_BACK_S = 15.0
+
+#: How many narration lines that report quotes, and how much of each.
+DEADLINE_REPORT_LINES = 6
+DEADLINE_REPORT_CHARS = 70
 
 #: Ceiling on the load-to-sensor window.
 LOAD_SENSOR_MAX_S = 180.0
@@ -9531,7 +9540,9 @@ class afcBambuAMS(afcUnit):
         :param fault_mark: A sequence from _ams_fault_seq taken before the move
         :param accept_switch_finish: Also end the wait on the unit's state-switch report (a
         retract's own completion) made after the wait began
-        :param accept_tray_release: The AMS slot this move is retracting
+        :param accept_tray_release: The AMS slot this move is retracting. The unit letting go of
+        that tray ends the wait, as narrated or, from a unit that does not narrate it, as its status
+        frame shows it: no tray selected, the bay still and its hub clear
         :return bool: True if the AMS reported a successful completion; False if it reported a stall
         or nothing arrived before the timeout
         """
@@ -9572,9 +9583,14 @@ class afcBambuAMS(afcUnit):
             except (AttributeError, TypeError):
                 accept_tray_release = None  # older bridge
         reactor = self.afc.reactor
+        # A unit that does not narrate its tray reports the release in its status frame. Armed once
+        # that frame shows the bay's hub holding the filament this move reels back.
+        status_armed = False
+        began: Optional[float] = None
         # Narration alone reports success.
         try:
-            end = reactor.monotonic() + deadline_s
+            began = reactor.monotonic()
+            end = began + deadline_s
             while reactor.monotonic() < end:
                 if bridge is not None:
                     seq, ok, _text = bridge.last_finish()
@@ -9615,11 +9631,76 @@ class afcBambuAMS(afcUnit):
                              f"after {reactor.monotonic() - (end - deadline_s):.1f}s "
                              f"-- tray {tr_from} -> none")
                         return True
+                if (accept_tray_release is not None
+                    and bridge is not None
+                    and not bridge.narrates_tray(getattr(self, "ams_index", None))):
+                    sel, state, hub = self._status_bay(accept_tray_release)
+                    if hub is None:
+                        pass  # no reading of the bay yet
+                    elif hub > afcBambuAMS._hub_empty_max(self):
+                        status_armed = True
+                    elif (status_armed
+                          and sel == TRAY_NONE
+                          and state != "feeding"):
+                        _say(f"{nm}: move ended on the STATUS FRAME "
+                             f"after {reactor.monotonic() - began:.1f}s "
+                             f"-- tray {accept_tray_release} -> none, bay {state}, hub clear")
+                        return True
                 reactor.pause(reactor.monotonic() + 0.1)
         except Exception:
             pass
         _say(f"{nm}: move ended on the DEADLINE ({deadline_s:.0f}s) -- no signal arrived")
+        if (accept_tray_release is not None
+            and began is not None):
+            detail = self._deadline_detail(accept_tray_release, began)
+            if detail:
+                _say(f"{nm}: {detail}")
         return False
+
+    def _status_bay(self, slot: int) -> Tuple[Optional[int], Optional[str], Optional[int]]:
+        """
+        What the unit's latest status frame says about a bay it is retracting.
+
+        :param slot: the 0-based AMS slot
+        :return tuple: (the unit's selected tray, the bay's state, the bay's raw hub reading), each
+        None when the frame does not carry it
+        """
+        latest = (self._bridge.latest_status() if self._bridge else None) or {}
+        unit = afcBambuAMS._unit_entry(self, latest)
+        sel = unit.get("seltray") if unit is not None else None
+        for entry in latest.get("slots") or []:
+            if (entry.get("unit", 0) == self.ams_index
+                and entry.get("i") == slot):
+                info = bridge_slot_to_info(entry)
+                return sel, info.get("state"), info.get("hub_raw")
+        return sel, None, None
+
+    def _deadline_detail(self, slot: int, since: float) -> str:
+        """
+        What the unit reported around a retract wait that ran out, for the log.
+
+        :param slot: the 0-based AMS slot that was retracting
+        :param since: the reactor time the wait began
+        :return str: its status frame's reading and the lines it narrated, or "" with neither
+        """
+        parts: List[str] = []
+        try:
+            sel, state, hub = self._status_bay(slot)
+            if (sel is not None
+                or state is not None):
+                hub_txt = "?" if hub is None else f"0x{hub:02X}"
+                parts.append(f"its status frame shows tray {sel}, bay {state}, hub {hub_txt}")
+            said = self._bridge.said_since(since - DEADLINE_REPORT_BACK_S,
+                                           getattr(self, "ams_index", None))
+            lines = []
+            for text, count in said[-DEADLINE_REPORT_LINES:]:
+                repeat = f" (x{count})" if count > 1 else ""
+                lines.append(f"{text[:DEADLINE_REPORT_CHARS]}{repeat}")
+            if lines:
+                parts.append("it said: " + " | ".join(lines))
+        except Exception:
+            pass
+        return "; ".join(parts)
 
     def _toolhead_sensor_triggered(self, cur_lane: Any) -> bool:
         """

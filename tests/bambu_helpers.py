@@ -12,7 +12,7 @@ import socket
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 from unittest.mock import patch
 
 import pytest
@@ -1732,6 +1732,10 @@ class FakeBridge:
         self.fault = fault
         self.fault_by_unit: Dict[int, Tuple[int, str, float]] = {}
         self.tray_release: Dict[Optional[int], Tuple[int, Optional[int]]] = {}
+        #: Chain indexes whose units narrate their selected tray (narrates_tray).
+        self.tray_narrators: Set[int] = set()
+        #: said_since(): (reactor time, chain index or None, line, times heard in a row).
+        self.said: List[Tuple[float, Optional[int], str, int]] = []
         self.dw: Dict[Optional[int], tuple] = {}
         self.tube: Dict[Optional[int], float] = {}
         #: Stamps by device address (None = bridge-wide), as the real _rfid_*_by_addr tables.
@@ -1986,6 +1990,18 @@ class FakeBridge:
         """:return tuple: (sequence, released tray)"""
         return self.tray_release.get(unit, self.tray_release.get(None,
                                                                  (0, None)))
+
+    def narrates_tray(self, unit: Optional[int]) -> bool:
+        """:return bool: whether ``unit`` is one of ``tray_narrators``"""
+        self._check("narrates_tray")
+        return unit in self.tray_narrators
+
+    def said_since(self, since: float, unit: Optional[int] = None
+                   ) -> List[Tuple[str, int]]:
+        """:return list: (line, count) of ``said`` from ``since`` on for ``unit``"""
+        self._check("said_since")
+        return [(text, count) for when, who, text, count in self.said
+                if when >= since and who in (None, unit)]
 
     def last_fault(self, unit: Optional[int] = None
                    ) -> Tuple[int, str, float]:

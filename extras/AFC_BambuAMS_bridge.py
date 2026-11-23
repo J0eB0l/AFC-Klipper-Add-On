@@ -44,7 +44,8 @@ import threading
 import chelper
 
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 _MEAS_LIVE_MAX_S = 120.0
 
@@ -102,6 +103,9 @@ _STATE_SWITCH_DONE_RE = re.compile(r"state_switch\s+finish\s*,\s*\w+\s*,\s*err_c
                                    re.IGNORECASE)
 
 TRAY_NONE = 255
+
+#: How many narration lines are kept for a later report.
+NARRATION_KEPT = 24
 
 _TRAY_NOW_RE = re.compile(r"tray_now:(\d+)")
 
@@ -973,6 +977,7 @@ class BambuBridge:
         self._mcaddr_ack: Dict[int, int] = {}
         self._fstate_last: Any = _UNSET
         self._tray_gone: bool = False
+        self._said: Deque[List[Any]] = deque(maxlen=NARRATION_KEPT)
         self._buff_pos: Optional[float] = None
         self._buff_refill: Optional[Tuple[float, float, Optional[float]]] = None
         self._buff_refill_seq: int = 0
@@ -1471,6 +1476,56 @@ class BambuBridge:
             return (self._tray_release_seq_by_unit.get(_u, 0),
                     self._tray_release_from_by_unit.get(_u))
 
+    def narrates_tray(self, unit: Optional[int]) -> bool:
+        """
+        Whether a unit reports its selected tray in its own narration.
+
+        :param unit: the unit's chain index
+        :return bool: True once a `tray_now` report was heard from that unit
+        """
+        if unit is None:
+            return False
+        with self._lock:
+            return int(unit) in self._tray_now_by_unit
+
+    def _keep_said(self, text: str, unit: Optional[int], now: float) -> None:
+        """
+        Keep a narration line for a later report, folding a repeat into its entry.
+
+        :param text: the unit's line
+        :param unit: the chain index the line was attributed to, when known
+        :param now: the reactor time it arrived
+        """
+        with self._lock:
+            last = self._said[-1] if self._said else None
+            if (last is not None
+                and last[1] == unit
+                and last[2] == text):
+                last[0] = now
+                last[3] += 1
+                return
+            self._said.append([now, unit, text, 1])
+
+    def said_since(self, since: float, unit: Optional[int] = None) -> List[Tuple[str, int]]:
+        """
+        The narration lines last heard at or after a time, oldest first.
+
+        :param since: the reactor time to report from
+        :param unit: leave out the lines attributed to another unit
+        :return list: (line, times heard in a row) per entry
+        """
+        out: List[Tuple[str, int]] = []
+        with self._lock:
+            for when, who, text, count in self._said:
+                if when < since:
+                    continue
+                if (unit is not None
+                    and who is not None
+                    and who != int(unit)):
+                    continue
+                out.append((text, count))
+        return out
+
     def last_assist_done(self) -> int:
         with self._lock:
             return self._assist_seq
@@ -1872,6 +1927,7 @@ class BambuBridge:
                 self._last_dbg_n = 1
                 self._last_dbg_t = now
             if raw:
+                self._keep_said(raw.strip(), _dbg_unit, now)
                 bp = _BUFF_POS_RE.search(raw)
                 if bp:
                     with self._lock:

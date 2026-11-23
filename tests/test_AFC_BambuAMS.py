@@ -24381,6 +24381,329 @@ class TestAfcBambuAMSWaitMove:
         assert unit.reactor.now == 100.0
         assert unit.logger.messages == self._deadline(6)
 
+    # A unit that does not narrate its tray ends an unload on its status frame.
+
+    @staticmethod
+    def _frame(sel: Optional[int], state: str = "idle", hubv: int = 0xB7,
+               slot: int = 2) -> dict:
+        """
+        :param sel: the tray the unit says it has selected (255 for none)
+        :param state: the bay's own motion state
+        :param hubv: the bay's raw hub reading (0 for none yet)
+        :param slot: the bay the frame describes
+        :return dict: a status frame for the unit at chain index 0
+        """
+        return {"units": [{"n": 0, "seltray": sel}],
+                "slots": [{"unit": 0, "i": slot, "present": True,
+                           "state": state, "hubv": hubv}]}
+
+    def _status_deadline(self, sel: int, state: str,
+                         hub: str) -> List[Tuple[str, str]]:
+        """
+        :param sel: the selected tray the last frame carried
+        :param state: the bay state it carried
+        :param hub: the hub reading as logged
+        :return list: the log of a 35s unload wait that ran out on that frame
+        """
+        return self._deadline(35) + [
+            ("debug", f"Bambu_AMS_1: its status frame shows tray {sel}, bay "
+                      f"{state}, hub {hub}")]
+
+    def test_the_status_frame_release_ends_an_unload(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is True
+        self._waited(unit, 2.0)
+        assert unit.logger.messages == [
+            ("debug", f"{self.PREFIX} the STATUS FRAME after 2.0s -- tray 2 "
+                      f"-> none, bay idle, hub clear")]
+
+    def test_a_bay_that_emptied_counts_as_home_too(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255, "empty"))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is True
+        assert unit.logger.messages == [
+            ("debug", f"{self.PREFIX} the STATUS FRAME after 2.0s -- tray 2 "
+                      f"-> none, bay empty, hub clear")]
+
+    def test_a_hub_that_never_held_the_filament_is_not_a_release(
+            self, monkeypatch):
+        # Home from the first frame on: the hub never showed the filament this move reels back.
+        unit = self._unit(monkeypatch, FakeBridge(status=self._frame(255)))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._status_deadline(255, "idle",
+                                                             "0xB7")
+
+    def test_another_tray_selected_is_not_a_release(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(1))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._status_deadline(1, "idle",
+                                                             "0xB7")
+
+    def test_a_bay_still_reeling_is_not_home(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255, "feeding"))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._status_deadline(255, "feeding",
+                                                             "0xB7")
+
+    def test_a_hub_that_still_reads_filament_is_not_home(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255, hubv=0xE1))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._status_deadline(255, "idle",
+                                                             "0xE1")
+
+    def test_a_hub_with_no_reading_is_not_home(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255, hubv=0))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._status_deadline(255, "idle", "?")
+
+    def test_a_hub_with_no_reading_does_not_forget_the_filament(self,
+                                                              monkeypatch):
+        # Seen in the hub, then a frame with no reading, then clear.
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 100.95, status=self._frame(255, hubv=0))
+        self._at(unit, 101.95, status=self._frame(255))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is True
+        self._waited(unit, 2.0)
+
+    def test_a_tray_released_before_the_reel_still_arms_on_the_hub(
+            self, monkeypatch):
+        # The unit already shows no tray while the bay reels and its hub holds the filament.
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(255, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is True
+        self._waited(unit, 2.0)
+        assert unit.logger.messages == [
+            ("debug", f"{self.PREFIX} the STATUS FRAME after 2.0s -- tray 2 "
+                      f"-> none, bay idle, hub clear")]
+
+    @pytest.mark.parametrize("model, hubv, home", [
+        ("ams1", 0xCA, True), ("ams1", 0xCB, False),
+        ("ams2", 0xE0, True), ("ams2", 0xE1, False)])
+    def test_the_hub_threshold_is_the_models_own(self, monkeypatch, model,
+                                                 hubv, home):
+        # HUB_EMPTY_MAX_BY_MODEL: 0xCA for an AMS 1, 0xE0 for an AMS 2. At it is clear, above is
+        # not.
+        unit = _bambu_p5_unit(
+            monkeypatch, model=model,
+            bridge=FakeBridge(status=self._frame(2, "feeding", 0xFF)))
+        unit.reactor.run_in_pause = True
+        self._at(unit, 101.95, status=self._frame(255, hubv=hubv))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is home
+        self._waited(unit, 2.0 if home else 35.0)
+
+    def test_a_unit_that_narrates_its_tray_keeps_to_its_words(self,
+                                                             monkeypatch):
+        bridge = FakeBridge(status=self._frame(2, "feeding", 0xE1))
+        bridge.tray_narrators = {0}
+        unit = self._unit(monkeypatch, bridge)
+        self._at(unit, 101.95, status=self._frame(255))
+        assert unit._wait_move(2000.0, accept_tray_release=2) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._status_deadline(255, "idle",
+                                                             "0xB7")
+
+    def test_the_status_frame_release_is_opt_in(self, monkeypatch):
+        unit = self._unit(monkeypatch,
+                          FakeBridge(status=self._frame(2, "feeding", 0xE1)))
+        self._at(unit, 101.95, status=self._frame(255))
+        assert unit._wait_move(2000.0) is False
+        self._waited(unit, 35.0)
+        assert unit.logger.messages == self._deadline(35)
+
+    def test_an_unload_with_no_bridge_reports_nothing_more(self,
+                                                          monkeypatch):
+        unit = self._unit(monkeypatch, offline=True)
+        assert unit._wait_move(10.0, 20.0, accept_tray_release=2) is False
+        self._waited(unit, 6.0)
+        assert unit.logger.messages == self._deadline(6)
+
+    def test_an_unload_that_ran_out_quotes_the_unit(self, monkeypatch):
+        bridge = FakeBridge()
+        bridge.said = [(99.0, 0, "[AMS_DEV] odom tray_id error 255", 3)]
+        unit = self._unit(monkeypatch, bridge)
+        assert unit._wait_move(10.0, 20.0, accept_tray_release=2) is False
+        assert unit.logger.messages == self._deadline(6) + [
+            ("debug", "Bambu_AMS_1: it said: [AMS_DEV] odom tray_id error 255 "
+                      "(x3)")]
+
+    def test_a_reactor_with_no_clock_reports_nothing_more(self, monkeypatch):
+        # The wait never began, so there is no time to report from.
+        bridge = FakeBridge(status=self._frame(255))
+        unit = self._unit(monkeypatch, bridge)
+
+        def _no_clock() -> float:
+            raise RuntimeError("reactor shutting down")
+
+        monkeypatch.setattr(unit.reactor, "monotonic", _no_clock)
+        assert unit._wait_move(10.0, 20.0, accept_tray_release=2) is False
+        assert unit.logger.messages == self._deadline(6)
+
+
+class TestAfcBambuAMSStatusBay:
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch,
+              status: Optional[dict]) -> afcBambuAMS:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param status: the bridge's latest status frame
+        :return afcBambuAMS: a unit at chain index 0 on that bridge
+        """
+        return _bambu_p5_unit(monkeypatch, bridge=FakeBridge(status=status))
+
+    def test_reads_the_tray_and_the_bay(self, monkeypatch):
+        unit = self._unit(monkeypatch, {
+            "units": [{"n": 1, "seltray": 0}, {"n": 0, "seltray": 2}],
+            "slots": [{"unit": 1, "i": 2, "present": True, "state": "idle",
+                       "hubv": 0xB1},
+                      {"unit": 0, "i": 1, "present": True, "state": "idle",
+                       "hubv": 0xB2},
+                      {"unit": 0, "i": 2, "present": True,
+                       "state": "feeding", "hubv": 0xE1}]})
+        assert unit._status_bay(2) == (2, "feeding", 0xE1)
+        assert unit.logger.messages == []
+
+    def test_a_slot_with_no_unit_field_is_unit_zeros(self, monkeypatch):
+        unit = self._unit(monkeypatch, {
+            "units": [{"n": 0, "seltray": 255}],
+            "slots": [{"i": 2, "present": True, "state": "idle",
+                       "hubv": 0xB7}]})
+        assert unit._status_bay(2) == (255, "idle", 0xB7)
+
+    def test_a_hub_with_no_reading_is_none(self, monkeypatch):
+        unit = self._unit(monkeypatch, {
+            "units": [{"n": 0, "seltray": 255}],
+            "slots": [{"unit": 0, "i": 2, "present": True, "state": "idle",
+                       "hubv": 0}]})
+        assert unit._status_bay(2) == (255, "idle", None)
+
+    def test_a_frame_without_the_bay_gives_the_tray_alone(self, monkeypatch):
+        unit = self._unit(monkeypatch, {
+            "units": [{"n": 0, "seltray": 3}],
+            "slots": [{"unit": 0, "i": 1, "present": True, "state": "idle",
+                       "hubv": 0xB7}]})
+        assert unit._status_bay(2) == (3, None, None)
+
+    def test_a_frame_without_the_unit_gives_the_bay_alone(self, monkeypatch):
+        unit = self._unit(monkeypatch, {
+            "units": [{"n": 1, "seltray": 3}],
+            "slots": [{"unit": 0, "i": 2, "present": True, "state": "idle",
+                       "hubv": 0xB7}]})
+        assert unit._status_bay(2) == (None, "idle", 0xB7)
+
+    def test_a_frame_with_no_slots_gives_the_tray_alone(self, monkeypatch):
+        unit = self._unit(monkeypatch, {"units": [{"n": 0, "seltray": 1}]})
+        assert unit._status_bay(2) == (1, None, None)
+
+    def test_no_frame_yet(self, monkeypatch):
+        unit = self._unit(monkeypatch, None)
+        assert unit._status_bay(2) == (None, None, None)
+
+    def test_no_bridge(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, offline=True)
+        assert unit._status_bay(2) == (None, None, None)
+
+
+class TestAfcBambuAMSDeadlineDetail:
+    FRAME = {"units": [{"n": 0, "seltray": 255}],
+             "slots": [{"unit": 0, "i": 2, "present": True, "state": "idle",
+                        "hubv": 0xB7}]}
+
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch, status: Optional[dict] = None,
+              said: Sequence[Tuple[float, Optional[int], str, int]] = ()
+              ) -> afcBambuAMS:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param status: the bridge's latest status frame
+        :param said: the narration the bridge kept
+        :return afcBambuAMS: a unit at chain index 0 on that bridge
+        """
+        bridge = FakeBridge(status=status)
+        bridge.said = list(said)
+        return _bambu_p5_unit(monkeypatch, bridge=bridge)
+
+    def test_the_frame_and_the_words(self, monkeypatch):
+        unit = self._unit(monkeypatch, self.FRAME, [
+            (120.0, 0, "[AMS_IDLE]set ams state switch", 1),
+            (130.0, None, "[AMS_DEV] odom tray_id error 255", 40)])
+        assert unit._deadline_detail(2, 125.0) == (
+            "its status frame shows tray 255, bay idle, hub 0xB7; it said: "
+            "[AMS_IDLE]set ams state switch | "
+            "[AMS_DEV] odom tray_id error 255 (x40)")
+        assert unit.logger.messages == []
+
+    def test_the_words_reach_back_before_the_wait(self, monkeypatch):
+        # DEADLINE_REPORT_BACK_S (15s) before the wait began, and no further.
+        unit = self._unit(monkeypatch, None, [
+            (109.9, 0, "too early", 1), (110.0, 0, "just in time", 1)])
+        assert unit._deadline_detail(2, 125.0) == "it said: just in time"
+
+    def test_another_units_words_are_left_out(self, monkeypatch):
+        unit = self._unit(monkeypatch, None, [
+            (120.0, 1, "the chain mate", 1), (121.0, 0, "this unit", 1)])
+        assert unit._deadline_detail(2, 125.0) == "it said: this unit"
+
+    def test_only_the_last_lines_are_quoted(self, monkeypatch):
+        # DEADLINE_REPORT_LINES (6) of them.
+        unit = self._unit(monkeypatch, None, [
+            (120.0 + i, 0, f"line {i}", 1) for i in range(8)])
+        assert unit._deadline_detail(2, 125.0) == (
+            "it said: line 2 | line 3 | line 4 | line 5 | line 6 | line 7")
+
+    def test_a_long_line_is_cut(self, monkeypatch):
+        # DEADLINE_REPORT_CHARS (70) of it.
+        unit = self._unit(monkeypatch, None, [(120.0, 0, "x" * 90, 2)])
+        assert unit._deadline_detail(2, 125.0) == (
+            "it said: " + "x" * 70 + " (x2)")
+
+    def test_the_frame_alone(self, monkeypatch):
+        unit = self._unit(monkeypatch, self.FRAME)
+        assert unit._deadline_detail(2, 125.0) == (
+            "its status frame shows tray 255, bay idle, hub 0xB7")
+
+    def test_a_tray_with_no_bay_record(self, monkeypatch):
+        unit = self._unit(monkeypatch, {"units": [{"n": 0, "seltray": 2}]})
+        assert unit._deadline_detail(2, 125.0) == (
+            "its status frame shows tray 2, bay None, hub ?")
+
+    def test_a_bay_with_no_tray_record(self, monkeypatch):
+        unit = self._unit(monkeypatch, {"slots": self.FRAME["slots"]})
+        assert unit._deadline_detail(2, 125.0) == (
+            "its status frame shows tray None, bay idle, hub 0xB7")
+
+    def test_nothing_to_report(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        assert unit._deadline_detail(2, 125.0) == ""
+
+    def test_a_failing_bridge_keeps_what_was_read(self, monkeypatch):
+        bridge = FakeBridge(status=self.FRAME,
+                            raising={"said_since": RuntimeError("gone")})
+        unit = _bambu_p5_unit(monkeypatch, bridge=bridge)
+        assert unit._deadline_detail(2, 125.0) == (
+            "its status frame shows tray 255, bay idle, hub 0xB7")
+
+    def test_no_bridge(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, offline=True)
+        assert unit._deadline_detail(2, 125.0) == ""
+
 
 class TestAfcBambuAMSToolheadSensorTriggered:
     @staticmethod

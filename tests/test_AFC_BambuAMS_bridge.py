@@ -3116,6 +3116,101 @@ class TestBambuBridgeLastTrayRelease:
         assert bambu_bridge.logger.messages == [ams_echo(loaded), ams_echo(insert)]
 
 
+class TestBambuBridgeNarratesTray:
+    def test_a_unit_is_known_once_it_says_its_tray(self, bambu_bridge):
+        assert bambu_bridge.narrates_tray(1) is False
+        line = "[AMS_COMMON]state:0,tray_now:1,tray_exit:7"
+        feed_amsdbg(bambu_bridge, line, addr=0x0700, unit=1)
+        assert bambu_bridge.narrates_tray(1) is True
+        assert bambu_bridge.logger.messages == [ams_echo(line)]
+
+    def test_a_chain_mate_is_not_taken_for_it(self, bambu_bridge):
+        feed_amsdbg(bambu_bridge, "[AMS_COMMON]state:0,tray_now:1,tray_exit:7",
+                    addr=0x0700, unit=1)
+        assert bambu_bridge.narrates_tray(0) is False
+
+    def test_a_unit_whose_narration_names_no_tray(self, bambu_bridge):
+        feed_amsdbg(bambu_bridge, "[AMS_DEV] odom tray_id error 255", addr=0x0700,
+                    unit=0)
+        assert bambu_bridge.narrates_tray(0) is False
+
+    def test_no_unit_named(self, bambu_bridge):
+        feed_amsdbg(bambu_bridge, "[AMS_COMMON]state:0,tray_now:1,tray_exit:7",
+                    addr=0x0700, unit=0)
+        assert bambu_bridge.narrates_tray(None) is False
+
+
+class TestBambuBridgeKeepSaid:
+    def test_a_line_is_kept_with_its_unit_and_time(self, bambu_bridge):
+        bambu_bridge._keep_said("pull tray 2 from switch", 1, 104.5)
+        assert list(bambu_bridge._said) == [
+            [104.5, 1, "pull tray 2 from switch", 1]]
+
+    def test_a_repeat_folds_into_its_entry(self, bambu_bridge):
+        bambu_bridge._keep_said("odom tray_id error 255", 0, 104.5)
+        bambu_bridge._keep_said("odom tray_id error 255", 0, 105.0)
+        bambu_bridge._keep_said("odom tray_id error 255", 0, 105.5)
+        assert list(bambu_bridge._said) == [
+            [105.5, 0, "odom tray_id error 255", 3]]
+
+    def test_the_same_line_from_another_unit_is_its_own_entry(
+            self, bambu_bridge):
+        bambu_bridge._keep_said("odom tray_id error 255", 0, 104.5)
+        bambu_bridge._keep_said("odom tray_id error 255", 1, 105.0)
+        assert list(bambu_bridge._said) == [
+            [104.5, 0, "odom tray_id error 255", 1],
+            [105.0, 1, "odom tray_id error 255", 1]]
+
+    def test_another_line_from_the_same_unit_is_its_own_entry(
+            self, bambu_bridge):
+        bambu_bridge._keep_said("pull tray 2 from switch", 0, 104.5)
+        bambu_bridge._keep_said("odom tray_id error 255", 0, 105.0)
+        assert list(bambu_bridge._said) == [
+            [104.5, 0, "pull tray 2 from switch", 1],
+            [105.0, 0, "odom tray_id error 255", 1]]
+
+    def test_only_the_newest_lines_are_kept(self, bambu_bridge):
+        # NARRATION_KEPT (24) of them.
+        for i in range(26):
+            bambu_bridge._keep_said(f"line {i}", 0, 100.0 + i)
+        assert [entry[2] for entry in bambu_bridge._said] == [
+            f"line {i}" for i in range(2, 26)]
+
+
+class TestBambuBridgeSaidSince:
+    @staticmethod
+    def _bridge(bambu_bridge: BambuBridge) -> BambuBridge:
+        """
+        :param bambu_bridge: a bridge
+        :return BambuBridge: it, having heard unit 0, unit 1 and a line with no unit named
+        """
+        bambu_bridge._keep_said("early", 0, 100.0)
+        bambu_bridge._keep_said("mate", 1, 110.0)
+        bambu_bridge._keep_said("unnamed", None, 111.0)
+        bambu_bridge._keep_said("late", 0, 112.0)
+        bambu_bridge._keep_said("late", 0, 113.0)
+        return bambu_bridge
+
+    def test_everything_from_a_time_on(self, bambu_bridge):
+        bridge = self._bridge(bambu_bridge)
+        assert bridge.said_since(110.0) == [("mate", 1), ("unnamed", 1),
+                                            ("late", 2)]
+
+    def test_a_line_is_dated_by_when_it_was_last_heard(self, bambu_bridge):
+        bridge = self._bridge(bambu_bridge)
+        assert bridge.said_since(113.0) == [("late", 2)]
+        assert bridge.said_since(113.1) == []
+
+    def test_another_units_lines_are_left_out(self, bambu_bridge):
+        bridge = self._bridge(bambu_bridge)
+        assert bridge.said_since(0.0, unit=0) == [("early", 1), ("unnamed", 1),
+                                                  ("late", 2)]
+        assert bridge.said_since(0.0, unit=1) == [("mate", 1), ("unnamed", 1)]
+
+    def test_nothing_heard(self, bambu_bridge):
+        assert bambu_bridge.said_since(0.0) == []
+
+
 class TestBambuBridgeLatestStatus:
     def test_latest_status_is_a_copy(self, monkeypatch):
         seen: List[dict] = []
@@ -3669,6 +3764,38 @@ class TestBambuBridgeHandleLine:
         for evt in ("mcaddr", "armms", "hb", "mute", "units"):
             bridge.handle_line(json.dumps({"evt": evt}))
         assert bridge.logger.messages == []
+
+    # Narration is kept for the report of a wait that ran out.
+
+    def test_narration_is_kept_with_its_unit_and_time(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.reactor.advance(4.5)
+        heard = bridge.reactor.monotonic()
+        self._say(bridge, " [AMS_DEV] odom tray_id error 255 ", addr=0x0700,
+                  unit=1)
+        bridge.reactor.advance(0.5)
+        self._say(bridge, " [AMS_DEV] odom tray_id error 255 ", addr=0x0700,
+                  unit=1)
+        assert list(bridge._said) == [
+            [heard + 0.5, 1, "[AMS_DEV] odom tray_id error 255", 2]]
+
+    def test_the_heartbeat_is_cut_from_a_kept_line(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        self._say(bridge, "[AMS_IDLE]set ams state switch" + self.HEARTBEAT,
+                  addr=0x0700)
+        assert [entry[1:] for entry in bridge._said] == [
+            [None, "[AMS_IDLE]set ams state switch", 1]]
+
+    def test_a_bare_heartbeat_is_not_kept(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        self._say(bridge, self.HEARTBEAT, addr=0x0700, unit=0)
+        assert list(bridge._said) == []
+
+    def test_the_bridges_own_diagnostics_are_not_kept(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        self._say(bridge, self.HT_MEAS, addr=0x1800, unit=0)
+        self._say(bridge, self.BB_GATE, addr=0x1800, unit=0)
+        assert list(bridge._said) == []
 
     def test_sniff_frames_are_file_only(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
