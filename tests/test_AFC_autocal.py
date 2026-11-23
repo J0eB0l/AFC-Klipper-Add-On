@@ -73,13 +73,23 @@ class AutocalReactor:
 
 
 class AutocalMutex:
-    """Klipper's gcode mutex: held while a command runs."""
+    """Klipper's gcode mutex: held while a command runs; `taken` counts each `with`."""
 
     def __init__(self) -> None:
         self.locked: Any = False
+        self.taken = 0
 
     def test(self) -> Any:
         return self.locked
+
+    def __enter__(self) -> None:
+        # The real one waits here; a test never takes it twice.
+        assert not self.locked
+        self.locked = True
+        self.taken += 1
+
+    def __exit__(self, *exc: Any) -> None:
+        self.locked = False
 
 
 class AutocalGcode:
@@ -1118,6 +1128,12 @@ class TestAFCautocalCalibrate:
         assert cal.printer.gcode.command_scripts == []
         assert cal.logger.messages == [("warning", "AFC_autocal: flow_calibrator not found")]
 
+    def test_missing_flow_calibrator_logs_under_a_borrowed_mutex(self):
+        cal = make_autocal(ready=True)
+        assert cal._calibrate(AutocalLane(), "sub_command") is None
+        assert cal.printer.gcode.command_scripts == []
+        assert cal.logger.messages == [("warning", "AFC_autocal: flow_calibrator not found")]
+
     def test_no_new_k(self):
         cal = make_autocal(calibrator=True, ready=True)
         flow = cal.printer.objects["flow_calibrator"]
@@ -1302,7 +1318,7 @@ class TestAFCautocalDoToolLoaded:
         cal = make_autocal({"auto_calibrate": True}, calibrator=True, ready=True)
         cal._do_tool_loaded(add_autocal_lane(cal, "lane1", 5, tool_loaded=True), "callback")
         assert autocal_threads.started == []
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
             ("info", "lane1: flow calibration gave no new K")]
@@ -1685,7 +1701,7 @@ class TestAFCautocalFetchKAsync:
         cal = make_autocal({"auto_calibrate": True}, calibrator=True, ready=True)
         cal._fetch_k_async(add_autocal_lane(cal, "lane1", None, tool_loaded=True), "callback")
         assert autocal_threads.started == []
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
             ("info", "lane1: flow calibration gave no new K")]
@@ -1705,7 +1721,7 @@ class TestAFCautocalFetchKAsync:
         cal._fetch_k_async(add_autocal_lane(cal, "lane1", 5, tool_loaded=True), "callback")
         assert autocal_threads.started == []
         assert autocal_spoolman.reads == []
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
             ("info", "lane1: flow calibration gave no new K")]
@@ -1827,7 +1843,7 @@ class TestAFCautocalKApplied:
                            calibrator=True, ready=True)
         add_autocal_lane(cal, "lane1", 5, tool_loaded=True)
         cal._k_applied("lane1", 5, None, "callback")
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
             ("info", "lane1: flow calibration gave no new K")]
@@ -1951,7 +1967,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         cal.afc.current_state = State.IDLE
         cal.printer.reactor.run_pending()
         assert cal._cal_pending == set()
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
             ("info", "lane1: flow calibration gave no new K")]
@@ -1999,7 +2015,7 @@ class TestAFCautocalCalibrateWhenLoaded:
         cal.printer.gcode.mutex.locked = False
         cal.printer.reactor.run_pending()
         assert cal._cal_pending == set()
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.printer.gcode.command_scripts == ["FLOW_CALIBRATE"]
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
             ("info", "lane1: flow calibration gave no new K")]
@@ -2054,11 +2070,16 @@ class TestAFCautocalCalibrateWhenLoaded:
                      "calibrate it")]
         assert cal._cal_pending == set()
 
-    def test_happy_runs_with_run_script_runner(self):
+    def test_happy_runs_alone(self):
         cal, lane = self._loaded()
+        gcode = cal.printer.gcode
+        held: List[Any] = []
+        gcode.on_script = lambda script: held.append(gcode.mutex.locked)
         cal._calibrate_when_loaded(lane, "callback")
-        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
-        assert cal.printer.gcode.command_scripts == []
+        assert gcode.command_scripts == ["FLOW_CALIBRATE"]
+        assert gcode.scripts == []
+        assert held == [True]
+        assert gcode.mutex.locked is False
         assert cal._cal_pending == set()
         assert cal.logger.messages == [
             ("info", "lane1: measuring flow K"),
@@ -2091,6 +2112,71 @@ class TestAFCautocalCalibrateWhenLoaded:
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == [
             ("warning", "AFC_autocal: deferred calibrate error: q")]
+
+
+class TestAFCautocalCalibrateAlone:
+    @staticmethod
+    def _loaded() -> Tuple[AFC_autocal, AutocalLane, List[Any]]:
+        """A U1 autocal with lane1, and the mutex's state at each script run."""
+        cal = make_autocal({"auto_calibrate": True}, calibrator=True, ready=True)
+        gcode = cal.printer.gcode
+        held: List[Any] = []
+
+        def measure(script: str) -> None:
+            held.append(gcode.mutex.locked)
+            cal.printer.objects["flow_calibrator"]._current_k["extruder"] = 0.06
+
+        gcode.on_script = measure
+        return cal, add_autocal_lane(cal, "lane1", 5, tool_loaded=True), held
+
+    def test_callback_holds_the_mutex_for_the_script(self):
+        cal, lane, held = self._loaded()
+        gcode = cal.printer.gcode
+        assert cal._calibrate_alone(lane, "callback") == 0.06
+        assert held == [True]
+        assert gcode.mutex.taken == 1
+        assert gcode.mutex.locked is False
+        # The script borrows the mutex held here, where a callback's own would wait for it.
+        assert gcode.command_scripts == ["FLOW_CALIBRATE"]
+        assert gcode.scripts == []
+        assert cal._lane_flow_k == {"lane1": (5, 0.06)}
+        assert cal.logger.messages == [
+            ("debug", "AFC autocal: applied K=0.060000 for lane1 on extruder"),
+            ("info", "lane1: flow K 0.0600 stored")]
+
+    def test_frees_the_mutex_when_the_script_fails(self):
+        cal, lane, held = self._loaded()
+        gcode = cal.printer.gcode
+
+        def refuse(script: str) -> None:
+            held.append(gcode.mutex.locked)
+            raise RuntimeError("q")
+
+        gcode.on_script = refuse
+        with pytest.raises(RuntimeError, match="q"):
+            cal._calibrate_alone(lane, "callback")
+        assert held == [True]
+        assert gcode.mutex.taken == 1
+        assert gcode.mutex.locked is False
+        assert cal._lane_flow_k == {}
+        assert cal.logger.messages == []
+
+    def test_command_runs_within_its_own_mutex(self):
+        cal, lane, held = self._loaded()
+        gcode = cal.printer.gcode
+        gcode.mutex.locked = True
+        gcmd = AutocalGcmd()
+        assert cal._calibrate_alone(lane, gcmd) == 0.06
+        assert held == [True]
+        assert gcode.mutex.taken == 0
+        assert gcode.mutex.locked is True
+        assert gcode.command_scripts == ["FLOW_CALIBRATE"]
+        assert gcode.scripts == []
+        assert gcmd.responses == []
+        assert cal._lane_flow_k == {"lane1": (5, 0.06)}
+        assert cal.logger.messages == [
+            ("debug", "AFC autocal: applied K=0.060000 for lane1 on extruder"),
+            ("info", "lane1: flow K 0.0600 stored")]
 
 
 class TestAFCautocalActiveExtruderName:
