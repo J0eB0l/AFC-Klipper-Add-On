@@ -405,7 +405,7 @@ class AFC_autocal:
         flow_cal = self.printer.lookup_object('flow_calibrator', None)
         if flow_cal is None:
             msg = "AFC_autocal: flow_calibrator not found"
-            if gcmd == "callback":
+            if isinstance(gcmd, str):
                 self.logger.warning(msg)
             else:
                 gcmd.respond_info(msg)
@@ -758,6 +758,10 @@ class AFC_autocal:
             self._cal_pending.discard(name)
             if not getattr(lane, 'tool_loaded', False):
                 return
+            # A command this waited out may have measured the lane itself.
+            if self._get_lane_k(lane) is not None:
+                self.logger.debug(f"AFC autocal: {name} calibration skipped, it has a K now")
+                return
             # FLOW_CALIBRATE only measures the active toolhead extruder, so only calibrate when this
             # lane's tool is the one mounted.
             if not self._lane_on_active_toolhead(lane):
@@ -770,10 +774,26 @@ class AFC_autocal:
                                  f"this lane's tool to calibrate it")
                 return
             self.logger.info(f"{name}: measuring flow K")
-            self._calibrate(lane, gcmd)
+            self._calibrate_alone(lane, gcmd)
         except Exception as e:
             self._cal_pending.discard(name)
             self.logger.warning(f"AFC_autocal: deferred calibrate error: {e}")
+
+    def _calibrate_alone(self, lane: Any, gcmd: AFCGcmd) -> Optional[float]:
+        """
+        Calibrate with the gcode mutex held, so a command sent meanwhile waits for the calibration
+        to end and cannot take its filament or its heat.
+
+        :param lane: The lane to calibrate
+        :param gcmd: command context the calibration runs through
+        :return Optional[float]: the measured K, or None if none produced
+        """
+        if gcmd != "callback":
+            # A command holds the mutex for whatever runs within it.
+            return self._calibrate(lane, gcmd)
+        with self.gcode.get_mutex():
+            # The mutex is held right here, so the calibration borrows it.
+            return self._calibrate(lane, "sub_command")
 
     def _active_extruder_name(self) -> Optional[str]:
         """
@@ -830,7 +850,18 @@ class AFC_autocal:
         if (state is not None
             and str(state).split('.')[-1].lower() != 'idle'):
             return f"state={str(state).split('.')[-1]} (not idle)"
+        # AFC reads idle between the steps of a command that loads a lane and then goes on.
+        if self._command_running():
+            return "a command is running"
         return None
+
+    def _command_running(self) -> bool:
+        """
+        Whether a gcode command is executing (the gcode mutex is held).
+
+        :return bool: True while a command runs
+        """
+        return bool(self.gcode.get_mutex().test())
 
     def _reapply_current_k(self) -> None:
         """
