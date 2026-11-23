@@ -758,6 +758,10 @@ class AFC_autocal:
             self._cal_pending.discard(name)
             if not getattr(lane, 'tool_loaded', False):
                 return
+            # A command this waited out may have measured the lane itself.
+            if self._get_lane_k(lane) is not None:
+                self.logger.debug(f"AFC autocal: {name} calibration skipped, it has a K now")
+                return
             # FLOW_CALIBRATE only measures the active toolhead extruder, so only calibrate when this
             # lane's tool is the one mounted.
             if not self._lane_on_active_toolhead(lane):
@@ -830,7 +834,18 @@ class AFC_autocal:
         if (state is not None
             and str(state).split('.')[-1].lower() != 'idle'):
             return f"state={str(state).split('.')[-1]} (not idle)"
+        # AFC reads idle between the steps of a command that loads a lane and then goes on.
+        if self._command_running():
+            return "a command is running"
         return None
+
+    def _command_running(self) -> bool:
+        """
+        Whether a gcode command is executing (the gcode mutex is held).
+
+        :return bool: True while a command runs
+        """
+        return bool(self.gcode.get_mutex().test())
 
     def _reapply_current_k(self) -> None:
         """
