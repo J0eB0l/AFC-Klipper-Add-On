@@ -405,7 +405,7 @@ class AFC_autocal:
         flow_cal = self.printer.lookup_object('flow_calibrator', None)
         if flow_cal is None:
             msg = "AFC_autocal: flow_calibrator not found"
-            if gcmd == "callback":
+            if isinstance(gcmd, str):
                 self.logger.warning(msg)
             else:
                 gcmd.respond_info(msg)
@@ -774,10 +774,26 @@ class AFC_autocal:
                                  f"this lane's tool to calibrate it")
                 return
             self.logger.info(f"{name}: measuring flow K")
-            self._calibrate(lane, gcmd)
+            self._calibrate_alone(lane, gcmd)
         except Exception as e:
             self._cal_pending.discard(name)
             self.logger.warning(f"AFC_autocal: deferred calibrate error: {e}")
+
+    def _calibrate_alone(self, lane: Any, gcmd: AFCGcmd) -> Optional[float]:
+        """
+        Calibrate with the gcode mutex held, so a command sent meanwhile waits for the calibration
+        to end and cannot take its filament or its heat.
+
+        :param lane: The lane to calibrate
+        :param gcmd: command context the calibration runs through
+        :return Optional[float]: the measured K, or None if none produced
+        """
+        if gcmd != "callback":
+            # A command holds the mutex for whatever runs within it.
+            return self._calibrate(lane, gcmd)
+        with self.gcode.get_mutex():
+            # The mutex is held right here, so the calibration borrows it.
+            return self._calibrate(lane, "sub_command")
 
     def _active_extruder_name(self) -> Optional[str]:
         """
