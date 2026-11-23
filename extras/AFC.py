@@ -132,6 +132,8 @@ class afc:
         self.next_lane_load     = None
         # How far the print file left the filament retracted in each toolhead, by extruder
         self.file_retracts: Dict[Optional[str], float] = {}
+        # What the print file unretracts after the change it asked for, until that is evened out
+        self.file_unretract_due: Optional[float] = None
         self.error_state        = False
         self.current_state      = State.INIT
         self.position_saved     = False
@@ -693,6 +695,7 @@ class afc:
         # A new print never finishes the tool change an earlier one left
         self.resume_toolchange = None
         self.file_retracts = {}
+        self.file_unretract_due = None
         self.number_of_toolchanges = 0
         self.current_toolchange    = -1
         self.print_tool_temperatures = []
@@ -2851,6 +2854,11 @@ class afc:
                 file_retract = (0.0, 0.0)
             if file_retract is not None:
                 self.file_retracts[self.function.get_current_extruder()] = file_retract[0]
+                if not fresh_load:
+                    # A lane that stays in its toolhead is taken as sliced unless the file
+                    # left that toolhead with something else
+                    self.file_retracts.setdefault(next_extruder, file_retract[1])
+                self.file_unretract_due = file_retract[1]
             adjusting_temperature: bool = new_extruder_temp is not None or \
                 (infinite_runout and self.function.get_current_extruder() != next_extruder)
 
@@ -2963,11 +2971,11 @@ class afc:
                     self.resume_toolchange = None
                     extra = self._file_retraction_left(cur_lane, file_retract, fresh_load, paused)
                     if extra < 0:
-                        self._extrude_outside_file(extra)
+                        self.extrude_outside_file(extra)
                     if restore_pos and not paused:
                         self.restore_pos()
                     if extra > 0:
-                        self._extrude_outside_file(extra)
+                        self.extrude_outside_file(extra)
                     total_time = self.afcDeltaTime.log_total_time("Total change time:")
                     if self.afc_stats is not None:
                         self.afc_stats.average_toolchange_time.average_time(total_time)
@@ -2988,7 +2996,7 @@ class afc:
                 self.logger.info("{} already loaded".format(cur_lane.name))
                 extra = self._file_retraction_left(cur_lane, file_retract, False, paused)
                 if extra:
-                    self._extrude_outside_file(extra)
+                    self.extrude_outside_file(extra)
                 if not self.error_state and self.current_toolchange == -1:
                     self.current_toolchange += 1
         # Copilot yes this is a bare exception, ignore please since this is being done on purpose
@@ -3055,12 +3063,41 @@ class afc:
         if (file_retract is None
             or paused):
             return 0.0
+        self.file_unretract_due = None
         extruder = cur_lane.extruder_obj.th_extruder_name
         held = 0.0 if fresh_load else self.file_retracts.get(extruder, file_retract[1])
         self.file_retracts[extruder] = 0.0
         return held - file_retract[1]
 
-    def _extrude_outside_file(self, length: float) -> None:
+    def file_retraction_left_at_resume(self) -> float:
+        """
+        How far to extrude at a resume so the filament is where the print file expects it.
+
+        A change that fails is finished during the pause, where nothing is evened out, and the
+        file goes on to unretract what its slicer planned for that change. A lane loaded since
+        the change began has no record and sits at the nozzle tip.
+
+        :return float: Length to extrude, negative to retract
+        """
+        unretract = self.file_unretract_due
+        self.file_unretract_due = None
+        cur_lane = self.lanes.get(self.current)
+        if (unretract is None
+            or cur_lane is None
+            or not self.function.in_print()):
+            return 0.0
+        extruder = cur_lane.extruder_obj.th_extruder_name
+        held = self.file_retracts.get(extruder, 0.0)
+        self.file_retracts[extruder] = 0.0
+        extra = held - unretract
+        if (extra
+            and not cur_lane.extruder_obj.get_heater().can_extrude):
+            self.logger.info("Not matching the print file's toolchange retraction, "
+                             f"{extruder} is too cold to extrude")
+            return 0.0
+        return extra
+
+    def extrude_outside_file(self, length: float) -> None:
         """
         Extrude, or retract when negative, without moving the print file's E position.
 

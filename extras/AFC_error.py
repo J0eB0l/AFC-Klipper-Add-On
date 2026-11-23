@@ -338,6 +338,11 @@ class afcError:
             or temp_is_paused
             or self.afc.position_saved):
             self.set_error_state(False)
+            # A tool change finished during the pause is evened out after the user's RESUME,
+            # which may purge, and before the print file unretracts
+            extra = self.afc.file_retraction_left_at_resume()
+            if extra < 0:
+                self.afc.extrude_outside_file(extra)
             # Restore position if the printer is homed, otherwise leave it where it is
             if self.afc.function.is_homed(for_move=True):
                 # The user's RESUME puts the head back where it paused, which during a tool
@@ -346,6 +351,8 @@ class afcError:
                     and self.afc.pre_resume_macro):
                     self.afc.run_script(self.afc.pre_resume_macro, gcmd)
                 self.afc.restore_pos(False)
+            if extra > 0:
+                self.afc.extrude_outside_file(extra)
             self.pause = False
             self.pause_in_toolchange = False
 

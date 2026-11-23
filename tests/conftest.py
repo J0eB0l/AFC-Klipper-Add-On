@@ -544,6 +544,8 @@ class MockAFC:
         self.position_saved = False
         self.in_toolchange = False
         self.resume_toolchange = None
+        self.file_retraction_left_at_resume = MagicMock(return_value=0.0)
+        self.extrude_outside_file = MagicMock()
         self.error_timeout = 600
         self.td1_defined = False
         self.td1_present = False

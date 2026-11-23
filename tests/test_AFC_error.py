@@ -1109,6 +1109,76 @@ class TestCmdAfcResume:
         assert err.pause is False
 
 
+class TestCmdAfcResume_FileRetract:
+    """AFC_RESUME evens out a tool change that was finished during the pause, after the user's
+    RESUME and around the move back to the print."""
+
+    LOGS = [
+        ("debug", "AFC_RESUME: not moving in z cur_pos:[0.0, 0.0, 10.0] move_z_pos:0.5"),
+        ("debug", "AFC_RESUME: Before User Restore"),
+        ("debug", "RESUME-Error State: False, Is Paused False, "
+                  "Position_saved False, in toolchange: False"),
+    ]
+
+    def _make(self, extra, homed=True, still_paused=False):
+        err, afc = _make_afc_error()
+        # Paused at the guard and the capture; the user's RESUME then unpauses, or refuses
+        afc.function.is_paused.side_effect = [True, True, still_paused, still_paused]
+        afc.function.is_homed.return_value = homed
+        afc.last_gcode_position = [0.0, 0.0, 0.0, 0.0]
+        afc.gcode_move.last_position = [0.0, 0.0, 10.0]
+        afc.move_z_pos = MagicMock()
+        # The order the user's RESUME, the filament moves and the move back happen in
+        order = []
+        afc.gcode.run_script_from_command.side_effect = lambda *args: order.append("resume")
+        afc.file_retraction_left_at_resume = MagicMock(return_value=extra)
+        afc.extrude_outside_file = MagicMock(side_effect=lambda mm: order.append(mm))
+        afc.restore_pos = MagicMock(side_effect=lambda move_z_first: order.append("restore"))
+        return err, afc, order
+
+    def test_a_retraction_is_made_before_the_head_goes_back(self):
+        err, afc, order = self._make(-4.0)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert order == ["resume", -4.0, "restore"]
+        afc.file_retraction_left_at_resume.assert_called_once_with()
+        assert err.logger.messages == self.LOGS
+
+    def test_an_extrusion_is_made_after_the_head_is_back(self):
+        err, afc, order = self._make(3.0)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert order == ["resume", "restore", 3.0]
+        afc.file_retraction_left_at_resume.assert_called_once_with()
+        assert err.logger.messages == self.LOGS
+
+    def test_a_change_made_as_sliced_moves_no_filament(self):
+        err, afc, order = self._make(0.0)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert order == ["resume", "restore"]
+        afc.file_retraction_left_at_resume.assert_called_once_with()
+        assert err.logger.messages == self.LOGS
+
+    def test_an_unhomed_printer_still_gets_its_retraction(self):
+        err, afc, order = self._make(-4.0, homed=False)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert order == ["resume", -4.0]
+        assert err.logger.messages == self.LOGS
+
+    def test_an_unhomed_printer_still_gets_its_extrusion(self):
+        err, afc, order = self._make(3.0, homed=False)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert order == ["resume", 3.0]
+        assert err.logger.messages == self.LOGS
+
+    def test_a_refused_user_resume_leaves_it_for_the_next_resume(self):
+        err, afc, order = self._make(-4.0, still_paused=True)
+        err.cmd_AFC_RESUME(MockGCodeCommand())
+        assert order == ["resume"]
+        afc.file_retraction_left_at_resume.assert_not_called()
+        assert err.logger.messages == self.LOGS[:2] + [
+            ("info", "AFC_RESUME: the print is still paused, keeping the saved "
+                     "position for the next resume")]
+
+
 # ── cmd_AFC_PAUSE ─────────────────────────────────────────────────────────────
 
     def _pending_toolchange(self, afc, loads):
