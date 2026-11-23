@@ -72,8 +72,18 @@ class AutocalReactor:
             callback(self.now)
 
 
+class AutocalMutex:
+    """Klipper's gcode mutex: held while a command runs."""
+
+    def __init__(self) -> None:
+        self.locked: Any = False
+
+    def test(self) -> Any:
+        return self.locked
+
+
 class AutocalGcode:
-    """Klipper's gcode: registered commands, mux handlers and the scripts run."""
+    """Klipper's gcode: registered commands, mux handlers, the scripts run and the mutex."""
 
     def __init__(self) -> None:
         self.commands: Dict[str, Tuple[Callable[..., Any], Optional[str]]] = {}
@@ -81,6 +91,10 @@ class AutocalGcode:
         self.scripts: List[str] = []
         self.command_scripts: List[str] = []
         self.on_script: Optional[Callable[[str], None]] = None
+        self.mutex = AutocalMutex()
+
+    def get_mutex(self) -> AutocalMutex:
+        return self.mutex
 
     def register_command(self, cmd: str, func: Callable[..., Any],
                          when_not_ready: bool = False, desc: Optional[str] = None) -> None:
@@ -1958,12 +1972,66 @@ class TestAFCautocalCalibrateWhenLoaded:
             ("debug", "AFC autocal: lane1 calibration gave up waiting to settle "
                      "(load in flight)")]
 
+    def test_command_running_waits(self):
+        cal, lane = self._loaded()
+        cal.printer.gcode.mutex.locked = True
+        cal._calibrate_when_loaded(lane, "callback", attempts=0)
+        assert cal.printer.reactor.waketimes() == [1001.0]
+        assert cal._cal_pending == {"lane1"}
+        assert cal.printer.gcode.scripts == []
+        assert cal.logger.messages == []
+
+    def test_command_running_gives_up(self):
+        cal, lane = self._loaded()
+        cal.printer.gcode.mutex.locked = True
+        cal._calibrate_when_loaded(lane, "callback", attempts=240)
+        assert cal.printer.reactor.callbacks == []
+        assert cal._cal_pending == set()
+        assert cal.printer.gcode.scripts == []
+        assert cal.logger.messages == [
+            ("debug", "AFC autocal: lane1 calibration gave up waiting to settle "
+                     "(a command is running)")]
+
+    def test_calibrates_once_the_command_ends(self):
+        cal, lane = self._loaded()
+        cal.printer.gcode.mutex.locked = True
+        cal._calibrate_when_loaded(lane, "callback")
+        cal.printer.gcode.mutex.locked = False
+        cal.printer.reactor.run_pending()
+        assert cal._cal_pending == set()
+        assert cal.printer.gcode.scripts == ["FLOW_CALIBRATE"]
+        assert cal.logger.messages == [
+            ("info", "lane1: measuring flow K"),
+            ("info", "lane1: flow calibration gave no new K")]
+
+    def test_unloaded_by_the_command_it_waited_out(self):
+        cal, lane = self._loaded()
+        cal.printer.gcode.mutex.locked = True
+        cal._calibrate_when_loaded(lane, "callback")
+        lane.tool_loaded = False
+        cal.printer.gcode.mutex.locked = False
+        cal.printer.reactor.run_pending()
+        assert cal._cal_pending == set()
+        assert cal.printer.reactor.callbacks == []
+        assert cal.printer.gcode.scripts == []
+        assert cal.logger.messages == []
+
     def test_unloaded_while_waiting_skips(self):
         cal, lane = self._loaded(tool_loaded=False)
         cal._calibrate_when_loaded(lane, "callback")
         assert cal._cal_pending == set()
         assert cal.printer.gcode.scripts == []
         assert cal.logger.messages == []
+
+    def test_measured_while_waiting_skips(self):
+        cal, lane = self._loaded()
+        cal._set_lane_k(lane, 0.03)
+        cal._calibrate_when_loaded(lane, "callback")
+        assert cal._cal_pending == set()
+        assert cal._lane_flow_k == {"lane1": (5, 0.03)}
+        assert cal.printer.gcode.scripts == []
+        assert cal.logger.messages == [
+            ("debug", "AFC autocal: lane1 calibration skipped, it has a K now")]
 
     def test_off_toolhead_skips_with_message(self):
         cal, lane = self._loaded(toolhead="extruder2")
@@ -2123,6 +2191,34 @@ class TestAFCautocalCalBlockReason:
         cal._ready_time = None
         cal.afc.current_state = None
         assert cal._cal_block_reason() is None
+        assert cal.logger.messages == []
+
+    def test_command_running(self):
+        cal = make_autocal(ready=True)
+        cal.printer.gcode.mutex.locked = True
+        assert cal._cal_block_reason() == "a command is running"
+        cal.afc.current_state = None
+        assert cal._cal_block_reason() == "a command is running"
+        assert cal.logger.messages == []
+
+    def test_state_is_named_before_the_command(self):
+        cal = make_autocal(ready=True)
+        cal.printer.gcode.mutex.locked = True
+        cal.afc.current_state = State.UNLOADING
+        assert cal._cal_block_reason() == "state=Unloading (not idle)"
+        assert cal.logger.messages == []
+
+
+class TestAFCautocalCommandRunning:
+    def test_free(self):
+        cal = make_autocal(ready=True)
+        assert cal._command_running() is False
+        assert cal.logger.messages == []
+
+    def test_held(self):
+        cal = make_autocal(ready=True)
+        cal.printer.gcode.mutex.locked = 1
+        assert cal._command_running() is True
         assert cal.logger.messages == []
 
 
