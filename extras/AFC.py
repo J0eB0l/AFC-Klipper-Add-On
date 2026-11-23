@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import json
+import math
 import re
 import traceback
 import inspect
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
     from extras.AFC_stepper import AFCExtruderStepper
     from extras.AFC_unit import afcUnit
     from extras.AFC_utils import AFCGcmd
+
+#: Speed of the move that evens out a print file's toolchange retraction, in mm/s.
+FILE_RETRACT_SPEED = 30.0
 
 ERROR_STR = "Error trying to import {import_lib}, please rerun install-afc.sh script in your AFC-Klipper-Add-On directory then restart klipper\n\n{trace}"
 
@@ -126,6 +130,8 @@ class afc:
 
         self.current_loading    = None
         self.next_lane_load     = None
+        # How far the print file left the filament retracted in each toolhead, by extruder
+        self.file_retracts: Dict[Optional[str], float] = {}
         self.error_state        = False
         self.current_state      = State.INIT
         self.position_saved     = False
@@ -686,6 +692,7 @@ class afc:
         self.run_script('CLEAR_PAUSE', gcmd="sub_command")
         # A new print never finishes the tool change an earlier one left
         self.resume_toolchange = None
+        self.file_retracts = {}
         self.number_of_toolchanges = 0
         self.current_toolchange    = -1
         self.print_tool_temperatures = []
@@ -1885,6 +1892,7 @@ class afc:
                         self.error.point_snapmaker_resume_at(cur_lane, gcmd)
                     # Update lane and extruder state for tracking.
                     cur_extruder.lane_loaded = cur_lane.name
+                    self.file_retracts.pop(cur_extruder.th_extruder_name, None)
                     self.spool.set_active_spool(cur_lane.spool_id)
                     cur_lane.unit_obj.lane_tool_loaded( cur_lane, gcmd=gcmd )
                     self.save_vars()
@@ -2691,9 +2699,15 @@ class afc:
         Optionally setting NEW_EXTRUDER_TEMP to set and wait for that temperature on the new extruder before
         performing the tool change.
 
+        Optionally setting RETRACT (how far the print file retracted the outgoing filament) and
+        UNRETRACT (how far it will unretract the incoming one). With both, the change extrudes or
+        retracts the difference between where the incoming filament is (at the nozzle tip after a
+        load, still retracted when it stayed in its toolhead) and what the file will unretract.
+
         Usage
         -----
-        `CHANGE_TOOL LANE=<lane> PURGE_LENGTH=<purge_length>(optional) NEW_EXTRUDER_TEMP=<temp>(optional)`
+        `CHANGE_TOOL LANE=<lane> PURGE_LENGTH=<purge_length>(optional)
+        NEW_EXTRUDER_TEMP=<temp>(optional) RETRACT=<length>(optional) UNRETRACT=<length>(optional)`
 
         Example
         ------
@@ -2744,6 +2758,9 @@ class afc:
                                      pause=False, gcmd=gcmd)
                 return
 
+        file_retract = self._file_retract_params(gcmd.get('RETRACT', None),
+                                                 gcmd.get('UNRETRACT', None))
+
         command_line = gcmd.get_commandline()
         self.logger.debug("CHANGE_TOOL: cmd-{}".format(command_line))
 
@@ -2773,7 +2790,7 @@ class afc:
         if change_to_lane:
             change_to_lane.current_map = Tcmd
             self.CHANGE_TOOL(change_to_lane, purge_length, new_extruder_temp=new_extruder_temp,
-                             gcmd=gcmd)
+                             file_retract=file_retract, gcmd=gcmd)
         else:
             self.error.AFC_error(f"Error trying to lookup lane for {Tcmd}", gcmd=gcmd)
 
@@ -2797,7 +2814,9 @@ class afc:
 
     def CHANGE_TOOL(self, cur_lane: AFCLane, purge_length: Optional[float]=None,
                     restore_pos: bool=True, new_extruder_temp: Optional[float]=None,
-                    count_change: bool=True, *, gcmd: AFCGcmd) -> None:
+                    count_change: bool=True,
+                    file_retract: Optional[Tuple[float, float]]=None,
+                    *, gcmd: AFCGcmd) -> None:
         """
         Change to the given lane: unload the lane that is loaded, then load this one.
         A failed unload or load during a print is recorded so that AFC_RESUME can
@@ -2810,6 +2829,8 @@ class afc:
         :param restore_pos: Set False to leave the toolhead where the load left it
         :param new_extruder_temp: Temperature to heat the next extruder to
         :param count_change: Set False when finishing a change already counted
+        :param file_retract: How far the print file retracted the outgoing filament and will
+            unretract the incoming one, from the T line's RETRACT and UNRETRACT
         :param gcmd: command context to run macros through, if any
         """
         try:
@@ -2822,6 +2843,14 @@ class afc:
             self.next_lane_load = cur_lane.name
             next_extruder = cur_lane.extruder_obj.th_extruder_name
             infinite_runout: bool = cur_lane.status == AFCLaneState.INFINITE_RUNOUT
+            fresh_load = cur_lane.extruder_obj.lane_loaded != cur_lane.name
+            if (file_retract is None
+                and infinite_runout
+                and self.file_retracts):
+                # A runout comes mid-print: nothing retracted, nothing to unretract
+                file_retract = (0.0, 0.0)
+            if file_retract is not None:
+                self.file_retracts[self.function.get_current_extruder()] = file_retract[0]
             adjusting_temperature: bool = new_extruder_temp is not None or \
                 (infinite_runout and self.function.get_current_extruder() != next_extruder)
 
@@ -2932,8 +2961,13 @@ class afc:
                 if (self.TOOL_LOAD(cur_lane, purge_length, set_start_time=False, gcmd=gcmd)
                     and not self.error_state):
                     self.resume_toolchange = None
+                    extra = self._file_retraction_left(cur_lane, file_retract, fresh_load, paused)
+                    if extra < 0:
+                        self._extrude_outside_file(extra)
                     if restore_pos and not paused:
                         self.restore_pos()
+                    if extra > 0:
+                        self._extrude_outside_file(extra)
                     total_time = self.afcDeltaTime.log_total_time("Total change time:")
                     if self.afc_stats is not None:
                         self.afc_stats.average_toolchange_time.average_time(total_time)
@@ -2952,6 +2986,9 @@ class afc:
                 # Take call out once transitioned away from KTC
                 self.function.handle_activate_extruder(0, gcmd=gcmd)
                 self.logger.info("{} already loaded".format(cur_lane.name))
+                extra = self._file_retraction_left(cur_lane, file_retract, False, paused)
+                if extra:
+                    self._extrude_outside_file(extra)
                 if not self.error_state and self.current_toolchange == -1:
                     self.current_toolchange += 1
         # Copilot yes this is a bare exception, ignore please since this is being done on purpose
@@ -2974,6 +3011,66 @@ class afc:
             self.next_lane_load = None
             self.function.log_toolhead_pos("Final Change Tool: Error State: {}, Is Paused {}, Position_saved {}, in toolchange: {}, POS: ".format(
                     self.error_state, self.function.is_paused(), self.position_saved, self.in_toolchange ))
+
+    def _file_retract_params(self, retract: Optional[str],
+                             unretract: Optional[str]) -> Optional[Tuple[float, float]]:
+        """
+        Read a T line's RETRACT and UNRETRACT.
+
+        :param retract: RETRACT as given, None when the line has none
+        :param unretract: UNRETRACT as given, None when the line has none
+        :return Optional[Tuple[float, float]]: both lengths, None unless both are lengths
+        """
+        if (retract is None
+            or unretract is None):
+            return None
+        try:
+            # A single-letter command keeps the equals sign in its parameter values
+            lengths = (float(retract.lstrip('=')), float(unretract.lstrip('=')))
+        except ValueError:
+            lengths = (math.nan, math.nan)
+        if (not math.isfinite(lengths[0])
+            or not math.isfinite(lengths[1])
+            or lengths[0] < 0
+            or lengths[1] < 0):
+            self.logger.info("Ignoring RETRACT and UNRETRACT, they must be lengths of 0 or more")
+            return None
+        return lengths
+
+    def _file_retraction_left(self, cur_lane: AFCLane,
+                              file_retract: Optional[Tuple[float, float]],
+                              fresh_load: bool, paused: bool) -> float:
+        """
+        How far to extrude after a change so the filament is where the print file expects it.
+
+        A lane just loaded sits at the nozzle tip and a lane that stayed in its toolhead is still
+        retracted as far as the file left it, while the file unretracts what its slicer planned.
+
+        :param cur_lane: Lane changed to
+        :param file_retract: The T line's RETRACT and UNRETRACT, None when it had none
+        :param fresh_load: True when the change loaded the lane
+        :param paused: True when the change was made during a pause
+        :return float: Length to extrude, negative to retract
+        """
+        if (file_retract is None
+            or paused):
+            return 0.0
+        extruder = cur_lane.extruder_obj.th_extruder_name
+        held = 0.0 if fresh_load else self.file_retracts.get(extruder, file_retract[1])
+        self.file_retracts[extruder] = 0.0
+        return held - file_retract[1]
+
+    def _extrude_outside_file(self, length: float) -> None:
+        """
+        Extrude, or retract when negative, without moving the print file's E position.
+
+        :param length: Length to extrude
+        """
+        move = "Retracting" if length < 0 else "Extruding"
+        self.logger.info(f"{move} {abs(length):.2f} mm to match the print file's toolchange "
+                         "retraction")
+        self.move_e_pos(length, FILE_RETRACT_SPEED, "toolchange retraction")
+        self.gcode_move.base_position[3] += length
 
     def _get_message(self, clear=False):
         """
@@ -3027,6 +3124,8 @@ class afc:
         str["led_state"] = self.led_state
 
         str["multiple_tool_mapping"] = self.enable_multiple_mapping
+        # A T line may carry RETRACT and UNRETRACT
+        str["toolchange_retraction"] = True
         return str
 
     def _webhooks_status(self, web_request):

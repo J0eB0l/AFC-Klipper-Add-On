@@ -136,6 +136,7 @@ def _make_afc():
     obj.message_queue = []
     obj.current_loading = None
     obj.next_lane_load = None
+    obj.file_retracts = {}
     obj.current_state = State.IDLE
     obj.error_state = False
     obj.position_saved = False
@@ -6188,3 +6189,308 @@ class TestAFCLedColorValidation:
     def test_valid_color_stored_on_attribute(self, option):
         obj = self._build({option: "0.2,0.4,0.6,0.8"})
         assert getattr(obj, self.OPTIONS[option]) == "0.2,0.4,0.6,0.8"
+
+
+def _make_afc_for_file_retract():
+    """An afc built through its constructor, with a logger that records its messages."""
+    from tests.conftest import MockConfig, MockLogger, MockPrinter
+    obj = afc(MockConfig(printer=MockPrinter()))
+    obj.logger = MockLogger()
+    return obj
+
+
+def _lane_on(extruder="extruder1"):
+    lane = MagicMock()
+    lane.extruder_obj.th_extruder_name = extruder
+    return lane
+
+
+class TestAfcInitFileRetracts:
+    def test_no_toolhead_holds_a_file_retraction_at_start(self):
+        from tests.conftest import MockConfig, MockPrinter
+        obj = afc(MockConfig(printer=MockPrinter()))
+        assert obj.file_retracts == {}
+
+
+class TestGetStatusToolchangeRetraction:
+    def test_status_says_a_t_line_may_carry_its_retraction(self):
+        obj = _make_afc_for_file_retract()
+        assert obj.get_status()["toolchange_retraction"] is True
+
+
+class TestResetFileCallbackFileRetracts:
+    def test_a_new_print_forgets_the_last_file_retractions(self):
+        obj = _make_afc()
+        obj.error = MagicMock()
+        obj.save_vars = MagicMock()
+        obj.print_data_metadata = None
+        obj.file_retracts = {"extruder": 5.0, "extruder1": 0.0}
+        obj._reset_file_callback()
+        assert obj.file_retracts == {}
+        assert obj.logger.messages == []
+
+
+class TestToolLoadForgetsFileRetract:
+    """A lane loaded into a toolhead sits at the nozzle tip, whatever the file left there."""
+
+    def _make(self):
+        obj, lane, _ = TestToolLoadDisplayStatusLifecycle()._make()
+        obj.load_sequence = MagicMock(return_value=True)
+        obj.snapmaker_printer = False
+        obj.function.is_paused.return_value = False
+        return obj, lane
+
+    def test_a_load_drops_the_record_of_its_toolhead_only(self):
+        obj, lane = self._make()
+        head = lane.extruder_obj.th_extruder_name
+        obj.file_retracts = {head: 5.0, "another": 3.0}
+        assert obj.TOOL_LOAD(lane, gcmd=MagicMock())
+        assert obj.file_retracts == {"another": 3.0}
+        assert obj.logger.messages == [("info", "Loading lane1")]
+
+    def test_a_load_into_a_toolhead_without_a_record_changes_nothing(self):
+        obj, lane = self._make()
+        obj.file_retracts = {"another": 3.0}
+        assert obj.TOOL_LOAD(lane, gcmd=MagicMock())
+        assert obj.file_retracts == {"another": 3.0}
+        assert obj.logger.messages == [("info", "Loading lane1")]
+
+    def test_a_failed_load_keeps_the_record(self):
+        obj, lane = self._make()
+        head = lane.extruder_obj.th_extruder_name
+        obj.load_sequence = MagicMock(return_value=False)
+        obj.file_retracts = {head: 5.0}
+        assert not obj.TOOL_LOAD(lane, gcmd=MagicMock())
+        assert obj.file_retracts == {head: 5.0}
+
+
+class TestFileRetractParams:
+    IGNORED = [("info", "Ignoring RETRACT and UNRETRACT, they must be lengths of 0 or more")]
+
+    def test_both_lengths_are_read(self):
+        obj = _make_afc_for_file_retract()
+        assert obj._file_retract_params("5.5", "0") == (5.5, 0.0)
+        assert obj.logger.messages == []
+
+    def test_a_single_letter_commands_equals_sign_is_dropped(self):
+        obj = _make_afc_for_file_retract()
+        assert obj._file_retract_params("=10", "=2.25") == (10.0, 2.25)
+        assert obj.logger.messages == []
+
+    def test_a_line_without_retract_has_none(self):
+        obj = _make_afc_for_file_retract()
+        assert obj._file_retract_params(None, "5") is None
+        assert obj.logger.messages == []
+
+    def test_a_line_without_unretract_has_none(self):
+        obj = _make_afc_for_file_retract()
+        assert obj._file_retract_params("5", None) is None
+        assert obj.logger.messages == []
+
+    @pytest.mark.parametrize("retract, unretract", [
+        ("ten", "0"),     # RETRACT is not a number
+        ("10", "none"),   # UNRETRACT is not a number
+        ("nan", "0"),     # RETRACT is not finite
+        ("10", "inf"),    # UNRETRACT is not finite
+        ("-1", "0"),      # RETRACT is below 0
+        ("10", "-0.5"),   # UNRETRACT is below 0
+    ])
+    def test_anything_but_two_lengths_is_ignored(self, retract, unretract):
+        obj = _make_afc_for_file_retract()
+        assert obj._file_retract_params(retract, unretract) is None
+        assert obj.logger.messages == self.IGNORED
+
+
+class TestFileRetractionLeft:
+    def test_a_fresh_load_the_file_will_unretract_is_retracted_first(self):
+        obj = _make_afc_for_file_retract()
+        obj.file_retracts = {"extruder1": 7.0}
+        assert obj._file_retraction_left(_lane_on(), (10.0, 4.0), True, False) == -4.0
+        assert obj.file_retracts == {"extruder1": 0.0}
+
+    def test_a_lane_that_stayed_retracted_gets_what_the_file_will_not_unretract(self):
+        obj = _make_afc_for_file_retract()
+        obj.file_retracts = {"extruder1": 7.0}
+        assert obj._file_retraction_left(_lane_on(), (10.0, 4.0), False, False) == 3.0
+        assert obj.file_retracts == {"extruder1": 0.0}
+
+    def test_a_toolhead_with_no_record_is_taken_as_sliced(self):
+        obj = _make_afc_for_file_retract()
+        obj.file_retracts = {"extruder": 7.0}
+        assert obj._file_retraction_left(_lane_on(), (10.0, 4.0), False, False) == 0.0
+        assert obj.file_retracts == {"extruder": 7.0, "extruder1": 0.0}
+
+    def test_a_line_without_the_lengths_leaves_the_filament_and_the_record(self):
+        obj = _make_afc_for_file_retract()
+        obj.file_retracts = {"extruder1": 7.0}
+        assert obj._file_retraction_left(_lane_on(), None, False, False) == 0.0
+        assert obj.file_retracts == {"extruder1": 7.0}
+
+    def test_a_change_during_a_pause_leaves_the_filament_and_the_record(self):
+        obj = _make_afc_for_file_retract()
+        obj.file_retracts = {"extruder1": 7.0}
+        assert obj._file_retraction_left(_lane_on(), (10.0, 4.0), False, True) == 0.0
+        assert obj.file_retracts == {"extruder1": 7.0}
+
+
+class TestExtrudeOutsideFile:
+    def _make(self):
+        obj = _make_afc_for_file_retract()
+        obj.gcode_move = MagicMock()
+        obj.gcode_move.last_position = [1.0, 2.0, 3.0, 50.0]
+        obj.gcode_move.base_position = [0.0, 0.0, 0.0, 20.0]
+        return obj
+
+    def test_an_extrusion_moves_e_and_keeps_the_files_e_position(self):
+        obj = self._make()
+        obj._extrude_outside_file(2.5)
+        obj.gcode_move.move_with_transform.assert_called_once_with([1.0, 2.0, 3.0, 52.5], 30.0)
+        # The file's E position is the last position less the base: 50 - 20 before and after
+        assert obj.gcode_move.base_position == [0.0, 0.0, 0.0, 22.5]
+        assert obj.logger.messages == [
+            ("info", "Extruding 2.50 mm to match the print file's toolchange retraction")]
+
+    def test_a_retraction_moves_e_back_and_keeps_the_files_e_position(self):
+        obj = self._make()
+        obj._extrude_outside_file(-4.0)
+        obj.gcode_move.move_with_transform.assert_called_once_with([1.0, 2.0, 3.0, 46.0], 30.0)
+        assert obj.gcode_move.base_position == [0.0, 0.0, 0.0, 16.0]
+        assert obj.logger.messages == [
+            ("info", "Retracting 4.00 mm to match the print file's toolchange retraction")]
+
+
+class TestCmdChangeTool_FileRetract:
+    def _make(self):
+        obj = _make_afc()
+        obj.CHANGE_TOOL = MagicMock()
+        obj.error = MagicMock()
+        obj.function.check_homed.return_value = True
+        obj._check_bypass = MagicMock(return_value=False)
+        obj.lanes["lane1"] = MagicMock()
+        obj.tool_cmds["T0"] = "lane1"
+        return obj
+
+    def test_a_t_lines_lengths_reach_the_change(self):
+        obj = self._make()
+        obj.cmd_CHANGE_TOOL(_build_gcmd({"RETRACT": "=10", "UNRETRACT": "=0"}, commandline="T0"))
+        assert obj.CHANGE_TOOL.call_args.kwargs["file_retract"] == (10.0, 0.0)
+        assert obj.logger.messages == [("debug", "CHANGE_TOOL: cmd-T0")]
+
+    def test_a_t_line_without_them_changes_as_before(self):
+        obj = self._make()
+        obj.cmd_CHANGE_TOOL(_build_gcmd({}, commandline="T0"))
+        assert obj.CHANGE_TOOL.call_args.kwargs["file_retract"] is None
+        assert obj.logger.messages == [("debug", "CHANGE_TOOL: cmd-T0")]
+
+
+class TestChangeTool_FileRetract:
+    """CHANGE_TOOL keeps what the file left in the toolhead it leaves and evens out the lane it
+    changes to."""
+
+    def _make(self, moves=None):
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        # The order the head goes back and the filament is moved in
+        order = [] if moves is None else moves
+        obj.restore_pos = MagicMock(side_effect=lambda: order.append("restore"))
+        obj._extrude_outside_file = MagicMock(side_effect=lambda mm: order.append(mm))
+        return obj, cur_lane, current_lane
+
+    def test_the_toolhead_left_keeps_the_files_retraction(self):
+        obj, cur_lane, _ = self._make()
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 0.0), gcmd=MagicMock())
+        assert obj.file_retracts == {"extruder0": 6.0, "extruder1": 0.0}
+
+    def test_a_change_without_the_lengths_records_and_moves_nothing(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        obj.file_retracts = {"extruder1": 6.0}
+        obj.CHANGE_TOOL(cur_lane, gcmd=MagicMock())
+        assert obj.file_retracts == {"extruder1": 6.0}
+        assert moves == ["restore"]
+
+    def test_a_fresh_load_is_retracted_before_the_head_goes_back(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 6.0), gcmd=MagicMock())
+        assert moves == [-6.0, "restore"]
+
+    def test_a_lane_that_stayed_retracted_is_extruded_after_the_head_goes_back(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        cur_lane.extruder_obj.lane_loaded = cur_lane.name
+        obj.file_retracts = {"extruder1": 6.0}
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 0.0), gcmd=MagicMock())
+        assert moves == ["restore", 6.0]
+
+    def test_a_change_made_as_sliced_moves_no_filament(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 0.0), gcmd=MagicMock())
+        assert moves == ["restore"]
+
+    def test_a_failed_load_moves_no_filament(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        obj.TOOL_LOAD.return_value = False
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 6.0), gcmd=MagicMock())
+        assert moves == []
+
+    def test_a_runout_in_a_print_with_records_expects_no_unretraction(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        cur_lane.status = AFCLaneState.INFINITE_RUNOUT
+        cur_lane.extruder_obj.lane_loaded = cur_lane.name
+        obj.file_retracts = {"extruder1": 6.0}
+        obj.CHANGE_TOOL(cur_lane, gcmd=MagicMock())
+        # The runout lane waited in its toolhead 6 mm back and the file will not unretract it
+        assert moves == ["restore", 6.0]
+        assert obj.file_retracts == {"extruder0": 0.0, "extruder1": 0.0}
+
+    def test_a_runout_in_a_print_without_records_changes_as_before(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        cur_lane.status = AFCLaneState.INFINITE_RUNOUT
+        obj.CHANGE_TOOL(cur_lane, gcmd=MagicMock())
+        assert moves == ["restore"]
+        assert obj.file_retracts == {}
+
+    def test_a_runouts_own_lengths_are_kept(self):
+        moves = []
+        obj, cur_lane, _ = self._make(moves)
+        cur_lane.status = AFCLaneState.INFINITE_RUNOUT
+        obj.file_retracts = {"extruder1": 6.0}
+        obj.CHANGE_TOOL(cur_lane, file_retract=(2.0, 2.0), gcmd=MagicMock())
+        assert moves == [-2.0, "restore"]
+        assert obj.file_retracts == {"extruder0": 2.0, "extruder1": 0.0}
+
+
+class TestChangeTool_FileRetractSameLane:
+    """A T line for the lane already in the active toolhead evens it out where it is."""
+
+    def _make(self):
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.function.get_current_lane.return_value = cur_lane.name
+        obj.function.get_current_extruder.return_value = "extruder1"
+        obj._extrude_outside_file = MagicMock()
+        return obj, cur_lane
+
+    def test_the_lane_gets_what_the_file_will_not_unretract(self):
+        obj, cur_lane = self._make()
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 2.0), gcmd=MagicMock())
+        # The file left this toolhead 6 mm back and will unretract 2 mm
+        obj._extrude_outside_file.assert_called_once_with(4.0)
+        assert obj.file_retracts == {"extruder1": 0.0}
+        obj.restore_pos.assert_not_called()
+
+    def test_a_lane_where_the_file_expects_it_is_left(self):
+        obj, cur_lane = self._make()
+        obj.CHANGE_TOOL(cur_lane, file_retract=(6.0, 6.0), gcmd=MagicMock())
+        obj._extrude_outside_file.assert_not_called()
+        assert obj.file_retracts == {"extruder1": 0.0}
+
+    def test_a_line_without_the_lengths_moves_nothing(self):
+        obj, cur_lane = self._make()
+        obj.file_retracts = {"extruder1": 6.0}
+        obj.CHANGE_TOOL(cur_lane, gcmd=MagicMock())
+        obj._extrude_outside_file.assert_not_called()
+        assert obj.file_retracts == {"extruder1": 6.0}
