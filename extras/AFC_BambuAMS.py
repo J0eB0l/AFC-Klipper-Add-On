@@ -2796,7 +2796,7 @@ class afcBambuAMS(afcUnit):
                                   f"will not turn a spool that does. Unload the bays and "
                                   f"leave the spools free to spin to dry with rotation. "
                                   f"Drying without it.")
-        # Follower quiet unless a lane on this unit prints.
+        # Follower quiet unless a lane on this unit is in a toolhead.
         self._dry_host_refusal = ""
         self._drying = True
         # Telemetry from before now belongs to the old cycle.
@@ -8476,12 +8476,30 @@ class afcBambuAMS(afcUnit):
         v = b / 100.0  # compressed (100) -> 1.0, empty (0) -> 0.0
         return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
 
+    def _in_idle_toolhead(self, lane: Any) -> bool:
+        """
+        Whether a lane's toolhead is known not to be the active one.
+
+        :param lane: The lane to judge
+        :return bool: True only when AFC names an active extruder and it is not the lane's
+        """
+        try:
+            current = self.afc.function.get_current_extruder()
+        except Exception:
+            current = None
+        ext = getattr(lane, "extruder_obj", None)
+        if (ext is None
+            or not current):
+            return False
+        name = getattr(ext, "th_extruder_name", None) or getattr(ext, "name", None)
+        return (bool(name)
+                and name != current)
+
     def _tool_loaded_lane(self) -> Optional[Any]:
         """
-        Return a lane on this unit threaded to the toolhead and belonging to the active extruder, or
-        None.
+        Return a lane on this unit threaded to a toolhead, the active extruder's first, or None.
 
-        :return Optional[Any]: a tool-loaded, slot-mapped, active lane, or None
+        :return Optional[Any]: a tool-loaded, slot-mapped lane, or None
         """
         # AFC's threaded lane survives a G28 and a Klipper restart.
         try:
@@ -8493,27 +8511,18 @@ class afcBambuAMS(afcUnit):
                 return self.lanes[named]
         except Exception:
             pass
-        current = None
-        try:
-            current = self.afc.function.get_current_extruder()
-        except Exception:
-            current = None
+        idle = None
         for lane in self.lanes.values():
             if not getattr(lane, "tool_loaded", False):
                 continue
             if self._slot_of(lane) is None:
                 continue
-            ext = getattr(lane, "extruder_obj", None)
-            if (ext is not None
-                and current):
-                name = (getattr(ext, "th_extruder_name", None)
-                        or getattr(ext, "name", None))
-                if (name
-                    and name != current):
-                    continue
             # No on_shuttle() check: a docked toolhead answers False after a G28.
-            return lane
-        return None
+            if not self._in_idle_toolhead(lane):
+                return lane
+            if idle is None:
+                idle = lane
+        return idle
 
     def _printing_lane(self) -> Optional[Any]:
         """
@@ -9220,6 +9229,9 @@ class afcBambuAMS(afcUnit):
                 if lane is not loaded:
                     self._engage_follower(loaded, gcmd)  # (re)engage mode:4.
                     lane = self._following_lane
+                elif self._in_idle_toolhead(loaded):
+                    # Held as it is: the extruder position read below is the active toolhead's.
+                    self._follow_last_e = None
                 else:
                     # Re-assert mode:4 if the AMS dropped to 0, only when the extruder asked for
                     # filament within follow_rearm_window.
@@ -9264,16 +9276,10 @@ class afcBambuAMS(afcUnit):
                 if (eventtime - getattr(self, "_follow_standdown_log", 0.0)
                         >= 5.0):
                     self._follow_standdown_log = eventtime
-                    try:
-                        cur_ext = self.afc.function.get_current_extruder()
-                    except Exception:
-                        cur_ext = "?"
                     self.logger.debug(f"{self.name}: standing the follower down "
-                                      f"for {getattr(lane, 'name', '?')} -- no tool-loaded "
-                                      f"lane on this unit (afc.current="
-                                      f"{getattr(self.afc, 'current', None)}, active "
-                                      f"extruder={cur_ext}). If this repeats at a lane that "
-                                      f"IS loaded, the active-extruder gate is the flap.")
+                                      f"for {getattr(lane, 'name', '?')}: no lane of this unit "
+                                      f"is in a toolhead (afc.current="
+                                      f"{getattr(self.afc, 'current', None)}).")
                 self.set_feed_assist(lane, False)
                 lane = self._following_lane
         return lane

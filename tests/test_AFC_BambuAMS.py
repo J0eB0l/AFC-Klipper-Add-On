@@ -3913,6 +3913,19 @@ class TestAfcBambuAMSCmdAFCBambuHeaterStart:
                             "55C for 480min (addr 0x0700, id 1).")]
         assert unit.logger.messages == []
 
+    def test_a_follower_on_a_lane_in_an_idle_toolhead_is_kept(self):
+        printer = make_printer(now=1000.0)
+        add_extruder(printer, "extruder1")
+        unit = make_bambu_unit("Bambu_AMS_2", printer=printer, model="ams2",
+                               ams_index=1, lanes=[LaneSpec(
+                                   "lane5", 1, tool_loaded=True,
+                                   values={"extruder": "extruder1"})])
+        unit._following_lane = unit.lanes["lane5"]
+        assert unit.afc.function.get_current_extruder() == "extruder"
+        gcmd = self._start(unit)
+        assert unit._following_lane is unit.lanes["lane5"]
+        self._started(unit, gcmd)
+
     def test_an_addressing_override_needs_force(self):
         # A mismatch on either half would target another unit's heater.
         for params, shown in (({"AMSID": 2}, "2/0x0700"),
@@ -21640,6 +21653,85 @@ class TestAfcBambuAMSFpsBufferValue:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSInIdleToolhead:
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch,
+              extruder: str = "extruder1") -> afcBambuAMS:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param extruder: the extruder lane1 is loaded in
+        :return afcBambuAMS: a unit on a two-extruder printer whose toolhead
+            is on "extruder"
+        """
+        printer = make_printer(monkeypatch=monkeypatch)
+        add_extruder(printer, "extruder1")
+        return make_bambu_unit(printer=printer, lanes=[LaneSpec(
+            "lane1", 0, tool_loaded=True, values={"extruder": extruder})])
+
+    def test_a_lane_on_another_extruder_is_idle(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        assert unit.afc.function.get_current_extruder() == "extruder"
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is True
+        assert unit.logger.messages == []
+
+    def test_a_lane_on_the_active_extruder_is_not(self, monkeypatch):
+        unit = self._unit(monkeypatch, extruder="extruder")
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is False
+        assert unit.logger.messages == []
+
+    def test_no_extruder_object_is_not_idle(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        unit.lanes["lane1"].extruder_obj = None
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is False
+        assert unit.logger.messages == []
+
+    def test_no_active_answer_is_not_idle(self, monkeypatch):
+        # A docked toolhead after a G28 or a restart: afcFunction cannot name an active extruder.
+        unit = self._unit(monkeypatch)
+        for tool in unit.afc.tools.values():
+            monkeypatch.setattr(tool, "on_shuttle", lambda: False)
+        assert unit.afc.function.get_current_extruder() is None
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is False
+        assert unit.logger.messages == []
+
+    def test_a_failing_active_lookup_is_not_idle(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+
+        def _broken() -> Optional[str]:
+            raise RuntimeError("no toolhead")
+
+        monkeypatch.setattr(unit.afc.function, "get_current_extruder",
+                            _broken)
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is False
+        assert unit.logger.messages == []
+
+    def test_the_toolhead_s_extruder_name_is_the_one_compared(self,
+                                                             monkeypatch):
+        unit = self._unit(monkeypatch)
+        ext = unit.lanes["lane1"].extruder_obj
+        assert ext.name == "extruder1"
+        ext.th_extruder_name = "extruder"
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is False
+        assert unit.logger.messages == []
+
+    def test_the_afc_extruder_name_stands_in_for_a_missing_one(self,
+                                                              monkeypatch):
+        unit = self._unit(monkeypatch)
+        ext = unit.lanes["lane1"].extruder_obj
+        ext.th_extruder_name = None
+        assert ext.name == "extruder1"
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is True
+        assert unit.logger.messages == []
+
+    def test_an_unnamed_extruder_is_not_idle(self, monkeypatch):
+        unit = self._unit(monkeypatch)
+        ext = unit.lanes["lane1"].extruder_obj
+        ext.th_extruder_name = None
+        ext.name = None
+        assert unit._in_idle_toolhead(unit.lanes["lane1"]) is False
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSToolLoadedLane:
     @staticmethod
     def _unit(monkeypatch: pytest.MonkeyPatch,
@@ -21667,10 +21759,22 @@ class TestAfcBambuAMSToolLoadedLane:
         assert unit._tool_loaded_lane() is unit.lanes["lane1"]
         assert unit.logger.messages == []
 
-    def test_inactive_extruder_skipped(self, monkeypatch):
+    def test_a_lane_in_an_idle_toolhead_is_returned(self, monkeypatch):
+        # Loaded is the whole condition: its follower holds while another toolhead prints.
         unit = self._unit(monkeypatch, [LaneSpec(
             "lane1", 0, tool_loaded=True, values={"extruder": "extruder1"})])
-        assert unit._tool_loaded_lane() is None
+        assert unit.afc.function.get_current_extruder() == "extruder"
+        assert unit._tool_loaded_lane() is unit.lanes["lane1"]
+        assert unit.logger.messages == []
+
+    def test_the_first_of_two_lanes_in_idle_toolheads_is_returned(
+            self, monkeypatch):
+        unit = self._unit(monkeypatch, [
+            LaneSpec("lane1", 0, tool_loaded=True,
+                     values={"extruder": "extruder1"}),
+            LaneSpec("lane2", 1, tool_loaded=True,
+                     values={"extruder": "extruder1"})])
+        assert unit._tool_loaded_lane() is unit.lanes["lane1"]
         assert unit.logger.messages == []
 
     def test_active_preferred_over_inactive(self, monkeypatch):
@@ -23165,6 +23269,68 @@ class TestAfcBambuAMSCheckFeedStopped:
         assert "_feed_stop_t" not in vars(unit)
 
 
+class TestAfcBambuAMSAutoArm:
+    @staticmethod
+    def _unit(monkeypatch: pytest.MonkeyPatch, *, following: bool = True
+              ) -> afcBambuAMS:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param following: lane1 is the followed lane
+        :return afcBambuAMS: a unit resting at state 0 on a two-extruder
+            printer whose toolhead is on "extruder", lane1 loaded in
+            "extruder1", the last extrusion a second before 10.0
+        """
+        printer = make_printer(monkeypatch=monkeypatch)
+        add_extruder(printer, "extruder1")
+        unit = make_bambu_unit(
+            printer=printer, bridge=FakeBridge(status={"fstate": 0}),
+            lanes=[LaneSpec("lane1", 0, tool_loaded=True,
+                            values={"extruder": "extruder1"})],
+            slots=[slot_info(0, material="PLA")])
+        unit.afc.toolhead.e_pos = 50.0
+        unit._follow_last_e = 5.0
+        unit._follow_last_demand = 9.0
+        if following:
+            unit._following_lane = unit.lanes["lane1"]
+        return unit
+
+    def test_a_lane_in_an_idle_toolhead_keeps_its_follower(self,
+                                                          monkeypatch):
+        unit = self._unit(monkeypatch)
+        lane = unit.lanes["lane1"]
+        assert unit.afc.function.get_current_extruder() == "extruder"
+        assert unit._auto_arm(10.0, lane, "callback") is lane
+        assert unit._bridge.sent == []
+        assert unit._following_lane is lane
+        # The other toolhead's extrusion is not this lane's demand.
+        assert unit._follow_last_e is None
+        assert unit._follow_last_demand == 9.0
+        assert "_follow_reassert_last" not in vars(unit)
+        assert unit.logger.messages == []
+
+    def test_it_is_re_armed_on_demand_once_its_toolhead_is_active(
+            self, monkeypatch):
+        # The same unit with its toolhead active re-arms, so the test above shows the idle hold.
+        unit = self._unit(monkeypatch)
+        lane = unit.lanes["lane1"]
+        unit.afc.toolhead.set_extruder(
+            unit.printer.lookup_object("extruder1"), 50.0)
+        assert unit.afc.function.get_current_extruder() == "extruder1"
+        assert unit._auto_arm(10.0, lane, "callback") is lane
+        assert unit._bridge.sent == [_bambu_p5_assist(True)]
+        assert unit._follow_last_demand == 10.0
+        assert unit._follow_reassert_last == 10.0
+        assert unit.logger.messages == []
+
+    def test_a_lane_loaded_in_an_idle_toolhead_is_engaged(self, monkeypatch):
+        unit = self._unit(monkeypatch, following=False)
+        lane = unit.lanes["lane1"]
+        assert unit._auto_arm(10.0, None, "callback") is lane
+        assert unit._bridge.sent == TestAfcBambuAMSFollowTick.ENGAGE
+        assert unit._following_lane is lane
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSDetectorTick:
     RESUMED = ("debug", "Bambu_AMS_1: print resumed, re-arming the "
                        "follower.")
@@ -23225,6 +23391,22 @@ class TestAfcBambuAMSDetectorTick:
         assert unit.afc.error.messages == []
         assert unit._fault_seen == 0
         assert unit.logger.messages == [self.RESUMED]
+
+    def test_a_lane_in_an_idle_toolhead_is_checked_too(self, monkeypatch):
+        bridge = FakeBridge(fault=(3, "feed finish -1, stall", 1.6))
+        bridge.silent = 0.2
+        printer = make_printer(monkeypatch=monkeypatch,
+                               print_state="printing")
+        add_extruder(printer, "extruder1")
+        unit = make_bambu_unit(printer=printer, bridge=bridge, lanes=[
+            LaneSpec("lane1", 0, tool_loaded=True,
+                     values={"extruder": "extruder1"})])
+        assert unit.afc.function.get_current_extruder() == "extruder"
+        assert unit._detector_tick(10.0) == pytest.approx(10.1)
+        assert unit.afc.error.messages == [("AFC_error", _P5_NARRATED)]
+        assert unit._fault_seen == 3
+        assert unit._bridge.sent == [_bambu_p5_assist(False)]
+        assert unit.logger.messages == []
 
     def test_a_raising_check_does_not_end_the_tick(self, monkeypatch):
         # A reactor timer that raises takes Klipper down with it.
@@ -23536,10 +23718,16 @@ class TestAfcBambuAMSFollowTick:
         assert unit._follow_standdown_log == 10.0
         assert unit.logger.messages == [
             ("debug", "Bambu_AMS_1: standing the follower down for "
-                      "lane1 -- no tool-loaded lane on this unit "
-                      "(afc.current=None, active extruder=extruder). If this "
-                      "repeats at a lane that IS loaded, the active-extruder "
-                      "gate is the flap.")]
+                      "lane1: no lane of this unit is in a toolhead "
+                      "(afc.current=None).")]
+
+    def test_a_lane_in_an_idle_toolhead_is_not_stood_down(self, monkeypatch):
+        unit = TestAfcBambuAMSAutoArm._unit(monkeypatch)
+        lane = unit.lanes["lane1"]
+        assert unit._follow_tick(10.0) == pytest.approx(10.1)
+        assert unit._bridge.sent == []
+        assert unit._following_lane is lane
+        assert unit.logger.messages == []
 
     def test_the_stand_down_line_is_rate_limited(self, monkeypatch):
         unit = self._unit(monkeypatch, loaded=False, following=True)
