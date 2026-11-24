@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 from extras.AFC_ACE import (
     afcACE, ACEConnection, ACESerialError, ACETimeoutError, REQUEST_TIMEOUT,
-    _ACE_CLAIMED_PORTS,
+    FEED_SPEED_CEILING, HUB_SWITCH_STEP, HUB_SWITCH_TRIES, _ACE_CLAIMED_PORTS,
 )
 
 if TYPE_CHECKING:
@@ -71,6 +71,11 @@ CALIBRATE_UNLOAD_TAKEUP = 40.0
 # A load's feed runs this far past where a calibration saw the filament touch
 # the extruder gears, so it ends pressed into them.
 CALIBRATE_PRESS = 35.0
+# A hub calibration backs off the hub's switch at this speed (mm/s), so the
+# unwind stops close to where the switch clears, and reads the switch this
+# often (s) while a move runs.
+HUB_SWITCH_SPEED = 25.0
+HUB_SWITCH_POLL = 0.1
 HEADER_LEN = 7
 TRAILER_LEN = 3
 MIN_FRAME_LEN = HEADER_LEN + TRAILER_LEN
@@ -1746,6 +1751,110 @@ class afcACE2(afcACE):
             or ratio > 1.1):
             return 1.0
         return ratio
+
+    def _calibrate_hub_inner(self, cur_lane: AFCLane) -> Tuple[bool, str, float]:
+        """
+        Measure `dist_hub` on the unit's own feed count instead of in steps:
+        one feed stopped when the hub's switch trips, a slow unwind stopped
+        when it clears, then `hub_clear_move_dis` more. The base method
+        answers what cannot be calibrated.
+
+        :param cur_lane: Lane to calibrate.
+        :return tuple: (success, message, measured_distance).
+        """
+        hub = self._hub_switch(cur_lane)
+        if (hub is None
+            or hub.state
+            or not self._ace
+            or not self._ace.connected):
+            return super()._calibrate_hub_inner(cur_lane)
+        slot = self._get_slot(cur_lane.name)
+        # The unit drives one slot at a time: a feed is not answered while
+        # another slot runs feed assist.
+        for other_slot in list(self._feed_assist_active):
+            if other_slot != slot:
+                self._stop_feed_assist(other_slot)
+        max_distance = 4000
+        self.logger.raw(f"Calibrating dist_hub for {cur_lane.name} on the unit's feed count "
+                        f"(max {max_distance}mm)")
+        fed = self._run_to_hub_switch(slot, hub, max_distance, self.feed_speed, True)
+        if not hub.state:
+            if fed:
+                self.lane_move(cur_lane, -fed, None)
+            return False, (f"Hub sensor did not trigger after {fed or 0.0:.0f}mm. "
+                           "Check filament path and hub sensor wiring."), fed or 0.0
+        backed = self._run_to_hub_switch(slot, hub, -HUB_SWITCH_STEP * HUB_SWITCH_TRIES,
+                                         HUB_SWITCH_SPEED, False)
+        if hub.state:
+            return False, ("Hub sensor did not clear while backing off it. "
+                           "Check the hub for stuck filament."), fed or 0.0
+        cleared: Optional[float] = 0.0
+        if hub.hub_clear_move_dis > 0:
+            cleared = self._run_to_hub_switch(slot, hub, -hub.hub_clear_move_dis,
+                                              self.retract_speed, None)
+        if (fed is None
+            or backed is None
+            or cleared is None):
+            return False, ("The unit did not report how far it moved the lane, dist_hub is "
+                           "unchanged."), 0.0
+        self.logger.info(f"ACE hub calibrate: switch tripped {fed:.1f}mm out, cleared "
+                         f"{backed:.1f}mm back")
+
+        # A staged lane started dist_hub out; any other started at the slot,
+        # ahead of the unit's own staging distance.
+        start = cur_lane.dist_hub if cur_lane.loaded_to_hub else -self.stage_initial_dist
+        old_dist = cur_lane.dist_hub
+        new_dist = round(max(start + fed - backed - cleared, 0.0), 2)
+        cal_msg = f"\n dist_hub: New: {new_dist} Old: {old_dist}"
+        cur_lane.dist_hub = new_dist
+        cur_lane.loaded_to_hub = True
+        self.afc.save_vars()
+        self.afc.function.ConfigRewrite(cur_lane.fullname, "dist_hub", new_dist, cal_msg)
+        return True, f"dist_hub calibration: {new_dist}mm (was {old_dist}mm)", new_dist
+
+    def _run_to_hub_switch(self, slot: int, hub: Any, distance: float, speed: float,
+                           until: Optional[bool]) -> Optional[float]:
+        """
+        Run one feed or unwind and stop it once the hub's switch reads `until`.
+        The unit's own count of the move is how far the lane went.
+
+        :param slot: 0-based ACE slot index.
+        :param hub: The lane's hub, which has a real switch.
+        :param distance: Signed distance in mm; positive feeds, negative unwinds.
+        :param speed: Speed of the move in mm/s.
+        :param until: Switch state that stops the move, None to let it run out.
+        :return Optional[float]: mm the unit counted for the move, or None when
+            the move was refused or the unit could not say.
+        """
+        reactor = self.afc.reactor
+        length = abs(distance)
+        try:
+            self._wait_for_ace_ready()
+            if distance > 0:
+                self._ace.feed_filament(slot, length, speed)
+            else:
+                self._ace.unwind_filament(slot, length, speed)
+        except Exception as e:
+            self.logger.error(f"ACE hub calibrate: move failed: {e}")
+            return None
+        last_moving = reactor.monotonic()
+        deadline = last_moving + 1.5 * length / min(max(speed, 1.0), FEED_SPEED_CEILING) + 15.0
+        # A move that ran out, or never started, shows no motion for the
+        # unit's departure timeout.
+        while bool(hub.state) is not until:
+            now = reactor.monotonic()
+            try:
+                moving = self._slot_is_moving(self._ace.get_status(timeout=2.0), slot)
+            except Exception:
+                moving = True
+            if moving:
+                last_moving = now
+            if (now > deadline
+                or now - last_moving >= self.feed_departure_timeout):
+                break
+            reactor.pause(now + HUB_SWITCH_POLL)
+        self._stop_feed_at_sensor(slot)
+        return self._last_feed_length(slot)
 
     cmd_AFC_ACE_IDENTIFY_help = "Blink an ACE 2's lane LEDs to show which unit it is"
     def cmd_AFC_ACE_IDENTIFY(self, gcmd: GCodeCommand) -> None:
