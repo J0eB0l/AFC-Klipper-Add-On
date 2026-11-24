@@ -2349,6 +2349,15 @@ class afcACE(afcUnit):
         errored = self._last_move_error == "feed_error"
         return errored, success
 
+    def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
+        """
+        Free a filament tip caught in the unit's buffer before a load feed is
+        resent. The V1 ACE has no buffer sensors, so it does nothing here.
+
+        :param slot: 0-based ACE slot index.
+        :param cur_lane: Lane being loaded.
+        """
+
     def _ace_load_inner(self, cur_lane: AFCLane, cur_extruder: Any, gcmd: AFCGcmd) -> bool:
         """
         ACE custom load, filament transport only.
@@ -2444,6 +2453,7 @@ class afcACE(afcUnit):
                         dist -= fed
                     if dist < 0.5:
                         break
+                    self._clear_tip_snag(slot, cur_lane)
                     self.logger.info(f"ACE load: {cur_lane.name} hit a feed error" +
                                      (f" after {fed:.0f}mm" if fed else "") +
                                      f", feeding the remaining {dist:.0f}mm again")

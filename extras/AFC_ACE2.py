@@ -41,6 +41,8 @@ from extras.AFC_ACE import (
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
+    from extras.AFC_lane import AFCLane
+    from gcode import GCodeCommand
     from reactor import SelectReactor as Reactor
 
 _logger = logging.getLogger("AFC_ACE2")
@@ -91,6 +93,7 @@ class Cmd:
     SET_VALVE = 66
     FILAMENT_IDENTIFY = 68
     RFID_TEST = 69
+    FLASH_LED = 70
     SET_FAN = 71
     # Opcode 73 (GET_SENSOR_STATE) returns the 17-channel filament-sensor
     # bitmask; kept under both names for clarity.
@@ -131,6 +134,13 @@ FEED_MODE_FEED = 0
 FEED_MODE_ROLLBACK = 1
 FEED_MODE_ASSIST = 2
 FEED_MODE_ROLLBACK_ASSIST = 3
+
+# FLASH_LED (opcode 70) payload that blinks the four lane LEDs: two rounds of
+# five slow flashes, about 6 s.
+# Field 1 is a component mask; 0x0F is the four lane LEDs, and its other bits
+# drive other parts of the unit, so only these values are ever sent.
+# Fields 2-6 are the blink pattern.
+FLASH_LED_LANES = ((1, 0x0F), (2, 2), (3, 0), (4, 4), (5, 0), (6, 0))
 
 # Opcodes whose response reports a status/error in protobuf field 1 (0 = ok).
 # For every other opcode field 1 is data; the feed/rollback family's error_2
@@ -378,6 +388,8 @@ def method_to_v2(method: str, params: Optional[Dict[str, Any]]) -> Tuple[int, by
         return Cmd.DRYING, (pb_uint32(1, temp) + pb_uint32(2, duration) + pb_uint32(3, fan_on))
     if method == 'drying_stop':
         return Cmd.DRYING, pb_uint32(1, 0) + pb_uint32(2, 0)
+    if method == 'flash_led':
+        return Cmd.FLASH_LED, b''.join(pb_uint32(n, v) for n, v in FLASH_LED_LANES)
     if method == 'set_fan_speed':
         speed = int(params.get('speed', 0))
         return Cmd.SET_FAN, (pb_uint32(1, speed) + pb_bool(2, speed > 0) + pb_bool(3, speed > 0))
@@ -1223,6 +1235,13 @@ class afcACE2(afcACE):
                 f"feed_check_length / {ACE2_ENCODER_SCALE:.4f}).")
             raise config.error(error_str)
         self._stuck_detection = config.getboolean("stuck_spool_detection", True)
+        # A filament tip thicker than the filament (a formed or blobbed tip) can
+        # catch the entry of the buffer plunger's tube and drag the plunger to
+        # its end, which stops the filament and trips the slip check. Before a
+        # load feed is resent after a feed error, back the lane off this far so
+        # the plunger can spring back to rest. 0 turns it off.
+        self.snag_backoff_length = config.getfloat("snag_backoff_length", 5.0,
+                                                   minval=0.0, maxval=20.0)
         # Slots running rollback assist for an unload (see _start_unload_assist).
         self._rollback_assist_active: set[int] = set()
         # Staging: skip_factory_autostage turns the factory identify off on
@@ -1247,6 +1266,9 @@ class afcACE2(afcACE):
         # The unit turns the identify back on across a reset, so set it on every
         # connect and reconnect.
         self.printer.register_event_handler("afc_ace:connected", self._handle_ace_connected)
+        self.gcode.register_mux_command('AFC_ACE_IDENTIFY', "UNIT", self.name,
+                                        self.cmd_AFC_ACE_IDENTIFY,
+                                        desc=self.cmd_AFC_ACE_IDENTIFY_help)
 
     def _apply_feed_check(self) -> None:
         """
@@ -1283,6 +1305,85 @@ class afcACE2(afcACE):
         except Exception as e:
             self.logger.warning(
                 f"ACE2 {self.name}: factory identify {state} failed (non-fatal): {e}")
+
+    # How long the buffer plunger gets to come back to rest after a back-off.
+    _SNAG_REST_TIMEOUT = 0.5
+
+    def _buffer_reading(self, slot: int) -> str:
+        """
+        One slot's buffer switches, for the tip snag log lines.
+
+        :param slot: 0-based ACE slot index.
+        :return str: e.g. "rest=1 back=0 full=0", or "unread" when the read fails.
+        """
+        try:
+            state = self._ace.get_sensor_state()
+            s = state['slot_sensors'][slot]
+            return (f"rest={int(s['buf_rst'])} back={int(s['buf_back'])} "
+                    f"full={int(state['buf_feed'])}")
+        except Exception:
+            return "unread"
+
+    def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
+        """
+        Back the lane off snag_backoff_length mm before a load feed is resent
+        after a feed error, so a tip caught at the buffer tube's entry lets go
+        and the plunger springs back to rest. The buffer switches are logged
+        before and after.
+
+        :param slot: 0-based ACE slot index.
+        :param cur_lane: Lane being loaded.
+        """
+        dist = self.snag_backoff_length
+        if (dist <= 0
+            or self._ace is None
+            or not self._ace.connected):
+            return
+        before = self._buffer_reading(slot)
+        self.logger.info(f"ACE load: {cur_lane.name} backing off {dist:.0f}mm to free a "
+                         f"caught tip (buffer {before})")
+        try:
+            self._wait_for_ace_ready()
+            self._ace.unwind_filament(slot, dist, self.retract_speed)
+            self._wait_for_feed_complete(slot, dist, self.retract_speed)
+        except Exception as e:
+            self.logger.warning(f"ACE load: {cur_lane.name} back-off failed: {e}")
+            return
+        reactor = self.afc.reactor
+        deadline = reactor.monotonic() + self._SNAG_REST_TIMEOUT
+        after = self._buffer_reading(slot)
+        while (not after.startswith("rest=1")
+               and reactor.monotonic() < deadline):
+            reactor.pause(reactor.monotonic() + 0.1)
+            after = self._buffer_reading(slot)
+        self.logger.info(f"ACE load: {cur_lane.name} after back-off, buffer {after}")
+
+    cmd_AFC_ACE_IDENTIFY_help = "Blink an ACE 2's lane LEDs to show which unit it is"
+    def cmd_AFC_ACE_IDENTIFY(self, gcmd: GCodeCommand) -> None:
+        """
+        Blink the four lane LEDs of this ACE 2 for about 6 seconds, to tell
+        which physical unit a config name belongs to. Only the LEDs change;
+        no motor, dryer or slot setting is touched.
+
+        Usage
+        -------
+        `AFC_ACE_IDENTIFY UNIT=<unit>`
+
+        Example
+        -------
+        ```
+        AFC_ACE_IDENTIFY UNIT=Ace2_1
+        ```
+        """
+        if (not self._ace
+            or not self._ace.connected):
+            gcmd.respond_info("ACE not connected")
+            return
+        try:
+            self._ace.send_command("flash_led")
+            gcmd.respond_info(f"{self.name}: blinking its lane LEDs")
+        except Exception as e:
+            gcmd.respond_info(f"Error blinking {self.name}: {e}")
 
     # ACE2 slot states that mean the encoder/odometer disagrees with the
     # commanded motor move, a real upstream jam, tangle, slip, or motor fault.

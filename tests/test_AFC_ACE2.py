@@ -46,6 +46,7 @@ from tests.ace_helpers import (
     make_ace2_unit,
     make_ace_connection,
     make_fake_ace_connection,
+    make_gcmd,
     reset_ace_globals,
 )
 
@@ -77,6 +78,7 @@ class Ace2Wire:
     SET_FEED_CHECK = 19
     GET_TEMP = 64
     FILAMENT_IDENTIFY = 68
+    FLASH_LED = 70
     SET_FAN = 71
     GET_SENSOR_STATE = 73
     GET_FEED_INFO = 76
@@ -460,6 +462,12 @@ class TestMethodToV2:
     def test_set_fan_speed_off(self):
         assert self._map("set_fan_speed", {"speed": 0}) == (
             (71, bytes([0x08, 0x00, 0x10, 0x00, 0x18, 0x00])), [])
+
+    def test_flash_led_lanes_only(self):
+        # mask 0x0F (the four lane LEDs), then the blink pattern 2, 0, 4, 0, 0.
+        assert self._map("flash_led", None) == (
+            (70, bytes([0x08, 0x0F, 0x10, 0x02, 0x18, 0x00,
+                        0x20, 0x04, 0x28, 0x00, 0x30, 0x00])), [])
 
     def test_set_rfid_enable_true(self):
         assert self._map("set_rfid_enable", {"index": 1, "enable": True}) == (
@@ -3100,3 +3108,151 @@ class TestAfcACE2StopFeedAssist:
         unit._stop_feed_assist(0)
         assert unit._rollback_assist_active == set()
 
+
+class TestAfcACE2CmdIdentify:
+    def test_registered_for_the_unit(self):
+        unit = make_ace2_unit()
+
+        handler = unit.printer.gcode.mux_commands[("AFC_ACE_IDENTIFY", "UNIT", "Ace2_1")]
+
+        assert handler == unit.cmd_AFC_ACE_IDENTIFY
+
+    def test_not_connected(self):
+        unit = make_ace2_unit()
+        unit._ace.connected = False
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_IDENTIFY(gcmd)
+
+        assert gcmd.messages == [("info", "ACE not connected")]
+        assert unit._ace.commands == []
+
+    def test_without_link(self):
+        unit = make_ace2_unit(connection=None)
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_IDENTIFY(gcmd)
+
+        assert gcmd.messages == [("info", "ACE not connected")]
+
+    def test_success_sends_flash_led(self):
+        unit = make_ace2_unit()
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_IDENTIFY(gcmd)
+
+        assert unit._ace.commands == [("flash_led", {})]
+        assert gcmd.messages == [("info", "Ace2_1: blinking its lane LEDs")]
+        assert unit.printer.logger.messages == []
+
+    def test_error(self):
+        unit = make_ace2_unit()
+        unit._ace.set_reply("flash_led", RuntimeError("timed out"))
+        gcmd = make_gcmd()
+
+        unit.cmd_AFC_ACE_IDENTIFY(gcmd)
+
+        assert gcmd.messages == [("info", "Error blinking Ace2_1: timed out")]
+        assert unit._ace.commands == [("flash_led", {})]
+
+
+class TestAfcACE2ClearTipSnag:
+    #: GET_SENSOR_STATE with slot 3 dragged to the full end, then back at rest.
+    CAUGHT = {"slot_sensors": [{"buf_rst": True, "buf_back": False}] * 3
+              + [{"buf_rst": False, "buf_back": False}], "buf_feed": True}
+    REST = {"slot_sensors": [{"buf_rst": True, "buf_back": False}] * 4, "buf_feed": False}
+
+    @staticmethod
+    def _unit(**values: Any) -> Tuple[afcACE2, Any]:
+        """
+        :param values: [AFC_ACE2] options
+        :return tuple: the unit and lane3 (slot 3)
+        """
+        unit = make_ace2_unit(lanes=[LaneSpec("lane3", slot=3, prep=True)], values=values)
+        return unit, unit.lanes["lane3"]
+
+    def test_backs_off_and_logs_the_buffer_before_and_after(self):
+        unit, lane = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.CAUGHT, self.REST)
+
+        unit._clear_tip_snag(3, lane)
+
+        assert [c for c in unit._ace.commands if c[0] == "unwind_filament"] == [
+            ("unwind_filament", {"index": 3, "length": 5.0, "speed": 100.0, "mode": "normal"})]
+        assert unit.logger.messages == [
+            ("info", "ACE load: lane3 backing off 5mm to free a caught tip "
+                     "(buffer rest=0 back=0 full=1)"),
+            ("debug", "ACE wait: slot 3 short move (5mm) completed before motion was "
+                      "observed, treating as done"),
+            ("info", "ACE load: lane3 after back-off, buffer rest=1 back=0 full=0")]
+
+    def test_waits_for_rest_then_gives_up(self):
+        unit, lane = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.CAUGHT)
+
+        unit._clear_tip_snag(3, lane)
+
+        reads = [c for c in unit._ace.commands if c[0] == "get_sensor_state"]
+        # One before, one right after the back-off, then about 0.5s of 0.1s polls.
+        assert 5 <= len(reads) <= 8
+        assert unit.logger.messages[-1] == (
+            "info", "ACE load: lane3 after back-off, buffer rest=0 back=0 full=1")
+
+    def test_unreadable_sensors_still_back_off(self):
+        unit, lane = self._unit()
+        unit._ace.set_reply("get_sensor_state", RuntimeError("no reply"), self.REST)
+
+        unit._clear_tip_snag(3, lane)
+
+        assert [c[0] for c in unit._ace.commands].count("unwind_filament") == 1
+        assert unit.logger.messages[0] == (
+            "info", "ACE load: lane3 backing off 5mm to free a caught tip (buffer unread)")
+
+    def test_failed_back_off_warns_and_returns(self):
+        unit, lane = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.REST)
+        unit._ace.set_reply("unwind_filament", RuntimeError("refused"))
+
+        unit._clear_tip_snag(3, lane)
+
+        assert unit.logger.messages[-1] == (
+            "warning", "ACE load: lane3 back-off failed: refused")
+
+    def test_zero_length_turns_it_off(self):
+        unit, lane = self._unit(snag_backoff_length=0)
+
+        unit._clear_tip_snag(3, lane)
+
+        assert unit._ace.commands == []
+        assert unit.logger.messages == []
+
+    def test_not_connected_does_nothing(self):
+        unit, lane = self._unit()
+        unit._ace.connected = False
+
+        unit._clear_tip_snag(3, lane)
+
+        assert unit._ace.commands == []
+        assert unit.logger.messages == []
+
+    def test_load_backs_off_before_each_resend(self):
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane = self._unit(load_approach_length=0, load_retry_timeout=1.0, feed_speed=80)
+        lane.hub_obj.afc_bowden_length = 3900.0
+        unit._ace.set_reply("get_sensor_state", self.REST)
+
+        def on_move(method: str, params: Dict[str, Any]) -> None:
+            """
+            :param method: the move
+            :param params: its params
+            """
+            if len([m for m in wire.moves() if m[0] == "feed_filament"]) == 2:
+                lane.extruder_obj.tool_start_state = True
+        wire = AceP1Wire(unit, on_move=on_move)
+        wire.stall(True, False, False)
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj, gcmd=make_gcmd()) is True
+
+        feed = ("feed_filament", {"index": 3, "length": 3960.0, "speed": 80.0})
+        back = ("unwind_filament", {"index": 3, "length": 5.0, "speed": 100.0, "mode": "normal"})
+        assert wire.moves() == [feed, back, feed]
