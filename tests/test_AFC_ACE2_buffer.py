@@ -121,7 +121,7 @@ class TestAFCACEBuffer:
         assert (buf.approach_length, buf.poll_interval, buf.still_seconds, buf.still_eps_mm,
                 buf.stall_seconds, buf.max_extra_length, buf.arrival_timeout,
                 buf.engage_extra_seconds, buf.engage_push_length, buf.engage_retries) == (
-            100.0, 0.1, 0.3, 1.0, 3.0, 150.0, 30.0, 2.0, 50.0, 2)
+            100.0, 0.1, 0.3, 1.0, 3.0, 150.0, 30.0, 2.0, 50.0, 3)
         assert buf.advance_state is False
 
     def test_arrival_latches_until_the_next_load(self):
@@ -183,6 +183,24 @@ class TestAFCACEBuffer:
         buf.lanes = {"lane0": BufLane("lane0", SlotUnit({"lane0": 0}))}
 
         assert buf.trailing_state is True
+
+    def test_state_name_for_the_gui(self):
+        buf = make_buffer()
+        unit = SlotUnit({"lane0": 0, "lane1": 1})
+        unit._feed_assist_active = set()
+        buf.lanes = {"lane0": BufLane("lane0", unit)}
+        assert buf.last_state == "Unknown"
+        assert buf.get_status()["state"] == "Unknown"
+
+        unit._cached_sensor_state = SENSORS
+        # full, but the shared switch belongs to another slot
+        assert buf.last_state == "Neutral"
+
+        unit._feed_assist_active = {0}
+        assert buf.last_state == "Trailing"
+
+        buf.lanes = {"lane1": BufLane("lane1", unit)}
+        assert buf.last_state == "Advancing"
 
     def test_status_carries_the_arrival(self):
         buf = make_buffer()

@@ -18,7 +18,8 @@ if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from extras.AFC_lane import AFCLane
 
-try: from extras.AFC_buffer import AFCBuffer
+try: from extras.AFC_buffer import (AFCBuffer, ADVANCING_STATE_NAME, NEUTRAL_STATE_NAME,
+                                   TRAILING_STATE_NAME)
 except:
     error_str = f"Error when trying to import AFC_buffer.AFCBuffer\n{traceback.format_exc()}"
     raise error(error_str)
@@ -77,7 +78,7 @@ class AFCACEBuffer(AFCBuffer):
                                                            minval=0.0)
         # Still full after that: push this far again while the extruder turns, this many times.
         self.engage_push_length: float = config.getfloat("engage_push_length", 50.0, minval=1.0)
-        self.engage_retries: int = config.getint("engage_retries", 2, minval=0)
+        self.engage_retries: int = config.getint("engage_retries", 3, minval=0)
 
         self.arrival_mm: Optional[float] = None
 
@@ -120,6 +121,33 @@ class AFCACEBuffer(AFCBuffer):
 
     @trailing_state.setter
     def trailing_state(self, value: bool) -> None:
+        pass
+
+    @property
+    def last_state(self) -> str:
+        """
+        The buffer state the GUI shows, read from the unit's last sensor
+        read: Trailing while full (pressed forward), Advancing while pulled
+        under tension, Neutral otherwise. The full switch is shared by the
+        unit's four buffers, so it only counts while one of this buffer's
+        slots is the one feeding.
+        """
+        read = False
+        for unit, slot in self._lane_slots():
+            sensors = getattr(unit, "_cached_sensor_state", None) or {}
+            slot_sensors = sensors.get("slot_sensors") or []
+            if slot >= len(slot_sensors):
+                continue
+            read = True
+            if slot_sensors[slot].get("buf_back"):
+                return ADVANCING_STATE_NAME
+            if (sensors.get("buf_feed")
+                and slot in getattr(unit, "_feed_assist_active", ())):
+                return TRAILING_STATE_NAME
+        return NEUTRAL_STATE_NAME if read else "Unknown"
+
+    @last_state.setter
+    def last_state(self, value: str) -> None:
         pass
 
     def _lane_slots(self) -> list:
