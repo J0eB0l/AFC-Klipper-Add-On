@@ -1462,6 +1462,13 @@ class AFC_ACE2_RFID(AFCUnitRFID):
             and net_fed == 0.0):
             net_fed = scan_dist
         if detected:
+            # A slow feed takes seconds to come up to speed, so its timed
+            # distance runs long and the lane would stage short of the hub.
+            # The unit's own count of the feed it just stopped is what went in.
+            counted = self.ace2._last_feed_length(slot)
+            if (counted is not None
+                and counted > 0.0):
+                net_fed = min(scan_dist, counted)
             tag, extra_retract = self._parked_read(link, slot, sibling, baseline)
             net_fed -= extra_retract
             if (tag
