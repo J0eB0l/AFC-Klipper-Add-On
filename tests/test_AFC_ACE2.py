@@ -217,6 +217,54 @@ def ace2_link_answers(conn: ACE2Connection, **response: Any) -> None:
     conn._serial.on_write = answer
 
 
+def ace2_link_script(conn: ACE2Connection,
+                     script: Dict[int, List[Optional[Dict[str, Any]]]]) -> None:
+    """
+    Answer each frame the connection writes from its opcode's list, taken in
+    order with the last entry repeating: a dict is the response's fields other
+    than its id and opcode, None leaves the frame unanswered (it times out).
+
+    :param conn: the connection
+    :param script: opcode -> responses
+    """
+    def answer(frame: bytes) -> None:
+        """
+        :param frame: the request frame just written
+        """
+        queue = script[frame[5]]
+        fields = queue.pop(0) if len(queue) > 1 else queue[0]
+        if fields is not None:
+            conn._handle_response({"id": frame[3] | (frame[4] << 8), "_cmd": frame[5], **fields})
+
+    conn._serial.on_write = answer
+
+
+def ace2_slot_states(*states: str) -> Dict[str, Any]:
+    """
+    :param states: each slot's motor state, slot 0 first
+    :return dict: the fields of a get_status response reporting them
+    """
+    slots = [ace2_status_slot(index, "ready", state) for index, state in enumerate(states)]
+    return {"code": 0, "msg": "success", "result": {"status": "ready", "slots": slots}}
+
+
+def ace2_move_frame(seq: int, slot: int, length: int, speed: int, mode: int = 0) -> bytes:
+    """
+    :param seq: request id
+    :param slot: 0-based slot
+    :param length: mm
+    :param speed: mm/s
+    :param mode: 0 for a feed, 1 for an unwind
+    :return bytes: the FEED_OR_ROLLBACK request frame
+    """
+    return Ace2Wire.frame(seq, Ace2Wire.FEED_OR_ROLLBACK,
+                          Ace2Wire.message((1, slot), (2, speed), (3, length), (4, mode)))
+
+
+#: The fields of the response a unit gives a move it started.
+ACE2_MOVE_STARTED: Dict[str, Any] = {"code": 0, "msg": "success", "result": {"ack": 1}}
+
+
 def ace2_jam_message(lane: str, what: str) -> str:
     """
     :param lane: the jammed lane
@@ -2359,6 +2407,267 @@ class TestACE2ConnectionParseFrames:
 
         assert conn._read_buffer == partial
         assert printer.logger.messages == []
+
+
+class TestACE2ConnectionFeedFilament:
+    def test_sends_a_feed_and_returns_its_result(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn.feed_filament(1, 600, 100) == {"ack": 1}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 1, 600, 100)]
+        assert printer.reactor.now == 100.0
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 feed_filament {'index': 1, 'length': 600, 'speed': 100}")]
+
+    def test_a_feeding_slot_is_a_started_feed(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [None],
+            Ace2Wire.GET_STATUS: [ace2_slot_states("ready", "feeding", "ready", "ready")]})
+
+        assert conn.feed_filament(1, 600, 100) == {}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 1, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 feed_filament {'index': 1, 'length': 600, 'speed': 100}"),
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            ("debug", "ACE2 feed_filament on slot 1 got no answer, but the slot is moving")]
+
+
+class TestACE2ConnectionUnwindFilament:
+    def test_sends_an_unwind_and_returns_its_result(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn.unwind_filament(2, 700, 100) == {"ack": 1}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 2, 700, 100, mode=1)]
+        assert printer.reactor.now == 100.0
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 unwind_filament "
+                      "{'index': 2, 'length': 700, 'speed': 100, 'mode': 'normal'}")]
+
+    def test_passes_the_mode(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn.unwind_filament(2, 700, 100, "fast") == {"ack": 1}
+
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 unwind_filament "
+                      "{'index': 2, 'length': 700, 'speed': 100, 'mode': 'fast'}")]
+
+    def test_an_unwinding_slot_is_a_started_unwind(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [None],
+            Ace2Wire.GET_STATUS: [ace2_slot_states("ready", "ready", "rollback", "ready")]})
+
+        assert conn.unwind_filament(2, 700, 100) == {}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 2, 700, 100, mode=1),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 unwind_filament "
+                      "{'index': 2, 'length': 700, 'speed': 100, 'mode': 'normal'}"),
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            ("debug", "ACE2 unwind_filament on slot 2 got no answer, but the slot is moving")]
+
+
+class TestACE2ConnectionSendMove:
+    FEED = {"index": 0, "length": 600, "speed": 100}
+    FEED_TX = ("debug", "ACE2 TX: id=0 feed_filament {'index': 0, 'length': 600, 'speed': 100}")
+    IDLE = ace2_slot_states("ready", "ready", "ready", "ready")
+    FEEDING = ace2_slot_states("feeding", "ready", "ready", "ready")
+    RESEND = ("info", "ACE2 feed_filament on slot 0 got no answer and the slot is not "
+                      "moving, sending it again")
+    MOVING = ("debug", "ACE2 feed_filament on slot 0 got no answer, but the slot is moving")
+
+    def test_short_move_answered(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        result = conn._send_move("feed_filament", "feeding",
+                                 {"index": 0, "length": 100, "speed": 50})
+
+        assert result == {"ack": 1}
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 100, 50)]
+
+    def test_short_move_waits_its_whole_time_and_is_not_sent_again(self):
+        # 2s of motion: it could end before a status check, so it waits 2 + 10s.
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", {"index": 0, "length": 100, "speed": 50})
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' (id=0) timed out after 12.0s"
+        assert printer.reactor.now == 112.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 100, 50)]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 feed_filament {'index': 0, 'length': 100, 'speed': 50}")]
+
+    def test_speed_below_one_counts_as_one(self):
+        # 4mm at "0" mm/s is taken as 4s of motion, a short move waiting 14s.
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", {"index": 0, "length": 4, "speed": 0})
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' (id=0) timed out after 14.0s"
+        assert printer.reactor.now == 114.0
+
+    def test_five_seconds_of_motion_is_a_long_move(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.FEEDING]})
+
+        result = conn._send_move("feed_filament", "feeding",
+                                 {"index": 0, "length": 500, "speed": 100})
+
+        assert result == {}
+        assert printer.reactor.now == 103.0
+
+    def test_long_move_answered_at_once(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert printer.reactor.now == 100.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100)]
+        assert printer.logger.messages == [self.FEED_TX]
+
+    def test_lost_answer_of_a_running_move_returns_empty(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.FEEDING]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {}
+
+        # The answer was given 3s, then the status came back at once.
+        assert printer.reactor.now == 103.0
+        assert conn._timeout_timestamps == [103.0]
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            self.FEED_TX, ("debug", "ACE2 TX: id=1 get_status {}"), self.MOVING]
+
+    def test_lost_command_is_sent_again(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None, ACE2_MOVE_STARTED],
+                                Ace2Wire.GET_STATUS: [self.IDLE]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert printer.reactor.now == 103.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100)]
+        assert printer.logger.messages == [
+            self.FEED_TX,
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            self.RESEND,
+            ("debug", "ACE2 TX: id=2 feed_filament {'index': 0, 'length': 600, 'speed': 100}")]
+
+    def test_another_slot_moving_does_not_count(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [None, ACE2_MOVE_STARTED],
+            Ace2Wire.GET_STATUS: [ace2_slot_states("rollback", "feeding", "ready", "ready")]})
+
+        # Slot 0 is unwinding and slot 1 feeding: neither is slot 0 feeding.
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100)]
+
+    def test_slot_without_a_motor_state_is_not_moving(self):
+        printer, conn = ace2_link()
+        bare = {"code": 0, "msg": "success",
+                "result": {"status": "ready", "slots": [{"index": 0, "status": "ready"}]}}
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None, ACE2_MOVE_STARTED],
+                                Ace2Wire.GET_STATUS: [bare]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert printer.logger.messages[2] == self.RESEND
+
+    def test_second_answer_lost_while_moving_returns_empty(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.IDLE, self.FEEDING]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {}
+
+        assert printer.reactor.now == 106.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100),
+                                       Ace2Wire.frame(3, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            self.FEED_TX,
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            self.RESEND,
+            ("debug", "ACE2 TX: id=2 feed_filament {'index': 0, 'length': 600, 'speed': 100}"),
+            ("debug", "ACE2 TX: id=3 get_status {}"),
+            self.MOVING]
+
+    def test_never_started_raises_the_second_timeout(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.IDLE]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", self.FEED)
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' (id=2) timed out after 3.0s"
+        # Two 3s waits; sent twice and no more.
+        assert printer.reactor.now == 106.0
+        assert conn._timeout_timestamps == [103.0, 106.0]
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100),
+                                       Ace2Wire.frame(3, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            self.FEED_TX,
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            self.RESEND,
+            ("debug", "ACE2 TX: id=2 feed_filament {'index': 0, 'length': 600, 'speed': 100}"),
+            ("debug", "ACE2 TX: id=3 get_status {}")]
+
+    def test_unanswered_status_raises_its_timeout(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [None]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", self.FEED)
+
+        assert str(excinfo.value) == "ACE2 command 'get_status' (id=1) timed out after 2.0s"
+        assert printer.reactor.now == 105.0
+        # The move is not sent again without knowing the slot's state.
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [self.FEED_TX,
+                                           ("debug", "ACE2 TX: id=1 get_status {}")]
+
+    def test_refused_move_raises_without_a_status_check(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [{"code": 1, "msg": "FORBIDDEN", "result": {}}]})
+
+        with pytest.raises(ACESerialError) as excinfo:
+            conn._send_move("feed_filament", "feeding", self.FEED)
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' failed: code=1, msg=FORBIDDEN"
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100)]
+        assert printer.logger.messages == [self.FEED_TX]
 
 
 class TestACE2ConnectionEnableRfid:

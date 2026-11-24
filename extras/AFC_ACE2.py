@@ -59,6 +59,11 @@ FLAG_RESPONSE = 0x80
 # encoder_reading = commanded_mm * 1.2342. Used to validate SET_FEED_CHECK
 # params and report slip.
 ACE2_ENCODER_SCALE = 1.2342
+# The unit answers a feed or an unwind as the move starts. A long move waits
+# this long for that answer before asking the slot whether it is moving.
+MOVE_ACK_TIMEOUT = 3.0
+# Wait for that status reply; a move must outlast both waits to be checked.
+MOVE_ACK_MARGIN = 2.0
 HEADER_LEN = 7
 TRAILER_LEN = 3
 MIN_FRAME_LEN = HEADER_LEN + TRAILER_LEN
@@ -1153,6 +1158,71 @@ class ACE2Connection(ACEConnection):
         """
         return self.send_command("start_rollback_assist", params={"index": slot_index},
                                  timeout=timeout)
+
+    def feed_filament(self, slot_index: int, length_mm: float, speed_mm_s: float) -> Any:
+        """
+        Feed filament forward from a slot, sending the command once more when
+        the unit never started it (see _send_move).
+
+        :param slot_index: Slot index (0-based)
+        :param length_mm: Distance to feed in mm
+        :param speed_mm_s: Feed speed in mm/s
+        :return Any: The response result payload.
+        """
+        return self._send_move("feed_filament", "feeding",
+                               {"index": slot_index, "length": length_mm, "speed": speed_mm_s})
+
+    def unwind_filament(self, slot_index: int, length_mm: float, speed_mm_s: float,
+                        mode: str = "normal") -> Any:
+        """
+        Unwind filament back into a slot, sending the command once more when
+        the unit never started it (see _send_move).
+
+        :param slot_index: Slot index (0-based)
+        :param length_mm: Distance to unwind in mm
+        :param speed_mm_s: Unwind speed in mm/s
+        :param mode: Unwind mode ("normal" or another the firmware supports)
+        :return Any: The response result payload.
+        """
+        return self._send_move("unwind_filament", "rollback",
+                               {"index": slot_index, "length": length_mm, "speed": speed_mm_s,
+                                "mode": mode})
+
+    def _send_move(self, method: str, moving_state: str, params: Dict[str, Any]) -> Any:
+        """
+        Send a feed or an unwind. The unit answers a move as it starts, so a
+        long move waits only MOVE_ACK_TIMEOUT for the answer. When none comes
+        the slot's state tells the two cases apart: it is moving, so only the
+        answer was lost, or it is not, so the command was, and the command is
+        sent once more. A move short enough to end before that check keeps the
+        full wait, as a finished move reads the same as one that never started.
+
+        :param method: "feed_filament" or "unwind_filament"
+        :param moving_state: the slot state the unit reports while the move runs
+        :param params: the command's params (index, length, speed)
+        :return Any: The response result payload, {} for a running move whose
+                     answer was lost.
+        :raises ACETimeoutError: When the command sent again got no answer
+                                 either and the slot is still not moving.
+        """
+        duration = params["length"] / max(params["speed"], 1)
+        if duration < MOVE_ACK_TIMEOUT + MOVE_ACK_MARGIN:
+            return self.send_command(method, params=params, timeout=duration + 10)
+        slot = params["index"]
+        for attempt in range(2):
+            try:
+                return self.send_command(method, params=params, timeout=MOVE_ACK_TIMEOUT)
+            except ACETimeoutError as e:
+                lost = e
+            status = self.get_status(timeout=MOVE_ACK_MARGIN)
+            if status["slots"][slot].get("slot_status") == moving_state:
+                self._logger.debug(f"ACE2 {method} on slot {slot} got no answer, "
+                                   "but the slot is moving")
+                return {}
+            if attempt == 0:
+                self._logger.info(f"ACE2 {method} on slot {slot} got no answer and the "
+                                  "slot is not moving, sending it again")
+        raise lost
 
     def enable_rfid(self) -> None:
         """
