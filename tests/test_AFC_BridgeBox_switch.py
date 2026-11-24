@@ -511,6 +511,7 @@ class TestAfcBridgeBoxSwitchInit:
         assert switch.lanes == []
         assert switch._routed == {"A": None, "B": None}
         assert switch._saved_lanes == {}
+        assert (switch._by_print, switch._due_back, switch._printing) == ([], [], False)
         assert switch.confirmed == []
         assert switch._offsets == {}
         assert switch._seen == {"A": False, "B": False}
@@ -668,9 +669,23 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         # A unit that was taken out of the section since is dropped.
         assert make_switch(printer).confirmed == ["Turtle_1", "Ace2_1"]
 
+    def test_the_saved_lanes_a_print_moved_are_read_with_the_lanes(self, tmp_path):
+        printer = make_printer()
+        printer._afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {"switches": {"Switch_1": {
+            "lanes": {"lane1": "extruder1", "lane2": "extruder1", "lane9": "extruder"},
+            "confirmed": [], "by_print": ["lane1", "lane3"],
+            "due_back": ["lane4", "lane9", "lane2"]}}}}))
+        switch = make_switch(printer)
+        # A lane that is not saved as off its starting extruder has nowhere to go back from.
+        assert switch._by_print == ["lane1"]
+        assert switch._due_back == ["lane9", "lane2"]
+        assert switch._printing is False
+
     def test_with_nothing_saved_no_lane_is_away_and_no_unit_confirmed(self):
         switch = plumbed()
         assert switch._saved_lanes == {}
+        assert (switch._by_print, switch._due_back) == ([], [])
         assert switch.confirmed == []
 
     def test_a_chain_named_on_an_inlet_stands_for_its_units(self):
@@ -715,10 +730,25 @@ class TestAfcBridgeBoxSwitchSaved:
 
     def test_the_lanes_and_units_saved_for_this_switch(self, tmp_path):
         saved = {"system": {"switches": {
-            "Switch_1": {"lanes": {"lane1": "extruder1"}, "confirmed": ["Turtle_1"]},
-            "Switch_2": {"lanes": {"lane20": "extruder3"}, "confirmed": ["Other"]}}}}
+            "Switch_1": {"lanes": {"lane1": "extruder1", "lane2": "extruder1"},
+                         "confirmed": ["Turtle_1"], "by_print": ["lane1"],
+                         "due_back": ["lane2"]},
+            "Switch_2": {"lanes": {"lane20": "extruder3"}, "confirmed": ["Other"],
+                         "by_print": ["lane20"], "due_back": []}}}}
         assert self._switch(tmp_path, json.dumps(saved))._saved() == {
-            "lanes": {"lane1": "extruder1"}, "confirmed": ["Turtle_1"]}
+            "lanes": {"lane1": "extruder1", "lane2": "extruder1"}, "confirmed": ["Turtle_1"],
+            "by_print": ["lane1"], "due_back": ["lane2"]}
+
+    @pytest.mark.parametrize("extra, by_print, due_back", [
+        ({}, [], []), ({"by_print": ["lane1"]}, ["lane1"], []),
+        ({"due_back": ["lane1"]}, [], ["lane1"])])
+    def test_what_was_saved_without_a_prints_lanes_reads_with_none(self, tmp_path, extra,
+                                                                   by_print, due_back):
+        saved = {"system": {"switches": {"Switch_1": dict(
+            {"lanes": {"lane1": "extruder1"}, "confirmed": ["Turtle_1"]}, **extra)}}}
+        assert self._switch(tmp_path, json.dumps(saved))._saved() == {
+            "lanes": {"lane1": "extruder1"}, "confirmed": ["Turtle_1"],
+            "by_print": by_print, "due_back": due_back}
 
     @pytest.mark.parametrize("text", [
         None, "", "{not json", "{}", '{"system": {}}', '{"system": null}',
@@ -732,9 +762,14 @@ class TestAfcBridgeBoxSwitchSaved:
         '{"system": {"switches": {"Switch_1": {"lanes": 5, "confirmed": ["Turtle_1"]}}}}',
         '{"system": {"switches": {"Switch_1": {"lanes": "ab", "confirmed": ["Turtle_1"]}}}}',
         '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
-        '"confirmed": 5}}}}'])
+        '"confirmed": 5}}}}',
+        '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
+        '"confirmed": [], "by_print": 5}}}}',
+        '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
+        '"confirmed": [], "due_back": 5}}}}'])
     def test_nothing_usable_saved_reads_as_nothing(self, tmp_path, text):
-        assert self._switch(tmp_path, text)._saved() == {"lanes": {}, "confirmed": []}
+        assert self._switch(tmp_path, text)._saved() == {
+            "lanes": {}, "confirmed": [], "by_print": [], "due_back": []}
 
 
 class TestAfcBridgeBoxSwitchHandleSaveVars:
@@ -742,7 +777,8 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         switch = plumbed()
         data: Dict[str, Any] = {"system": {}}
         switch.handle_save_vars(data)
-        assert data == {"system": {"switches": {"Switch_1": {"lanes": {}, "confirmed": []}}}}
+        assert data == {"system": {"switches": {"Switch_1": {
+            "lanes": {}, "confirmed": [], "by_print": [], "due_back": []}}}}
 
     def test_lanes_off_their_starting_extruder_are_listed(self):
         switch = plumbed()
@@ -753,7 +789,23 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         assert data == {"system": {"switches": {
             "Switch_2": {"lane20": "extruder3"},
             "Switch_1": {"lanes": {"lane_Turtle_1": "extruder1", "lane_Ace2_1": "extruder"},
-                         "confirmed": []}}}}
+                         "confirmed": [], "by_print": [], "due_back": []}}}}
+
+    def test_the_lanes_a_print_moved_are_listed_in_lists_of_their_own(self):
+        switch = plumbed()
+        lane_of(switch, "Turtle_1").set_extruder(extruder_of(switch, "extruder1"))
+        lane_of(switch, "Ace2_1").set_extruder(extruder_of(switch, "extruder"))
+        switch._by_print = ["lane_Turtle_1"]
+        switch._due_back = ["lane_Ace2_1"]
+        data: Dict[str, Any] = {"system": {}}
+        switch.handle_save_vars(data)
+        saved = data["system"]["switches"]["Switch_1"]
+        assert saved == {"lanes": {"lane_Turtle_1": "extruder1", "lane_Ace2_1": "extruder"},
+                         "confirmed": [], "by_print": ["lane_Turtle_1"],
+                         "due_back": ["lane_Ace2_1"]}
+        # What is saved does not change with the switch's own lists.
+        assert saved["by_print"] is not switch._by_print
+        assert saved["due_back"] is not switch._due_back
 
     def test_the_units_seen_at_their_inlet_are_listed_in_a_list_of_their_own(self):
         switch = plumbed()
@@ -761,7 +813,8 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         data: Dict[str, Any] = {"system": {}}
         switch.handle_save_vars(data)
         saved = data["system"]["switches"]["Switch_1"]
-        assert saved == {"lanes": {}, "confirmed": ["Turtle_1", "Ace2_1"]}
+        assert saved == {"lanes": {}, "confirmed": ["Turtle_1", "Ace2_1"], "by_print": [],
+                         "due_back": []}
         # What is saved does not grow with the switch's own list.
         assert saved["confirmed"] is not switch.confirmed
 
@@ -1303,16 +1356,20 @@ class TestAfcBridgeBoxSwitchWatch:
         switch = make_switch()
         switch.afc.prep_done = True
         switch._look = MagicMock()
+        switch._release = MagicMock()
         switch._note_arrivals = MagicMock()
+        switch._send_back = MagicMock()
         switch._settle = MagicMock(return_value=["a problem"])
         switch._say = MagicMock()
         return switch
 
     @staticmethod
     def _only_looked(switch: afcBridgeBoxSwitch) -> None:
-        """Assert the watch looked at the inlets and did nothing else."""
+        """Assert the watch looked at the inlets and for a print, and did nothing else."""
         switch._look.assert_called_once_with()
+        switch._release.assert_called_once_with(False)
         switch._note_arrivals.assert_not_called()
+        switch._send_back.assert_not_called()
         switch._settle.assert_not_called()
         switch._say.assert_not_called()
 
@@ -1324,14 +1381,36 @@ class TestAfcBridgeBoxSwitchWatch:
             held.append(("settle", switch._moving, switch._look.call_count))
             return ["a problem"]
 
+        switch._release.side_effect = lambda printing: held.append(("release", printing))
         switch._note_arrivals.side_effect = lambda: held.append(("arrivals", switch._moving))
+        switch._send_back.side_effect = lambda: held.append(("back", switch._moving))
         switch._settle.side_effect = settle
         switch._say.side_effect = lambda problems: held.append(("say", switch._moving))
         assert switch._watch(55.0) == 101.0
         switch._look.assert_called_once_with()
         switch._say.assert_called_once_with(["a problem"])
-        assert held == [("arrivals", False), ("settle", True, 1), ("say", True)]
+        assert held == [("release", False), ("arrivals", False), ("back", False),
+                        ("settle", True, 1), ("say", True)]
         assert switch._moving is False
+
+    def test_while_a_print_runs_no_lane_is_sent_back(self):
+        switch = self._switch()
+        switch.afc.function.in_print.return_value = True
+        assert switch._watch(55.0) == 101.0
+        switch._release.assert_called_once_with(True)
+        switch._send_back.assert_not_called()
+        # The switch is still brought in line with the lanes.
+        switch._note_arrivals.assert_called_once_with()
+        switch._say.assert_called_once_with(["a problem"])
+
+    def test_a_print_is_looked_for_while_afc_is_busy(self):
+        switch = self._switch()
+        switch.afc.function.in_print.return_value = True
+        switch.afc.current_state = "Loading"
+        assert switch._watch(55.0) == 101.0
+        switch._release.assert_called_once_with(True)
+        switch._send_back.assert_not_called()
+        switch._settle.assert_not_called()
 
     def test_before_prep_is_done_it_only_looks(self):
         switch = self._switch()
@@ -1366,6 +1445,29 @@ class TestAfcBridgeBoxSwitchWatch:
         assert switch.logger.messages == [("warning", held)]
         assert switch._told == held
 
+    def test_the_lane_of_a_print_that_ended_goes_back_once_it_is_unloaded(self):
+        switch = plumbed(SimChain(route=2))
+        switch.afc.prep_done = True
+        switch._reported = switch.live_units()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        lane.tool_loaded = True
+        switch._by_print = ["lane_Turtle_1"]
+        switch.afc.function.in_print.return_value = True
+        switch._watch(55.0)
+        assert (switch._by_print, switch._due_back) == (["lane_Turtle_1"], [])
+        switch.afc.function.in_print.return_value = False
+        switch._watch(56.0)
+        assert (switch._by_print, switch._due_back) == ([], ["lane_Turtle_1"])
+        assert lane.extruder_obj.name == "extruder1"
+        lane.tool_loaded = False
+        switch._watch(57.0)
+        assert switch._due_back == []
+        assert lane.extruder_obj is extruder_of(switch, "extruder")
+        assert switch.logger.messages == [
+            ("info", "Switch_1: lane_Turtle_1 is back on extruder, the print that put it on "
+                     "extruder1 is over")]
+
     def test_a_unit_that_came_in_since_the_section_has_it_printed_again(self):
         switch = plumbed(SimChain(route=2))
         switch.afc.prep_done = True
@@ -1378,6 +1480,139 @@ class TestAfcBridgeBoxSwitchWatch:
                     + TestAfcBridgeBoxSwitchHandlePrep.OUTLETS)]
         assert switch._reported == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
         assert switch._report_by is None
+
+
+class TestAfcBridgeBoxSwitchRelease:
+    @staticmethod
+    def _switch(printing: bool) -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch with a lane a print moved and one due back"""
+        switch = plumbed()
+        switch._by_print = ["lane_Turtle_1"]
+        switch._due_back = ["lane_Ace2_1"]
+        switch._printing = printing
+        return switch
+
+    def test_the_lanes_of_a_print_that_ended_are_due_back_and_that_is_saved(self):
+        switch = self._switch(True)
+        switch._release(False)
+        assert switch._by_print == []
+        assert switch._due_back == ["lane_Ace2_1", "lane_Turtle_1"]
+        assert switch._printing is False
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_print_that_still_runs_keeps_its_lanes(self):
+        switch = self._switch(True)
+        switch._release(True)
+        assert switch._by_print == ["lane_Turtle_1"]
+        assert switch._due_back == ["lane_Ace2_1"]
+        assert switch._printing is True
+        switch.afc.save_vars.assert_not_called()
+
+    def test_with_no_print_seen_running_the_lanes_of_a_print_stay(self):
+        # As after a restart during a print, which may be resumed.
+        switch = self._switch(False)
+        switch._release(False)
+        assert switch._by_print == ["lane_Turtle_1"]
+        assert switch._due_back == ["lane_Ace2_1"]
+        assert switch._printing is False
+        switch.afc.save_vars.assert_not_called()
+
+    def test_a_print_that_starts_is_noted(self):
+        switch = self._switch(False)
+        switch._release(True)
+        assert switch._by_print == ["lane_Turtle_1"]
+        assert switch._due_back == ["lane_Ace2_1"]
+        assert switch._printing is True
+        switch.afc.save_vars.assert_not_called()
+
+    def test_a_print_that_moved_no_lane_saves_nothing_when_it_ends(self):
+        switch = self._switch(True)
+        switch._by_print = []
+        switch._release(False)
+        assert switch._due_back == ["lane_Ace2_1"]
+        assert switch._printing is False
+        switch.afc.save_vars.assert_not_called()
+
+
+class TestAfcBridgeBoxSwitchSendBack:
+    @staticmethod
+    def _switch() -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch whose three lanes are on their other extruder"""
+        switch = plumbed()
+        for unit, extruder in (("Turtle_1", "extruder1"), ("Bambu_AMS_1", "extruder1"),
+                               ("Ace2_1", "extruder")):
+            lane_of(switch, unit).set_extruder(extruder_of(switch, extruder))
+        return switch
+
+    @staticmethod
+    def _on(switch: afcBridgeBoxSwitch) -> Dict[str, str]:
+        """:return dict: unit -> the extruder its lane is on"""
+        return {unit: lane_of(switch, unit).extruder_obj.name
+                for unit in ("Turtle_1", "Bambu_AMS_1", "Ace2_1")}
+
+    def test_a_lane_that_is_due_back_goes_to_its_units_starting_extruder(self):
+        switch = self._switch()
+        switch._due_back = ["lane_Turtle_1"]
+        switch._send_back()
+        assert lane_of(switch, "Turtle_1").extruder_obj is extruder_of(switch, "extruder")
+        assert "lane_Turtle_1" in extruder_of(switch, "extruder").lanes
+        assert switch._due_back == []
+        assert switch.logger.messages == [
+            ("info", "Switch_1: lane_Turtle_1 is back on extruder, the print that put it on "
+                     "extruder1 is over")]
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_lane_that_is_not_due_back_stays(self):
+        switch = self._switch()
+        switch._due_back = ["lane_Turtle_1"]
+        switch._send_back()
+        assert self._on(switch) == {"Turtle_1": "extruder", "Bambu_AMS_1": "extruder1",
+                                    "Ace2_1": "extruder"}
+
+    def test_each_inlets_lane_goes_back_to_its_own_start_and_all_are_saved_once(self):
+        switch = self._switch()
+        switch._due_back = ["lane_Ace2_1", "lane_Turtle_1"]
+        switch._send_back()
+        assert self._on(switch) == {"Turtle_1": "extruder", "Bambu_AMS_1": "extruder1",
+                                    "Ace2_1": "extruder1"}
+        assert switch._due_back == []
+        # In the order of the switch's lanes.
+        assert switch.logger.messages == [
+            ("info", "Switch_1: lane_Turtle_1 is back on extruder, the print that put it on "
+                     "extruder1 is over"),
+            ("info", "Switch_1: lane_Ace2_1 is back on extruder1, the print that put it on "
+                     "extruder is over")]
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_lane_that_is_still_loaded_waits(self):
+        switch = self._switch()
+        switch._due_back = ["lane_Turtle_1", "lane_Ace2_1"]
+        lane_of(switch, "Turtle_1").tool_loaded = True
+        switch._send_back()
+        assert self._on(switch) == {"Turtle_1": "extruder1", "Bambu_AMS_1": "extruder1",
+                                    "Ace2_1": "extruder1"}
+        assert switch._due_back == ["lane_Turtle_1"]
+        assert switch.logger.messages == [
+            ("info", "Switch_1: lane_Ace2_1 is back on extruder1, the print that put it on "
+                     "extruder is over")]
+
+    def test_a_lane_on_its_way_into_a_toolhead_waits(self):
+        switch = self._switch()
+        switch._due_back = ["lane_Turtle_1"]
+        switch._routed["A"] = lane_of(switch, "Turtle_1")
+        switch._send_back()
+        assert lane_of(switch, "Turtle_1").extruder_obj.name == "extruder1"
+        assert switch._due_back == ["lane_Turtle_1"]
+        assert switch.logger.messages == []
+        switch.afc.save_vars.assert_not_called()
+
+    def test_with_no_lane_due_back_nothing_is_saved(self):
+        switch = self._switch()
+        switch._send_back()
+        assert self._on(switch) == {"Turtle_1": "extruder1", "Bambu_AMS_1": "extruder1",
+                                    "Ace2_1": "extruder"}
+        assert switch.logger.messages == []
+        switch.afc.save_vars.assert_not_called()
 
 
 class TestAfcBridgeBoxSwitchLook:
@@ -2944,7 +3179,31 @@ class TestAfcBridgeBoxSwitchAssign:
         switch.assign(lane_of(switch, "Turtle_1"), "extruder", False, gcmd)
         gcmd.respond_info.assert_called_once_with(
             "Switch_1: lane_Turtle_1 already feeds extruder")
+
+    def test_a_lane_a_print_put_there_is_kept_there_by_naming_it_again(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._due_back = ["lane_Turtle_1", "lane_Ace2_1"]
+        gcmd = MockGCodeCommand()
+        switch.assign(lane, "extruder1", False, gcmd)
+        assert switch._due_back == ["lane_Ace2_1"]
+        switch.afc.save_vars.assert_called_once_with()
+        gcmd.respond_info.assert_called_once_with(
+            "Switch_1: lane_Turtle_1 already feeds extruder1")
+
+    def test_a_print_that_names_a_lane_where_it_is_leaves_it_due_back(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._due_back = ["lane_Turtle_1"]
+        switch.afc.function.in_print.return_value = True
+        gcmd = MockGCodeCommand()
+        switch.assign(lane, "extruder1", False, gcmd)
+        assert (switch._by_print, switch._due_back) == ([], ["lane_Turtle_1"])
         switch.afc.save_vars.assert_not_called()
+        gcmd.respond_info.assert_called_once_with(
+            "Switch_1: lane_Turtle_1 already feeds extruder1")
 
     def test_a_lane_moves_to_the_other_extruder_and_the_choice_is_saved(self):
         switch = plumbed()
@@ -2954,9 +3213,36 @@ class TestAfcBridgeBoxSwitchAssign:
         assert lane.extruder_obj is extruder_of(switch, "extruder1")
         assert "lane_Turtle_1" in extruder_of(switch, "extruder1").lanes
         assert "lane_Turtle_1" not in extruder_of(switch, "extruder").lanes
+        # With no print running the lane stays there.
+        assert (switch._by_print, switch._due_back) == ([], [])
         switch.afc.save_vars.assert_called_once_with()
         gcmd.respond_info.assert_called_once_with(
             "Switch_1: lane_Turtle_1 now feeds extruder1")
+
+    def test_a_lane_a_print_moves_is_there_for_that_print(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        switch.afc.function.in_print.return_value = True
+        gcmd = MockGCodeCommand()
+        switch.assign(lane, "extruder1", False, gcmd)
+        assert lane.extruder_obj is extruder_of(switch, "extruder1")
+        assert (switch._by_print, switch._due_back) == (["lane_Turtle_1"], [])
+        switch.afc.save_vars.assert_called_once_with()
+        gcmd.respond_info.assert_called_once_with(
+            "Switch_1: lane_Turtle_1 now feeds extruder1 for this print")
+
+    def test_a_lane_a_print_sends_to_its_starting_extruder_stays_there(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._due_back = ["lane_Turtle_1"]
+        switch.afc.function.in_print.return_value = True
+        gcmd = MockGCodeCommand()
+        switch.assign(lane, "extruder", False, gcmd)
+        assert lane.extruder_obj is extruder_of(switch, "extruder")
+        assert (switch._by_print, switch._due_back) == ([], [])
+        switch.afc.save_vars.assert_called_once_with()
+        gcmd.respond_info.assert_called_once_with("Switch_1: lane_Turtle_1 now feeds extruder")
 
     def test_without_an_extruder_the_lane_goes_back_to_its_start(self):
         switch = plumbed()
@@ -3014,6 +3300,56 @@ class TestAfcBridgeBoxSwitchAssign:
         switch.afc.TOOL_UNLOAD = MagicMock()
         switch.assign(lane_of(switch, "Turtle_1"), "extruder1", True, MockGCodeCommand())
         switch.afc.TOOL_UNLOAD.assert_not_called()
+
+
+class TestAfcBridgeBoxSwitchNoteAssign:
+    @staticmethod
+    def _switch() -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch with other lanes a print moved and due back"""
+        switch = plumbed()
+        switch._by_print = ["lane_Ace2_1"]
+        switch._due_back = ["lane_Bambu_AMS_1"]
+        return switch
+
+    def test_a_lane_a_running_print_put_off_its_starting_extruder_is_the_prints(self):
+        switch = self._switch()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._note_assign(lane, True)
+        assert switch._by_print == ["lane_Ace2_1", "lane_Turtle_1"]
+        assert switch._due_back == ["lane_Bambu_AMS_1"]
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_lane_that_was_due_back_is_the_new_prints_and_listed_once(self):
+        switch = self._switch()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._by_print = ["lane_Turtle_1", "lane_Ace2_1"]
+        switch._due_back = ["lane_Turtle_1", "lane_Bambu_AMS_1"]
+        switch._note_assign(lane, True)
+        assert switch._by_print == ["lane_Ace2_1", "lane_Turtle_1"]
+        assert switch._due_back == ["lane_Bambu_AMS_1"]
+
+    def test_with_no_print_running_the_lane_is_no_prints(self):
+        switch = self._switch()
+        lane = lane_of(switch, "Turtle_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._by_print.append("lane_Turtle_1")
+        switch._due_back.append("lane_Turtle_1")
+        switch._note_assign(lane, False)
+        assert switch._by_print == ["lane_Ace2_1"]
+        assert switch._due_back == ["lane_Bambu_AMS_1"]
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_lane_a_print_put_on_its_starting_extruder_is_no_prints(self):
+        switch = self._switch()
+        lane = lane_of(switch, "Turtle_1")
+        switch._by_print.append("lane_Turtle_1")
+        switch._due_back.append("lane_Turtle_1")
+        switch._note_assign(lane, True)
+        assert switch._by_print == ["lane_Ace2_1"]
+        assert switch._due_back == ["lane_Bambu_AMS_1"]
+        switch.afc.save_vars.assert_called_once_with()
 
 
 class TestAfcBridgeBoxSwitchHandleCalibrationButtons:

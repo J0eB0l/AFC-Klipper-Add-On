@@ -25,6 +25,11 @@ An inlet's units start on the extruder of the outlet with the same letter, and a
 on that outlet. A lane goes to the other extruder with `AFC_BRIDGEBOX_SWITCH_ASSIGN`, and every
 load points the lane's inlet at its extruder's outlet before filament moves.
 
+A lane that is assigned while a print runs, as a print file does for the toolhead each of its
+filaments was sliced for, is on that extruder for the print: once the print is over and the lane
+is out of its toolhead it goes back to the extruder its unit starts on. A lane that is assigned
+at any other time stays where it is put.
+
 `outlet_a_length` and `outlet_b_length` are the tube from each outlet to its toolhead in mm. Only
 their difference is used: it is added to a lane's tube length while the lane goes through the
 outlet its unit does not start on. `AFC_BRIDGEBOX_SWITCH_CALIBRATION` measures them, and they may
@@ -166,6 +171,12 @@ class afcBridgeBoxSwitch:
         # The lane each inlet was last pointed for, until it reaches its toolhead.
         self._routed: Dict[str, Optional[AFCLane]] = {letter: None for letter in LETTERS}
         self._saved_lanes: Dict[str, str] = {}
+        # The lanes a running print put on an extruder their unit does not start on, and those
+        # of a print that is over, which go back once they are out of their toolhead.
+        self._by_print: List[str] = []
+        self._due_back: List[str] = []
+        # Whether a print ran at the last look.
+        self._printing = False
         # The units a lane of which has shown at its inlet.
         self.confirmed: List[str] = []
         # The mm added to each tube for the outlet its lane goes through.
@@ -255,6 +266,8 @@ class afcBridgeBoxSwitch:
                           and self.inlet_of(obj.unit) is not None)]
         saved = self._saved()
         self._saved_lanes = saved["lanes"]
+        self._by_print = [name for name in saved["by_print"] if name in self._saved_lanes]
+        self._due_back = [name for name in saved["due_back"] if name in self._saved_lanes]
         self.confirmed = [unit for unit in saved["confirmed"] if unit in self.units()]
         for unit in self.units():
             if unit in self.afc.units:
@@ -275,27 +288,31 @@ class afcBridgeBoxSwitch:
         What AFC saved for this switch.
 
         :return dict: `lanes`, lane name -> extruder name for the lanes off the extruder their
-        inlet starts on, and `confirmed`, the units seen at their inlet. Both empty when
-        nothing usable is saved
+        inlet starts on, `confirmed`, the units seen at their inlet, `by_print`, the lanes a
+        print that was running put there, and `due_back`, those of a print that is over. All
+        empty when nothing usable is saved
         """
         try:
             with open(f"{self.afc.VarFile}.unit") as file:
                 saved = json.load(file)["system"]["switches"][self.name]
-            return {"lanes": dict(saved["lanes"]), "confirmed": list(saved["confirmed"])}
+            return {"lanes": dict(saved["lanes"]), "confirmed": list(saved["confirmed"]),
+                    "by_print": list(saved.get("by_print", [])),
+                    "due_back": list(saved.get("due_back", []))}
         except (OSError, ValueError, KeyError, TypeError):
-            return {"lanes": {}, "confirmed": []}
+            return {"lanes": {}, "confirmed": [], "by_print": [], "due_back": []}
 
     def handle_save_vars(self, data: Dict[str, Any]) -> None:
         """
-        Add the lanes that are off their starting extruder, and the units seen at their inlet,
-        to what AFC saves.
+        Add the lanes that are off their starting extruder, which of them a print put there,
+        and the units seen at their inlet, to what AFC saves.
 
         :param data: what AFC is about to save
         """
         away = {lane.name: lane.extruder_obj.name for lane in self.lanes
                 if lane.extruder_obj.name != self.start_extruder(lane.unit)}
         data["system"].setdefault("switches", {})[self.name] = {
-            "lanes": away, "confirmed": list(self.confirmed)}
+            "lanes": away, "confirmed": list(self.confirmed),
+            "by_print": list(self._by_print), "due_back": list(self._due_back)}
 
     def start_extruder(self, unit: str) -> str:
         """
@@ -583,19 +600,59 @@ class afcBridgeBoxSwitch:
 
     def _watch(self, eventtime: float) -> float:
         """
-        Reactor timer: bring the switch in line with the lanes while AFC is idle.
+        Reactor timer: bring the switch in line with the lanes while AFC is idle, and put the
+        lanes of a print that is over back on their starting extruder.
 
         :param eventtime: reactor time of this call
         :return float: reactor time of the next call
         """
         self._look()
+        printing = self.afc.function.in_print()
+        self._release(printing)
         if (self.afc.prep_done
             and self.afc.current_state == State.IDLE
             and not self._moving):
             self._note_arrivals()
+            if not printing:
+                self._send_back()
             with self._own():
                 self._say(self._settle())
         return self.reactor.monotonic() + _WATCH_PERIOD
+
+    def _release(self, printing: bool) -> None:
+        """
+        Note a print that ended since the last look: the lanes it put on an extruder are due
+        back on the one their unit starts on. A print Klipper restarted under keeps its lanes
+        where they are, for when it is resumed, until a print ends.
+
+        :param printing: whether a print runs now
+        """
+        if (self._printing
+            and not printing
+            and self._by_print):
+            self._due_back += self._by_print
+            self._by_print = []
+            self.afc.save_vars()
+        self._printing = printing
+
+    def _send_back(self) -> None:
+        """
+        Put the lanes that are due back on their unit's starting extruder, each once it is out
+        of its toolhead and not on its way into one.
+        """
+        back = [lane for lane in self.lanes
+                if (lane.name in self._due_back
+                    and not lane.tool_loaded
+                    and lane not in self._routed.values())]
+        for lane in back:
+            was = lane.extruder_obj.name
+            start = self.start_extruder(lane.unit)
+            lane.set_extruder(self._extruder(start))
+            self._due_back.remove(lane.name)
+            self.logger.info(f"{self.name}: {lane.name} is back on {start}, the print that put "
+                             f"it on {was} is over")
+        if back:
+            self.afc.save_vars()
 
     def _look(self) -> None:
         """
@@ -1018,6 +1075,9 @@ class afcBridgeBoxSwitch:
         Put a lane on one of the extruders its filament switch feeds. The lane is loaded into
         that extruder from then on, and the choice is kept over restarts.
 
+        While a print runs the choice is for that print: once the print is over and the lane is
+        out of its toolhead, the lane goes back to the extruder its unit starts on.
+
         Without EXTRUDER the lane goes back to the extruder its unit starts on. A lane that is
         loaded in a toolhead is only moved with UNLOAD=1, which unloads it first.
 
@@ -1095,7 +1155,8 @@ class afcBridgeBoxSwitch:
     def assign(self, lane: AFCLane, extruder: Optional[str], unload: bool,
                gcmd: GCodeCommand) -> None:
         """
-        Put one of this switch's lanes on one of its extruders and save the choice.
+        Put one of this switch's lanes on one of its extruders and save the choice. While a
+        print runs the choice is for that print, at any other time it is kept.
 
         :param lane: the lane
         :param extruder: AFC extruder name, None for the one the lane's unit starts on
@@ -1107,7 +1168,11 @@ class afcBridgeBoxSwitch:
         if extruder not in self.extruders():
             error_str = f"{self.name}: EXTRUDER takes {' or '.join(self.extruders())}"
             raise gcmd.error(error_str)
+        printing = self.afc.function.in_print()
         if extruder == was:
+            # Outside a print this keeps a lane where a print put it.
+            if not printing:
+                self._note_assign(lane, False)
             gcmd.respond_info(f"{self.name}: {lane.name} already feeds {extruder}")
             return
         if (lane.tool_loaded
@@ -1120,8 +1185,23 @@ class afcBridgeBoxSwitch:
         if not lane.set_extruder(self._extruder(extruder)):
             error_str = f"{self.name}: {lane.name} could not be unloaded from {was}"
             raise gcmd.error(error_str)
+        self._note_assign(lane, printing)
+        until = " for this print" if lane.name in self._by_print else ""
+        gcmd.respond_info(f"{self.name}: {lane.name} now feeds {extruder}{until}")
+
+    def _note_assign(self, lane: AFCLane, printing: bool) -> None:
+        """
+        Note whether a lane is on its extruder for a running print only, and save that.
+
+        :param lane: the lane that was assigned
+        :param printing: whether a print runs now
+        """
+        self._by_print = [name for name in self._by_print if name != lane.name]
+        self._due_back = [name for name in self._due_back if name != lane.name]
+        if (printing
+            and lane.extruder_obj.name != self.start_extruder(lane.unit)):
+            self._by_print.append(lane.name)
         self.afc.save_vars()
-        gcmd.respond_info(f"{self.name}: {lane.name} now feeds {extruder}")
 
     def handle_calibration_buttons(self, buttons: List[Tuple[str, str, str]]) -> None:
         """
