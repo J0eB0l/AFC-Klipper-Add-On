@@ -3394,3 +3394,168 @@ class TestAfcACE2Trace:
         assert unit._trace is None
         assert unit.logger.messages[-1][1].startswith(
             "ACE2 Ace2_1: trace of lane1 ended, ACE not connected")
+
+
+class RamStubBuffer:
+    """An [AFC_buffer] with type: ace as _ram_to_buffer reads it."""
+
+    type = "ace"
+
+    def __init__(self, **values: Any) -> None:
+        self.approach_length = 100.0
+        self.poll_interval = 0.1
+        self.still_seconds = 0.3
+        self.still_eps_mm = 1.0
+        self.stall_seconds = 3.0
+        self.max_extra_length = 150.0
+        self.arrival_timeout = 30.0
+        self.advance_state = False
+        self.__dict__.update(values)
+        self.arrivals: List[Tuple[str, int, float]] = []
+
+    def mark_arrival(self, lane: Any, unit: Any, slot: int, pushed_mm: float) -> None:
+        self.arrivals.append((lane.name, slot, pushed_mm))
+
+
+class TestAfcACE2RamToBuffer:
+    @staticmethod
+    def sensors(full: bool) -> Dict[str, Any]:
+        """
+        :param full: the shared full switch
+        :return dict: a GET_SENSOR_STATE result
+        """
+        return {"slot_sensors": [{"buf_rst": not full, "buf_back": False}] * 4,
+                "buf_feed": full}
+
+    @staticmethod
+    def feed(*decoders: int) -> List[Dict[str, Any]]:
+        """
+        :param decoders: slot 3's encoder count, one per read
+        :return list: GET_FEED_INFO results
+        """
+        return [{"feed_info": [{}, {}, {}, {"length": d, "decoder": d, "steps": 0}]}
+                for d in decoders]
+
+    def _unit(self, **values: Any) -> Tuple[afcACE2, Any, RamStubBuffer]:
+        """
+        :param values: RamStubBuffer overrides
+        :return tuple: the unit, lane3 and its buffer
+        """
+        unit = make_ace2_unit(lanes=[LaneSpec("lane3", slot=3, prep=True)])
+        lane = unit.lanes["lane3"]
+        buf = RamStubBuffer(**values)
+        lane.buffer_obj = buf
+        lane.extruder_obj.tool_start = "buffer"
+        return unit, lane, buf
+
+    def test_ram_buffer_only_for_an_ace_buffer_as_tool_start(self):
+        unit, lane, buf = self._unit()
+        assert unit._ram_buffer(lane) is buf
+
+        lane.extruder_obj.tool_start = "tool_start_pin"
+        assert unit._ram_buffer(lane) is None
+
+        lane.extruder_obj.tool_start = "buffer"
+        buf.type = "FPS_PSF"
+        assert unit._ram_buffer(lane) is None
+
+    def test_full_and_still_is_arrival(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", *([self.sensors(False)] * 3
+                                                 + [self.sensors(True)]))
+        unit._ace.set_reply("get_feed_info", *self.feed(0, 20, 40, 45, 45, 45, 45, 45))
+
+        assert unit._ram_to_buffer(3, lane, 100.0) == ""
+
+        assert buf.arrivals == [("lane3", 3, 45.0)]
+        assert ("start_feed_assist", {"index": 3}) in unit._ace.commands
+        assert ("info", "ACE Ace2_1: lane3 reached the extruder, buffer full after 45mm "
+                        "of feed assist") in unit.logger.messages
+
+    def test_full_while_still_moving_is_not_arrival_yet(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.sensors(True))
+        unit._ace.set_reply("get_feed_info", *self.feed(0, 10, 20, 30, 30, 30, 30, 30))
+
+        assert unit._ram_to_buffer(3, lane, 100.0) == ""
+
+        assert buf.arrivals == [("lane3", 3, 30.0)]
+
+    def test_a_new_push_counting_from_zero_adds_on(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", *([self.sensors(False)] * 4
+                                                 + [self.sensors(True)]))
+        unit._ace.set_reply("get_feed_info", *self.feed(0, 20, 25, 5, 12, 12, 12, 12, 12))
+
+        assert unit._ram_to_buffer(3, lane, 100.0) == ""
+
+        assert buf.arrivals == [("lane3", 3, 37.0)]
+
+    def test_still_without_full_is_a_jam(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.sensors(False))
+        unit._ace.set_reply("get_feed_info", *self.feed(0, 15, 15))
+
+        reason = unit._ram_to_buffer(3, lane, 100.0)
+
+        assert reason == ("the filament stopped after 15mm of feed assist without filling "
+                          "the buffer, check for a jam")
+        assert buf.arrivals == []
+        assert ("stop_feed_assist", {"index": 3}) in unit._ace.commands
+
+    def test_pushing_past_the_approach_gives_up(self):
+        unit, lane, buf = self._unit(max_extra_length=20.0)
+        unit._ace.set_reply("get_sensor_state", self.sensors(False))
+        unit._ace.set_reply("get_feed_info", *self.feed(*range(0, 400, 10)))
+
+        reason = unit._ram_to_buffer(3, lane, 50.0)
+
+        assert reason == ("feed assist pushed 80mm without filling the buffer, check the "
+                          "bowden length")
+        assert buf.arrivals == []
+
+    def test_times_out_without_readings(self):
+        unit, lane, buf = self._unit(arrival_timeout=2.0)
+        unit._ace.set_reply("get_sensor_state", RuntimeError("no reply"))
+
+        assert unit._ram_to_buffer(3, lane, 100.0) == (
+            "the buffer did not fill within 2s (0mm pushed)")
+
+    def test_assist_that_will_not_start(self):
+        unit, lane, buf = self._unit()
+        unit._ace.connected = False
+
+        assert unit._ram_to_buffer(3, lane, 100.0) == "feed assist would not start on slot 3"
+
+    def test_load_stops_short_and_skips_the_retry_pulses(self):
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane, buf = self._unit()
+        unit.load_approach_length = 30.0
+        lane.hub_obj.afc_bowden_length = 1800.0
+        rams: List[float] = []
+
+        def ram(slot: int, cur_lane: Any, approach: float) -> str:
+            rams.append(approach)
+            buf.advance_state = True
+            return ""
+        unit._ram_to_buffer = ram
+        wire = AceP1Wire(unit)
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj, gcmd=make_gcmd()) is True
+
+        feeds = [m for m in wire.moves() if m[0] == "feed_filament"]
+        # The bowden feed stops approach_length short; no approach feed or pulses follow.
+        assert [m[1]["length"] for m in feeds] == [1760.0]
+        assert rams == [100.0]
+
+    def test_load_fails_when_the_ram_does(self):
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane, buf = self._unit()
+        lane.hub_obj.afc_bowden_length = 1800.0
+        unit._ram_to_buffer = lambda slot, cur_lane, approach: "jammed"
+        AceP1Wire(unit)
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj, gcmd=make_gcmd()) is False
+
+        failures = unit.afc.error.handle_lane_failure.calls
+        assert failures[-1][0][1] == "lane3 did not reach the extruder: jammed"
