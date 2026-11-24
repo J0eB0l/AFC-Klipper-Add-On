@@ -1333,6 +1333,83 @@ class afcACE2(afcACE):
         except Exception:
             return "unread"
 
+    def _ram_buffer(self, cur_lane: AFCLane) -> Any:
+        """
+        The unit's buffer (an [AFC_buffer] with type: ace) when it is this
+        lane's toolhead sensor (pin_tool_start: buffer).
+
+        :param cur_lane: Lane being loaded.
+        :return: the buffer, or None to load to the toolhead sensor as usual
+        """
+        buffer_obj = getattr(cur_lane, "buffer_obj", None)
+        if (getattr(cur_lane.extruder_obj, "tool_start", None) == "buffer"
+            and getattr(buffer_obj, "type", None) == "ace"):
+            return buffer_obj
+        return None
+
+    def _ram_to_buffer(self, slot: int, cur_lane: AFCLane, approach: float) -> str:
+        """
+        Bring the filament the last stretch to the extruder in feed assist.
+        Feed assist stops by itself once the unit's buffer is full, so the
+        filament has arrived when the full switch is on and the encoder has
+        stopped. Not full and not moving is a jam.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param approach: How far short of the extruder the feed stopped, in mm.
+        :return str: '' once it arrived, else why it did not
+        """
+        from extras.AFC_ACE2_buffer import decoder_step, read_slot
+        buf = cur_lane.buffer_obj
+        reactor = self.afc.reactor
+        self._start_feed_assist(slot)
+        if slot not in self._feed_assist_active:
+            return f"feed assist would not start on slot {slot}"
+        max_push = approach + buf.max_extra_length
+        pushed = 0.0
+        last_dec = None
+        still_since = None
+        start = reactor.monotonic()
+        deadline = start + buf.arrival_timeout
+        reason = ""
+        while True:
+            now = reactor.monotonic()
+            if now > deadline:
+                reason = (f"the buffer did not fill within {buf.arrival_timeout:.0f}s "
+                          f"({pushed:.0f}mm pushed)")
+                break
+            sample = read_slot(self, slot)
+            if sample is not None:
+                step = decoder_step(last_dec, sample["decoder"])
+                pushed += step
+                if last_dec is not None:
+                    if step <= buf.still_eps_mm:
+                        still_since = still_since if still_since is not None else now
+                    else:
+                        still_since = None
+                last_dec = sample["decoder"]
+                still_for = (now - still_since) if still_since is not None else 0.0
+                if (sample["full"]
+                    and still_for >= buf.still_seconds):
+                    self.logger.info(f"ACE {self.name}: {cur_lane.name} reached the extruder, "
+                                     f"buffer full after {pushed:.0f}mm of feed assist")
+                    buf.mark_arrival(cur_lane, self, slot, pushed)
+                    break
+                if (not sample["full"]
+                    and still_for >= buf.stall_seconds):
+                    reason = (f"the filament stopped after {pushed:.0f}mm of feed assist "
+                              f"without filling the buffer, check for a jam")
+                    break
+                if pushed > max_push:
+                    reason = (f"feed assist pushed {pushed:.0f}mm without filling the "
+                              f"buffer, check the bowden length")
+                    break
+            reactor.pause(reactor.monotonic() + buf.poll_interval)
+        if (reason
+            or not self._use_feed_assist(cur_lane)):
+            self._stop_feed_assist(slot)
+        return reason
+
     def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
         """
         Back the lane off snag_backoff_length mm before a load feed is resent
