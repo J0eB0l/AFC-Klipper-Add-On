@@ -1040,7 +1040,9 @@ class afcACE(afcUnit):
                 and not slot_transient
                 and prep_done
                 and lane.status == AFCLaneState.NONE):
-                if self._lane_in_toolhead(lane):
+                if (lane.tool_loaded
+                    and hasattr(lane, 'extruder_obj')
+                    and lane.extruder_obj.lane_loaded == lane.name):
                     self.logger.info(f"ACE: {lane.name} restoring TOOLED state from saved vars")
                     lane.loaded_to_hub = True
                     self._set_hub_state(lane, True)
@@ -1286,13 +1288,12 @@ class afcACE(afcUnit):
 
     def on_filament_insert(self, lane: AFCLane, gcmd: AFCGcmd) -> None:
         """
-        ACE-specific insertion: on a V1 ACE, refreshes the slot's RFID
-        inventory and applies the tag's material and color; restores a
-        staged/remembered spool id and runs the base insertion handling.
+        ACE-specific insertion: refresh RFID inventory, apply spool defaults, sync to spoolman.
 
-        :param lane: Lane whose slot had filament inserted; a V1 ACE applies
-            its tag values, a freshly staged or remembered spool id is
-            restored, and the base on_filament_insert is then called.
+        :param lane: Lane whose slot had filament inserted; its RFID inventory
+            is refreshed, filament defaults/Spoolman are applied, a freshly
+            staged or remembered spool id is restored, and the base
+            on_filament_insert is then called.
         :param gcmd: command context the insert is run through
         """
         slot = self._get_slot(lane.name)
@@ -2349,6 +2350,51 @@ class afcACE(afcUnit):
         errored = self._last_move_error == "feed_error"
         return errored, success
 
+    def _ram_buffer(self, cur_lane: AFCLane) -> Any:
+        """
+        The unit's own buffer that ends this lane's load, when the unit has
+        one. The V1 ACE has no buffer sensors, so it has none.
+
+        :param cur_lane: Lane being loaded.
+        :return: the buffer, or None to load to the toolhead sensor as usual
+        """
+        return None
+
+    def _ram_to_buffer(self, slot: int, cur_lane: AFCLane, approach: float) -> str:
+        """
+        Bring the filament the last stretch to the extruder on the unit's own
+        buffer. Only called when _ram_buffer returned one.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param approach: How far short of the extruder the feed stopped, in mm.
+        :return str: '' once it arrived, else why it did not
+        """
+        return "this unit has no buffer of its own"
+
+    def _confirm_engaged(self, slot: int, cur_lane: AFCLane, distance: float,
+                         speed: float) -> str:
+        """
+        Confirm the extruder took the filament after _ram_to_buffer, while
+        its tool_stn move runs. Only called when _ram_buffer returned one.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param distance: How far the extruder is pulling, in mm.
+        :param speed: Its speed, in mm/s.
+        :return str: '' once confirmed, else why not
+        """
+        return ""
+
+    def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
+        """
+        Free a filament tip caught in the unit's buffer before a load feed is
+        resent. The V1 ACE has no buffer sensors, so it does nothing here.
+
+        :param slot: 0-based ACE slot index.
+        :param cur_lane: Lane being loaded.
+        """
+
     def _ace_load_inner(self, cur_lane: AFCLane, cur_extruder: Any, gcmd: AFCGcmd) -> bool:
         """
         ACE custom load, filament transport only.
@@ -2412,6 +2458,11 @@ class afcACE(afcUnit):
 
         stalled = False
         approach = min(max(self.load_approach_length, 0.0), feed_dist)
+        # A unit whose own buffer is the toolhead sensor ends the load itself
+        # (_ram_to_buffer) instead of with the approach feed and retry pulses.
+        ram_buffer = self._ram_buffer(cur_lane)
+        if ram_buffer is not None:
+            approach = min(max(approach, ram_buffer.approach_length), feed_dist)
         approach_speed = self.load_approach_speed
         fast = feed_dist - approach
         try:
@@ -2421,7 +2472,8 @@ class afcACE(afcUnit):
                                                   (approach, approach_speed))):
                 if (dist < 0.5
                     or (step
-                        and cur_lane.get_toolhead_pre_sensor_state())):
+                        and (ram_buffer is not None
+                             or cur_lane.get_toolhead_pre_sensor_state()))):
                     continue
                 # A long feed that trips the unit's slip check early (seen on the
                 # first load after an unload) is resent for what it has left,
@@ -2444,6 +2496,7 @@ class afcACE(afcUnit):
                         dist -= fed
                     if dist < 0.5:
                         break
+                    self._clear_tip_snag(slot, cur_lane)
                     self.logger.info(f"ACE load: {cur_lane.name} hit a feed error" +
                                      (f" after {fed:.0f}mm" if fed else "") +
                                      f", feeding the remaining {dist:.0f}mm again")
@@ -2469,6 +2522,14 @@ class afcACE(afcUnit):
             afc.error.handle_lane_failure(cur_lane, f"ACE load feed error: {e}",
                                           pause=afc.function.in_print(), gcmd=gcmd)
             return False
+
+        if ram_buffer is not None:
+            reason = self._ram_to_buffer(slot, cur_lane, approach)
+            if reason:
+                afc.error.handle_lane_failure(cur_lane,
+                    f"{cur_lane.name} did not reach the extruder: {reason}",
+                    pause=afc.function.in_print(), gcmd=gcmd)
+                return False
 
         # If the sensor has not triggered yet, pulse load_retry_pulse mm until it
         # does or load_retry_timeout elapses.
@@ -2517,6 +2578,15 @@ class afcACE(afcUnit):
             cur_lane.activate_toolhead_extruder()
             afc.move_e_pos(tool_stn, cur_extruder.tool_load_speed, "tool stn")
             self._log_delta("ACE load: tool_stn to nozzle")
+
+        if ram_buffer is not None:
+            reason = self._confirm_engaged(slot, cur_lane, tool_stn,
+                                           cur_extruder.tool_load_speed)
+            if reason:
+                afc.error.handle_lane_failure(cur_lane,
+                    f"{cur_lane.name} did not take the filament: {reason}",
+                    pause=afc.function.in_print(), gcmd=gcmd)
+                return False
 
         self._log_delta("ACE load transport complete")
         return True

@@ -1481,11 +1481,13 @@ class TestAFCACE2RFIDStageProbeBegin:
     @staticmethod
     def _field(monkeypatch: pytest.MonkeyPatch, uids: List[Optional[str]]) -> None:
         """
-        Script the tag that answers each stage-scan poll (MifareClassic.activate):
-        one UID per poll, None or an empty queue for no tag in the field.
+        Script the tags in the field at each stage-scan poll
+        (MifareClassic.activate): one UID, or a tuple of UIDs that are all in
+        the field, per poll; None or an empty queue for no tag. An excluded
+        UID is halted, so the next one in the tuple answers.
 
         :param monkeypatch: the test's monkeypatch
-        :param uids: UID hex per poll
+        :param uids: UID hex, or a tuple of them, per poll
         """
         queue = list(uids)
 
@@ -1493,9 +1495,17 @@ class TestAFCACE2RFIDStageProbeBegin:
             def __init__(self, mfrc: Any) -> None:
                 self.mfrc = mfrc
 
-            def activate(self) -> Tuple[Optional[bytes], Optional[int]]:
-                uid = queue.pop(0) if queue else None
-                return (None, None) if uid is None else (bytes.fromhex(uid), 0x08)
+            def activate(self, is_excluded: Optional[Callable[[str], bool]] = None
+                         ) -> Tuple[Optional[bytes], Optional[int]]:
+                entry = queue.pop(0) if queue else None
+                field = entry if isinstance(entry, tuple) else (entry,)
+                for uid in field:
+                    if uid is None:
+                        continue
+                    if is_excluded is not None and is_excluded(uid):
+                        continue
+                    return bytes.fromhex(uid), 0x08
+                return None, None
 
         monkeypatch.setattr(ace2_rfid_module, "MifareClassic", FieldScript)
 
@@ -1860,6 +1870,36 @@ class TestAFCACE2RFIDStageProbeBegin:
             ("info", "ACE2 RFID: stage scan slot 2, tag cafe parked on the shared reader "
                      "(sibling slot 3); clearing it before the read"),
             ("info", "ACE2 RFID: stage scan slot 2, no tag seen in 560mm; staging without RFID")]
+
+    def test_stage_scan_ends_with_the_feed_while_a_parked_tag_stays_in_the_field(
+            self, monkeypatch):
+        # An unmovable sibling's parked tag answers every poll; the scan still
+        # sees its own feed finish instead of polling on to the deadline.
+        reader, unit, motion = self._sister_rig({"tool_loaded": True})
+        reader._slot_uid = {}
+        self._field(monkeypatch, ["cafe"] * 100000)
+        Ace2RfidTagScript(monkeypatch, None)
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
+        start = unit.printer.reactor.monotonic()
+        reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
+        feed_time = 560.0 / min(float(reader.stage_scan_speed), 90.0)
+        assert ctx["done"] is False
+        assert motion.pos(2) == 560.0
+        assert unit.printer.reactor.monotonic() - start < feed_time + 3.0
+
+    def test_stage_scan_reads_own_tag_while_the_parked_tag_stays_in_the_field(
+            self, monkeypatch):
+        # The unmovable sibling's tag never leaves the antenna; halting it on
+        # each poll lets this lane's tag answer as it sweeps in.
+        reader, unit, motion = self._sister_rig({"tool_loaded": True})
+        reader._slot_uid = {}
+        self._field(monkeypatch, ["cafe", "cafe", ("cafe",), ("cafe", "beef")])
+        tags = Ace2RfidTagScript(monkeypatch, self._decoded("beef"))
+        ctx: Dict[str, Any] = {"active": False, "done": False, "initial": 500.0}
+        reader._stage_probe_begin(unit.printer.afc.lanes["lane2"], ctx)
+        assert ctx["done"] is True
+        assert reader._slot_uid == {2: "beef"}
+        assert unit.printer.gcode.messages == [ace2_rfid_read_out("lane2", "beef")]
 
     def test_stage_scan_reads_own_tag_past_unmovable_sibling(self, monkeypatch):
         reader, unit, motion = self._sister_rig({"tool_loaded": True})

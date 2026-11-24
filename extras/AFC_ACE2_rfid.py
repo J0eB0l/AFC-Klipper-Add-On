@@ -603,15 +603,19 @@ class AFC_ACE2_RFID(AFCUnitRFID):
         return _Ace2RegLink(self.ace2, reg_idx, power_index=power_index,
                             reg_timeout=self.read_reg_timeout)
 
-    def _probe_uid(self, link: Any) -> Optional[str]:
+    def _probe_uid(self, link: Any,
+                   is_excluded: Optional[Callable[[str], bool]] = None) -> Optional[str]:
         """
         Return the UID of the tag in the reader's field, without decoding it.
 
         :param link: reader link
+        :param is_excluded: predicate for UIDs to halt so a tag behind them answers
         :return Optional[str]: UID hex, None when no tag
         """
         try:
-            uid, _sak = MifareClassic(Mfrc522(link)).activate()
+            tag = MifareClassic(Mfrc522(link))
+            uid, _sak = (tag.activate(is_excluded=is_excluded) if is_excluded is not None
+                         else tag.activate())
         except Exception:
             return None
         return uid.hex() if uid is not None else None
@@ -1411,23 +1415,28 @@ class AFC_ACE2_RFID(AFCUnitRFID):
                         return min(scan_dist, (self.reactor.monotonic() - t0) * eff)
                 except Exception:
                     pass
-            uidhex = self._probe_uid(link)
+            # Halt the parked sibling tag so this lane's own tag can answer
+            # while both sit in the field.
+            uidhex = self._probe_uid(link, (lambda uid: uid == baseline) if baseline else None)
+            # The stationary parked sibling tag captured at baseline is never
+            # this lane's; keep feeding so our own tag sweeps in (and still
+            # watch the slot below, so a finished feed ends the scan).
+            if (uidhex is not None
+                and baseline is not None
+                and uidhex == baseline):
+                uidhex = None
+            # A neighbour's tag on the antenna: retract the idle sibling and
+            # keep feeding so our tag sweeps in. Restored in _stage_probe_end.
+            if (uidhex is not None
+                and self._is_sibling_tag(slot, sibling, uidhex)):
+                self.logger.info(
+                    f"ACE2 RFID: stage scan slot {slot} saw sibling slot {sibling}'s tag (uid="
+                    f"{uidhex}), clearing it and continuing")
+                self._maybe_retract_sister(sibling)
+                if self._sister_retracted is None:
+                    blocked_sib = sibling
+                uidhex = None
             if uidhex is not None:
-                # The stationary parked sibling tag captured at baseline, never
-                # this lane's; keep feeding so our own tag sweeps in.
-                if (baseline is not None
-                    and uidhex == baseline):
-                    continue
-                # A neighbour's tag on the antenna: retract the idle sibling and
-                # keep feeding so our tag sweeps in. Restored in _stage_probe_end.
-                if self._is_sibling_tag(slot, sibling, uidhex):
-                    self.logger.info(
-                        f"ACE2 RFID: stage scan slot {slot} saw sibling slot {sibling}'s tag (uid="
-                        f"{uidhex}), clearing it and continuing")
-                    self._maybe_retract_sister(sibling)
-                    if self._sister_retracted is None:
-                        blocked_sib = sibling
-                    continue
                 detected = uidhex
                 net_fed = min(scan_dist, (self.reactor.monotonic() - t0) * eff)
                 try:
