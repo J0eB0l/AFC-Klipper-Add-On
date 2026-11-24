@@ -1068,7 +1068,9 @@ class afcACE(afcUnit):
                 and not slot_transient
                 and prep_done
                 and lane.status == AFCLaneState.NONE):
-                if self._lane_in_toolhead(lane):
+                if (lane.tool_loaded
+                    and hasattr(lane, 'extruder_obj')
+                    and lane.extruder_obj.lane_loaded == lane.name):
                     self.logger.info(f"ACE: {lane.name} restoring TOOLED state from saved vars")
                     lane.loaded_to_hub = True
                     self._set_hub_state(lane, True)
@@ -1314,13 +1316,12 @@ class afcACE(afcUnit):
 
     def on_filament_insert(self, lane: AFCLane, gcmd: AFCGcmd) -> None:
         """
-        ACE-specific insertion: on a V1 ACE, refreshes the slot's RFID
-        inventory and applies the tag's material and color; restores a
-        staged/remembered spool id and runs the base insertion handling.
+        ACE-specific insertion: refresh RFID inventory, apply spool defaults, sync to spoolman.
 
-        :param lane: Lane whose slot had filament inserted; a V1 ACE applies
-            its tag values, a freshly staged or remembered spool id is
-            restored, and the base on_filament_insert is then called.
+        :param lane: Lane whose slot had filament inserted; its RFID inventory
+            is refreshed, filament defaults/Spoolman are applied, a freshly
+            staged or remembered spool id is restored, and the base
+            on_filament_insert is then called.
         :param gcmd: command context the insert is run through
         """
         slot = self._get_slot(lane.name)
