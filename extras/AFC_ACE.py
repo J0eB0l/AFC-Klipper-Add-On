@@ -2371,6 +2371,20 @@ class afcACE(afcUnit):
         """
         return "this unit has no buffer of its own"
 
+    def _confirm_engaged(self, slot: int, cur_lane: AFCLane, distance: float,
+                         speed: float) -> str:
+        """
+        Confirm the extruder took the filament after _ram_to_buffer, while
+        its tool_stn move runs. Only called when _ram_buffer returned one.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param distance: How far the extruder is pulling, in mm.
+        :param speed: Its speed, in mm/s.
+        :return str: '' once confirmed, else why not
+        """
+        return ""
+
     def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
         """
         Free a filament tip caught in the unit's buffer before a load feed is
@@ -2563,6 +2577,15 @@ class afcACE(afcUnit):
             cur_lane.activate_toolhead_extruder()
             afc.move_e_pos(tool_stn, cur_extruder.tool_load_speed, "tool stn")
             self._log_delta("ACE load: tool_stn to nozzle")
+
+        if ram_buffer is not None:
+            reason = self._confirm_engaged(slot, cur_lane, tool_stn,
+                                           cur_extruder.tool_load_speed)
+            if reason:
+                afc.error.handle_lane_failure(cur_lane,
+                    f"{cur_lane.name} did not take the filament: {reason}",
+                    pause=afc.function.in_print(), gcmd=gcmd)
+                return False
 
         self._log_delta("ACE load transport complete")
         return True

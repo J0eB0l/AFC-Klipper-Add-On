@@ -72,10 +72,14 @@ class AFCACEBuffer(AFCBuffer):
         # Give up when the assist pushes this much more than approach_length.
         self.max_extra_length: float = config.getfloat("max_extra_length", 150.0, minval=0.0)
         self.arrival_timeout: float = config.getfloat("arrival_timeout", 30.0, minval=1.0)
+        # After arrival the buffer must drain within the tool_stn move plus this.
+        self.engage_extra_seconds: float = config.getfloat("engage_extra_seconds", 2.0,
+                                                           minval=0.0)
+        # Still full after that: push this far again while the extruder turns, this many times.
+        self.engage_push_length: float = config.getfloat("engage_push_length", 50.0, minval=1.0)
+        self.engage_retries: int = config.getint("engage_retries", 2, minval=0)
 
         self.arrival_mm: Optional[float] = None
-        self._watch_timer = None
-        self._watch: Optional[Dict[str, Any]] = None
 
     # AFCBuffer's __init__ assigns these two, so they need setters.
     @property
@@ -102,16 +106,17 @@ class AFCACEBuffer(AFCBuffer):
     @property
     def trailing_state(self) -> bool:
         """
-        True while one of this buffer's lanes reads its back switch (buffer
-        pulled, the filament under tension), from the unit's last sensor read.
+        True unless the unit's buffer reads full (the filament pressed
+        forward), from its last sensor read. An unload backs off until then
+        before it retracts. Filament that never reached the gears is not held,
+        so the buffer can never come under tension, and an unread buffer must
+        not block an unload either.
         """
-        for unit, slot in self._lane_slots():
-            sensors = (getattr(unit, "_cached_sensor_state", None) or {}).get("slot_sensors")
-            if (sensors
-                and slot < len(sensors)
-                and sensors[slot].get("buf_back")):
-                return True
-        return False
+        for unit, _slot in self._lane_slots():
+            sensors = getattr(unit, "_cached_sensor_state", None) or {}
+            if sensors.get("buf_feed"):
+                return False
+        return True
 
     @trailing_state.setter
     def trailing_state(self, value: bool) -> None:
@@ -150,8 +155,7 @@ class AFCACEBuffer(AFCBuffer):
 
     def mark_arrival(self, lane: AFCLane, unit: Any, slot: int, pushed_mm: float) -> None:
         """
-        Record that the filament reached the extruder, and start watching the
-        buffer while the extruder takes it, for the log.
+        Record that the filament reached the extruder.
 
         :param lane: lane being loaded
         :param unit: its ACE unit
@@ -160,82 +164,13 @@ class AFCACEBuffer(AFCBuffer):
         """
         self._arrived = True
         self.arrival_mm = pushed_mm
-        self._start_watch(lane, unit, slot)
-
-    def enable_buffer(self, lane: AFCLane) -> None:
-        """
-        The lane is loaded: end the engagement watch. The arrival stays
-        latched while the lane is loaded.
-
-        :param lane: the loaded lane
-        """
-        self._end_watch()
-        super().enable_buffer(lane)
 
     def disable_buffer(self) -> None:
         """
         Disable the buffer and drop the latch; this runs as an unload starts.
         """
-        self._end_watch()
         self._arrived = False
         super().disable_buffer()
-
-    # The watch after arrival: logs how the buffer behaves while the
-    # extruder takes the filament, so engagement can be judged from real
-    # loads before anything acts on it.
-
-    def _start_watch(self, lane: AFCLane, unit: Any, slot: int) -> None:
-        """
-        Start sampling the unit until the load finishes.
-
-        :param lane: lane being loaded
-        :param unit: its ACE unit
-        :param slot: its slot on the unit
-        """
-        self._end_watch()
-        self._watch = {"lane": lane.name, "unit": unit, "slot": slot, "full": None,
-                       "drains": 0, "fills": 0, "fed_mm": 0.0, "last_dec": None,
-                       "start": self.reactor.monotonic()}
-        if self._watch_timer is None:
-            self._watch_timer = self.reactor.register_timer(self._watch_tick)
-        self.reactor.update_timer(self._watch_timer, self.reactor.NOW)
-
-    def _watch_tick(self, eventtime: float) -> float:
-        """
-        Reactor timer: read the unit once and count buffer fills and drains.
-
-        :param eventtime: reactor event time
-        :return float: the next tick, or NEVER once the watch ended
-        """
-        watch = self._watch
-        if watch is None:
-            return self.reactor.NEVER
-        if eventtime - watch["start"] > 120.0:
-            self._end_watch()
-            return self.reactor.NEVER
-        sample = read_slot(watch["unit"], watch["slot"])
-        if sample is not None:
-            full, dec = sample["full"], sample["decoder"]
-            if watch["full"] is not None and full != watch["full"]:
-                watch["fills" if full else "drains"] += 1
-            watch["full"] = full
-            watch["fed_mm"] += decoder_step(watch["last_dec"], dec)
-            watch["last_dec"] = dec
-        return eventtime + self.poll_interval
-
-    def _end_watch(self) -> None:
-        """
-        Stop the engagement watch and log what it saw.
-        """
-        watch = self._watch
-        if watch is None:
-            return
-        self._watch = None
-        if self._watch_timer is not None:
-            self.reactor.update_timer(self._watch_timer, self.reactor.NEVER)
-        self.logger.debug(f"{self.name}: {watch['lane']} after arrival, the buffer drained "
-                          f"{watch['drains']} and refilled {watch['fills']} times while the "
-                          f"assist fed {watch['fed_mm']:.0f}mm")
 
     def get_status(self, eventtime: Optional[float] = None) -> dict:
         """

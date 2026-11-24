@@ -1405,10 +1405,95 @@ class afcACE2(afcACE):
                               f"buffer, check the bowden length")
                     break
             reactor.pause(reactor.monotonic() + buf.poll_interval)
+        if reason:
+            self._stop_feed_assist(slot)
+        # On arrival assist keeps running: _confirm_engaged needs it to hold
+        # the buffer full until the extruder takes the filament.
+        return reason
+
+    def _confirm_engaged(self, slot: int, cur_lane: AFCLane, distance: float,
+                         speed: float) -> str:
+        """
+        Confirm the extruder took the filament. Feed assist holds the buffer
+        full against whatever stopped the filament, so it only drains when
+        the extruder pulls filament out of it. Still full once the tool_stn
+        move is done means the extruder never gripped it: then push again,
+        a short feed (the motor's full force, which feed assist does not
+        use) while the extruder turns another tool_stn, and watch a further
+        tool_stn pull, up to engage_retries times.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param distance: How far the extruder pulls (tool_stn), in mm.
+        :param speed: Its speed, in mm/s.
+        :return str: '' once the buffer drained, else why not
+        """
+        buf = cur_lane.buffer_obj
+        if distance <= 0:
+            self.logger.warning(f"ACE {self.name}: {cur_lane.name} has no tool_stn move, so "
+                                f"there is nothing to confirm the extruder took it")
+            if not self._use_feed_assist(cur_lane):
+                self._stop_feed_assist(slot)
+            return ""
+        reason = self._wait_for_drain(slot, buf, distance, speed)
+        tries = 0
+        while (reason == "full"
+               and tries < buf.engage_retries):
+            tries += 1
+            self.logger.info(f"ACE {self.name}: {cur_lane.name} not taken by the extruder yet, "
+                             f"pushing {buf.engage_push_length:.0f}mm again "
+                             f"(try {tries}/{buf.engage_retries})")
+            try:
+                self._stop_feed_assist(slot)
+                self.afc.move_e_pos(distance, speed, "engage retry")
+                self._wait_for_ace_ready()
+                self._ace.feed_filament(slot, buf.engage_push_length, self.load_approach_speed)
+                self._wait_for_feed_complete(slot, buf.engage_push_length,
+                                             self.load_approach_speed)
+                # Then watch for the drain on a fresh pull, assist holding the buffer full.
+                self._start_feed_assist(slot)
+                self.afc.move_e_pos(distance, speed, "engage check")
+            except Exception as e:
+                self.logger.warning(f"ACE {self.name}: {cur_lane.name} push retry failed: {e}")
+            reason = self._wait_for_drain(slot, buf, distance, speed)
+        if reason == "full":
+            reason = (f"the buffer stayed full while the extruder pulled {distance:.0f}mm"
+                      + (f" and after {tries} more push{'es' if tries > 1 else ''}"
+                         if tries else "")
+                      + ", so the filament is stopped short of the gears "
+                        "(check for a catch or snag)")
+        elif not reason:
+            self.logger.info(f"ACE {self.name}: {cur_lane.name} taken by the extruder, "
+                             f"the buffer drained")
         if (reason
             or not self._use_feed_assist(cur_lane)):
             self._stop_feed_assist(slot)
         return reason
+
+    def _wait_for_drain(self, slot: int, buf: Any, distance: float, speed: float) -> str:
+        """
+        Watch the buffer while the extruder pulls distance mm.
+
+        :param slot: 0-based ACE slot index.
+        :param buf: the lane's ACE buffer
+        :param distance: the extruder move, in mm
+        :param speed: its speed, in mm/s
+        :return str: '' when it drained, 'full' when it stayed full, else why
+            it could not be read
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        reactor = self.afc.reactor
+        deadline = reactor.monotonic() + distance / max(speed, 1.0) + buf.engage_extra_seconds
+        read_any = False
+        while reactor.monotonic() < deadline:
+            reactor.pause(reactor.monotonic() + buf.poll_interval)
+            sample = read_slot(self, slot)
+            if sample is None:
+                continue
+            read_any = True
+            if not sample["full"]:
+                return ""
+        return "full" if read_any else "the unit's buffer could not be read"
 
     def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
         """
