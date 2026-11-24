@@ -59,6 +59,18 @@ FLAG_RESPONSE = 0x80
 # encoder_reading = commanded_mm * 1.2342. Used to validate SET_FEED_CHECK
 # params and report slip.
 ACE2_ENCODER_SCALE = 1.2342
+# The unit answers a feed or an unwind as the move starts. A long move waits
+# this long for that answer before asking the slot whether it is moving.
+MOVE_ACK_TIMEOUT = 3.0
+# Wait for that status reply; a move must outlast both waits to be checked.
+MOVE_ACK_MARGIN = 2.0
+# An unload takes up about this much before its long unwind (rollback assist
+# and the buffer's collapse), so the unwind that puts the tip back where a
+# load starts is this much shorter than the feed a calibration measures.
+CALIBRATE_UNLOAD_TAKEUP = 40.0
+# A load's feed runs this far past where a calibration saw the filament touch
+# the extruder gears, so it ends pressed into them.
+CALIBRATE_PRESS = 35.0
 HEADER_LEN = 7
 TRAILER_LEN = 3
 MIN_FRAME_LEN = HEADER_LEN + TRAILER_LEN
@@ -1154,6 +1166,71 @@ class ACE2Connection(ACEConnection):
         return self.send_command("start_rollback_assist", params={"index": slot_index},
                                  timeout=timeout)
 
+    def feed_filament(self, slot_index: int, length_mm: float, speed_mm_s: float) -> Any:
+        """
+        Feed filament forward from a slot, sending the command once more when
+        the unit never started it (see _send_move).
+
+        :param slot_index: Slot index (0-based)
+        :param length_mm: Distance to feed in mm
+        :param speed_mm_s: Feed speed in mm/s
+        :return Any: The response result payload.
+        """
+        return self._send_move("feed_filament", "feeding",
+                               {"index": slot_index, "length": length_mm, "speed": speed_mm_s})
+
+    def unwind_filament(self, slot_index: int, length_mm: float, speed_mm_s: float,
+                        mode: str = "normal") -> Any:
+        """
+        Unwind filament back into a slot, sending the command once more when
+        the unit never started it (see _send_move).
+
+        :param slot_index: Slot index (0-based)
+        :param length_mm: Distance to unwind in mm
+        :param speed_mm_s: Unwind speed in mm/s
+        :param mode: Unwind mode ("normal" or another the firmware supports)
+        :return Any: The response result payload.
+        """
+        return self._send_move("unwind_filament", "rollback",
+                               {"index": slot_index, "length": length_mm, "speed": speed_mm_s,
+                                "mode": mode})
+
+    def _send_move(self, method: str, moving_state: str, params: Dict[str, Any]) -> Any:
+        """
+        Send a feed or an unwind. The unit answers a move as it starts, so a
+        long move waits only MOVE_ACK_TIMEOUT for the answer. When none comes
+        the slot's state tells the two cases apart: it is moving, so only the
+        answer was lost, or it is not, so the command was, and the command is
+        sent once more. A move short enough to end before that check keeps the
+        full wait, as a finished move reads the same as one that never started.
+
+        :param method: "feed_filament" or "unwind_filament"
+        :param moving_state: the slot state the unit reports while the move runs
+        :param params: the command's params (index, length, speed)
+        :return Any: The response result payload, {} for a running move whose
+                     answer was lost.
+        :raises ACETimeoutError: When the command sent again got no answer
+                                 either and the slot is still not moving.
+        """
+        duration = params["length"] / max(params["speed"], 1)
+        if duration < MOVE_ACK_TIMEOUT + MOVE_ACK_MARGIN:
+            return self.send_command(method, params=params, timeout=duration + 10)
+        slot = params["index"]
+        for attempt in range(2):
+            try:
+                return self.send_command(method, params=params, timeout=MOVE_ACK_TIMEOUT)
+            except ACETimeoutError as e:
+                lost = e
+            status = self.get_status(timeout=MOVE_ACK_MARGIN)
+            if status["slots"][slot].get("slot_status") == moving_state:
+                self._logger.debug(f"ACE2 {method} on slot {slot} got no answer, "
+                                   "but the slot is moving")
+                return {}
+            if attempt == 0:
+                self._logger.info(f"ACE2 {method} on slot {slot} got no answer and the "
+                                  "slot is not moving, sending it again")
+        raise lost
+
     def enable_rfid(self) -> None:
         """
         Nothing to turn on: the ACE 2 has no firmware tag reader (AFC_ACE2_rfid
@@ -1524,6 +1601,157 @@ class afcACE2(afcACE):
         reactor.pause(reactor.monotonic() + self._SNAG_SETTLE_TIME)
         after = self._buffer_reading(slot)
         self.logger.info(f"ACE load: {cur_lane.name} after back-off, buffer {after}")
+
+    def _calibrate_bowden_inner(self, cur_lane: AFCLane, cur_hub: Any,
+                                slot: int) -> Tuple[bool, str, float]:
+        """
+        A lane whose toolhead sensor is the unit's buffer has no sensor to
+        feed up to, so its bowden is measured on the unit's encoder: feed
+        until the extruder gears stop the filament (_feed_to_gears), unwind
+        what was fed, and save both lengths. afc_bowden_length is set so a
+        load's feed ends with the filament pressed against the gears, and
+        afc_unload_bowden_length so an unload leaves the tip where a load
+        starts. Any other lane calibrates to its toolhead sensor as usual.
+
+        :param cur_lane: Lane to calibrate.
+        :param cur_hub: Hub object the measured lengths are saved to.
+        :param slot: 0-based ACE slot index for the lane.
+        :return tuple: (success, message, afc_bowden_length).
+        """
+        buf = self._ram_buffer(cur_lane)
+        if buf is None:
+            return super()._calibrate_bowden_inner(cur_lane, cur_hub, slot)
+        if cur_lane.get_toolhead_pre_sensor_state():
+            return False, "Filament is already at the extruder, unload first", 0
+        # The unit drives one slot at a time: a feed is not answered while
+        # another slot runs feed assist.
+        for other_slot in list(self._feed_assist_active):
+            if other_slot != slot:
+                self._stop_feed_assist(other_slot)
+        max_distance = 6000
+        self.logger.raw(f"Calibrating afc_bowden_length for {cur_lane.name} on its buffer "
+                        f"and encoder (max {max_distance}mm)")
+        contact, fed, reason = self._feed_to_gears(slot, buf, max_distance)
+        ratio = self._unwind_measured(slot, fed)
+        # The unit unwinds a little less than it is told: cover what that
+        # left, so the tip is back where the feed started.
+        self._unwind_measured(slot, fed * (ratio - 1.0))
+        if reason:
+            return False, f"{cur_lane.name} did not reach the extruder: {reason}", contact
+
+        # A lane not staged at its hub is loaded with dist_hub added to both.
+        offset = 0.0 if cur_lane.loaded_to_hub else cur_lane.dist_hub
+        bowden = round(contact + CALIBRATE_PRESS + buf.approach_length - offset, 2)
+        unload = round((fed - CALIBRATE_UNLOAD_TAKEUP) * ratio - offset, 2)
+        old_bowden = getattr(cur_hub, "afc_bowden_length", 0)
+        old_unload = getattr(cur_hub, "afc_unload_bowden_length", 0)
+        cur_hub.afc_bowden_length = bowden
+        cur_hub.afc_unload_bowden_length = unload
+        self.afc.function.ConfigRewrite(cur_hub.fullname, "afc_bowden_length", bowden,
+                                        f"\n afc_bowden_length: New: {bowden} Old: {old_bowden}")
+        self.afc.function.ConfigRewrite(
+            cur_hub.fullname, "afc_unload_bowden_length", unload,
+            f"\n afc_unload_bowden_length: New: {unload} Old: {old_unload}")
+        return (True, f"afc_bowden_length calibration: {bowden}mm (was {old_bowden}mm), "
+                      f"afc_unload_bowden_length: {unload}mm (was {old_unload}mm)", bowden)
+
+    def _feed_to_gears(self, slot: int, buf: Any, max_distance: float) -> Tuple[float, float, str]:
+        """
+        Feed until the extruder gears stop the filament, then stop the feed.
+        The filament has arrived when the slot's buffer is pressed forward
+        and, for the buffer's still_seconds, the encoder counts less than
+        half of what the motor feeds. An encoder that stops with the motor,
+        or without the buffer pressed, is a feed the unit ended or a jam.
+
+        :param slot: 0-based ACE slot index.
+        :param buf: the lane's ACE buffer, for its poll and stillness settings
+        :param max_distance: the longest feed to try, in mm
+        :return tuple: (mm the unit had fed, by its own count, when the
+            filament last moved freely, mm the encoder counted in all, '' or
+            why the filament did not arrive)
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        reactor = self.afc.reactor
+        sample = read_slot(self, slot)
+        if (sample is None
+            or not sample["rest"]):
+            return 0.0, 0.0, "its buffer is not at rest, unload the lane first"
+        try:
+            self._wait_for_ace_ready()
+            self._ace.feed_filament(slot, max_distance, self.feed_speed)
+        except Exception as e:
+            return 0.0, 0.0, f"the feed did not start: {e}"
+        length = 0.0
+        contact = 0.0
+        last_dec: Optional[float] = None
+        still_since: Optional[float] = None
+        slipped = False
+        reason = ""
+        deadline = reactor.monotonic() + 2.0 * max_distance / max(self.feed_speed, 1.0) + 15.0
+        while True:
+            now = reactor.monotonic()
+            if now > deadline:
+                reason = f"no arrival after {length:.0f}mm, the unit's buffer could not be read"
+                break
+            sample = read_slot(self, slot)
+            if sample is not None:
+                dec = float(sample["decoder"])
+                moved = sample["length"] - length
+                length = sample["length"]
+                if (last_dec is not None
+                    and dec - last_dec <= max(buf.still_eps_mm, moved / 2.0)):
+                    still_since = still_since if still_since is not None else now
+                    slipped = slipped or moved / 2.0 > buf.still_eps_mm
+                else:
+                    still_since = None
+                    slipped = False
+                    contact = length
+                last_dec = dec
+                still_for = (now - still_since) if still_since is not None else 0.0
+                if (slipped
+                    and not sample["rest"]
+                    and not sample["back"]
+                    and still_for >= buf.still_seconds):
+                    break
+                if still_for >= buf.stall_seconds:
+                    reason = f"the feed stopped after {length:.0f}mm"
+                    break
+            reactor.pause(reactor.monotonic() + buf.poll_interval)
+        self._stop_feed_at_sensor(slot)
+        sample = read_slot(self, slot)
+        fed = float(sample["decoder"]) if sample is not None else (last_dec or 0.0)
+        return contact, fed, reason
+
+    def _unwind_measured(self, slot: int, distance: float) -> float:
+        """
+        Unwind what a calibration feed pushed out, and compare the command
+        with what the encoder counted: the unit covers a little less than an
+        unwind tells it to.
+
+        :param slot: 0-based ACE slot index.
+        :param distance: mm to unwind
+        :return float: commanded mm per mm the encoder counted, 1.0 when that
+            could not be measured
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        if distance < 1.0:
+            return 1.0
+        self.logger.info(f"ACE calibrate: unwinding {distance:.0f}mm")
+        try:
+            self._wait_for_ace_ready()
+            self._ace.unwind_filament(slot, distance, self.retract_speed)
+            self._wait_for_feed_complete(slot, distance, self.retract_speed)
+            self._wait_for_ace_ready(timeout=15.0)
+        except Exception as e:
+            self.logger.error(f"ACE calibrate: unwind failed: {e}")
+            return 1.0
+        sample = read_slot(self, slot)
+        unwound = -float(sample["decoder"]) if sample is not None else 0.0
+        ratio = distance / unwound if unwound > 0 else 1.0
+        if (ratio < 0.9
+            or ratio > 1.1):
+            return 1.0
+        return ratio
 
     cmd_AFC_ACE_IDENTIFY_help = "Blink an ACE 2's lane LEDs to show which unit it is"
     def cmd_AFC_ACE_IDENTIFY(self, gcmd: GCodeCommand) -> None:

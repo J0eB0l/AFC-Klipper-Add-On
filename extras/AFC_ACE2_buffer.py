@@ -251,7 +251,8 @@ def read_slot(unit: Any, slot: int) -> Optional[Dict[str, Any]]:
 
     :param unit: the ACE unit
     :param slot: 0-based slot
-    :return dict: {"full", "rest", "back", "decoder"}, or None if a read failed
+    :return dict: {"full", "rest", "back", "decoder", "length"}, or None if a
+        read failed; length is how far the unit counts its current move
     """
     ace = getattr(unit, "_ace", None)
     if (ace is None
@@ -264,6 +265,7 @@ def read_slot(unit: Any, slot: int) -> Optional[Dict[str, Any]]:
         return {"full": slot_full(sensors, slot),
                 "rest": bool(slot_sensors["buf_rst"]),
                 "back": bool(slot_sensors["buf_back"]),
-                "decoder": signed_decoder(feed.get("decoder", 0))}
+                "decoder": signed_decoder(feed.get("decoder", 0)),
+                "length": float(feed.get("length", 0))}
     except Exception:
         return None

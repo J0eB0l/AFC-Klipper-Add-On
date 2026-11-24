@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import struct
 import sys
+import types
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import pytest
@@ -215,6 +216,54 @@ def ace2_link_answers(conn: ACE2Connection, **response: Any) -> None:
         conn._handle_response({"id": frame[3] | (frame[4] << 8), **response})
 
     conn._serial.on_write = answer
+
+
+def ace2_link_script(conn: ACE2Connection,
+                     script: Dict[int, List[Optional[Dict[str, Any]]]]) -> None:
+    """
+    Answer each frame the connection writes from its opcode's list, taken in
+    order with the last entry repeating: a dict is the response's fields other
+    than its id and opcode, None leaves the frame unanswered (it times out).
+
+    :param conn: the connection
+    :param script: opcode -> responses
+    """
+    def answer(frame: bytes) -> None:
+        """
+        :param frame: the request frame just written
+        """
+        queue = script[frame[5]]
+        fields = queue.pop(0) if len(queue) > 1 else queue[0]
+        if fields is not None:
+            conn._handle_response({"id": frame[3] | (frame[4] << 8), "_cmd": frame[5], **fields})
+
+    conn._serial.on_write = answer
+
+
+def ace2_slot_states(*states: str) -> Dict[str, Any]:
+    """
+    :param states: each slot's motor state, slot 0 first
+    :return dict: the fields of a get_status response reporting them
+    """
+    slots = [ace2_status_slot(index, "ready", state) for index, state in enumerate(states)]
+    return {"code": 0, "msg": "success", "result": {"status": "ready", "slots": slots}}
+
+
+def ace2_move_frame(seq: int, slot: int, length: int, speed: int, mode: int = 0) -> bytes:
+    """
+    :param seq: request id
+    :param slot: 0-based slot
+    :param length: mm
+    :param speed: mm/s
+    :param mode: 0 for a feed, 1 for an unwind
+    :return bytes: the FEED_OR_ROLLBACK request frame
+    """
+    return Ace2Wire.frame(seq, Ace2Wire.FEED_OR_ROLLBACK,
+                          Ace2Wire.message((1, slot), (2, speed), (3, length), (4, mode)))
+
+
+#: The fields of the response a unit gives a move it started.
+ACE2_MOVE_STARTED: Dict[str, Any] = {"code": 0, "msg": "success", "result": {"ack": 1}}
 
 
 def ace2_jam_message(lane: str, what: str) -> str:
@@ -2361,6 +2410,267 @@ class TestACE2ConnectionParseFrames:
         assert printer.logger.messages == []
 
 
+class TestACE2ConnectionFeedFilament:
+    def test_sends_a_feed_and_returns_its_result(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn.feed_filament(1, 600, 100) == {"ack": 1}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 1, 600, 100)]
+        assert printer.reactor.now == 100.0
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 feed_filament {'index': 1, 'length': 600, 'speed': 100}")]
+
+    def test_a_feeding_slot_is_a_started_feed(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [None],
+            Ace2Wire.GET_STATUS: [ace2_slot_states("ready", "feeding", "ready", "ready")]})
+
+        assert conn.feed_filament(1, 600, 100) == {}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 1, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 feed_filament {'index': 1, 'length': 600, 'speed': 100}"),
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            ("debug", "ACE2 feed_filament on slot 1 got no answer, but the slot is moving")]
+
+
+class TestACE2ConnectionUnwindFilament:
+    def test_sends_an_unwind_and_returns_its_result(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn.unwind_filament(2, 700, 100) == {"ack": 1}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 2, 700, 100, mode=1)]
+        assert printer.reactor.now == 100.0
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 unwind_filament "
+                      "{'index': 2, 'length': 700, 'speed': 100, 'mode': 'normal'}")]
+
+    def test_passes_the_mode(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn.unwind_filament(2, 700, 100, "fast") == {"ack": 1}
+
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 unwind_filament "
+                      "{'index': 2, 'length': 700, 'speed': 100, 'mode': 'fast'}")]
+
+    def test_an_unwinding_slot_is_a_started_unwind(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [None],
+            Ace2Wire.GET_STATUS: [ace2_slot_states("ready", "ready", "rollback", "ready")]})
+
+        assert conn.unwind_filament(2, 700, 100) == {}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 2, 700, 100, mode=1),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 unwind_filament "
+                      "{'index': 2, 'length': 700, 'speed': 100, 'mode': 'normal'}"),
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            ("debug", "ACE2 unwind_filament on slot 2 got no answer, but the slot is moving")]
+
+
+class TestACE2ConnectionSendMove:
+    FEED = {"index": 0, "length": 600, "speed": 100}
+    FEED_TX = ("debug", "ACE2 TX: id=0 feed_filament {'index': 0, 'length': 600, 'speed': 100}")
+    IDLE = ace2_slot_states("ready", "ready", "ready", "ready")
+    FEEDING = ace2_slot_states("feeding", "ready", "ready", "ready")
+    RESEND = ("info", "ACE2 feed_filament on slot 0 got no answer and the slot is not "
+                      "moving, sending it again")
+    MOVING = ("debug", "ACE2 feed_filament on slot 0 got no answer, but the slot is moving")
+
+    def test_short_move_answered(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        result = conn._send_move("feed_filament", "feeding",
+                                 {"index": 0, "length": 100, "speed": 50})
+
+        assert result == {"ack": 1}
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 100, 50)]
+
+    def test_short_move_waits_its_whole_time_and_is_not_sent_again(self):
+        # 2s of motion: it could end before a status check, so it waits 2 + 10s.
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", {"index": 0, "length": 100, "speed": 50})
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' (id=0) timed out after 12.0s"
+        assert printer.reactor.now == 112.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 100, 50)]
+        assert printer.logger.messages == [
+            ("debug", "ACE2 TX: id=0 feed_filament {'index': 0, 'length': 100, 'speed': 50}")]
+
+    def test_speed_below_one_counts_as_one(self):
+        # 4mm at "0" mm/s is taken as 4s of motion, a short move waiting 14s.
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", {"index": 0, "length": 4, "speed": 0})
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' (id=0) timed out after 14.0s"
+        assert printer.reactor.now == 114.0
+
+    def test_five_seconds_of_motion_is_a_long_move(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.FEEDING]})
+
+        result = conn._send_move("feed_filament", "feeding",
+                                 {"index": 0, "length": 500, "speed": 100})
+
+        assert result == {}
+        assert printer.reactor.now == 103.0
+
+    def test_long_move_answered_at_once(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [ACE2_MOVE_STARTED]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert printer.reactor.now == 100.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100)]
+        assert printer.logger.messages == [self.FEED_TX]
+
+    def test_lost_answer_of_a_running_move_returns_empty(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.FEEDING]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {}
+
+        # The answer was given 3s, then the status came back at once.
+        assert printer.reactor.now == 103.0
+        assert conn._timeout_timestamps == [103.0]
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            self.FEED_TX, ("debug", "ACE2 TX: id=1 get_status {}"), self.MOVING]
+
+    def test_lost_command_is_sent_again(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None, ACE2_MOVE_STARTED],
+                                Ace2Wire.GET_STATUS: [self.IDLE]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert printer.reactor.now == 103.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100)]
+        assert printer.logger.messages == [
+            self.FEED_TX,
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            self.RESEND,
+            ("debug", "ACE2 TX: id=2 feed_filament {'index': 0, 'length': 600, 'speed': 100}")]
+
+    def test_another_slot_moving_does_not_count(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [None, ACE2_MOVE_STARTED],
+            Ace2Wire.GET_STATUS: [ace2_slot_states("rollback", "feeding", "ready", "ready")]})
+
+        # Slot 0 is unwinding and slot 1 feeding: neither is slot 0 feeding.
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100)]
+
+    def test_slot_without_a_motor_state_is_not_moving(self):
+        printer, conn = ace2_link()
+        bare = {"code": 0, "msg": "success",
+                "result": {"status": "ready", "slots": [{"index": 0, "status": "ready"}]}}
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None, ACE2_MOVE_STARTED],
+                                Ace2Wire.GET_STATUS: [bare]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {"ack": 1}
+
+        assert printer.logger.messages[2] == self.RESEND
+
+    def test_second_answer_lost_while_moving_returns_empty(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.IDLE, self.FEEDING]})
+
+        assert conn._send_move("feed_filament", "feeding", self.FEED) == {}
+
+        assert printer.reactor.now == 106.0
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100),
+                                       Ace2Wire.frame(3, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            self.FEED_TX,
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            self.RESEND,
+            ("debug", "ACE2 TX: id=2 feed_filament {'index': 0, 'length': 600, 'speed': 100}"),
+            ("debug", "ACE2 TX: id=3 get_status {}"),
+            self.MOVING]
+
+    def test_never_started_raises_the_second_timeout(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [self.IDLE]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", self.FEED)
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' (id=2) timed out after 3.0s"
+        # Two 3s waits; sent twice and no more.
+        assert printer.reactor.now == 106.0
+        assert conn._timeout_timestamps == [103.0, 106.0]
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS),
+                                       ace2_move_frame(2, 0, 600, 100),
+                                       Ace2Wire.frame(3, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [
+            self.FEED_TX,
+            ("debug", "ACE2 TX: id=1 get_status {}"),
+            self.RESEND,
+            ("debug", "ACE2 TX: id=2 feed_filament {'index': 0, 'length': 600, 'speed': 100}"),
+            ("debug", "ACE2 TX: id=3 get_status {}")]
+
+    def test_unanswered_status_raises_its_timeout(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {Ace2Wire.FEED_OR_ROLLBACK: [None],
+                                Ace2Wire.GET_STATUS: [None]})
+
+        with pytest.raises(ACETimeoutError) as excinfo:
+            conn._send_move("feed_filament", "feeding", self.FEED)
+
+        assert str(excinfo.value) == "ACE2 command 'get_status' (id=1) timed out after 2.0s"
+        assert printer.reactor.now == 105.0
+        # The move is not sent again without knowing the slot's state.
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100),
+                                       Ace2Wire.frame(1, Ace2Wire.GET_STATUS)]
+        assert printer.logger.messages == [self.FEED_TX,
+                                           ("debug", "ACE2 TX: id=1 get_status {}")]
+
+    def test_refused_move_raises_without_a_status_check(self):
+        printer, conn = ace2_link()
+        ace2_link_script(conn, {
+            Ace2Wire.FEED_OR_ROLLBACK: [{"code": 1, "msg": "FORBIDDEN", "result": {}}]})
+
+        with pytest.raises(ACESerialError) as excinfo:
+            conn._send_move("feed_filament", "feeding", self.FEED)
+
+        assert str(excinfo.value) == "ACE2 command 'feed_filament' failed: code=1, msg=FORBIDDEN"
+        assert conn._serial.frames == [ace2_move_frame(0, 0, 600, 100)]
+        assert printer.logger.messages == [self.FEED_TX]
+
+
 class TestACE2ConnectionEnableRfid:
     def test_sends_nothing(self):
         # The ACE 2 has no firmware tag reader; opcode 14 is set_identify's.
@@ -3703,3 +4013,348 @@ class TestAfcACE2ConfirmEngaged:
 
         failures = unit.afc.error.handle_lane_failure.calls
         assert failures[-1][0][1] == "lane3 did not take the filament: stayed full"
+
+
+class TestAfcACE2CalibrateBowdenInner:
+    def _unit(self, staged: bool = True) -> Tuple[afcACE2, Any, RamStubBuffer, List[Any]]:
+        """
+        A unit whose feed to the gears and measured unwind are stand-ins: the
+        filament touches the gears 1735mm into the feed, the encoder counts
+        1669mm in all, and an unwind covers 1mm for every 1.02 it is told.
+
+        :param staged: lane3 is staged at its hub
+        :return tuple: the unit, lane3, its buffer and the stand-ins' calls
+        """
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit(approach_length=30.0)
+        lane.loaded_to_hub = staged
+        lane.hub_obj.fullname = "AFC_hub Ace2_1_hub"
+        calls: List[Any] = []
+
+        def feed_to_gears(slot: int, buffer: Any, max_distance: float) -> Tuple[float, float, str]:
+            calls.append(("feed", slot, buffer, max_distance))
+            return 1735.0, 1669.0, ""
+
+        def unwind_measured(slot: int, distance: float) -> float:
+            calls.append(("unwind", slot, distance))
+            return 1.02
+        unit._feed_to_gears = feed_to_gears
+        unit._unwind_measured = unwind_measured
+        return unit, lane, buf, calls
+
+    def test_lane_with_a_toolhead_sensor_calibrates_to_it(self):
+        unit, lane, buf, calls = self._unit()
+        lane.extruder_obj.tool_start = "tool_start_pin"
+        lane.extruder_obj.fila_tool_start = types.SimpleNamespace(
+            runout_buttun_state=1, runout_helper=types.SimpleNamespace(filament_present=False))
+
+        result = unit._calibrate_bowden_inner(lane, lane.hub_obj, 3)
+
+        # The base calibration ran and found its sensor already triggered.
+        assert result == (False, "Toolhead sensor already triggered, unload first", 0)
+        assert calls == []
+
+    def test_filament_already_at_the_extruder_bails(self):
+        unit, lane, buf, calls = self._unit()
+        buf.advance_state = True
+
+        result = unit._calibrate_bowden_inner(lane, lane.hub_obj, 3)
+
+        assert result == (False, "Filament is already at the extruder, unload first", 0)
+        assert calls == []
+        assert unit.logger.messages == []
+
+    def test_staged_lane_saves_both_lengths(self):
+        unit, lane, buf, calls = self._unit()
+        hub = lane.hub_obj
+
+        ok, msg, dist = unit._calibrate_bowden_inner(lane, hub, 3)
+
+        # Load: contact 1735 + 35 of press + the 30mm approach the load holds back.
+        # Unload: (1669 counted - 40 of take-up) * 1.02.
+        assert (ok, dist) == (True, 1800.0)
+        assert msg == ("afc_bowden_length calibration: 1800.0mm (was 900.0mm), "
+                       "afc_unload_bowden_length: 1661.58mm (was 900.0mm)")
+        assert hub.afc_bowden_length == 1800.0
+        assert hub.afc_unload_bowden_length == 1661.58
+        # All the encoder counted is unwound, then the 2% that unwind fell short.
+        assert calls == [("feed", 3, buf, 6000), ("unwind", 3, 1669.0),
+                         ("unwind", 3, pytest.approx(33.38))]
+        assert unit.afc.function.ConfigRewrite.calls == [
+            (("AFC_hub Ace2_1_hub", "afc_bowden_length", 1800.0,
+              "\n afc_bowden_length: New: 1800.0 Old: 900.0"), {}),
+            (("AFC_hub Ace2_1_hub", "afc_unload_bowden_length", 1661.58,
+              "\n afc_unload_bowden_length: New: 1661.58 Old: 900.0"), {})]
+        assert unit.logger.messages == [
+            ("raw", "Calibrating afc_bowden_length for lane3 on its buffer and encoder "
+                    "(max 6000mm)")]
+
+    def test_lane_not_staged_takes_dist_hub_off_both(self):
+        unit, lane, buf, calls = self._unit(staged=False)
+        hub = lane.hub_obj
+
+        ok, msg, dist = unit._calibrate_bowden_inner(lane, hub, 3)
+
+        # Its loads and unloads add dist_hub (60) to the saved lengths.
+        assert (ok, dist) == (True, 1740.0)
+        assert hub.afc_bowden_length == 1740.0
+        assert hub.afc_unload_bowden_length == 1601.58
+
+    def test_failed_feed_unwinds_and_saves_nothing(self):
+        unit, lane, buf, calls = self._unit()
+        hub = lane.hub_obj
+        unit._feed_to_gears = lambda slot, buffer, max_distance: (
+            820.0, 790.0, "the feed stopped after 830mm")
+
+        result = unit._calibrate_bowden_inner(lane, hub, 3)
+
+        assert result == (
+            False, "lane3 did not reach the extruder: the feed stopped after 830mm", 820.0)
+        assert calls == [("unwind", 3, 790.0), ("unwind", 3, pytest.approx(15.8))]
+        assert hub.afc_bowden_length == 900.0
+        assert hub.afc_unload_bowden_length == 900.0
+        assert unit.afc.function.ConfigRewrite.calls == []
+
+    def test_stops_feed_assist_on_the_other_slots_only(self):
+        unit, lane, buf, calls = self._unit()
+        unit._feed_assist_active.update({1, 3})
+
+        unit._calibrate_bowden_inner(lane, lane.hub_obj, 3)
+
+        assert [c for c in unit._ace.commands if c[0] == "stop_feed_assist"] == [
+            ("stop_feed_assist", {"index": 1})]
+        assert unit._feed_assist_active == {3}
+
+
+class TestAfcACE2FeedToGears:
+    REST = {"buf_rst": True, "buf_back": False}
+    FORWARD = {"buf_rst": False, "buf_back": False}
+    BACK = {"buf_rst": False, "buf_back": True}
+    #: The feed a calibration sends: the whole cap at the default feed_speed.
+    FEED = ("feed_filament", {"index": 3, "length": 6000, "speed": 100.0})
+    STOPPED = ("debug", "ACE Ace2_1: feed on slot 3 stopped at the toolhead sensor")
+
+    def _unit(self, switches: List[Dict[str, bool]], counts: List[Tuple[int, int]],
+              after_stop: Tuple[int, int] = (0, 0)) -> Tuple[afcACE2, RamStubBuffer, Any]:
+        """
+        A unit with lane3 on slot 3 whose buffer and feed counts are read from
+        the lists, one entry per read with the last repeating. The first read
+        is the one before the feed.
+
+        :param switches: slot 3's buffer switches per read
+        :param counts: slot 3's (length, decoder) per read
+        :param after_stop: its (length, decoder) once the feed is stopped
+        :return tuple: the unit, lane3's buffer and the wire
+        """
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        wire = AceP1Wire(unit)
+        queue = list(counts)
+
+        def feed_info(params: Dict[str, Any]) -> Dict[str, Any]:
+            if ("stop_feed_filament", {"index": 3}) in unit._ace.commands:
+                length, decoder = after_stop
+            else:
+                length, decoder = queue.pop(0) if len(queue) > 1 else queue[0]
+            return {"feed_info": [{}, {}, {}, {"length": length, "decoder": decoder}]}
+        unit._ace.set_reply("get_sensor_state", *[
+            {"slot_sensors": [self.REST] * 3 + [state], "buf_feed": False} for state in switches])
+        unit._ace.set_reply("get_feed_info", feed_info)
+        return unit, buf, wire
+
+    def test_pressed_with_the_encoder_stopped_under_the_motor_is_arrival(self):
+        # Free to 200mm, pressed by drag at 300mm, then the encoder all but
+        # stops while the motor runs on.
+        unit, buf, wire = self._unit(
+            [self.REST, self.REST, self.REST, self.FORWARD],
+            [(0, 0), (100, 96), (200, 192), (300, 288), (310, 290), (320, 291), (330, 291),
+             (340, 291), (350, 291), (360, 291)],
+            after_stop=(365, 292))
+
+        # 300mm is the last count with the filament moving freely; the encoder's
+        # total is read once the feed has stopped.
+        assert unit._feed_to_gears(3, buf, 6000) == (300.0, 292.0, "")
+
+        assert wire.moves() == [self.FEED]
+        assert ("stop_feed_filament", {"index": 3}) in unit._ace.commands
+        assert unit.logger.messages == [self.STOPPED]
+
+    def test_buffer_not_at_rest_before_the_feed_bails(self):
+        unit, buf, wire = self._unit([self.FORWARD], [(0, 0)])
+
+        assert unit._feed_to_gears(3, buf, 6000) == (
+            0.0, 0.0, "its buffer is not at rest, unload the lane first")
+
+        assert wire.moves() == []
+        assert unit.logger.messages == []
+
+    def test_unreadable_buffer_before_the_feed_bails(self):
+        unit, buf, wire = self._unit([self.REST], [(0, 0)])
+        unit._ace.set_reply("get_sensor_state", RuntimeError("no answer"))
+
+        assert unit._feed_to_gears(3, buf, 6000) == (
+            0.0, 0.0, "its buffer is not at rest, unload the lane first")
+
+        assert wire.moves() == []
+
+    def test_refused_feed_is_reported(self):
+        unit, buf, wire = self._unit([self.REST], [(0, 0)])
+        wire.fail("feed_filament", RuntimeError("FORBIDDEN"))
+
+        assert unit._feed_to_gears(3, buf, 6000) == (
+            0.0, 0.0, "the feed did not start: FORBIDDEN")
+
+        assert ("stop_feed_filament", {"index": 3}) not in unit._ace.commands
+
+    def test_encoder_stopping_with_the_motor_is_not_arrival(self):
+        # The unit ends the feed at 500mm with the buffer pressed by drag: the
+        # motor and the encoder stop together, so nothing slipped.
+        unit, buf, wire = self._unit(
+            [self.REST, self.REST, self.FORWARD],
+            [(0, 0), (250, 240), (500, 480)], after_stop=(500, 480))
+
+        assert unit._feed_to_gears(3, buf, 6000) == (
+            500.0, 480.0, "the feed stopped after 500mm")
+
+        assert unit.logger.messages == [self.STOPPED]
+
+    def test_slipping_without_the_buffer_pressed_is_not_arrival(self):
+        # The motor runs on to 530mm with the encoder stopped and the buffer at
+        # rest: the filament is held before the buffer, not at the gears.
+        unit, buf, wire = self._unit(
+            [self.REST],
+            [(0, 0), (250, 240), (500, 480), (510, 480), (520, 480), (530, 480)],
+            after_stop=(530, 480))
+
+        assert unit._feed_to_gears(3, buf, 6000) == (
+            500.0, 480.0, "the feed stopped after 530mm")
+
+    def test_buffer_pulled_back_is_not_pressed(self):
+        unit, buf, wire = self._unit(
+            [self.REST, self.REST, self.BACK],
+            [(0, 0), (250, 240), (500, 480), (510, 480), (520, 480), (530, 480)],
+            after_stop=(530, 480))
+
+        assert unit._feed_to_gears(3, buf, 6000) == (
+            500.0, 480.0, "the feed stopped after 530mm")
+
+    def test_slip_that_ends_starts_the_wait_over(self):
+        # One slow read at 310mm, then the filament moves freely again to 500mm
+        # before it stops for good.
+        unit, buf, wire = self._unit(
+            [self.REST, self.FORWARD],
+            [(0, 0), (300, 288), (310, 290), (400, 380), (500, 476), (510, 477), (520, 477),
+             (530, 477), (540, 477), (550, 477), (560, 477)],
+            after_stop=(565, 478))
+
+        assert unit._feed_to_gears(3, buf, 6000) == (500.0, 478.0, "")
+
+    def test_unreadable_reads_are_skipped(self):
+        unit, buf, wire = self._unit(
+            [self.REST, self.FORWARD],
+            [(0, 0), (300, 288), (310, 290), (320, 291), (330, 291), (340, 291), (350, 291),
+             (360, 291)],
+            after_stop=(365, 292))
+        sensors = {"slot_sensors": [self.REST] * 3 + [self.FORWARD], "buf_feed": False}
+        rest = {"slot_sensors": [self.REST] * 4, "buf_feed": False}
+        unit._ace.set_reply("get_sensor_state", rest, sensors, RuntimeError("no answer"),
+                            sensors)
+
+        assert unit._feed_to_gears(3, buf, 6000) == (300.0, 292.0, "")
+
+    def test_buffer_never_readable_gives_up_at_the_deadline(self):
+        unit, buf, wire = self._unit([self.REST], [(0, 0)])
+        rest = {"slot_sensors": [self.REST] * 4, "buf_feed": False}
+        unit._ace.set_reply("get_sensor_state", rest, RuntimeError("no answer"))
+        start = unit.afc.reactor.monotonic()
+
+        assert unit._feed_to_gears(3, buf, 100) == (
+            0.0, 0.0, "no arrival after 0mm, the unit's buffer could not be read")
+
+        # Twice the 1s the feed should take, plus 15s, then the 0.3s stop check.
+        assert unit.afc.reactor.monotonic() - start == pytest.approx(17.4, abs=0.15)
+        assert ("stop_feed_filament", {"index": 3}) in unit._ace.commands
+
+    def test_unreadable_after_the_stop_keeps_the_last_count(self):
+        unit, buf, wire = self._unit(
+            [self.REST, self.FORWARD],
+            [(0, 0), (300, 288), (310, 290), (320, 291), (330, 291), (340, 291), (350, 291),
+             (360, 291)])
+        feed_info = unit._ace.replies["get_feed_info"][0]
+
+        def until_stopped(params: Dict[str, Any]) -> Dict[str, Any]:
+            if ("stop_feed_filament", {"index": 3}) in unit._ace.commands:
+                raise RuntimeError("no answer")
+            return feed_info(params)
+        unit._ace.set_reply("get_feed_info", until_stopped)
+
+        assert unit._feed_to_gears(3, buf, 6000) == (300.0, 291.0, "")
+
+
+class TestAfcACE2UnwindMeasured:
+    UNWIND = ("unwind_filament", {"index": 3, "length": 1000.0, "speed": 100.0,
+                                  "mode": "normal"})
+
+    def _unit(self, decoder: Any = -980) -> Tuple[afcACE2, Any]:
+        """
+        :param decoder: slot 3's encoder count read after the unwind
+        :return tuple: the unit with lane3 on slot 3, and the wire
+        """
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        wire = AceP1Wire(unit)
+        unit._ace.set_reply("get_sensor_state", TestAfcACE2ClearTipSnag.REST)
+        unit._ace.set_reply("get_feed_info", {"feed_info": [{}, {}, {}, {"decoder": decoder}]})
+        return unit, wire
+
+    def test_under_a_millimetre_is_left(self):
+        unit, wire = self._unit()
+
+        assert unit._unwind_measured(3, 0.5) == 1.0
+
+        assert wire.moves() == []
+        assert unit.logger.messages == []
+
+    def test_returns_commanded_per_counted(self):
+        unit, wire = self._unit(decoder=-980)
+
+        # Told 1000mm, the encoder counted 980 back.
+        assert unit._unwind_measured(3, 1000.0) == 1000.0 / 980.0
+
+        assert wire.moves() == [self.UNWIND]
+        assert unit.logger.messages == [("info", "ACE calibrate: unwinding 1000mm")]
+
+    def test_reads_the_count_as_the_unit_reports_it(self):
+        # A backwards count arrives wrapped as an unsigned 64-bit value.
+        unit, wire = self._unit(decoder=(1 << 64) - 980)
+
+        assert unit._unwind_measured(3, 1000.0) == 1000.0 / 980.0
+
+    def test_failed_unwind_is_logged(self):
+        unit, wire = self._unit()
+        wire.fail("unwind_filament", RuntimeError("unwind boom"))
+
+        assert unit._unwind_measured(3, 1000.0) == 1.0
+
+        assert unit.logger.messages == [
+            ("info", "ACE calibrate: unwinding 1000mm"),
+            ("error", "ACE calibrate: unwind failed: unwind boom")]
+
+    def test_unreadable_count_reads_one(self):
+        unit, wire = self._unit()
+        unit._ace.set_reply("get_feed_info", RuntimeError("no answer"))
+
+        assert unit._unwind_measured(3, 1000.0) == 1.0
+
+        assert wire.moves() == [self.UNWIND]
+
+    def test_count_that_did_not_go_back_reads_one(self):
+        unit, wire = self._unit(decoder=12)
+
+        assert unit._unwind_measured(3, 1000.0) == 1.0
+
+    @pytest.mark.parametrize("decoder", [-1200, -800])
+    def test_implausible_count_reads_one(self, decoder):
+        # More than a tenth over or under what the unwind was told.
+        unit, wire = self._unit(decoder=decoder)
+
+        assert unit._unwind_measured(3, 1000.0) == 1.0

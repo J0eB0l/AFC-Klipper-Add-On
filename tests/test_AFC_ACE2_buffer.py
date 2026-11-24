@@ -101,21 +101,23 @@ class TestHelpers:
         assert slot_full({"buf_feed": True}, 0) is False
 
     def test_read_slot(self):
-        link = SensorLink(SENSORS, {"feed_info": [{}, {"decoder": 18446744073709551613}]})
+        link = SensorLink(SENSORS, {"feed_info": [{}, {"decoder": 18446744073709551613,
+                                                       "length": 5}]})
         unit = SlotUnit({}, ace=link)
 
         assert read_slot(unit, 1) == {"full": False, "rest": False, "back": True,
-                                      "decoder": -3}
+                                      "decoder": -3, "length": 5.0}
         assert link.calls == [("get_sensor_state", 0.5), ("get_feed_info", 0.5)]
 
     def test_read_slot_reads_full_only_for_the_slot_pressed_forward(self):
         link = SensorLink(SENSORS, {"feed_info": [{"decoder": 4}, {}, {"decoder": 7}]})
         unit = SlotUnit({}, ace=link)
 
+        # A slot the unit gives no length for reads 0.
         assert read_slot(unit, 2) == {"full": True, "rest": False, "back": False,
-                                      "decoder": 7}
+                                      "decoder": 7, "length": 0.0}
         assert read_slot(unit, 0) == {"full": False, "rest": True, "back": False,
-                                      "decoder": 4}
+                                      "decoder": 4, "length": 0.0}
 
     def test_read_slot_failures_read_none(self):
         assert read_slot(SlotUnit({}), 0) is None
