@@ -3089,24 +3089,35 @@ class TestAfcACE2StopFeedAssist:
         # Stays tracked active since the stop was never confirmed, so the next
         # call (reconciliation, the next unload step, ...) retries it.
         assert unit._rollback_assist_active == {0}
-        # One failing call here, then another from super()._stop_feed_assist.
+        # Two failing calls here (one resend), then one from super()._stop_feed_assist.
         assert [m for m, _p in unit._ace.commands if m != "get_status"] == (
-            ["stop_feed_assist", "stop_feed_assist"])
+            ["stop_feed_assist", "stop_feed_assist", "stop_feed_assist"])
         assert unit._feed_assist_active == {0}
         assert unit.printer.logger.messages == [
+            ("debug", "ACE Ace2_1: stop on slot 0 got no answer (boom), sending it again"),
             ("error", "Failed to stop rollback assist slot 0: boom"),
             ("error", "Failed to stop feed assist slot 0: boom")]
 
     def test_retry_after_a_failed_stop_succeeds_and_discards(self):
         unit = self._unit()
         unit._rollback_assist_active.add(0)
-        unit._ace.set_reply("stop_feed_assist", RuntimeError("boom"), {})
+        unit._ace.set_reply("stop_feed_assist", RuntimeError("boom"), RuntimeError("boom"), {})
 
         unit._stop_feed_assist(0)
         assert unit._rollback_assist_active == {0}
 
         unit._stop_feed_assist(0)
         assert unit._rollback_assist_active == set()
+
+    def test_one_lost_reply_is_resent(self):
+        unit = self._unit()
+        unit._rollback_assist_active.add(0)
+        unit._ace.set_reply("stop_feed_assist", RuntimeError("timed out"), {})
+
+        unit._stop_feed_assist(0)
+
+        assert unit._rollback_assist_active == set()
+        assert not [m for m in unit.printer.logger.messages if m[0] == "error"]
 
 
 class TestAfcACE2CmdIdentify:

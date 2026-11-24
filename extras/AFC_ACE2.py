@@ -1413,7 +1413,7 @@ class afcACE2(afcACE):
         Example
         -------
         ```
-        AFC_ACE_TRACE UNIT=Ace2_1 LANE=lane1 PERIOD=0.05 DURATION=180
+        AFC_ACE_TRACE UNIT=Ace2_1 LANE=lane1 PERIOD=0.1 DURATION=180
         ```
         """
         if gcmd.get_int('STOP', 0):
@@ -1436,7 +1436,7 @@ class afcACE2(afcACE):
             or not self._ace.connected):
             gcmd.respond_info("ACE not connected")
             return
-        period = gcmd.get_float('PERIOD', 0.05, minval=0.02, maxval=1.0)
+        period = gcmd.get_float('PERIOD', 0.1, minval=0.02, maxval=1.0)
         duration = gcmd.get_float('DURATION', 120.0, minval=1.0, maxval=1800.0)
         log_path = self.printer.get_start_args().get("log_file") or ""
         folder = os.path.dirname(log_path) or "/tmp"
@@ -1646,12 +1646,20 @@ class afcACE2(afcACE):
         if slot in self._rollback_assist_active:
             if (self._ace
                 and self._ace.connected):
-                try:
-                    self._wait_for_ace_ready()
-                    self._ace.stop_feed_assist_sync(slot)
-                    self._rollback_assist_active.discard(slot)
-                except Exception as e:
-                    self.logger.error(f"Failed to stop rollback assist slot {slot}: {e}")
+                # The ACE can drop a reply under heavy polling, so a stop
+                # that gets no answer is sent once more before it counts as failed.
+                for attempt in range(2):
+                    try:
+                        self._wait_for_ace_ready()
+                        self._ace.stop_feed_assist_sync(slot)
+                        self._rollback_assist_active.discard(slot)
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            self.logger.debug(f"ACE {self.name}: stop on slot {slot} got no answer "
+                                              f"({e}), sending it again")
+                            continue
+                        self.logger.error(f"Failed to stop rollback assist slot {slot}: {e}")
             else:
                 self._rollback_assist_active.discard(slot)
         super()._stop_feed_assist(slot)
