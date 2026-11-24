@@ -1269,6 +1269,12 @@ class afcACE2(afcACE):
         self.gcode.register_mux_command('AFC_ACE_IDENTIFY', "UNIT", self.name,
                                         self.cmd_AFC_ACE_IDENTIFY,
                                         desc=self.cmd_AFC_ACE_IDENTIFY_help)
+        self.gcode.register_mux_command('AFC_ACE_TRACE', "UNIT", self.name,
+                                        self.cmd_AFC_ACE_TRACE,
+                                        desc=self.cmd_AFC_ACE_TRACE_help)
+        # The running AFC_ACE_TRACE, if any: its file, lane, slot, period,
+        # start and end times, and reactor timer.
+        self._trace: Optional[Dict[str, Any]] = None
 
     def _apply_feed_check(self) -> None:
         """
@@ -1306,21 +1312,24 @@ class afcACE2(afcACE):
             self.logger.warning(
                 f"ACE2 {self.name}: factory identify {state} failed (non-fatal): {e}")
 
-    # How long the buffer plunger gets to come back to rest after a back-off.
-    _SNAG_REST_TIMEOUT = 0.5
+    # How long the buffer plunger gets to settle after a back-off.
+    _SNAG_SETTLE_TIME = 0.5
 
     def _buffer_reading(self, slot: int) -> str:
         """
-        One slot's buffer switches, for the tip snag log lines.
+        One slot's buffer switch bits as the unit reports them, for the tip
+        snag log lines. Their polarity is not settled yet (a loaded lane at
+        idle reads buf_rst=0 buf_back=0 bit16=1), so they are logged raw.
 
         :param slot: 0-based ACE slot index.
-        :return str: e.g. "rest=1 back=0 full=0", or "unread" when the read fails.
+        :return str: e.g. "buf_rst=0 buf_back=0 bit16=1", or "unread" when the
+            read fails.
         """
         try:
             state = self._ace.get_sensor_state()
             s = state['slot_sensors'][slot]
-            return (f"rest={int(s['buf_rst'])} back={int(s['buf_back'])} "
-                    f"full={int(state['buf_feed'])}")
+            return (f"buf_rst={int(s['buf_rst'])} buf_back={int(s['buf_back'])} "
+                    f"bit16={int(state['buf_feed'])}")
         except Exception:
             return "unread"
 
@@ -1328,8 +1337,8 @@ class afcACE2(afcACE):
         """
         Back the lane off snag_backoff_length mm before a load feed is resent
         after a feed error, so a tip caught at the buffer tube's entry lets go
-        and the plunger springs back to rest. The buffer switches are logged
-        before and after.
+        and the plunger springs back. The buffer switches are logged before
+        and after.
 
         :param slot: 0-based ACE slot index.
         :param cur_lane: Lane being loaded.
@@ -1350,12 +1359,8 @@ class afcACE2(afcACE):
             self.logger.warning(f"ACE load: {cur_lane.name} back-off failed: {e}")
             return
         reactor = self.afc.reactor
-        deadline = reactor.monotonic() + self._SNAG_REST_TIMEOUT
+        reactor.pause(reactor.monotonic() + self._SNAG_SETTLE_TIME)
         after = self._buffer_reading(slot)
-        while (not after.startswith("rest=1")
-               and reactor.monotonic() < deadline):
-            reactor.pause(reactor.monotonic() + 0.1)
-            after = self._buffer_reading(slot)
         self.logger.info(f"ACE load: {cur_lane.name} after back-off, buffer {after}")
 
     cmd_AFC_ACE_IDENTIFY_help = "Blink an ACE 2's lane LEDs to show which unit it is"
@@ -1384,6 +1389,153 @@ class afcACE2(afcACE):
             gcmd.respond_info(f"{self.name}: blinking its lane LEDs")
         except Exception as e:
             gcmd.respond_info(f"Error blinking {self.name}: {e}")
+
+    _TRACE_HEADER = ("time_s,slot_status,feed_length,feed_decoder,feed_steps,"
+                     "insert,buf_rst,buf_back,bit16,sensor_mask,toolhead_sensor")
+
+    cmd_AFC_ACE_TRACE_help = ("Record a lane's buffer switches and feed odometer to a CSV "
+                              "next to klippy.log")
+    def cmd_AFC_ACE_TRACE(self, gcmd: GCodeCommand) -> None:
+        """
+        Record one lane's slot status, feed odometer (get_feed_info: motor
+        length, encoder reading, steps), buffer switches and the toolhead
+        sensor every PERIOD seconds, to ace_trace_<unit>_<lane>_<time>.csv
+        next to klippy.log. It runs alongside normal loads and moves, and
+        stops after DURATION seconds or on STOP=1. Meant for measuring how
+        the unit's buffer and encoder behave when filament reaches the
+        extruder.
+
+        Usage
+        -------
+        `AFC_ACE_TRACE UNIT=<unit> LANE=<lane> [PERIOD=<s>] [DURATION=<s>]`
+        `AFC_ACE_TRACE UNIT=<unit> STOP=1`
+
+        Example
+        -------
+        ```
+        AFC_ACE_TRACE UNIT=Ace2_1 LANE=lane1 PERIOD=0.05 DURATION=180
+        ```
+        """
+        if gcmd.get_int('STOP', 0):
+            if self._trace is None:
+                gcmd.respond_info(f"{self.name}: no trace running")
+                return
+            path = self._end_trace("stopped")
+            gcmd.respond_info(f"{self.name}: trace stopped, saved to {path}")
+            return
+        if self._trace is not None:
+            gcmd.respond_info(f"{self.name}: a trace is already running, "
+                              f"AFC_ACE_TRACE UNIT={self.name} STOP=1 ends it")
+            return
+        lane_name = gcmd.get('LANE', '')
+        if lane_name not in self._slot_map:
+            gcmd.respond_info(f"{self.name}: LANE must be one of this unit's lanes: "
+                              f"{', '.join(sorted(self._slot_map))}")
+            return
+        if (not self._ace
+            or not self._ace.connected):
+            gcmd.respond_info("ACE not connected")
+            return
+        period = gcmd.get_float('PERIOD', 0.05, minval=0.02, maxval=1.0)
+        duration = gcmd.get_float('DURATION', 120.0, minval=1.0, maxval=1800.0)
+        log_path = self.printer.get_start_args().get("log_file") or ""
+        folder = os.path.dirname(log_path) or "/tmp"
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(folder, f"ace_trace_{self.name}_{lane_name}_{stamp}.csv")
+        try:
+            out = open(path, "w")
+            out.write(self._TRACE_HEADER + "\n")
+        except OSError as e:
+            gcmd.respond_info(f"{self.name}: cannot write {path}: {e}")
+            return
+        reactor = self.afc.reactor
+        now = reactor.monotonic()
+        self._trace = {"out": out, "path": path, "lane": lane_name,
+                       "slot": self._slot_map[lane_name], "period": period,
+                       "start": now, "end": now + duration,
+                       "timer": reactor.register_timer(self._trace_tick, now)}
+        gcmd.respond_info(f"{self.name}: tracing {lane_name} every {period * 1000:.0f}ms "
+                          f"for up to {duration:.0f}s to {path}")
+
+    def _end_trace(self, why: str) -> str:
+        """
+        Stop the running trace and close its file.
+
+        :param why: logged reason, e.g. "stopped" or "time up"
+        :return str: the trace file's path
+        """
+        trace, self._trace = self._trace, None
+        if trace is None:
+            return ""
+        self.afc.reactor.unregister_timer(trace["timer"])
+        with contextlib.suppress(OSError):
+            trace["out"].close()
+        self.logger.info(f"ACE2 {self.name}: trace of {trace['lane']} {why}, "
+                         f"saved to {trace['path']}")
+        return trace["path"]
+
+    def _trace_row(self, trace: Dict[str, Any], elapsed: float) -> str:
+        """
+        Read the unit once and format one CSV row of the trace; a read that
+        fails leaves its columns empty.
+
+        :param trace: the running trace
+        :param elapsed: seconds since the trace started
+        :return str: the row, without a newline
+        """
+        slot = trace["slot"]
+        cols: List[str] = [f"{elapsed:.3f}"]
+        try:
+            st = self._ace.get_status(timeout=0.5)
+            cols.append(str(st["slots"][slot].get("slot_status", "")))
+        except Exception:
+            cols.append("")
+        try:
+            fi = self._ace.send_command("get_feed_info", timeout=0.5)["feed_info"][slot]
+            cols += [str(fi.get("length", "")), str(fi.get("decoder", "")),
+                     str(fi.get("steps", ""))]
+        except Exception:
+            cols += ["", "", ""]
+        try:
+            ss = self._ace.get_sensor_state(timeout=0.5)
+            s = ss["slot_sensors"][slot]
+            cols += [str(int(s["insert"])), str(int(s["buf_rst"])), str(int(s["buf_back"])),
+                     str(int(ss["buf_feed"])), str(ss["sensor_bitmask"])]
+        except Exception:
+            cols += ["", "", "", "", ""]
+        lane = self.afc.lanes.get(trace["lane"])
+        try:
+            cols.append(str(int(bool(lane.get_toolhead_pre_sensor_state()))))
+        except Exception:
+            cols.append("")
+        return ",".join(cols)
+
+    def _trace_tick(self, eventtime: float) -> float:
+        """
+        Reactor timer for AFC_ACE_TRACE: write one row, then reschedule.
+
+        :param eventtime: reactor event time
+        :return float: the next tick, or reactor.NEVER once the trace ended
+        """
+        trace = self._trace
+        reactor = self.afc.reactor
+        if trace is None:
+            return reactor.NEVER
+        if (self._ace is None
+            or not self._ace.connected):
+            self._end_trace("ended, ACE not connected")
+            return reactor.NEVER
+        if eventtime >= trace["end"]:
+            self._end_trace("time up")
+            return reactor.NEVER
+        row = self._trace_row(trace, eventtime - trace["start"])
+        try:
+            trace["out"].write(row + "\n")
+            trace["out"].flush()
+        except (OSError, ValueError) as e:
+            self._end_trace(f"ended, write failed: {e}")
+            return reactor.NEVER
+        return max(eventtime + trace["period"], reactor.monotonic())
 
     # ACE2 slot states that mean the encoder/odometer disagrees with the
     # commanded motor move, a real upstream jam, tangle, slip, or motor fault.

@@ -3181,22 +3181,23 @@ class TestAfcACE2ClearTipSnag:
             ("unwind_filament", {"index": 3, "length": 5.0, "speed": 100.0, "mode": "normal"})]
         assert unit.logger.messages == [
             ("info", "ACE load: lane3 backing off 5mm to free a caught tip "
-                     "(buffer rest=0 back=0 full=1)"),
+                     "(buffer buf_rst=0 buf_back=0 bit16=1)"),
             ("debug", "ACE wait: slot 3 short move (5mm) completed before motion was "
                       "observed, treating as done"),
-            ("info", "ACE load: lane3 after back-off, buffer rest=1 back=0 full=0")]
+            ("info", "ACE load: lane3 after back-off, buffer buf_rst=1 buf_back=0 bit16=0")]
 
-    def test_waits_for_rest_then_gives_up(self):
+    def test_settles_before_the_second_read(self):
         unit, lane = self._unit()
         unit._ace.set_reply("get_sensor_state", self.CAUGHT)
+        start = unit.afc.reactor.monotonic()
 
         unit._clear_tip_snag(3, lane)
 
         reads = [c for c in unit._ace.commands if c[0] == "get_sensor_state"]
-        # One before, one right after the back-off, then about 0.5s of 0.1s polls.
-        assert 5 <= len(reads) <= 8
+        assert len(reads) == 2
+        assert unit.afc.reactor.monotonic() - start >= 0.5
         assert unit.logger.messages[-1] == (
-            "info", "ACE load: lane3 after back-off, buffer rest=0 back=0 full=1")
+            "info", "ACE load: lane3 after back-off, buffer buf_rst=0 buf_back=0 bit16=1")
 
     def test_unreadable_sensors_still_back_off(self):
         unit, lane = self._unit()
@@ -3256,3 +3257,129 @@ class TestAfcACE2ClearTipSnag:
         feed = ("feed_filament", {"index": 3, "length": 3960.0, "speed": 80.0})
         back = ("unwind_filament", {"index": 3, "length": 5.0, "speed": 100.0, "mode": "normal"})
         assert wire.moves() == [feed, back, feed]
+
+
+class TestAfcACE2Trace:
+    SENSORS = {"slot_sensors": [{"insert": True, "buf_rst": True, "buf_back": False}] * 4,
+               "buf_feed": False, "sensor_bitmask": 0x4445}
+    FEED = {"feed_info": [{}, {"length": 120, "decoder": 97, "steps": 3000}, {}, {}]}
+    STATUS = {"status": "busy", "slots": [{"slot_status": "ready"},
+                                          {"slot_status": "feeding"},
+                                          {"slot_status": "ready"},
+                                          {"slot_status": "ready"}]}
+
+    def _unit(self, tmp_path: Any) -> afcACE2:
+        """
+        :param tmp_path: folder that stands in for klippy.log's
+        :return afcACE2: a unit with lane0 and lane1, its replies scripted
+        """
+        unit = make_ace2_unit(lanes=["lane0", "lane1"])
+        unit.printer.start_args["log_file"] = str(tmp_path / "klippy.log")
+        unit._ace.set_reply("get_status", self.STATUS)
+        unit._ace.set_reply("get_feed_info", self.FEED)
+        unit._ace.set_reply("get_sensor_state", self.SENSORS)
+        return unit
+
+    def test_registered_for_the_unit(self):
+        unit = make_ace2_unit()
+
+        handler = unit.printer.gcode.mux_commands[("AFC_ACE_TRACE", "UNIT", "Ace2_1")]
+
+        assert handler == unit.cmd_AFC_ACE_TRACE
+
+    def test_records_rows_until_duration_ends(self, tmp_path):
+        unit = self._unit(tmp_path)
+        gcmd = make_gcmd(LANE="lane1", PERIOD=0.1, DURATION=1.0)
+
+        unit.cmd_AFC_ACE_TRACE(gcmd)
+        path = unit._trace["path"]
+        unit.afc.reactor.advance(2.0)
+
+        assert unit._trace is None
+        lines = open(path).read().splitlines()
+        assert lines[0] == afcACE2._TRACE_HEADER
+        assert lines[1] == "0.000,feeding,120,97,3000,1,1,0,0,17477,0"
+        times = [float(line.split(",")[0]) for line in lines[1:]]
+        assert len(times) >= 8
+        assert times == sorted(times)
+        assert times[-1] <= 1.0
+        assert {line.split(",", 1)[1] for line in lines[1:]} == {
+            "feeding,120,97,3000,1,1,0,0,17477,0"}
+        assert path.startswith(str(tmp_path) + "/ace_trace_Ace2_1_lane1_")
+        assert gcmd.messages == [("info", f"Ace2_1: tracing lane1 every 100ms for up to 1s "
+                                          f"to {path}")]
+        assert unit.logger.messages == [
+            ("info", f"ACE2 Ace2_1: trace of lane1 time up, saved to {path}")]
+
+    def test_failed_reads_leave_columns_empty(self, tmp_path):
+        unit = self._unit(tmp_path)
+        unit._ace.set_reply("get_feed_info", RuntimeError("no reply"))
+        unit._ace.set_reply("get_sensor_state", RuntimeError("no reply"))
+
+        unit.cmd_AFC_ACE_TRACE(make_gcmd(LANE="lane1", DURATION=1.0))
+        path = unit._trace["path"]
+        unit.afc.reactor.advance(0.01)
+        unit.cmd_AFC_ACE_TRACE(make_gcmd(STOP=1))
+
+        assert open(path).read().splitlines()[1] == "0.000,feeding,,,,,,,,,0"
+
+    def test_stop_ends_it(self, tmp_path):
+        unit = self._unit(tmp_path)
+        unit.cmd_AFC_ACE_TRACE(make_gcmd(LANE="lane1"))
+        path = unit._trace["path"]
+        gcmd = make_gcmd(STOP=1)
+
+        unit.cmd_AFC_ACE_TRACE(gcmd)
+
+        assert unit._trace is None
+        assert gcmd.messages == [("info", f"Ace2_1: trace stopped, saved to {path}")]
+
+    def test_stop_without_a_trace(self, tmp_path):
+        unit = self._unit(tmp_path)
+        gcmd = make_gcmd(STOP=1)
+
+        unit.cmd_AFC_ACE_TRACE(gcmd)
+
+        assert gcmd.messages == [("info", "Ace2_1: no trace running")]
+
+    def test_one_trace_at_a_time(self, tmp_path):
+        unit = self._unit(tmp_path)
+        unit.cmd_AFC_ACE_TRACE(make_gcmd(LANE="lane1"))
+        gcmd = make_gcmd(LANE="lane0")
+
+        unit.cmd_AFC_ACE_TRACE(gcmd)
+
+        assert gcmd.messages == [("info", "Ace2_1: a trace is already running, "
+                                          "AFC_ACE_TRACE UNIT=Ace2_1 STOP=1 ends it")]
+        assert unit._trace["lane"] == "lane1"
+
+    def test_unknown_lane(self, tmp_path):
+        unit = self._unit(tmp_path)
+        gcmd = make_gcmd(LANE="lane9")
+
+        unit.cmd_AFC_ACE_TRACE(gcmd)
+
+        assert gcmd.messages == [
+            ("info", "Ace2_1: LANE must be one of this unit's lanes: lane0, lane1")]
+        assert unit._trace is None
+
+    def test_not_connected(self, tmp_path):
+        unit = self._unit(tmp_path)
+        unit._ace.connected = False
+        gcmd = make_gcmd(LANE="lane1")
+
+        unit.cmd_AFC_ACE_TRACE(gcmd)
+
+        assert gcmd.messages == [("info", "ACE not connected")]
+
+    def test_disconnect_ends_it(self, tmp_path):
+        unit = self._unit(tmp_path)
+        unit.cmd_AFC_ACE_TRACE(make_gcmd(LANE="lane1", PERIOD=0.1))
+        unit.afc.reactor.advance(0.25)
+        unit._ace.connected = False
+
+        unit.afc.reactor.advance(0.2)
+
+        assert unit._trace is None
+        assert unit.logger.messages[-1][1].startswith(
+            "ACE2 Ace2_1: trace of lane1 ended, ACE not connected")
