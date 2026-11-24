@@ -161,6 +161,10 @@ SENSOR_POLL_S = 0.02
 STOP_CONFIRM_TRIES = 3
 # Times a long load feed that ends in feed_error is resent for what it has left.
 LOAD_FEED_ERROR_RESENDS = 2
+# Short move (mm) that settles a lane on a real hub switch, and how many of
+# them a lane may take to reach or clear the switch.
+HUB_SWITCH_STEP = 20.0
+HUB_SWITCH_TRIES = 15
 
 def _ams_box_logo(title: str, n_slots: int, name: str) -> str:
     """
@@ -961,6 +965,33 @@ class afcACE(afcUnit):
         hub = lane.hub_obj
         return (hub is not None and hasattr(hub, 'is_virtual_pin') and hub.is_virtual_pin())
 
+    def _hub_switch(self, lane: AFCLane) -> Optional[Any]:
+        """
+        Return the lane's hub when that hub has a real switch.
+
+        :param lane: Lane whose hub to inspect.
+        :return Optional[Any]: the hub, or None for a virtual hub, a hub with no
+            switch pin, or no hub.
+        """
+        hub = lane.hub_obj
+        if (hub is None
+            or not hub.switch_pin
+            or hub.is_virtual_pin()):
+            return None
+        return hub
+
+    def _sync_load_state(self, lane: AFCLane) -> None:
+        """
+        Set the load state of a lane on a real hub switch from its slot. AFC
+        loads a lane only while that is set, and the switch reports the hub,
+        not the lane. A lane with a `load` pin of its own is left to that pin.
+
+        :param lane: Lane whose `prep_state` was just read from its slot.
+        """
+        if (self._hub_switch(lane) is not None
+            and lane.load is None):
+            lane._load_state = lane.prep_state
+
     def _set_hub_state(self, lane: AFCLane, state: bool) -> None:
         """
         Reflect live hub-switch occupancy on the lane's raw_load_state.
@@ -973,8 +1004,8 @@ class afcACE(afcUnit):
         - Virtual (pinless) hub: no physical sensor, so synthesize the live signal
           from tool_loaded (occupied when loaded to toolhead, clear when only
           staged or empty).
-        - Real hub switch: its own pin callback drives raw_load_state, so we must
-          not override it here.
+        - Real hub switch: the switch reports the hub itself, so the lane's
+          signal is not the hub's occupancy; `_sync_load_state` sets it.
 
         :param lane: Lane whose hub-presence signal to drive.
         :param state: Unused for the live signal (kept for call-site symmetry);
@@ -1042,6 +1073,7 @@ class afcACE(afcUnit):
             if not slot_transient:
                 # Vivid-style: slot "ready" means filament inserted -> prep_state.
                 lane.prep_state = slot_ready
+                self._sync_load_state(lane)
                 if not slot_ready:
                     # Only clear the staged state on a genuine ready -> not-ready
                     # removal; the ACE 2 reports 'empty' for a few polls at power-up.
@@ -1727,6 +1759,63 @@ class afcACE(afcUnit):
             self._note_move_error(hw_status, slot_index)
         return self._last_move_error
 
+    def _hub_switch_step(self, lane: AFCLane, distance: float) -> None:
+        """
+        Move a lane one short step and give its hub's switch time to settle.
+
+        :param lane: Lane to move.
+        :param distance: Signed distance in mm; positive feeds, negative unwinds.
+        """
+        self.lane_move(lane, distance, None)
+        self.afc.reactor.pause(self.afc.reactor.monotonic() + 0.2)
+
+    def _back_off_hub_switch(self, lane: AFCLane, hub: Any) -> Optional[float]:
+        """
+        Unwind a lane until its hub's switch clears, then `hub_clear_move_dis`
+        more, which parks it clear of the hub where AFC parks a stepper lane.
+
+        :param lane: Lane whose filament holds the switch.
+        :param hub: Its hub, which has a real switch.
+        :return Optional[float]: mm unwound before the switch cleared, or None
+            when it was still pressed after `HUB_SWITCH_TRIES` steps.
+        """
+        backed = 0.0
+        while hub.state:
+            if backed >= HUB_SWITCH_STEP * HUB_SWITCH_TRIES:
+                return None
+            self._hub_switch_step(lane, -HUB_SWITCH_STEP)
+            backed += HUB_SWITCH_STEP
+        if hub.hub_clear_move_dis > 0:
+            self.lane_move(lane, -hub.hub_clear_move_dis, None)
+        return backed
+
+    def _park_at_hub_switch(self, lane: AFCLane, hub: Any) -> bool:
+        """
+        Settle a lane just staged by distance on its hub's switch and park it
+        `hub_clear_move_dis` short of it, as AFC stages a stepper lane.
+
+        :param lane: Lane fed `dist_hub`, which ends short of the switch.
+        :param hub: Its hub, whose real switch was clear before that feed.
+        :return bool: False when the lane was left holding the switch (logged),
+            so it is not staged; else True.
+        """
+        fed = 0.0
+        while not hub.state:
+            if fed >= HUB_SWITCH_STEP * HUB_SWITCH_TRIES:
+                self.lane_move(lane, -fed, None)
+                self.logger.warning(f"ACE prep_post_load: {lane.name} did not reach its hub switch "
+                                    f"within {fed:.0f}mm of dist_hub, staged by distance. "
+                                    f"Run AFC_ACE_CALIBRATE_HUB LANE={lane.name}")
+                return True
+            self._hub_switch_step(lane, HUB_SWITCH_STEP)
+            fed += HUB_SWITCH_STEP
+        if self._back_off_hub_switch(lane, hub) is None:
+            self.logger.error(f"ACE prep_post_load: {lane.name} not staged, its hub switch stayed "
+                              f"pressed while the lane was pulled back. "
+                              f"Check the hub for stuck filament")
+            return False
+        return True
+
     def prep_post_load(self, lane: AFCLane, gcmd: AFCGcmd) -> None:
         """
         Stage filament to hub via ACE serial feed.
@@ -1734,7 +1823,9 @@ class afcACE(afcUnit):
         Feeds dist_hub from the slot when load_to_hub is enabled and the slot
         is prepped but not yet staged, marking the lane loaded_to_hub and
         optionally capturing TD-1 data. Retries the feed up to three times,
-        but not after the unit stopped it with a slot error (a jam).
+        but not after the unit stopped it with a slot error (a jam). On a hub
+        with a real switch the lane is then settled on the switch and parked
+        short of it.
 
         :param lane: Lane to stage to the hub.
         :param gcmd: command context the TD-1 capture is run through, if any
@@ -1760,6 +1851,11 @@ class afcACE(afcUnit):
                     # Wait out the unit's own insert cycle, or it rejects the
                     # staging feed with error_2.
                     self._wait_for_ace_ready(timeout=self.prep_ready_timeout)
+                    # A hub switch another lane already holds can't place this one.
+                    hub_switch = self._hub_switch(lane)
+                    if (hub_switch is not None
+                        and hub_switch.state):
+                        hub_switch = None
                     staged = self._feed_to_hub_probing(lane, slot, lane.dist_hub)
                     if staged is None:
                         # The unit stopped the stage on a slot error (logged).
@@ -1773,6 +1869,9 @@ class afcACE(afcUnit):
                         self._set_hub_state(lane, False)
                         lane.prep_state = False
                         self.afc.save_vars()
+                        return
+                    if (hub_switch is not None
+                        and not self._park_at_hub_switch(lane, hub_switch)):
                         return
                     lane.loaded_to_hub = True
                     self._set_hub_state(lane, True)
@@ -1964,6 +2063,7 @@ class afcACE(afcUnit):
                         and isinstance(slots[slot], dict)):
                         slot_ready = slots[slot].get("status", "") == "ready"
                         cur_lane.prep_state = slot_ready
+                        self._sync_load_state(cur_lane)
                         if not slot_ready:
                             cur_lane.loaded_to_hub = False
                             self._set_hub_state(cur_lane, False)
@@ -2835,6 +2935,18 @@ class afcACE(afcUnit):
             if (cur_extruder.tool_start != "buffer"
                 and not self._clear_toolhead_sensor(cur_lane, cur_extruder, slot,
                                                     retract_dist, gcmd=gcmd)):
+                return False
+
+            # An unwind that came up short leaves the tip on a real hub switch.
+            hub_switch = self._hub_switch(cur_lane)
+            if (hub_switch is not None
+                and hub_switch.state
+                and self._back_off_hub_switch(cur_lane, hub_switch) is None):
+                message = (f"Hub is not clearing after the ACE unwind of {cur_lane.name}, "
+                           f"filament may be stuck in hub\nPlease check to make sure "
+                           f"filament has not broken off and caused the sensor to stay stuck")
+                afc.error.handle_lane_failure(cur_lane, message, pause=afc.function.in_print(),
+                                              gcmd=gcmd)
                 return False
         except Exception as e:
             afc.error.handle_lane_failure(cur_lane, f"ACE unwind failed for {cur_lane.name}: {e}",
@@ -4470,10 +4582,11 @@ class afcACE(afcUnit):
 
     def _calibrate_hub_inner(self, cur_lane: AFCLane) -> Tuple[bool, str, float]:
         """
-        Calibrate dist_hub by incrementally feeding until the hub sensor
-        triggers; the first-detection distance is the measurement.
+        Calibrate `dist_hub` by incrementally feeding until the hub sensor
+        triggers, then backing off it: the spot `hub_clear_move_dis` short of
+        the sensor, where the lane is left staged, is the measurement.
 
-        Requires a physical hub sensor; rewrites dist_hub to config on success.
+        Requires a physical hub sensor; rewrites `dist_hub` to config on success.
 
         :param cur_lane: Lane to calibrate.
         :return tuple: (success, message, measured_distance).
@@ -4530,19 +4643,22 @@ class afcACE(afcUnit):
         distance = coarse_fed
         self.logger.info(f"ACE hub calibrate: trigger at {distance:.1f}mm")
 
-        retract_dist = max(distance - 50, 0)
-        if retract_dist > 0:
-            try:
-                self._wait_for_ace_ready()
-                self._ace.unwind_filament(slot, retract_dist, self.retract_speed)
-                self._wait_for_feed_complete(slot, retract_dist, self.retract_speed)
-            except Exception as e:
-                self.logger.error(f"ACE hub calibrate: retract failed: {e}")
+        # Park the lane hub_clear_move_dis short of the switch and save that
+        # spot: staged at the trigger point, a lane would hold the switch.
+        backed = self._back_off_hub_switch(cur_lane, hub)
+        if backed is None:
+            return False, ("Hub sensor did not clear while backing off it. "
+                           "Check the hub for stuck filament."), distance
 
+        # A staged lane started dist_hub out; any other started at the slot,
+        # ahead of the unit's own staging distance.
+        start = cur_lane.dist_hub if cur_lane.loaded_to_hub else -self.stage_initial_dist
         old_dist = cur_lane.dist_hub
-        new_dist = round(distance, 2)
+        new_dist = round(max(start + distance - backed - hub.hub_clear_move_dis, 0.0), 2)
         cal_msg = f'\n dist_hub: New: {new_dist} Old: {old_dist}'
         cur_lane.dist_hub = new_dist
+        cur_lane.loaded_to_hub = True
+        self.afc.save_vars()
         self.afc.function.ConfigRewrite(cur_lane.fullname, "dist_hub", new_dist, cal_msg)
 
         return True, f"dist_hub calibration: {new_dist}mm (was {old_dist}mm)", new_dist
@@ -4715,6 +4831,7 @@ class afcACE(afcUnit):
                 slot_info = self._slot_inventory[slot]
                 slot_loaded = bool(slot_info and slot_info.get("status", "") == "ready")
                 lane.prep_state = slot_loaded
+                self._sync_load_state(lane)
                 if not slot_loaded:
                     lane.loaded_to_hub = False
                     self._set_hub_state(lane, False)
