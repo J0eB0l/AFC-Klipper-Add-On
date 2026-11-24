@@ -1321,7 +1321,8 @@ class afcACE2(afcACE):
         # catch the entry of the buffer plunger's tube and drag the plunger to
         # its end, which stops the filament and trips the slip check. Before a
         # load feed is resent after a feed error, back the lane off this far so
-        # the plunger can spring back to rest. 0 turns it off.
+        # the plunger can spring back to rest. 0 turns it off. The idea and its
+        # values come from tobecwb's ace2k firmware (github.com/tobecwb/ace2k).
         self.snag_backoff_length = config.getfloat("snag_backoff_length", 5.0,
                                                    minval=0.0, maxval=20.0)
         # Slots running rollback assist for an unload (see _start_unload_assist).
