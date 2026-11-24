@@ -119,8 +119,9 @@ class TestAFCACEBuffer:
         buf = make_buffer()
 
         assert (buf.approach_length, buf.poll_interval, buf.still_seconds, buf.still_eps_mm,
-                buf.stall_seconds, buf.max_extra_length, buf.arrival_timeout) == (
-            100.0, 0.1, 0.3, 1.0, 3.0, 150.0, 30.0)
+                buf.stall_seconds, buf.max_extra_length, buf.arrival_timeout,
+                buf.engage_extra_seconds, buf.engage_push_length, buf.engage_retries) == (
+            100.0, 0.1, 0.3, 1.0, 3.0, 150.0, 30.0, 2.0, 50.0, 2)
         assert buf.advance_state is False
 
     def test_arrival_latches_until_the_next_load(self):
@@ -168,38 +169,20 @@ class TestAFCACEBuffer:
         lane.extruder_obj.lane_loaded = "lane0"
         assert buf.advance_state is True
 
-    def test_trailing_reads_the_back_switch_of_its_lanes(self):
+    def test_trailing_until_the_buffer_reads_full(self):
         buf = make_buffer()
-        unit = SlotUnit({"lane0": 0, "lane1": 1}, cached=SENSORS)
+        unit = SlotUnit({"lane0": 0}, cached=SENSORS)
         buf.lanes = {"lane0": BufLane("lane0", unit)}
         assert buf.trailing_state is False
 
-        buf.lanes["lane1"] = BufLane("lane1", unit)
+        unit._cached_sensor_state = dict(SENSORS, buf_feed=False)
         assert buf.trailing_state is True
 
-    def test_trailing_is_false_with_no_sensor_read(self):
+    def test_trailing_with_no_sensor_read(self):
         buf = make_buffer()
         buf.lanes = {"lane0": BufLane("lane0", SlotUnit({"lane0": 0}))}
 
-        assert buf.trailing_state is False
-
-    def test_watch_counts_drains_and_refills_then_logs(self):
-        buf = make_buffer()
-        reads = [(True, 45), (False, 45), (True, 20), (False, 25), (True, 30)]
-        link = SensorLink(None, None)
-        unit = SlotUnit({"lane0": 0}, ace=link)
-        lane = BufLane("lane0", unit)
-
-        buf.mark_arrival(lane, unit, 0, 45.0)
-        for full, dec in reads:
-            link.sensors = {"slot_sensors": [{"buf_rst": False, "buf_back": False}],
-                            "buf_feed": full}
-            link.feed = {"feed_info": [{"decoder": dec}]}
-            buf._watch_tick(buf.reactor.monotonic())
-        buf.enable_buffer(lane)
-
-        assert ("debug", "Ace_Buffer: lane0 after arrival, the buffer drained 2 and refilled "
-                         "2 times while the assist fed 30mm") in buf.logger.messages
+        assert buf.trailing_state is True
 
     def test_status_carries_the_arrival(self):
         buf = make_buffer()

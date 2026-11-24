@@ -3409,6 +3409,9 @@ class RamStubBuffer:
         self.stall_seconds = 3.0
         self.max_extra_length = 150.0
         self.arrival_timeout = 30.0
+        self.engage_extra_seconds = 2.0
+        self.engage_push_length = 50.0
+        self.engage_retries = 2
         self.advance_state = False
         self.__dict__.update(values)
         self.arrivals: List[Tuple[str, int, float]] = []
@@ -3539,6 +3542,7 @@ class TestAfcACE2RamToBuffer:
             buf.advance_state = True
             return ""
         unit._ram_to_buffer = ram
+        unit._confirm_engaged = lambda slot, cur_lane, distance, speed: ""
         wire = AceP1Wire(unit)
 
         assert unit._ace_load_inner(lane, lane.extruder_obj, gcmd=make_gcmd()) is True
@@ -3559,3 +3563,107 @@ class TestAfcACE2RamToBuffer:
 
         failures = unit.afc.error.handle_lane_failure.calls
         assert failures[-1][0][1] == "lane3 did not reach the extruder: jammed"
+
+
+class TestAfcACE2ConfirmEngaged:
+    sensors = staticmethod(TestAfcACE2RamToBuffer.sensors)
+    feed = staticmethod(TestAfcACE2RamToBuffer.feed)
+
+    def _unit(self) -> Tuple[afcACE2, Any, RamStubBuffer]:
+        """
+        :return tuple: the unit, lane3 with assist running on slot 3, and its buffer
+        """
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        unit._feed_assist_active.add(3)
+        unit._ace.set_reply("get_feed_info", *self.feed(10))
+        return unit, lane, buf
+
+    def test_a_drain_confirms_it(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.sensors(True), self.sensors(True),
+                            self.sensors(False))
+
+        assert unit._confirm_engaged(3, lane, 36.0, 25.0) == ""
+
+        assert ("info", "ACE Ace2_1: lane3 taken by the extruder, the buffer drained"
+                ) in unit.logger.messages
+
+    def test_staying_full_pushes_again_then_fails(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", self.sensors(True))
+        moves: List[Tuple[float, float, str]] = []
+        unit.afc.move_e_pos = lambda dist, speed, label="", wait_tool=False: moves.append(
+            (dist, speed, label))
+        start = unit.afc.reactor.monotonic()
+
+        reason = unit._confirm_engaged(3, lane, 36.0, 25.0)
+
+        assert reason == ("the buffer stayed full while the extruder pulled 36mm and after "
+                          "2 more pushes, so the filament is stopped short of the gears "
+                          "(check for a catch or snag)")
+        assert moves == [(36.0, 25.0, "engage retry"), (36.0, 25.0, "engage check")] * 2
+        pushes = [c for c in unit._ace.commands if c[0] == "feed_filament"]
+        assert pushes == [("feed_filament", {"index": 3, "length": 50.0, "speed": 50.0})] * 2
+        # each watch gave the whole tool_stn move (1.44s) plus engage_extra_seconds
+        assert unit.afc.reactor.monotonic() - start >= 3 * 3.44
+        assert unit._ace.commands[-1] == ("stop_feed_assist", {"index": 3})
+        assert [m for m in unit.logger.messages if m[0] == "info"] == [
+            ("info", "ACE Ace2_1: lane3 not taken by the extruder yet, pushing 50mm again "
+                     "(try 1/2)"),
+            ("info", "ACE Ace2_1: lane3 not taken by the extruder yet, pushing 50mm again "
+                     "(try 2/2)")]
+
+    def test_a_push_that_gets_it_through_passes(self):
+        unit, lane, buf = self._unit()
+        unit.afc.move_e_pos = lambda *a, **k: None
+        full = [self.sensors(True)] * 40
+        unit._ace.set_reply("get_sensor_state", *(full + [self.sensors(False)]))
+
+        assert unit._confirm_engaged(3, lane, 36.0, 25.0) == ""
+
+        assert len([c for c in unit._ace.commands if c[0] == "feed_filament"]) == 1
+        assert unit.logger.messages[-1] == (
+            "info", "ACE Ace2_1: lane3 taken by the extruder, the buffer drained")
+
+    def test_no_retries_fails_at_once(self):
+        unit, lane, buf = self._unit()
+        buf.engage_retries = 0
+        unit._ace.set_reply("get_sensor_state", self.sensors(True))
+
+        assert unit._confirm_engaged(3, lane, 36.0, 25.0) == (
+            "the buffer stayed full while the extruder pulled 36mm, so the filament is "
+            "stopped short of the gears (check for a catch or snag)")
+        assert not [c for c in unit._ace.commands if c[0] == "feed_filament"]
+
+    def test_no_readings_fails(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", RuntimeError("no reply"))
+
+        assert unit._confirm_engaged(3, lane, 36.0, 25.0) == (
+            "the unit's buffer could not be read")
+
+    def test_no_tool_stn_warns_and_passes(self):
+        unit, lane, buf = self._unit()
+
+        assert unit._confirm_engaged(3, lane, 0.0, 25.0) == ""
+
+        assert unit.logger.messages[0] == (
+            "warning", "ACE Ace2_1: lane3 has no tool_stn move, so there is nothing to "
+                       "confirm the extruder took it")
+
+    def test_load_fails_when_the_extruder_did_not_take_it(self):
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        lane.hub_obj.afc_bowden_length = 1800.0
+
+        def ram(slot: int, cur_lane: Any, approach: float) -> str:
+            buf.advance_state = True
+            return ""
+        unit._ram_to_buffer = ram
+        unit._confirm_engaged = lambda slot, cur_lane, distance, speed: "stayed full"
+        AceP1Wire(unit)
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj, gcmd=make_gcmd()) is False
+
+        failures = unit.afc.error.handle_lane_failure.calls
+        assert failures[-1][0][1] == "lane3 did not take the filament: stayed full"
