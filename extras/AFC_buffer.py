@@ -1563,6 +1563,12 @@ def load_config_prefix(config):
         from extras.AFC_BambuAMS_buffer import AFCBambuBuffer
         return AFCBambuBuffer(config)
 
-    msg = (f"{buffer_type} not valid, only switched(turtleneck style), FPS_PSF "
-           f"or bambu are valid options")
+    if buffer_type == "ace":
+        # The ACE 2 Pro's own buffer (AFC_ACE2_buffer.py) as a toolhead load
+        # sensor. Imported here because it subclasses AFCBuffer from this module.
+        from extras.AFC_ACE2_buffer import AFCACEBuffer
+        return AFCACEBuffer(config)
+
+    msg = (f"{buffer_type} not valid, only switched(turtleneck style), FPS_PSF, "
+           f"bambu or ace are valid options")
     raise error(msg)
