@@ -36,11 +36,13 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 from extras.AFC_ACE import (
     afcACE, ACEConnection, ACESerialError, ACETimeoutError, REQUEST_TIMEOUT,
-    _ACE_CLAIMED_PORTS,
+    FEED_SPEED_CEILING, HUB_SWITCH_STEP, HUB_SWITCH_TRIES, _ACE_CLAIMED_PORTS,
 )
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
+    from extras.AFC_lane import AFCLane
+    from gcode import GCodeCommand
     from reactor import SelectReactor as Reactor
 
 _logger = logging.getLogger("AFC_ACE2")
@@ -57,6 +59,23 @@ FLAG_RESPONSE = 0x80
 # encoder_reading = commanded_mm * 1.2342. Used to validate SET_FEED_CHECK
 # params and report slip.
 ACE2_ENCODER_SCALE = 1.2342
+# The unit answers a feed or an unwind as the move starts. A long move waits
+# this long for that answer before asking the slot whether it is moving.
+MOVE_ACK_TIMEOUT = 3.0
+# Wait for that status reply; a move must outlast both waits to be checked.
+MOVE_ACK_MARGIN = 2.0
+# An unload takes up about this much before its long unwind (rollback assist
+# and the buffer's collapse), so the unwind that puts the tip back where a
+# load starts is this much shorter than the feed a calibration measures.
+CALIBRATE_UNLOAD_TAKEUP = 40.0
+# A load's feed runs this far past where a calibration saw the filament touch
+# the extruder gears, so it ends pressed into them.
+CALIBRATE_PRESS = 35.0
+# A hub calibration backs off the hub's switch at this speed (mm/s), so the
+# unwind stops close to where the switch clears, and reads the switch this
+# often (s) while a move runs.
+HUB_SWITCH_SPEED = 25.0
+HUB_SWITCH_POLL = 0.1
 HEADER_LEN = 7
 TRAILER_LEN = 3
 MIN_FRAME_LEN = HEADER_LEN + TRAILER_LEN
@@ -91,6 +110,7 @@ class Cmd:
     SET_VALVE = 66
     FILAMENT_IDENTIFY = 68
     RFID_TEST = 69
+    FLASH_LED = 70
     SET_FAN = 71
     # Opcode 73 (GET_SENSOR_STATE) returns the 17-channel filament-sensor
     # bitmask; kept under both names for clarity.
@@ -131,6 +151,13 @@ FEED_MODE_FEED = 0
 FEED_MODE_ROLLBACK = 1
 FEED_MODE_ASSIST = 2
 FEED_MODE_ROLLBACK_ASSIST = 3
+
+# FLASH_LED (opcode 70) payload that blinks the four lane LEDs: two rounds of
+# five slow flashes, about 6 s.
+# Field 1 is a component mask; 0x0F is the four lane LEDs, and its other bits
+# drive other parts of the unit, so only these values are ever sent.
+# Fields 2-6 are the blink pattern.
+FLASH_LED_LANES = ((1, 0x0F), (2, 2), (3, 0), (4, 4), (5, 0), (6, 0))
 
 # Opcodes whose response reports a status/error in protobuf field 1 (0 = ok).
 # For every other opcode field 1 is data; the feed/rollback family's error_2
@@ -378,6 +405,8 @@ def method_to_v2(method: str, params: Optional[Dict[str, Any]]) -> Tuple[int, by
         return Cmd.DRYING, (pb_uint32(1, temp) + pb_uint32(2, duration) + pb_uint32(3, fan_on))
     if method == 'drying_stop':
         return Cmd.DRYING, pb_uint32(1, 0) + pb_uint32(2, 0)
+    if method == 'flash_led':
+        return Cmd.FLASH_LED, b''.join(pb_uint32(n, v) for n, v in FLASH_LED_LANES)
     if method == 'set_fan_speed':
         speed = int(params.get('speed', 0))
         return Cmd.SET_FAN, (pb_uint32(1, speed) + pb_bool(2, speed > 0) + pb_bool(3, speed > 0))
@@ -1142,6 +1171,71 @@ class ACE2Connection(ACEConnection):
         return self.send_command("start_rollback_assist", params={"index": slot_index},
                                  timeout=timeout)
 
+    def feed_filament(self, slot_index: int, length_mm: float, speed_mm_s: float) -> Any:
+        """
+        Feed filament forward from a slot, sending the command once more when
+        the unit never started it (see _send_move).
+
+        :param slot_index: Slot index (0-based)
+        :param length_mm: Distance to feed in mm
+        :param speed_mm_s: Feed speed in mm/s
+        :return Any: The response result payload.
+        """
+        return self._send_move("feed_filament", "feeding",
+                               {"index": slot_index, "length": length_mm, "speed": speed_mm_s})
+
+    def unwind_filament(self, slot_index: int, length_mm: float, speed_mm_s: float,
+                        mode: str = "normal") -> Any:
+        """
+        Unwind filament back into a slot, sending the command once more when
+        the unit never started it (see _send_move).
+
+        :param slot_index: Slot index (0-based)
+        :param length_mm: Distance to unwind in mm
+        :param speed_mm_s: Unwind speed in mm/s
+        :param mode: Unwind mode ("normal" or another the firmware supports)
+        :return Any: The response result payload.
+        """
+        return self._send_move("unwind_filament", "rollback",
+                               {"index": slot_index, "length": length_mm, "speed": speed_mm_s,
+                                "mode": mode})
+
+    def _send_move(self, method: str, moving_state: str, params: Dict[str, Any]) -> Any:
+        """
+        Send a feed or an unwind. The unit answers a move as it starts, so a
+        long move waits only MOVE_ACK_TIMEOUT for the answer. When none comes
+        the slot's state tells the two cases apart: it is moving, so only the
+        answer was lost, or it is not, so the command was, and the command is
+        sent once more. A move short enough to end before that check keeps the
+        full wait, as a finished move reads the same as one that never started.
+
+        :param method: "feed_filament" or "unwind_filament"
+        :param moving_state: the slot state the unit reports while the move runs
+        :param params: the command's params (index, length, speed)
+        :return Any: The response result payload, {} for a running move whose
+                     answer was lost.
+        :raises ACETimeoutError: When the command sent again got no answer
+                                 either and the slot is still not moving.
+        """
+        duration = params["length"] / max(params["speed"], 1)
+        if duration < MOVE_ACK_TIMEOUT + MOVE_ACK_MARGIN:
+            return self.send_command(method, params=params, timeout=duration + 10)
+        slot = params["index"]
+        for attempt in range(2):
+            try:
+                return self.send_command(method, params=params, timeout=MOVE_ACK_TIMEOUT)
+            except ACETimeoutError as e:
+                lost = e
+            status = self.get_status(timeout=MOVE_ACK_MARGIN)
+            if status["slots"][slot].get("slot_status") == moving_state:
+                self._logger.debug(f"ACE2 {method} on slot {slot} got no answer, "
+                                   "but the slot is moving")
+                return {}
+            if attempt == 0:
+                self._logger.info(f"ACE2 {method} on slot {slot} got no answer and the "
+                                  "slot is not moving, sending it again")
+        raise lost
+
     def enable_rfid(self) -> None:
         """
         Nothing to turn on: the ACE 2 has no firmware tag reader (AFC_ACE2_rfid
@@ -1223,6 +1317,13 @@ class afcACE2(afcACE):
                 f"feed_check_length / {ACE2_ENCODER_SCALE:.4f}).")
             raise config.error(error_str)
         self._stuck_detection = config.getboolean("stuck_spool_detection", True)
+        # A filament tip thicker than the filament (a formed or blobbed tip) can
+        # catch the entry of the buffer plunger's tube and drag the plunger to
+        # its end, which stops the filament and trips the slip check. Before a
+        # load feed is resent after a feed error, back the lane off this far so
+        # the plunger can spring back to rest. 0 turns it off.
+        self.snag_backoff_length = config.getfloat("snag_backoff_length", 5.0,
+                                                   minval=0.0, maxval=20.0)
         # Slots running rollback assist for an unload (see _start_unload_assist).
         self._rollback_assist_active: set[int] = set()
         # Staging: skip_factory_autostage turns the factory identify off on
@@ -1247,6 +1348,9 @@ class afcACE2(afcACE):
         # The unit turns the identify back on across a reset, so set it on every
         # connect and reconnect.
         self.printer.register_event_handler("afc_ace:connected", self._handle_ace_connected)
+        self.gcode.register_mux_command('AFC_ACE_IDENTIFY', "UNIT", self.name,
+                                        self.cmd_AFC_ACE_IDENTIFY,
+                                        desc=self.cmd_AFC_ACE_IDENTIFY_help)
 
     def _apply_feed_check(self) -> None:
         """
@@ -1283,6 +1387,501 @@ class afcACE2(afcACE):
         except Exception as e:
             self.logger.warning(
                 f"ACE2 {self.name}: factory identify {state} failed (non-fatal): {e}")
+
+    # How long the buffer plunger gets to settle after a back-off.
+    _SNAG_SETTLE_TIME = 0.5
+
+    def _buffer_reading(self, slot: int) -> str:
+        """
+        One slot's buffer switch bits as the unit reports them, for the tip
+        snag log lines. Their polarity is not settled yet (a loaded lane at
+        idle reads buf_rst=0 buf_back=0 bit16=1), so they are logged raw.
+
+        :param slot: 0-based ACE slot index.
+        :return str: e.g. "buf_rst=0 buf_back=0 bit16=1", or "unread" when the
+            read fails.
+        """
+        try:
+            state = self._ace.get_sensor_state()
+            s = state['slot_sensors'][slot]
+            return (f"buf_rst={int(s['buf_rst'])} buf_back={int(s['buf_back'])} "
+                    f"bit16={int(state['buf_feed'])}")
+        except Exception:
+            return "unread"
+
+    def _ram_buffer(self, cur_lane: AFCLane) -> Any:
+        """
+        The unit's buffer (an [AFC_buffer] with type: ace) when it is this
+        lane's toolhead sensor (pin_tool_start: buffer).
+
+        :param cur_lane: Lane being loaded.
+        :return: the buffer, or None to load to the toolhead sensor as usual
+        """
+        buffer_obj = getattr(cur_lane, "buffer_obj", None)
+        if (getattr(cur_lane.extruder_obj, "tool_start", None) == "buffer"
+            and getattr(buffer_obj, "type", None) == "ace"):
+            return buffer_obj
+        return None
+
+    def _ram_to_buffer(self, slot: int, cur_lane: AFCLane, approach: float) -> str:
+        """
+        Bring the filament the last stretch to the extruder in feed assist.
+        Feed assist stops by itself once the unit's buffer is full, so the
+        filament has arrived when the full switch is on and the encoder has
+        stopped. Not full and not moving is a jam.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param approach: How far short of the extruder the feed stopped, in mm.
+        :return str: '' once it arrived, else why it did not
+        """
+        from extras.AFC_ACE2_buffer import decoder_step, read_slot
+        buf = cur_lane.buffer_obj
+        reactor = self.afc.reactor
+        self._start_feed_assist(slot)
+        if slot not in self._feed_assist_active:
+            return f"feed assist would not start on slot {slot}"
+        max_push = approach + buf.max_extra_length
+        pushed = 0.0
+        last_dec = None
+        still_since = None
+        start = reactor.monotonic()
+        deadline = start + buf.arrival_timeout
+        reason = ""
+        while True:
+            now = reactor.monotonic()
+            if now > deadline:
+                reason = (f"the buffer did not fill within {buf.arrival_timeout:.0f}s "
+                          f"({pushed:.0f}mm pushed)")
+                break
+            sample = read_slot(self, slot)
+            if sample is not None:
+                step = decoder_step(last_dec, sample["decoder"])
+                pushed += step
+                if last_dec is not None:
+                    if step <= buf.still_eps_mm:
+                        still_since = still_since if still_since is not None else now
+                    else:
+                        still_since = None
+                last_dec = sample["decoder"]
+                still_for = (now - still_since) if still_since is not None else 0.0
+                if (sample["full"]
+                    and still_for >= buf.still_seconds):
+                    self.logger.info(f"ACE {self.name}: {cur_lane.name} reached the extruder, "
+                                     f"buffer full after {pushed:.0f}mm of feed assist")
+                    buf.mark_arrival(cur_lane, self, slot, pushed)
+                    break
+                if (not sample["full"]
+                    and still_for >= buf.stall_seconds):
+                    reason = (f"the filament stopped after {pushed:.0f}mm of feed assist "
+                              f"without filling the buffer, check for a jam")
+                    break
+                if pushed > max_push:
+                    reason = (f"feed assist pushed {pushed:.0f}mm without filling the "
+                              f"buffer, check the bowden length")
+                    break
+            reactor.pause(reactor.monotonic() + buf.poll_interval)
+        if reason:
+            self._stop_feed_assist(slot)
+        # On arrival assist keeps running: _confirm_engaged needs it to hold
+        # the buffer full until the extruder takes the filament.
+        return reason
+
+    def _confirm_engaged(self, slot: int, cur_lane: AFCLane, distance: float,
+                         speed: float) -> str:
+        """
+        Confirm the extruder took the filament. Feed assist holds the buffer
+        full against whatever stopped the filament, so it only drains when
+        the extruder pulls filament out of it. Still full once the tool_stn
+        move is done means the extruder never gripped it: then push again,
+        a short feed (the motor's full force, which feed assist does not
+        use) while the extruder turns another tool_stn, and watch a further
+        tool_stn pull, up to engage_retries times.
+
+        :param slot: 0-based ACE slot index being loaded.
+        :param cur_lane: Lane being loaded.
+        :param distance: How far the extruder pulls (tool_stn), in mm.
+        :param speed: Its speed, in mm/s.
+        :return str: '' once the buffer drained, else why not
+        """
+        buf = cur_lane.buffer_obj
+        if distance <= 0:
+            self.logger.warning(f"ACE {self.name}: {cur_lane.name} has no tool_stn move, so "
+                                f"there is nothing to confirm the extruder took it")
+            if not self._use_feed_assist(cur_lane):
+                self._stop_feed_assist(slot)
+            return ""
+        reason = self._wait_for_drain(slot, buf, distance, speed)
+        tries = 0
+        while (reason == "full"
+               and tries < buf.engage_retries):
+            tries += 1
+            self.logger.info(f"ACE {self.name}: {cur_lane.name} not taken by the extruder yet, "
+                             f"pushing {buf.engage_push_length:.0f}mm again "
+                             f"(try {tries}/{buf.engage_retries})")
+            try:
+                self._stop_feed_assist(slot)
+                self.afc.move_e_pos(distance, speed, "engage retry")
+                self._wait_for_ace_ready()
+                self._ace.feed_filament(slot, buf.engage_push_length, self.load_approach_speed)
+                self._wait_for_feed_complete(slot, buf.engage_push_length,
+                                             self.load_approach_speed)
+                # Then watch for the drain on a fresh pull, assist holding the buffer full.
+                self._start_feed_assist(slot)
+                self.afc.move_e_pos(distance, speed, "engage check")
+            except Exception as e:
+                self.logger.warning(f"ACE {self.name}: {cur_lane.name} push retry failed: {e}")
+            reason = self._wait_for_drain(slot, buf, distance, speed)
+        if reason == "full":
+            reason = (f"the buffer stayed full while the extruder pulled {distance:.0f}mm"
+                      + (f" and after {tries} more push{'es' if tries > 1 else ''}"
+                         if tries else "")
+                      + ", so the filament is stopped short of the gears "
+                        "(check for a catch or snag)")
+        elif not reason:
+            self.logger.info(f"ACE {self.name}: {cur_lane.name} taken by the extruder, "
+                             f"the buffer drained")
+        if (reason
+            or not self._use_feed_assist(cur_lane)):
+            self._stop_feed_assist(slot)
+        return reason
+
+    def _wait_for_drain(self, slot: int, buf: Any, distance: float, speed: float) -> str:
+        """
+        Watch the buffer while the extruder pulls distance mm.
+
+        :param slot: 0-based ACE slot index.
+        :param buf: the lane's ACE buffer
+        :param distance: the extruder move, in mm
+        :param speed: its speed, in mm/s
+        :return str: '' when it drained, 'full' when it stayed full, else why
+            it could not be read
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        reactor = self.afc.reactor
+        deadline = reactor.monotonic() + distance / max(speed, 1.0) + buf.engage_extra_seconds
+        read_any = False
+        while reactor.monotonic() < deadline:
+            reactor.pause(reactor.monotonic() + buf.poll_interval)
+            sample = read_slot(self, slot)
+            if sample is None:
+                continue
+            read_any = True
+            if not sample["full"]:
+                return ""
+        return "full" if read_any else "the unit's buffer could not be read"
+
+    def _clear_tip_snag(self, slot: int, cur_lane: AFCLane) -> None:
+        """
+        Back the lane off snag_backoff_length mm before a load feed is resent
+        after a feed error, so a tip caught at the buffer tube's entry lets go
+        and the plunger springs back. The buffer switches are logged before
+        and after.
+
+        :param slot: 0-based ACE slot index.
+        :param cur_lane: Lane being loaded.
+        """
+        dist = self.snag_backoff_length
+        if (dist <= 0
+            or self._ace is None
+            or not self._ace.connected):
+            return
+        before = self._buffer_reading(slot)
+        self.logger.info(f"ACE load: {cur_lane.name} backing off {dist:.0f}mm to free a "
+                         f"caught tip (buffer {before})")
+        try:
+            self._wait_for_ace_ready()
+            self._ace.unwind_filament(slot, dist, self.retract_speed)
+            self._wait_for_feed_complete(slot, dist, self.retract_speed)
+        except Exception as e:
+            self.logger.warning(f"ACE load: {cur_lane.name} back-off failed: {e}")
+            return
+        reactor = self.afc.reactor
+        reactor.pause(reactor.monotonic() + self._SNAG_SETTLE_TIME)
+        after = self._buffer_reading(slot)
+        self.logger.info(f"ACE load: {cur_lane.name} after back-off, buffer {after}")
+
+    def _calibrate_bowden_inner(self, cur_lane: AFCLane, cur_hub: Any,
+                                slot: int) -> Tuple[bool, str, float]:
+        """
+        A lane whose toolhead sensor is the unit's buffer has no sensor to
+        feed up to, so its bowden is measured on the unit's encoder: feed
+        until the extruder gears stop the filament (_feed_to_gears), unwind
+        what was fed, and save both lengths. afc_bowden_length is set so a
+        load's feed ends with the filament pressed against the gears, and
+        afc_unload_bowden_length so an unload leaves the tip where a load
+        starts. Any other lane calibrates to its toolhead sensor as usual.
+
+        :param cur_lane: Lane to calibrate.
+        :param cur_hub: Hub object the measured lengths are saved to.
+        :param slot: 0-based ACE slot index for the lane.
+        :return tuple: (success, message, afc_bowden_length).
+        """
+        buf = self._ram_buffer(cur_lane)
+        if buf is None:
+            return super()._calibrate_bowden_inner(cur_lane, cur_hub, slot)
+        if cur_lane.get_toolhead_pre_sensor_state():
+            return False, "Filament is already at the extruder, unload first", 0
+        # The unit drives one slot at a time: a feed is not answered while
+        # another slot runs feed assist.
+        for other_slot in list(self._feed_assist_active):
+            if other_slot != slot:
+                self._stop_feed_assist(other_slot)
+        max_distance = 6000
+        self.logger.raw(f"Calibrating afc_bowden_length for {cur_lane.name} on its buffer "
+                        f"and encoder (max {max_distance}mm)")
+        contact, fed, reason = self._feed_to_gears(slot, buf, max_distance)
+        ratio = self._unwind_measured(slot, fed)
+        # The unit unwinds a little less than it is told: cover what that
+        # left, so the tip is back where the feed started.
+        self._unwind_measured(slot, fed * (ratio - 1.0))
+        if reason:
+            return False, f"{cur_lane.name} did not reach the extruder: {reason}", contact
+
+        # A lane not staged at its hub is loaded with dist_hub added to both.
+        offset = 0.0 if cur_lane.loaded_to_hub else cur_lane.dist_hub
+        bowden = round(contact + CALIBRATE_PRESS + buf.approach_length - offset, 2)
+        unload = round((fed - CALIBRATE_UNLOAD_TAKEUP) * ratio - offset, 2)
+        old_bowden = getattr(cur_hub, "afc_bowden_length", 0)
+        old_unload = getattr(cur_hub, "afc_unload_bowden_length", 0)
+        cur_hub.afc_bowden_length = bowden
+        cur_hub.afc_unload_bowden_length = unload
+        self.afc.function.ConfigRewrite(cur_hub.fullname, "afc_bowden_length", bowden,
+                                        f"\n afc_bowden_length: New: {bowden} Old: {old_bowden}")
+        self.afc.function.ConfigRewrite(
+            cur_hub.fullname, "afc_unload_bowden_length", unload,
+            f"\n afc_unload_bowden_length: New: {unload} Old: {old_unload}")
+        return (True, f"afc_bowden_length calibration: {bowden}mm (was {old_bowden}mm), "
+                      f"afc_unload_bowden_length: {unload}mm (was {old_unload}mm)", bowden)
+
+    def _feed_to_gears(self, slot: int, buf: Any, max_distance: float) -> Tuple[float, float, str]:
+        """
+        Feed until the extruder gears stop the filament, then stop the feed.
+        The filament has arrived when the slot's buffer is pressed forward
+        and, for the buffer's still_seconds, the encoder counts less than
+        half of what the motor feeds. An encoder that stops with the motor,
+        or without the buffer pressed, is a feed the unit ended or a jam.
+
+        :param slot: 0-based ACE slot index.
+        :param buf: the lane's ACE buffer, for its poll and stillness settings
+        :param max_distance: the longest feed to try, in mm
+        :return tuple: (mm the unit had fed, by its own count, when the
+            filament last moved freely, mm the encoder counted in all, '' or
+            why the filament did not arrive)
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        reactor = self.afc.reactor
+        sample = read_slot(self, slot)
+        if (sample is None
+            or not sample["rest"]):
+            return 0.0, 0.0, "its buffer is not at rest, unload the lane first"
+        try:
+            self._wait_for_ace_ready()
+            self._ace.feed_filament(slot, max_distance, self.feed_speed)
+        except Exception as e:
+            return 0.0, 0.0, f"the feed did not start: {e}"
+        length = 0.0
+        contact = 0.0
+        last_dec: Optional[float] = None
+        still_since: Optional[float] = None
+        slipped = False
+        reason = ""
+        deadline = reactor.monotonic() + 2.0 * max_distance / max(self.feed_speed, 1.0) + 15.0
+        while True:
+            now = reactor.monotonic()
+            if now > deadline:
+                reason = f"no arrival after {length:.0f}mm, the unit's buffer could not be read"
+                break
+            sample = read_slot(self, slot)
+            if sample is not None:
+                dec = float(sample["decoder"])
+                moved = sample["length"] - length
+                length = sample["length"]
+                if (last_dec is not None
+                    and dec - last_dec <= max(buf.still_eps_mm, moved / 2.0)):
+                    still_since = still_since if still_since is not None else now
+                    slipped = slipped or moved / 2.0 > buf.still_eps_mm
+                else:
+                    still_since = None
+                    slipped = False
+                    contact = length
+                last_dec = dec
+                still_for = (now - still_since) if still_since is not None else 0.0
+                if (slipped
+                    and not sample["rest"]
+                    and not sample["back"]
+                    and still_for >= buf.still_seconds):
+                    break
+                if still_for >= buf.stall_seconds:
+                    reason = f"the feed stopped after {length:.0f}mm"
+                    break
+            reactor.pause(reactor.monotonic() + buf.poll_interval)
+        self._stop_feed_at_sensor(slot)
+        sample = read_slot(self, slot)
+        fed = float(sample["decoder"]) if sample is not None else (last_dec or 0.0)
+        return contact, fed, reason
+
+    def _unwind_measured(self, slot: int, distance: float) -> float:
+        """
+        Unwind what a calibration feed pushed out, and compare the command
+        with what the encoder counted: the unit covers a little less than an
+        unwind tells it to.
+
+        :param slot: 0-based ACE slot index.
+        :param distance: mm to unwind
+        :return float: commanded mm per mm the encoder counted, 1.0 when that
+            could not be measured
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        if distance < 1.0:
+            return 1.0
+        self.logger.info(f"ACE calibrate: unwinding {distance:.0f}mm")
+        try:
+            self._wait_for_ace_ready()
+            self._ace.unwind_filament(slot, distance, self.retract_speed)
+            self._wait_for_feed_complete(slot, distance, self.retract_speed)
+            self._wait_for_ace_ready(timeout=15.0)
+        except Exception as e:
+            self.logger.error(f"ACE calibrate: unwind failed: {e}")
+            return 1.0
+        sample = read_slot(self, slot)
+        unwound = -float(sample["decoder"]) if sample is not None else 0.0
+        ratio = distance / unwound if unwound > 0 else 1.0
+        if (ratio < 0.9
+            or ratio > 1.1):
+            return 1.0
+        return ratio
+
+    def _calibrate_hub_inner(self, cur_lane: AFCLane) -> Tuple[bool, str, float]:
+        """
+        Measure `dist_hub` on the unit's own feed count instead of in steps:
+        one feed stopped when the hub's switch trips, a slow unwind stopped
+        when it clears, then `hub_clear_move_dis` more. The base method
+        answers what cannot be calibrated.
+
+        :param cur_lane: Lane to calibrate.
+        :return tuple: (success, message, measured_distance).
+        """
+        hub = self._hub_switch(cur_lane)
+        if (hub is None
+            or hub.state
+            or not self._ace
+            or not self._ace.connected):
+            return super()._calibrate_hub_inner(cur_lane)
+        slot = self._get_slot(cur_lane.name)
+        # The unit drives one slot at a time: a feed is not answered while
+        # another slot runs feed assist.
+        for other_slot in list(self._feed_assist_active):
+            if other_slot != slot:
+                self._stop_feed_assist(other_slot)
+        max_distance = 4000
+        self.logger.raw(f"Calibrating dist_hub for {cur_lane.name} on the unit's feed count "
+                        f"(max {max_distance}mm)")
+        fed = self._run_to_hub_switch(slot, hub, max_distance, self.feed_speed, True)
+        if not hub.state:
+            if fed:
+                self.lane_move(cur_lane, -fed, None)
+            return False, (f"Hub sensor did not trigger after {fed or 0.0:.0f}mm. "
+                           "Check filament path and hub sensor wiring."), fed or 0.0
+        backed = self._run_to_hub_switch(slot, hub, -HUB_SWITCH_STEP * HUB_SWITCH_TRIES,
+                                         HUB_SWITCH_SPEED, False)
+        if hub.state:
+            return False, ("Hub sensor did not clear while backing off it. "
+                           "Check the hub for stuck filament."), fed or 0.0
+        cleared: Optional[float] = 0.0
+        if hub.hub_clear_move_dis > 0:
+            cleared = self._run_to_hub_switch(slot, hub, -hub.hub_clear_move_dis,
+                                              self.retract_speed, None)
+        if (fed is None
+            or backed is None
+            or cleared is None):
+            return False, ("The unit did not report how far it moved the lane, dist_hub is "
+                           "unchanged."), 0.0
+        self.logger.info(f"ACE hub calibrate: switch tripped {fed:.1f}mm out, cleared "
+                         f"{backed:.1f}mm back")
+
+        # A staged lane started dist_hub out; any other started at the slot,
+        # ahead of the unit's own staging distance.
+        start = cur_lane.dist_hub if cur_lane.loaded_to_hub else -self.stage_initial_dist
+        old_dist = cur_lane.dist_hub
+        new_dist = round(max(start + fed - backed - cleared, 0.0), 2)
+        cal_msg = f"\n dist_hub: New: {new_dist} Old: {old_dist}"
+        cur_lane.dist_hub = new_dist
+        cur_lane.loaded_to_hub = True
+        self.afc.save_vars()
+        self.afc.function.ConfigRewrite(cur_lane.fullname, "dist_hub", new_dist, cal_msg)
+        return True, f"dist_hub calibration: {new_dist}mm (was {old_dist}mm)", new_dist
+
+    def _run_to_hub_switch(self, slot: int, hub: Any, distance: float, speed: float,
+                           until: Optional[bool]) -> Optional[float]:
+        """
+        Run one feed or unwind and stop it once the hub's switch reads `until`.
+        The unit's own count of the move is how far the lane went.
+
+        :param slot: 0-based ACE slot index.
+        :param hub: The lane's hub, which has a real switch.
+        :param distance: Signed distance in mm; positive feeds, negative unwinds.
+        :param speed: Speed of the move in mm/s.
+        :param until: Switch state that stops the move, None to let it run out.
+        :return Optional[float]: mm the unit counted for the move, or None when
+            the move was refused or the unit could not say.
+        """
+        reactor = self.afc.reactor
+        length = abs(distance)
+        try:
+            self._wait_for_ace_ready()
+            if distance > 0:
+                self._ace.feed_filament(slot, length, speed)
+            else:
+                self._ace.unwind_filament(slot, length, speed)
+        except Exception as e:
+            self.logger.error(f"ACE hub calibrate: move failed: {e}")
+            return None
+        last_moving = reactor.monotonic()
+        deadline = last_moving + 1.5 * length / min(max(speed, 1.0), FEED_SPEED_CEILING) + 15.0
+        # A move that ran out, or never started, shows no motion for the
+        # unit's departure timeout.
+        while bool(hub.state) is not until:
+            now = reactor.monotonic()
+            try:
+                moving = self._slot_is_moving(self._ace.get_status(timeout=2.0), slot)
+            except Exception:
+                moving = True
+            if moving:
+                last_moving = now
+            if (now > deadline
+                or now - last_moving >= self.feed_departure_timeout):
+                break
+            reactor.pause(now + HUB_SWITCH_POLL)
+        self._stop_feed_at_sensor(slot)
+        return self._last_feed_length(slot)
+
+    cmd_AFC_ACE_IDENTIFY_help = "Blink an ACE 2's lane LEDs to show which unit it is"
+    def cmd_AFC_ACE_IDENTIFY(self, gcmd: GCodeCommand) -> None:
+        """
+        Blink the four lane LEDs of this ACE 2 for about 6 seconds, to tell
+        which physical unit a config name belongs to. Only the LEDs change;
+        no motor, dryer or slot setting is touched.
+
+        Usage
+        -------
+        `AFC_ACE_IDENTIFY UNIT=<unit>`
+
+        Example
+        -------
+        ```
+        AFC_ACE_IDENTIFY UNIT=Ace2_1
+        ```
+        """
+        if (not self._ace
+            or not self._ace.connected):
+            gcmd.respond_info("ACE not connected")
+            return
+        try:
+            self._ace.send_command("flash_led")
+            gcmd.respond_info(f"{self.name}: blinking its lane LEDs")
+        except Exception as e:
+            gcmd.respond_info(f"Error blinking {self.name}: {e}")
 
     # ACE2 slot states that mean the encoder/odometer disagrees with the
     # commanded motor move, a real upstream jam, tangle, slip, or motor fault.
@@ -1393,12 +1992,20 @@ class afcACE2(afcACE):
         if slot in self._rollback_assist_active:
             if (self._ace
                 and self._ace.connected):
-                try:
-                    self._wait_for_ace_ready()
-                    self._ace.stop_feed_assist_sync(slot)
-                    self._rollback_assist_active.discard(slot)
-                except Exception as e:
-                    self.logger.error(f"Failed to stop rollback assist slot {slot}: {e}")
+                # The ACE can drop a reply under heavy polling, so a stop
+                # that gets no answer is sent once more before it counts as failed.
+                for attempt in range(2):
+                    try:
+                        self._wait_for_ace_ready()
+                        self._ace.stop_feed_assist_sync(slot)
+                        self._rollback_assist_active.discard(slot)
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            self.logger.debug(f"ACE {self.name}: stop on slot {slot} got no answer "
+                                              f"({e}), sending it again")
+                            continue
+                        self.logger.error(f"Failed to stop rollback assist slot {slot}: {e}")
             else:
                 self._rollback_assist_active.discard(slot)
         super()._stop_feed_assist(slot)
