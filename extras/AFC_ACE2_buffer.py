@@ -46,7 +46,9 @@ class AFCACEBuffer(AFCBuffer):
     end, which the four buffers share. During a feed command the unit keeps
     pushing past full, but in feed assist it stops by itself once its buffer
     is full. So a load ends in feed assist: the filament has arrived when the
-    full switch is on and the unit's encoder has stopped.
+    full switch is on and the unit's encoder has stopped. Another lane resting
+    full in its own toolhead holds the shared switch on, so it only counts for
+    a slot whose own buffer is pressed forward (see `slot_full`).
     """
 
     def __init__(self, config: ConfigWrapper) -> None:
@@ -107,15 +109,15 @@ class AFCACEBuffer(AFCBuffer):
     @property
     def trailing_state(self) -> bool:
         """
-        True unless the unit's buffer reads full (the filament pressed
-        forward), from its last sensor read. An unload backs off until then
+        True unless this buffer reads full (the filament pressed forward),
+        from the unit's last sensor read. An unload backs off until then
         before it retracts. Filament that never reached the gears is not held,
         so the buffer can never come under tension, and an unread buffer must
         not block an unload either.
         """
-        for unit, _slot in self._lane_slots():
+        for unit, slot in self._lane_slots():
             sensors = getattr(unit, "_cached_sensor_state", None) or {}
-            if sensors.get("buf_feed"):
+            if slot_full(sensors, slot):
                 return False
         return True
 
@@ -228,6 +230,24 @@ def decoder_step(last: Optional[int], current: int) -> float:
     return float(max(step, 0))
 
 
+def slot_full(sensors: Dict[str, Any], slot: int) -> bool:
+    """
+    Whether one slot's buffer is full. The full switch is shared by the
+    unit's four buffers, so it counts for a slot only while that slot's own
+    buffer is pressed forward: off its rest switch and not pulled back.
+
+    :param sensors: a get_sensor_state result
+    :param slot: 0-based slot
+    :return bool: True when the full switch is on and this slot's buffer is pressed forward
+    """
+    slot_sensors = sensors.get("slot_sensors") or []
+    if (not sensors.get("buf_feed")
+        or slot >= len(slot_sensors)):
+        return False
+    return (not slot_sensors[slot].get("buf_rst")
+            and not slot_sensors[slot].get("buf_back"))
+
+
 def read_slot(unit: Any, slot: int) -> Optional[Dict[str, Any]]:
     """
     Read one slot's buffer switches and encoder from the unit.
@@ -244,7 +264,7 @@ def read_slot(unit: Any, slot: int) -> Optional[Dict[str, Any]]:
         sensors = ace.get_sensor_state(timeout=0.5)
         feed = ace.send_command("get_feed_info", timeout=0.5)["feed_info"][slot]
         slot_sensors = sensors["slot_sensors"][slot]
-        return {"full": bool(sensors["buf_feed"]),
+        return {"full": slot_full(sensors, slot),
                 "rest": bool(slot_sensors["buf_rst"]),
                 "back": bool(slot_sensors["buf_back"]),
                 "decoder": signed_decoder(feed.get("decoder", 0))}

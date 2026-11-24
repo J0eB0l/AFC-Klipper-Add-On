@@ -3431,6 +3431,18 @@ class TestAfcACE2RamToBuffer:
                 "buf_feed": full}
 
     @staticmethod
+    def held(pressed: bool) -> Dict[str, Any]:
+        """
+        :param pressed: slot 3's own buffer is pressed forward
+        :return dict: a GET_SENSOR_STATE result with slot 1 resting full, which holds
+            the shared full switch on
+        """
+        rest = {"buf_rst": True, "buf_back": False}
+        forward = {"buf_rst": False, "buf_back": False}
+        return {"slot_sensors": [rest, forward, rest, forward if pressed else rest],
+                "buf_feed": True}
+
+    @staticmethod
     def feed(*decoders: int) -> List[Dict[str, Any]]:
         """
         :param decoders: slot 3's encoder count, one per read
@@ -3472,6 +3484,19 @@ class TestAfcACE2RamToBuffer:
 
         assert buf.arrivals == [("lane3", 3, 45.0)]
         assert ("start_feed_assist", {"index": 3}) in unit._ace.commands
+        assert ("info", "ACE Ace2_1: lane3 reached the extruder, buffer full after 45mm "
+                        "of feed assist") in unit.logger.messages
+
+    def test_another_lane_resting_full_is_not_arrival(self):
+        unit, lane, buf = self._unit()
+        unit._ace.set_reply("get_sensor_state", *([self.held(False)] * 9 + [self.held(True)]))
+        # the pause at 10mm is long enough to count as still
+        unit._ace.set_reply("get_feed_info",
+                            *self.feed(0, 10, 10, 10, 10, 10, 10, 10, 30, 45, 45))
+
+        assert unit._ram_to_buffer(3, lane, 100.0) == ""
+
+        assert buf.arrivals == [("lane3", 3, 45.0)]
         assert ("info", "ACE Ace2_1: lane3 reached the extruder, buffer full after 45mm "
                         "of feed assist") in unit.logger.messages
 
@@ -3585,6 +3610,17 @@ class TestAfcACE2ConfirmEngaged:
 
         assert unit._confirm_engaged(3, lane, 36.0, 25.0) == ""
 
+        assert ("info", "ACE Ace2_1: lane3 taken by the extruder, the buffer drained"
+                ) in unit.logger.messages
+
+    def test_a_drain_shows_while_another_lane_holds_the_full_switch(self):
+        unit, lane, buf = self._unit()
+        held = TestAfcACE2RamToBuffer.held
+        unit._ace.set_reply("get_sensor_state", held(True), held(True), held(False))
+
+        assert unit._confirm_engaged(3, lane, 36.0, 25.0) == ""
+
+        assert not [c for c in unit._ace.commands if c[0] == "feed_filament"]
         assert ("info", "ACE Ace2_1: lane3 taken by the extruder, the buffer drained"
                 ) in unit.logger.messages
 
