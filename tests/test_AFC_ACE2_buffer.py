@@ -213,18 +213,21 @@ class TestAFCACEBuffer:
 
     def test_state_name_for_the_gui(self):
         buf = make_buffer()
-        unit = SlotUnit({"lane0": 0, "lane1": 1})
-        unit._feed_assist_active = set()
+        unit = SlotUnit({"lane0": 0, "lane1": 1, "lane2": 2})
         buf.lanes = {"lane0": BufLane("lane0", unit)}
         assert buf.last_state == "Unknown"
         assert buf.get_status()["state"] == "Unknown"
 
         unit._cached_sensor_state = SENSORS
-        # full, but the shared switch belongs to another slot
+        # at rest: the shared full switch belongs to another slot
         assert buf.last_state == "Neutral"
+        assert buf.get_status()["state"] == "Neutral"
 
-        unit._feed_assist_active = {0}
+        buf.lanes = {"lane2": BufLane("lane2", unit)}
         assert buf.last_state == "Trailing"
+
+        unit._cached_sensor_state = dict(SENSORS, buf_feed=False)
+        assert buf.last_state == "Neutral"
 
         buf.lanes = {"lane1": BufLane("lane1", unit)}
         assert buf.last_state == "Advancing"
