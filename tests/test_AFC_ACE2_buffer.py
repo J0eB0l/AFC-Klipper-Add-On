@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from extras.AFC_ACE2_buffer import AFCACEBuffer, decoder_step, read_slot, signed_decoder
+from extras.AFC_ACE2_buffer import (AFCACEBuffer, decoder_step, read_slot, signed_decoder,
+                                    slot_full)
 from extras.AFC_buffer import load_config_prefix
 from tests.conftest import MockAFC, MockConfig, MockPrinter
 
@@ -71,9 +72,10 @@ class BufLane:
         self.tool_loaded = False
 
 
+# slot 0 at rest, slot 1 pulled back, slot 2 pressed forward onto the shared full switch
 SENSORS = {"slot_sensors": [{"buf_rst": True, "buf_back": False},
                             {"buf_rst": False, "buf_back": True},
-                            {"buf_rst": True, "buf_back": False},
+                            {"buf_rst": False, "buf_back": False},
                             {"buf_rst": True, "buf_back": False}],
            "buf_feed": True}
 
@@ -89,13 +91,31 @@ class TestHelpers:
         # a new push counts from zero again
         assert decoder_step(25, 6) == 6.0
 
+    def test_slot_full_needs_the_slots_own_buffer_pressed_forward(self):
+        assert slot_full(SENSORS, 2) is True
+        # at rest or pulled back: another slot holds the shared switch
+        assert slot_full(SENSORS, 0) is False
+        assert slot_full(SENSORS, 1) is False
+        assert slot_full(dict(SENSORS, buf_feed=False), 2) is False
+        assert slot_full(SENSORS, 4) is False
+        assert slot_full({"buf_feed": True}, 0) is False
+
     def test_read_slot(self):
         link = SensorLink(SENSORS, {"feed_info": [{}, {"decoder": 18446744073709551613}]})
         unit = SlotUnit({}, ace=link)
 
-        assert read_slot(unit, 1) == {"full": True, "rest": False, "back": True,
+        assert read_slot(unit, 1) == {"full": False, "rest": False, "back": True,
                                       "decoder": -3}
         assert link.calls == [("get_sensor_state", 0.5), ("get_feed_info", 0.5)]
+
+    def test_read_slot_reads_full_only_for_the_slot_pressed_forward(self):
+        link = SensorLink(SENSORS, {"feed_info": [{"decoder": 4}, {}, {"decoder": 7}]})
+        unit = SlotUnit({}, ace=link)
+
+        assert read_slot(unit, 2) == {"full": True, "rest": False, "back": False,
+                                      "decoder": 7}
+        assert read_slot(unit, 0) == {"full": False, "rest": True, "back": False,
+                                      "decoder": 4}
 
     def test_read_slot_failures_read_none(self):
         assert read_slot(SlotUnit({}), 0) is None
@@ -171,11 +191,18 @@ class TestAFCACEBuffer:
 
     def test_trailing_until_the_buffer_reads_full(self):
         buf = make_buffer()
-        unit = SlotUnit({"lane0": 0}, cached=SENSORS)
-        buf.lanes = {"lane0": BufLane("lane0", unit)}
+        unit = SlotUnit({"lane2": 2}, cached=SENSORS)
+        buf.lanes = {"lane2": BufLane("lane2", unit)}
         assert buf.trailing_state is False
 
         unit._cached_sensor_state = dict(SENSORS, buf_feed=False)
+        assert buf.trailing_state is True
+
+    def test_trailing_while_another_slot_holds_the_full_switch(self):
+        buf = make_buffer()
+        unit = SlotUnit({"lane0": 0}, cached=SENSORS)
+        buf.lanes = {"lane0": BufLane("lane0", unit)}
+
         assert buf.trailing_state is True
 
     def test_trailing_with_no_sensor_read(self):
