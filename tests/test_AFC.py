@@ -1226,7 +1226,6 @@ def _make_afc_for_change_tool(lane_name="lane2", next_extruder_name="extruder1",
     obj._cooldown_last_extruder = MagicMock()
     obj._wait_for_temp_within_tolerance = MagicMock()
     obj.error = MagicMock()
-    obj.printer = Printer
 
     # Current (old) lane/extruder
     current_extruder = MagicMock()
@@ -2034,6 +2033,91 @@ class TestChangeTool_InfiniteRunout:
         current_lane.is_direct_hub = MagicMock(return_value = True)
         obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
         obj.LANE_UNLOAD.assert_not_called()
+
+
+class TestChangeTool_ToolChangeUnloadEvent:
+    """CHANGE_TOOL sends `afc:tool_change_unload` before it unloads the loaded lane."""
+
+    def test_handler_gets_the_loaded_lane_and_the_next_lane_before_the_unload(self):
+        gcmd = MagicMock()
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        seen = []
+        obj.printer.register_event_handler(
+            "afc:tool_change_unload",
+            lambda held, lane: seen.append((held, lane, obj.TOOL_UNLOAD.call_count)))
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        assert seen == [(current_lane, cur_lane, 0)]
+
+    def test_true_answer_unloads_the_lane_before_the_next_toolhead_is_picked(self):
+        gcmd = MagicMock()
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        obj.printer.register_event_handler("afc:tool_change_unload", lambda held, lane: True)
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        obj.TOOL_UNLOAD.assert_called_once_with(current_lane, set_start_time=False,
+                                                force_unload=True, gcmd=gcmd)
+        # Only an infinite runout ejects the spool as well.
+        obj.LANE_UNLOAD.assert_not_called()
+        obj.TOOL_LOAD.assert_called_once()
+
+    def test_one_true_among_several_answers_unloads_the_lane_first(self):
+        gcmd = MagicMock()
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        obj.printer.register_event_handler("afc:tool_change_unload", lambda held, lane: False)
+        obj.printer.register_event_handler("afc:tool_change_unload", lambda held, lane: True)
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        obj.TOOL_UNLOAD.assert_called_once_with(current_lane, set_start_time=False,
+                                                force_unload=True, gcmd=gcmd)
+
+    def test_false_answer_leaves_the_unload_to_decide(self):
+        gcmd = MagicMock()
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        obj.printer.register_event_handler("afc:tool_change_unload", lambda held, lane: False)
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        obj.TOOL_UNLOAD.assert_called_once_with(current_lane, set_start_time=False,
+                                                force_unload=False, gcmd=gcmd)
+
+    def test_the_unload_decides_with_nothing_listening(self):
+        gcmd = MagicMock()
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        obj.TOOL_UNLOAD.assert_called_once_with(current_lane, set_start_time=False,
+                                                force_unload=False, gcmd=gcmd)
+
+    def test_infinite_runout_unloads_first_whatever_the_answer(self):
+        gcmd = MagicMock()
+        obj, cur_lane, current_lane = _make_afc_for_change_tool()
+        cur_lane.status = AFCLaneState.INFINITE_RUNOUT
+        current_lane.extruder_obj.is_standalone.return_value = False
+        obj.printer.register_event_handler("afc:tool_change_unload", lambda held, lane: False)
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        obj.TOOL_UNLOAD.assert_called_once_with(current_lane, set_start_time=False,
+                                                force_unload=True, gcmd=gcmd)
+        obj.LANE_UNLOAD.assert_called_once_with(current_lane, gcmd=gcmd)
+
+    def test_nothing_is_asked_with_no_lane_loaded(self):
+        gcmd = MagicMock()
+        obj, cur_lane, _ = _make_afc_for_change_tool()
+        obj.function.get_current_lane.return_value = None
+        seen = []
+        obj.printer.register_event_handler("afc:tool_change_unload",
+                                           lambda held, lane: seen.append(held))
+
+        obj.CHANGE_TOOL(cur_lane, gcmd=gcmd)
+
+        assert seen == []
+        obj.TOOL_UNLOAD.assert_not_called()
 
 
 class TestChangeTool_PrepNotDoneAdjustingTemperature:

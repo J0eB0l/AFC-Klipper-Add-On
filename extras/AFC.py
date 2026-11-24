@@ -2916,8 +2916,14 @@ class afc:
                             self.error.AFC_error('{} Unknown'.format(current_lane_name), gcmd=gcmd)
                             return
                         force_unload = (infinite_runout and not unload_lane.extruder_obj.is_standalone())
+                        # A module answers True when the lane has to leave its toolhead
+                        # before the next lane's toolhead is picked
+                        answers = self.printer.send_event("afc:tool_change_unload",
+                                                          unload_lane, cur_lane)
+                        unload_first = (force_unload
+                                        or True in answers)
                         if not self.TOOL_UNLOAD(unload_lane, set_start_time=False,
-                                                force_unload=force_unload, gcmd=gcmd):
+                                                force_unload=unload_first, gcmd=gcmd):
                             # Abort if the unloading process fails.
                             msg = (' UNLOAD ERROR NOT CLEARED')
                             self.error.fix(msg, unload_lane, gcmd=gcmd)  #send to error handling

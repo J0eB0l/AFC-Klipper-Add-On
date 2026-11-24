@@ -197,6 +197,8 @@ class afcBridgeBoxSwitch:
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
         self.printer.register_event_handler("afc:prep", self.handle_prep)
+        self.printer.register_event_handler("afc:tool_change_unload",
+                                            self.handle_tool_change_unload)
         self.printer.register_event_handler("afc:tool_load_prepare",
                                             self.handle_tool_load_prepare)
         self.printer.register_event_handler("afc:tool_loaded", self.handle_tool_loaded)
@@ -869,6 +871,23 @@ class afcBridgeBoxSwitch:
             outlet = self.rest[inlet]
         self.set_inlet(inlet, outlet)
 
+    def handle_tool_change_unload(self, held: AFCLane, lane: AFCLane) -> bool:
+        """
+        Have a tool change unload the loaded lane while its toolhead is still the active one
+        when it is in the way of the next lane, so that toolhead is not picked up again for it.
+
+        :param held: the lane loaded in the active toolhead
+        :param lane: the lane the tool change loads next
+        :return bool: True when the loaded lane has to be unloaded first
+        """
+        inlet = self.inlet_of(lane.unit)
+        outlet = self.outlet_of(lane.extruder_obj.name)
+        if (inlet is None
+            or outlet is None
+            or lane.tool_loaded):
+            return False
+        return held in self._in_the_way(lane, inlet, outlet)
+
     def handle_tool_load_prepare(self, lane: AFCLane, gcmd: AFCGcmd) -> bool:
         """
         Point a lane's inlet at its extruder's outlet before AFC loads the lane.
@@ -895,7 +914,9 @@ class afcBridgeBoxSwitch:
 
     def _route(self, lane: AFCLane, inlet: str, gcmd: AFCGcmd) -> bool:
         """
-        Unload what is in the way of a lane, then point the lane's inlet at its outlet.
+        Unload what is in the way of a lane, then point the lane's inlet at its outlet. An inlet
+        with no lane loaded is given time to read empty first, as its lane may have just left
+        it, unloaded here or by the tool change this load belongs to.
 
         :param lane: the lane about to be loaded
         :param inlet: the lane's inlet
@@ -909,7 +930,9 @@ class afcBridgeBoxSwitch:
                              f"{lane.extruder_obj.name}")
             if not self._unload(held, gcmd):
                 return False
-            self._wait_clear(self.inlet_of(held.unit))
+        for letter in LETTERS:
+            if self._loaded(letter) is None:
+                self._wait_clear(letter)
         self.set_inlet(inlet, outlet)
         return True
 

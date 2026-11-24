@@ -526,6 +526,7 @@ class TestAfcBridgeBoxSwitchInit:
             "klippy:connect": [switch.handle_connect],
             "klippy:ready": [switch.handle_ready],
             "afc:prep": [switch.handle_prep],
+            "afc:tool_change_unload": [switch.handle_tool_change_unload],
             "afc:tool_load_prepare": [switch.handle_tool_load_prepare],
             "afc:tool_loaded": [switch.handle_tool_loaded],
             "afc:save_vars": [switch.handle_save_vars],
@@ -638,8 +639,9 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert lane_of(switch, "Bambu_AMS_1").extruder_obj is extruder_of(switch, "extruder")
         assert lane_of(switch, "Ace2_1").extruder_obj is extruder_of(switch, "extruder1")
         assert list(switch.printer._event_handlers) == [
-            "klippy:connect", "klippy:ready", "afc:prep", "afc:tool_load_prepare",
-            "afc:tool_loaded", "afc:save_vars", "afc:calibration_buttons"]
+            "klippy:connect", "klippy:ready", "afc:prep", "afc:tool_change_unload",
+            "afc:tool_load_prepare", "afc:tool_loaded", "afc:save_vars",
+            "afc:calibration_buttons"]
 
     def test_a_unit_that_connects_later_is_started_then(self):
         printer = make_printer(connected=False)
@@ -2436,6 +2438,53 @@ class TestAfcBridgeBoxSwitchSettleInlet:
         assert chain.fs["position"] == 0
 
 
+class TestAfcBridgeBoxSwitchHandleToolChangeUnload:
+    @staticmethod
+    def _switch() -> Tuple[afcBridgeBoxSwitch, FakeLane, FakeLane]:
+        """
+        :return tuple: a switch, the Bambu_AMS_1 lane loaded in `extruder1` and the Turtle_1
+        lane of the same inlet, which is to load into `extruder`
+        """
+        switch = plumbed(SimChain(route=0, a=True))
+        held = lane_of(switch, "Bambu_AMS_1")
+        held.set_extruder(extruder_of(switch, "extruder1"))
+        held.tool_loaded = True
+        return switch, held, lane_of(switch, "Turtle_1")
+
+    def test_a_loaded_lane_in_the_way_of_the_next_one_is_unloaded_first(self):
+        switch, held, lane = self._switch()
+        assert switch.handle_tool_change_unload(held, lane) is True
+        # AFC unloads it, the switch is only asked.
+        assert chain_of(switch).routes == []
+        switch.afc.TOOL_UNLOAD.assert_not_called()
+
+    def test_a_loaded_lane_that_is_not_in_the_way_stays_in_its_toolhead(self):
+        switch = plumbed(SimChain(route=2, a=True))
+        held = lane_of(switch, "Turtle_1")
+        held.tool_loaded = True
+        assert switch.handle_tool_change_unload(held, lane_of(switch, "Ace2_1")) is False
+
+    def test_a_loaded_lane_of_no_switch_is_left_to_afc(self):
+        switch, _, lane = self._switch()
+        stranger = add_lane(switch.printer, "lane0", "AMS_9", loaded=True)
+        assert switch.handle_tool_change_unload(stranger, lane) is False
+
+    def test_a_next_lane_that_is_not_on_the_switch(self):
+        switch, held, _ = self._switch()
+        stranger = add_lane(switch.printer, "lane0", "AMS_9")
+        assert switch.handle_tool_change_unload(held, stranger) is False
+
+    def test_a_next_lane_on_an_extruder_the_switch_does_not_feed(self):
+        switch, held, lane = self._switch()
+        lane.set_extruder(FakeExtruder("extruder2"))
+        assert switch.handle_tool_change_unload(held, lane) is False
+
+    def test_a_next_lane_already_in_its_toolhead_needs_nothing_unloaded(self):
+        switch, held, lane = self._switch()
+        lane.tool_loaded = True
+        assert switch.handle_tool_change_unload(held, lane) is False
+
+
 class TestAfcBridgeBoxSwitchHandleToolLoadPrepare:
     def test_a_lane_that_is_not_on_the_switch_loads_as_ever(self):
         chain = SimChain(route=0)
@@ -2587,25 +2636,55 @@ class TestAfcBridgeBoxSwitchRoute:
         assert chain.routes == []
         switch.reactor.pause.assert_not_called()
 
+    @staticmethod
+    def _clears_on_the_third_poll(switch: afcBridgeBoxSwitch) -> List[float]:
+        """:return list: the reactor pauses, inlet A reading empty from the third one on"""
+        polls: List[float] = []
+
+        def pause(until: float) -> None:
+            polls.append(until)
+            if len(polls) == 3:
+                chain_of(switch).fill(a=False)
+
+        switch.reactor.pause.side_effect = pause
+        return polls
+
     def test_the_sensor_is_given_time_to_clear_after_the_unload(self):
         chain = SimChain(route=0, a=True)
         switch = plumbed(chain)
         held = lane_of(switch, "Bambu_AMS_1")
         held.set_extruder(extruder_of(switch, "extruder1"))
         held.tool_loaded = True
-        switch.afc.TOOL_UNLOAD = MagicMock(return_value=True)
-        polls = []
 
-        def clears_on_the_third_poll(until: float) -> None:
-            polls.append(until)
-            if len(polls) == 3:
-                chain.fill(a=False)
+        def tool_unload(lane: FakeLane, **_kwargs: Any) -> bool:
+            lane.tool_loaded = False
+            return True
 
-        switch.reactor.pause.side_effect = clears_on_the_third_poll
+        switch.afc.TOOL_UNLOAD = MagicMock(side_effect=tool_unload)
+        polls = self._clears_on_the_third_poll(switch)
         assert switch._route(lane_of(switch, "Turtle_1"), "A", MagicMock()) is True
         # Three waits for the sensor, then one for the route to read back.
         assert polls == [100.1] * 4
         assert chain.routes == [2]
+
+    def test_the_sensor_is_given_time_to_clear_after_a_tool_change_unloaded_the_lane(self):
+        chain = SimChain(route=0, a=True)
+        switch = plumbed(chain)
+        polls = self._clears_on_the_third_poll(switch)
+        assert switch._route(lane_of(switch, "Turtle_1"), "A", MagicMock()) is True
+        switch.afc.TOOL_UNLOAD.assert_not_called()
+        assert polls == [100.1] * 4
+        assert chain.routes == [2]
+        assert switch.logger.messages == []
+
+    def test_an_inlet_with_a_lane_loaded_is_not_waited_for(self):
+        chain = SimChain(route=2, a=True)
+        switch = plumbed(chain)
+        lane_of(switch, "Turtle_1").tool_loaded = True
+        lane = lane_of(switch, "Ace2_1")
+        assert switch._route(lane, "B", MagicMock()) is True
+        switch.reactor.pause.assert_not_called()
+        assert chain.routes == []
 
     def test_a_lane_on_an_extruder_the_switch_does_not_feed(self):
         switch = plumbed()
