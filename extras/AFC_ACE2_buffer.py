@@ -130,9 +130,7 @@ class AFCACEBuffer(AFCBuffer):
         """
         The buffer state the GUI shows, read from the unit's last sensor
         read: Trailing while full (pressed forward), Advancing while pulled
-        under tension, Neutral otherwise. The full switch is shared by the
-        unit's four buffers, so it only counts while one of this buffer's
-        slots is the one feeding.
+        under tension, Neutral otherwise.
         """
         read = False
         for unit, slot in self._lane_slots():
@@ -143,8 +141,7 @@ class AFCACEBuffer(AFCBuffer):
             read = True
             if slot_sensors[slot].get("buf_back"):
                 return ADVANCING_STATE_NAME
-            if (sensors.get("buf_feed")
-                and slot in getattr(unit, "_feed_assist_active", ())):
+            if slot_full(sensors, slot):
                 return TRAILING_STATE_NAME
         return NEUTRAL_STATE_NAME if read else "Unknown"
 
