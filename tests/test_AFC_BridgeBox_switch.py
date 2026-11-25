@@ -699,6 +699,17 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert switch.lanes == [lane]
         assert lane.extruder_obj.name == "extruder"
 
+    def test_the_bays_of_a_chain_no_inlet_names_follow_its_named_unit(self):
+        printer = make_printer([FakeChain(bays=["Bambu_AMS_1", "Bambu_AMS_2"])],
+                               units=VALUES["inlet_a"] + VALUES["inlet_b"] + ["Bambu_AMS_2"])
+        lane = add_lane(printer, "lane4", "Bambu_AMS_2", extruder="extruder1")
+        switch = make_switch(printer)
+        assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1", "Bambu_AMS_2"],
+                                 "B": ["Ace2_1"]}
+        # They are on the inlet by the time the lanes are kept and started.
+        assert switch.lanes == [lane]
+        assert lane.extruder_obj.name == "extruder"
+
     def test_a_chain_on_one_inlet_and_a_unit_of_it_on_the_other_is_refused(self):
         printer = make_printer([FakeChain(bays=["Bambu_AMS_1", "Ace2_1"])])
         with pytest.raises(error) as err:
@@ -939,6 +950,176 @@ class TestAfcBridgeBoxSwitchExpandChains:
         switch = self._switch([FakeChain()], inlet_b=["Chain_1"])
         switch._expand_chains()
         assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1"], "B": []}
+
+
+class TestAfcBridgeBoxSwitchFollowChains:
+    AS_NAMED = {"A": ["Bambu_AMS_1", "Turtle_1"], "B": ["Ace2_1"]}
+
+    @staticmethod
+    def _switch(chains: List[FakeChain]) -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch that has not connected, on Chain_1"""
+        return make_switch(make_printer(chains), connect=False, chain="Chain_1")
+
+    def test_the_bays_no_inlet_names_join_the_inlet_of_the_named_one(self):
+        switch = self._switch([FakeChain(bays=["Bay_0", "Bambu_AMS_1", "Bay_2"])])
+        switch._follow_chains()
+        assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1", "Bay_0", "Bay_2"],
+                                 "B": ["Ace2_1"]}
+
+    def test_they_join_inlet_b_when_the_named_one_is_there(self):
+        switch = self._switch([FakeChain(bays=["Bay_0", "Ace2_1", "Bay_2"])])
+        switch._follow_chains()
+        assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1"],
+                                 "B": ["Ace2_1", "Bay_0", "Bay_2"]}
+
+    def test_several_named_units_on_one_inlet_take_the_rest_once(self):
+        switch = self._switch([FakeChain(bays=["Bambu_AMS_1", "Bay_1", "Turtle_1"])])
+        switch._follow_chains()
+        assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1", "Bay_1"], "B": ["Ace2_1"]}
+
+    def test_a_chain_with_units_on_both_inlets_is_left_as_named(self):
+        switch = self._switch([FakeChain(bays=["Bambu_AMS_1", "Ace2_1", "Bay_2"])])
+        switch._follow_chains()
+        assert switch.inlets == self.AS_NAMED
+
+    def test_a_chain_with_no_unit_on_an_inlet_is_left_out(self):
+        switch = self._switch([FakeChain(bays=["Bay_0", "Bay_1"])])
+        switch._follow_chains()
+        assert switch.inlets == self.AS_NAMED
+
+    def test_a_chain_whose_bays_are_all_named_adds_nothing(self):
+        switch = self._switch([FakeChain(bays=["Turtle_1", "Bambu_AMS_1"])])
+        switch._follow_chains()
+        assert switch.inlets == self.AS_NAMED
+
+    def test_a_chain_with_a_unit_on_another_switch_is_left_as_named(self):
+        printer = make_printer([FakeChain(bays=["Bay_0", "Bambu_AMS_1", "Bay_2"]),
+                                FakeChain("Chain_2")])
+        make_switch(printer, section="AFC_BridgeBox_switch Switch_2", connect=False,
+                    chain="Chain_2", inlet_a=["Bay_2"], inlet_b=None, outlet_a="extruder2",
+                    outlet_b=None)
+        switch = make_switch(printer, connect=False, chain="Chain_1")
+        switch._follow_chains()
+        assert switch.inlets == self.AS_NAMED
+
+    def test_each_chain_follows_its_own_named_unit(self):
+        chains = [FakeChain("Chain_1", bays=["Bambu_AMS_1", "Bay_1"]),
+                  FakeChain("Chain_2", bays=["Bay_4", "Ace2_1"]),
+                  FakeChain("Chain_3", bays=["Bay_8"])]
+        switch = self._switch(chains)
+        switch._follow_chains()
+        assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1", "Bay_1"],
+                                 "B": ["Ace2_1", "Bay_4"]}
+
+
+class TestAfcBridgeBoxSwitchOnAnotherSwitch:
+    @staticmethod
+    def _pair(inlet: List[str]) -> Tuple[afcBridgeBoxSwitch, FakeChain]:
+        """
+        :return tuple: Switch_1 and its chain, which has the bays Bambu_AMS_1 and Bay_1, beside
+        a Switch_2 on Chain_2 whose inlet A names ``inlet``
+        """
+        chain = FakeChain(bays=["Bambu_AMS_1", "Bay_1"])
+        printer = make_printer([chain, FakeChain("Chain_2")])
+        make_switch(printer, section="AFC_BridgeBox_switch Switch_2", connect=False,
+                    chain="Chain_2", inlet_a=inlet, inlet_b=None, outlet_a="extruder2",
+                    outlet_b=None)
+        return make_switch(printer, connect=False, chain="Chain_1"), chain
+
+    def test_what_the_switch_itself_names_does_not_count(self):
+        chain = FakeChain(bays=["Bambu_AMS_1", "Bay_1"])
+        switch = make_switch(make_printer([chain]), connect=False, inlet_b=["Chain_1"])
+        assert switch._on_another_switch(chain) is False
+
+    def test_another_switch_that_names_neither_the_chain_nor_a_unit_of_it(self):
+        switch, chain = self._pair(["Other", "Chain_2"])
+        assert switch._on_another_switch(chain) is False
+
+    def test_another_switch_that_names_the_chain(self):
+        switch, chain = self._pair(["Other", "Chain_1"])
+        assert switch._on_another_switch(chain) is True
+
+    def test_another_switch_that_names_a_unit_of_the_chain(self):
+        switch, chain = self._pair(["Other", "Bay_1"])
+        assert switch._on_another_switch(chain) is True
+
+
+class TestAfcBridgeBoxSwitchOffInlet:
+    BAY_2 = ("Switch_1: no inlet names Bay_2. The switch is not set for the lanes of a unit on "
+             "no inlet: add every unit to inlet_a or inlet_b.")
+
+    @staticmethod
+    def _split() -> afcBridgeBoxSwitch:
+        """
+        :return afcBridgeBoxSwitch: a connected switch whose chain has a unit on each inlet, and
+        the unit Bay_2 that no inlet names
+        """
+        chain = FakeChain(bays=["Bambu_AMS_1", "Ace2_1", "Bay_2"])
+        printer = make_printer([chain], units=VALUES["inlet_a"] + VALUES["inlet_b"] + ["Bay_2"])
+        return make_switch(printer)
+
+    def test_a_switch_whose_chain_has_no_bays_has_nothing_to_say(self):
+        assert make_switch()._off_inlet() == []
+
+    def test_a_unit_in_use_that_no_inlet_names(self):
+        switch = self._split()
+        switch.afc.units["Bay_2"].pool = False
+        assert switch._off_inlet() == [self.BAY_2]
+
+    def test_a_unit_that_is_no_bay_is_in_use(self):
+        switch = self._split()
+        assert not hasattr(switch.afc.units["Bay_2"], "pool")
+        assert switch._off_inlet() == [self.BAY_2]
+
+    def test_a_bay_that_holds_no_unit_now_is_left_out(self):
+        switch = self._split()
+        switch.afc.units["Bay_2"].pool = True
+        assert switch._off_inlet() == []
+
+    def test_a_unit_afc_does_not_have_yet_counts_as_in_use(self):
+        switch = self._split()
+        del switch.afc.units["Bay_2"]
+        assert switch._off_inlet() == [self.BAY_2]
+
+    def test_several_units_are_named_in_bay_order(self):
+        chain = FakeChain(bays=["Bay_0", "Bambu_AMS_1", "Ace2_1", "Bay_3"])
+        printer = make_printer([chain],
+                               units=VALUES["inlet_a"] + VALUES["inlet_b"] + ["Bay_3", "Bay_0"])
+        assert make_switch(printer)._off_inlet() == [
+            "Switch_1: no inlet names Bay_0, Bay_3. The switch is not set for the lanes of a "
+            "unit on no inlet: add every unit to inlet_a or inlet_b."]
+
+    def test_a_chain_with_no_unit_on_this_switch_is_not_looked_at(self):
+        chains = [FakeChain("Chain_1"), FakeChain("Chain_2", bays=["Bay_4", "Bay_5"])]
+        printer = make_printer(chains,
+                               units=VALUES["inlet_a"] + VALUES["inlet_b"] + ["Bay_4", "Bay_5"])
+        assert make_switch(printer, chain="Chain_1")._off_inlet() == []
+
+    def test_a_chain_whose_bays_followed_its_named_unit_has_none_left(self):
+        chain = FakeChain(bays=["Bambu_AMS_1", "Bay_2"])
+        printer = make_printer([chain], units=VALUES["inlet_a"] + VALUES["inlet_b"] + ["Bay_2"])
+        switch = make_switch(printer)
+        assert switch.inlets["A"] == ["Bambu_AMS_1", "Turtle_1", "Bay_2"]
+        assert switch._off_inlet() == []
+
+    def test_a_unit_on_another_switch_is_not_named(self):
+        # Chain_1 has a unit on each switch, so neither took its other bay.
+        chains = [FakeChain("Chain_1", bays=["Bambu_AMS_1", "Other", "Bay_2"]),
+                  FakeChain("Chain_2")]
+        printer = make_printer(chains,
+                               units=VALUES["inlet_a"] + VALUES["inlet_b"] + ["Other", "Bay_2"],
+                               extruders=["extruder", "extruder1", "extruder2"])
+        second = make_switch(printer, section="AFC_BridgeBox_switch Switch_2", connect=False,
+                             chain="Chain_2", inlet_a=["Other"], inlet_b=None,
+                             outlet_a="extruder2", outlet_b=None)
+        first = make_switch(printer, chain="Chain_1")
+        second.handle_connect()
+        assert first.units() == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
+        assert second.units() == ["Other"]
+        assert first._off_inlet() == [self.BAY_2]
+        assert second._off_inlet() == [
+            "Switch_2: no inlet names Bay_2. The switch is not set for the lanes of a unit on "
+            "no inlet: add every unit to inlet_a or inlet_b."]
 
 
 class TestAfcBridgeBoxSwitchFindChain:
@@ -1697,6 +1878,19 @@ class TestAfcBridgeBoxSwitchSettle:
               "where it is. Unload it or pull it out.")
     HELD_B = ("Switch_1: inlet B holds filament and none of its lanes is loaded, so it is left "
               "where it is. Unload it or pull it out.")
+    NO_INLET = ("Switch_1: no inlet names Bay_2. The switch is not set for the lanes of a unit "
+                "on no inlet: add every unit to inlet_a or inlet_b.")
+
+    @staticmethod
+    def _split(chain: FakeChain) -> afcBridgeBoxSwitch:
+        """
+        :return afcBridgeBoxSwitch: ``plumbed`` on a chain that has a unit on each inlet, and
+        the unit Bay_2 that no inlet names
+        """
+        chain.bays = ["Bambu_AMS_1", "Ace2_1", "Bay_2"]
+        switch = plumbed(chain)
+        switch.afc.units["Bay_2"] = FakeUnit("Bay_2")
+        return switch
 
     def test_a_switch_that_is_not_answering_is_the_one_problem(self):
         switch = plumbed(FakeChain(state=None), **LENGTHS)
@@ -1709,6 +1903,10 @@ class TestAfcBridgeBoxSwitchSettle:
         assert tube_of(hub) == (900.0, 880.0)
         assert switch._offsets == {}
         assert switch.logger.messages == []
+
+    def test_a_switch_that_is_not_answering_says_nothing_of_a_unit_on_no_inlet(self):
+        switch = self._split(FakeChain(state=None))
+        assert switch._settle() == ["Switch_1: the filament switch is not answering"]
 
     def test_empty_inlets_go_to_rest(self):
         chain = SimChain(route=0)
@@ -1742,6 +1940,16 @@ class TestAfcBridgeBoxSwitchSettle:
     def test_the_problems_of_both_inlets_come_back_inlet_a_first(self):
         switch = plumbed(SimChain(route=0, a=True, b=True))
         assert switch._settle() == [self.HELD_A, self.HELD_B]
+
+    def test_a_unit_on_no_inlet_is_a_problem_of_inlets_that_settle(self):
+        chain = SimChain(route=0)
+        switch = self._split(chain)
+        assert switch._settle() == [self.NO_INLET]
+        assert chain.routes == [2]
+
+    def test_a_unit_on_no_inlet_comes_after_the_problems_of_the_inlets(self):
+        switch = self._split(SimChain(route=0, a=True, b=True))
+        assert switch._settle() == [self.HELD_A, self.HELD_B, self.NO_INLET]
 
     def test_the_tube_of_a_loaded_lane_gets_its_length(self):
         # Inlet A's lane is loaded in outlet B, where its path is.

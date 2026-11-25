@@ -10,7 +10,7 @@ loaded into either extruder.
 
     [AFC_BridgeBox_switch Switch_1]
     chain: Chain_1
-    inlet_a: Bambu_AMS_1, Turtle_1
+    inlet_a: Chain_1, Turtle_1
     inlet_b: Ace2_1
     outlet_a: extruder
     outlet_b: extruder1
@@ -18,8 +18,11 @@ loaded into either extruder.
     outlet_b_length: 1010
 
 The letters are the ones printed on the switch. `chain` may be left out when there is one chain.
-An inlet may name a BridgeBox chain in place of a unit, for every unit that chain makes for its
-bays.
+A BridgeBox chain's name on an inlet stands for every unit that chain makes for its bays, so a
+unit that is plugged into the chain later enters that inlet too. Where an inlet names a chain's
+units one by one, the bays of that chain it does not name go with the inlet the named ones are
+on. A chain with units on both inlets, or on another switch, is left as it is named: a unit of it
+that no inlet names is warned about, and the switch is not set for its loads.
 
 An inlet's units start on the extruder of the outlet with the same letter, and an empty inlet rests
 on that outlet. A lane goes to the other extruder with `AFC_BRIDGEBOX_SWITCH_ASSIGN`, and every
@@ -259,6 +262,7 @@ class afcBridgeBoxSwitch:
         self.chain = self._find_chain()
         self.chain_name = self.chain.name
         self._expand_chains()
+        self._follow_chains()
         self._check_section()
         problems = self._missing() + self._clashes()
         if problems:
@@ -374,6 +378,57 @@ class afcBridgeBoxSwitch:
                 else:
                     units.append(name)
             self.inlets[letter] = units
+
+    def _follow_chains(self) -> None:
+        """
+        Add the bays of a chain that no inlet names to the inlet that chain's named units are
+        on, so a unit that takes one of them later enters it too. A chain with units on both
+        inlets, or with one on another switch, is left as it is named.
+        """
+        for chain in self._chains().values():
+            bays = chain.unit_names()
+            named = [letter for letter in LETTERS
+                     if any(bay in self.inlets[letter] for bay in bays)]
+            if (len(named) != 1
+                or self._on_another_switch(chain)):
+                continue
+            self.inlets[named[0]] += [bay for bay in bays if self.inlet_of(bay) is None]
+
+    def _on_another_switch(self, chain: afcBridgeBox) -> bool:
+        """
+        Whether another filament switch names a chain or one of the units it makes for its bays.
+
+        :param chain: the chain
+        :return bool: True when one does
+        """
+        names = [chain.name] + chain.unit_names()
+        others = [switch
+                  for _name, switch in self.printer.lookup_objects("AFC_BridgeBox_switch")
+                  if switch is not self]
+        return any(name in switch.units() for switch in others for name in names)
+
+    def _off_inlet(self) -> List[str]:
+        """
+        What to say about the units in use that no filament switch has on an inlet, of the chains
+        with a unit on this switch. A load from one of them does not set the switch.
+
+        :return list: one message when there are such units, else none
+        """
+        taken = [unit
+                 for _name, switch in self.printer.lookup_objects("AFC_BridgeBox_switch")
+                 for unit in switch.units()]
+        units: List[str] = []
+        for chain in self._chains().values():
+            bays = chain.unit_names()
+            if all(self.inlet_of(bay) is None for bay in bays):
+                continue
+            units += [bay for bay in bays
+                      if (bay not in taken
+                          and not getattr(self.afc.units.get(bay), "pool", False))]
+        if not units:
+            return []
+        return [f"{self.name}: no inlet names {', '.join(units)}. The switch is not set for the "
+                "lanes of a unit on no inlet: add every unit to inlet_a or inlet_b."]
 
     def _find_chain(self) -> afcBridgeBox:
         """
@@ -684,7 +739,8 @@ class afcBridgeBoxSwitch:
         """
         Point each inlet where it belongs and give each tube its length.
 
-        :return list: what keeps an inlet from getting there, one message each
+        :return list: what keeps an inlet from getting there, one message each, then the units
+        in use that are on no inlet
         """
         try:
             inlets = self.state()["inlets"]
@@ -697,7 +753,7 @@ class afcBridgeBoxSwitch:
             except SwitchError as ex:
                 problems.append(str(ex))
         self._settle_lengths()
-        return problems
+        return problems + self._off_inlet()
 
     def _settle_lengths(self) -> None:
         """
