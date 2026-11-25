@@ -4864,7 +4864,7 @@ class TestLoadConfigPrefix:
             load_config_prefix(config)
 
         assert str(exc.value) == ("nonsense not valid, only switched(turtleneck style), "
-                                  "FPS_PSF, bambu or ace are valid options")
+                                  "FPS_PSF, COMP, bambu or ace are valid options")
         assert afc.buffers == {}
         assert afc.logger.messages == []
 
