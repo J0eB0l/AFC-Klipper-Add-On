@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from extras.AFC_ACE2_buffer import (AFCACEBuffer, decoder_step, read_slot, signed_decoder,
-                                    slot_full)
+from extras.AFC_ACE2_buffer import (AFCACEBuffer, SlipWatch, decoder_step, read_slot,
+                                    signed_decoder, slot_full)
 from extras.AFC_buffer import load_config_prefix
 from tests.conftest import MockAFC, MockConfig, MockPrinter
 
@@ -125,6 +125,73 @@ class TestHelpers:
         assert read_slot(SlotUnit({}, ace=SensorLink(RuntimeError("x"), {})), 0) is None
 
 
+class TestSlipWatchInit:
+    def test_starts_with_no_reads(self):
+        assert SlipWatch()._reads == []
+
+
+class TestSlipWatchUpdate:
+    @staticmethod
+    def run(*reads: Tuple[float, float]) -> Tuple[SlipWatch, List[bool]]:
+        """
+        :param reads: (motor count, encoder count) per read
+        :return tuple: the watch and what it said for each read
+        """
+        watch = SlipWatch()
+        return watch, [watch.update(length, decoder) for length, decoder in reads]
+
+    def test_first_read_has_nothing_to_compare(self):
+        watch, said = self.run((40.0, 0.0))
+
+        assert said == [False]
+        assert watch._reads == [(40.0, 0.0)]
+
+    def test_encoder_following_the_motor_is_not_slipping(self):
+        watch, said = self.run((0.0, 0.0), (8.0, 8.0), (16.0, 15.0), (24.0, 23.0))
+
+        assert said == [False, False, False, False]
+        # Only the read it compares the next one against is kept.
+        assert watch._reads == [(16.0, 15.0), (24.0, 23.0)]
+
+    def test_encoder_counting_under_half_of_the_feed_is_slipping(self):
+        watch, said = self.run((100.0, 96.0), (108.0, 104.0), (116.0, 107.0))
+
+        assert said == [False, False, True]
+
+    def test_encoder_counting_half_of_the_feed_is_not_slipping(self):
+        watch, said = self.run((100.0, 96.0), (108.0, 100.0))
+
+        assert said == [False, False]
+
+    def test_too_little_motor_travel_says_nothing(self):
+        # 5mm of motor with the encoder stopped, then the sixth.
+        watch, said = self.run((0.0, 0.0), (5.0, 0.0), (6.0, 0.0))
+
+        assert said == [False, False, True]
+        assert watch._reads == [(0.0, 0.0), (5.0, 0.0), (6.0, 0.0)]
+
+    def test_slow_motor_is_judged_over_several_reads(self):
+        watch, said = self.run((0.0, 0.0), (2.0, 2.0), (4.0, 4.0), (6.0, 6.0), (8.0, 8.0),
+                               (10.0, 8.0), (12.0, 8.0), (14.0, 8.0))
+
+        # At 10mm the read 6mm back is the one at 4mm, with 4mm counted since:
+        # at 12mm it is the one at 6mm, with 2mm counted.
+        assert said == [False, False, False, False, False, False, True, True]
+        assert watch._reads == [(8.0, 8.0), (10.0, 8.0), (12.0, 8.0), (14.0, 8.0)]
+
+    def test_motor_standing_still_is_not_slipping(self):
+        watch, said = self.run((100.0, 96.0), (108.0, 96.0), (108.0, 96.0))
+
+        assert said == [False, True, False]
+        assert watch._reads == [(100.0, 96.0), (108.0, 96.0)]
+
+    def test_count_starting_over_drops_the_earlier_reads(self):
+        watch, said = self.run((60.0, 58.0), (68.0, 66.0), (2.0, 2.0), (10.0, 2.0))
+
+        assert said == [False, False, False, True]
+        assert watch._reads == [(2.0, 2.0), (10.0, 2.0)]
+
+
 class TestAFCACEBuffer:
     def test_load_config_prefix_builds_it(self):
         printer = MockPrinter(afc=MockAFC())
@@ -233,6 +300,15 @@ class TestAFCACEBuffer:
 
         buf.lanes = {"lane1": BufLane("lane1", unit)}
         assert buf.last_state == "Advancing"
+
+    def test_lanes_off_an_ace_or_without_a_slot_are_left_out(self):
+        buf = make_buffer()
+        unit = SlotUnit({"lane0": 0})
+        buf.lanes = {"lane0": BufLane("lane0", unit),
+                     "lane1": BufLane("lane1", object()),
+                     "lane2": BufLane("lane2", unit)}
+
+        assert buf._lane_slots() == [(unit, 0)]
 
     def test_status_carries_the_arrival(self):
         buf = make_buffer()

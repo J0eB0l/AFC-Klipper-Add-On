@@ -12,7 +12,7 @@ import traceback
 
 from configparser import Error as error
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
@@ -23,6 +23,11 @@ try: from extras.AFC_buffer import (AFCBuffer, ADVANCING_STATE_NAME, NEUTRAL_STA
 except:
     error_str = f"Error when trying to import AFC_buffer.AFCBuffer\n{traceback.format_exc()}"
     raise error(error_str)
+
+
+# The unit's drive is turning without moving the filament when, over this
+# many mm of its motor count, its encoder counts less than half of them.
+SLIP_MIN_FEED = 6.0
 
 
 def signed_decoder(value: Any) -> int:
@@ -72,7 +77,8 @@ class AFCACEBuffer(AFCBuffer):
         self.still_eps_mm: float = config.getfloat("still_eps_mm", 1.0, minval=0.0)
         # Not full and not moving for this long is a jam.
         self.stall_seconds: float = config.getfloat("stall_seconds", 3.0, minval=0.5)
-        # Give up when the assist pushes this much more than approach_length.
+        # Give up when the assist pushes this much more than approach_length. A
+        # feed the extruder stops this far or less before its end has arrived.
         self.max_extra_length: float = config.getfloat("max_extra_length", 150.0, minval=0.0)
         self.arrival_timeout: float = config.getfloat("arrival_timeout", 30.0, minval=1.0)
         # After arrival the buffer must drain within the tool_stn move plus this.
@@ -225,6 +231,43 @@ def decoder_step(last: Optional[int], current: int) -> float:
         return 0.0
     step = current - last if current >= last else current
     return float(max(step, 0))
+
+
+class SlipWatch:
+    """
+    Tells from successive get_feed_info reads when the unit's drive turns
+    without moving the filament, which grinds the filament at the drive.
+    """
+
+    def __init__(self) -> None:
+        """
+        Start with no reads.
+        """
+        self._reads: List[Tuple[float, float]] = []
+
+    def update(self, length: float, decoder: float) -> bool:
+        """
+        Add one read and compare it with the latest one SLIP_MIN_FEED mm of
+        motor count before it.
+
+        :param length: mm the unit counts on its motor for its current move
+        :param decoder: mm its encoder counted for that move
+        :return bool: True when the motor moved on and the encoder counted
+            less than half of what it fed
+        """
+        if self._reads:
+            if length == self._reads[-1][0]:
+                return False
+            if length < self._reads[-1][0]:
+                # Each feed or assist push starts the unit's counts from zero.
+                self._reads = []
+        self._reads.append((length, decoder))
+        while (len(self._reads) > 1
+               and length - self._reads[1][0] >= SLIP_MIN_FEED):
+            self._reads.pop(0)
+        fed = length - self._reads[0][0]
+        return (fed >= SLIP_MIN_FEED
+                and decoder - self._reads[0][1] < fed / 2.0)
 
 
 def slot_full(sensors: Dict[str, Any], slot: int) -> bool:

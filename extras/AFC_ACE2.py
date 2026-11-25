@@ -1424,6 +1424,121 @@ class afcACE2(afcACE):
             return buffer_obj
         return None
 
+    def _wait_for_feed_complete(self, slot_index: int, length_mm: float, speed_mm_s: float,
+                                lane: Optional[AFCLane] = None, poll_interval: float = 0.5) -> bool:
+        """
+        Wait for a feed or unwind to finish. A load feed for a lane whose
+        toolhead sensor is the unit's buffer is watched meanwhile
+        (`_watch_feed`) and stopped once the filament stalls against the
+        buffer. Near the end of the feed that is the extruder, any earlier it
+        is a feed error.
+
+        :param slot_index: 0-based ACE slot index being moved.
+        :param length_mm: Move length in mm.
+        :param speed_mm_s: Move speed in mm/s.
+        :param lane: Lane a load feed is for, else None.
+        :param poll_interval: Status poll interval in seconds.
+        :return bool: True once the move ended or was stopped; False on
+            no-start or timeout.
+        """
+        buf = self._ram_buffer(lane) if lane is not None else None
+        if (lane is None
+            or buf is None):
+            return super()._wait_for_feed_complete(slot_index, length_mm, speed_mm_s, lane,
+                                                   poll_interval)
+        done, stall = self._watch_feed(slot_index, length_mm, speed_mm_s, buf, poll_interval)
+        if stall is None:
+            return done
+        left = length_mm - stall["length"]
+        if left <= buf.max_extra_length:
+            self.logger.info(f"ACE {self.name}: {lane.name} stopped by the extruder "
+                             f"{left:.0f}mm before the end of its feed")
+            return True
+        self._last_move_error = "feed_error"
+        self.logger.warning(f"ACE {self.name}: {lane.name} stalled against its buffer "
+                            f"{stall['length']:.0f}mm into a {length_mm:.0f}mm feed")
+        return True
+
+    def _watch_feed(self, slot: int, length_mm: float, speed_mm_s: float, buf: Any,
+                    poll_interval: float = 0.5) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Wait for a feed to finish as `_wait_for_feed_complete` does, and stop
+        it as soon as the slot's buffer is pressed forward and the drive turns
+        without moving the filament. Left to run its length, the feed grinds
+        the filament at the drive.
+
+        :param slot: 0-based ACE slot index being fed.
+        :param length_mm: Feed length in mm, used to bound the wait.
+        :param speed_mm_s: Feed speed in mm/s, used to bound the wait.
+        :param buf: The lane's ACE buffer, for its poll interval.
+        :param poll_interval: Status poll interval in seconds.
+        :return tuple: (True once the feed ended or was stopped, False on
+            no-start or timeout; the buffer read it was stopped on, None when
+            it was not stopped)
+        """
+        from extras.AFC_ACE2_buffer import SlipWatch, read_slot
+        reactor = self.afc.reactor
+        self._last_move_error = None
+        start = reactor.monotonic()
+        if (self._ace is None
+            or not self._ace.connected):
+            return False, None
+        expected = length_mm / min(max(speed_mm_s, 1.0), FEED_SPEED_CEILING)
+        max_wait = expected * 1.5 + 15.0
+        watch = SlipWatch()
+        hw_status: Optional[Dict[str, Any]] = None
+        started = False
+        idle_reads = 0
+        status_due = start
+        while True:
+            now = reactor.monotonic()
+            if now - start > max_wait:
+                self.logger.debug(f"ACE wait: timeout waiting for slot {slot} movement "
+                                  f"({max_wait:.1f}s)")
+                return False, None
+            sample = read_slot(self, slot)
+            if (sample is not None
+                and watch.update(sample["length"], float(sample["decoder"]))
+                and not sample["rest"]
+                and not sample["back"]):
+                self._stop_feed_at_sensor(slot)
+                return True, sample
+            if now >= status_due:
+                try:
+                    hw_status = self._ace.get_status(timeout=0.5)
+                except Exception:
+                    hw_status = None
+                if hw_status is not None:
+                    # The error can sit on a single frame; the heartbeat's copy
+                    # covers one this poll missed, once it is newer than the move.
+                    seen_frames = [hw_status]
+                    if (self._hw_status_time or 0) > start:
+                        seen_frames.append(self._cached_hw_status)
+                    for seen in seen_frames:
+                        if self._slot_in_error(seen, slot):
+                            self._note_move_error(seen, slot)
+                    if self._slot_is_moving(hw_status, slot):
+                        started = True
+                        idle_reads = 0
+                    elif started:
+                        idle_reads += 1
+                        if idle_reads >= 2:
+                            return True, None
+                status_due = now + (poll_interval if started else 0.2)
+            if (not started
+                and now - start >= self.feed_departure_timeout):
+                # A short feed can start and finish between polls.
+                if (expected <= 2.0
+                    and hw_status is not None
+                    and not self._slot_in_error(hw_status, slot)):
+                    self.logger.debug(f"ACE wait: slot {slot} short feed ({length_mm:.0f}mm) "
+                                      f"completed before motion was observed, treating as done")
+                    return True, None
+                self.logger.debug(f"ACE wait: slot {slot} never reported motion after its "
+                                  f"feed command")
+                return False, None
+            reactor.pause(now + buf.poll_interval)
+
     def _ram_to_buffer(self, slot: int, cur_lane: AFCLane, approach: float) -> str:
         """
         Bring the filament the last stretch to the extruder in feed assist.
@@ -1496,8 +1611,9 @@ class afcACE2(afcACE):
         the extruder pulls filament out of it. Still full once the tool_stn
         move is done means the extruder never gripped it: then push again,
         a short feed (the motor's full force, which feed assist does not
-        use) while the extruder turns another tool_stn, and watch a further
-        tool_stn pull, up to engage_retries times.
+        use, stopped once it stalls) while the extruder turns another
+        tool_stn, and watch a further tool_stn pull, up to engage_retries
+        times.
 
         :param slot: 0-based ACE slot index being loaded.
         :param cur_lane: Lane being loaded.
@@ -1525,8 +1641,7 @@ class afcACE2(afcACE):
                 self.afc.move_e_pos(distance, speed, "engage retry")
                 self._wait_for_ace_ready()
                 self._ace.feed_filament(slot, buf.engage_push_length, self.load_approach_speed)
-                self._wait_for_feed_complete(slot, buf.engage_push_length,
-                                             self.load_approach_speed)
+                self._watch_feed(slot, buf.engage_push_length, self.load_approach_speed, buf)
                 # Then watch for the drain on a fresh pull, assist holding the buffer full.
                 self._start_feed_assist(slot)
                 self.afc.move_e_pos(distance, speed, "engage check")
