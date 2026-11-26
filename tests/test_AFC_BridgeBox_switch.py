@@ -2659,9 +2659,9 @@ class TestAfcBridgeBoxSwitchTell:
 
 class TestAfcBridgeBoxSwitchSettle:
     HELD_A = ("Switch_1: inlet A holds filament and none of its lanes is loaded, so it is left "
-              "where it is. Unload it or pull it out.")
+              "where it is. Run LANE_UNLOAD on the lane that is in it.")
     HELD_B = ("Switch_1: inlet B holds filament and none of its lanes is loaded, so it is left "
-              "where it is. Unload it or pull it out.")
+              "where it is. Run LANE_UNLOAD on the lane that is in it.")
 
     def test_a_switch_that_is_not_answering_is_the_one_problem(self):
         switch = plumbed(FakeChain(state=None), **LENGTHS)
@@ -3089,8 +3089,8 @@ class TestAfcBridgeBoxSwitchHandlePrep:
             ("raw", "Inlet A: Bambu_AMS_1, Turtle_1, at outlet A, empty\n"
                     "Inlet B: Ace2_1, at outlet B, holds filament\n" + self.OUTLETS),
             ("raw", "<span class=error--text>Switch_1: inlet B holds filament and none of "
-                    "its lanes is loaded, so it is left where it is. Unload it or pull it "
-                    "out.</span>")]
+                    "its lanes is loaded, so it is left where it is. Run LANE_UNLOAD on "
+                    "the lane that is in it.</span>")]
         assert switch.logger.messages == said
         assert switch._told == held
         # So the watch does not say it again.
@@ -3105,11 +3105,11 @@ class TestAfcBridgeBoxSwitchHandlePrep:
             ("raw", "Inlet A: Bambu_AMS_1, Turtle_1, at outlet A, holds filament\n"
                     "Inlet B: Ace2_1, at outlet B, holds filament\n" + self.OUTLETS),
             ("raw", "<span class=error--text>Switch_1: inlet A holds filament and none of "
-                    "its lanes is loaded, so it is left where it is. Unload it or pull it "
-                    "out.</span>"),
+                    "its lanes is loaded, so it is left where it is. Run LANE_UNLOAD on "
+                    "the lane that is in it.</span>"),
             ("raw", "<span class=error--text>Switch_1: inlet B holds filament and none of "
-                    "its lanes is loaded, so it is left where it is. Unload it or pull it "
-                    "out.</span>")]
+                    "its lanes is loaded, so it is left where it is. Run LANE_UNLOAD on "
+                    "the lane that is in it.</span>")]
         assert switch._told == (f"{TestAfcBridgeBoxSwitchSettle.HELD_A}\n"
                                 f"{TestAfcBridgeBoxSwitchSettle.HELD_B}")
 
@@ -6600,8 +6600,8 @@ class TestAfcBridgeBoxSwitchClear:
         switch = finding(SimChain(route=2, a=a, b=b))
         with pytest.raises(SwitchError) as err:
             switch._clear(MockGCodeCommand())
-        assert str(err.value) == (f"Switch_1: filament is still in inlet {full}. Pull it out, "
-                                  "then try again.")
+        assert str(err.value) == (f"Switch_1: filament is still in inlet {full}. Run "
+                                  "LANE_UNLOAD on the lane that is in it, then try again.")
         # Each inlet that reads filament was given its time to read empty.
         assert switch.reactor.pause.call_count == switch_mod._CLEAR_POLLS * (a + b)
 

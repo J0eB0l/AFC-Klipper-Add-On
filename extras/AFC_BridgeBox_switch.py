@@ -1165,7 +1165,8 @@ class afcBridgeBoxSwitch:
             outlet = self.outlet_for(lane)
         elif inlets[inlet]["filament"]:
             error_str = (f"{self.name}: inlet {inlet} holds filament and none of its lanes is "
-                         "loaded, so it is left where it is. Unload it or pull it out.")
+                         "loaded, so it is left where it is. Run LANE_UNLOAD on the lane "
+                         "that is in it.")
             raise SwitchError(error_str)
         elif (self.afc.function.in_print()
               or (there["filament"]
@@ -2168,8 +2169,8 @@ class afcBridgeBoxSwitch:
         inlets = self.state()["inlets"]
         full = [letter for letter in LETTERS if inlets[letter]["filament"]]
         if full:
-            error_str = (f"{self.name}: filament is still in inlet {' and '.join(full)}. Pull "
-                         "it out, then try again.")
+            error_str = (f"{self.name}: filament is still in inlet {' and '.join(full)}. Run "
+                         "LANE_UNLOAD on the lane that is in it, then try again.")
             raise SwitchError(error_str)
 
     def _saw(self) -> bool:
