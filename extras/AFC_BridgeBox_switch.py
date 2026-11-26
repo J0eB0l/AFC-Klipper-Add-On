@@ -409,6 +409,7 @@ class afcBridgeBoxSwitch:
             # Until its inlet is found, the buffer it reports may be the other one.
             unit_obj.use_buffer(*chain.inlet_buffer(inlet), assumed=inlet is None)
         start = self.start_extruder(unit_obj.name) if inlet is not None else None
+        moved: List[AFCLane] = []
         for lane in self.lanes:
             if lane.unit != unit_obj.name:
                 continue
@@ -417,6 +418,10 @@ class afcBridgeBoxSwitch:
                 saved = start
             if saved is not None:
                 lane.set_extruder(self._extruder(saved))
+                moved.append(lane)
+        # An extruder that had no lane when Klipper was ready has one now, or AFC goes on
+        # refusing to eject its lanes.
+        self.chain._clear_standalone(moved)
 
     def _chains(self) -> Dict[str, afcBridgeBox]:
         """
@@ -1907,7 +1912,8 @@ class afcBridgeBoxSwitch:
     def _identify(self, lane: AFCLane, gcmd: GCodeCommand) -> str:
         """
         Find the inlet a lane's unit is plumbed into: empty both inlets, feed the lane until an
-        inlet reads its filament, reel it back, and put the unit on that inlet.
+        inlet reads its filament, reel it back, and put the unit on that inlet. An inlet that
+        was found and still holds the lane afterwards is kept, and is an error.
 
         :param lane: a lane that holds filament, of a unit that is found by loading
         :param gcmd: the command the unloads and the feed run through
@@ -1924,6 +1930,8 @@ class afcBridgeBoxSwitch:
             saw = [letter for letter in LETTERS if self._seen[letter]]
             for letter in saw:
                 self._wait_clear(letter)
+            inlets = self.state()["inlets"]
+            left = [letter for letter in saw if inlets[letter]["filament"]]
         error_str = ""
         if not saw:
             error_str = (f"{self.name}: {lane.name} was fed and neither inlet read filament. "
@@ -1941,6 +1949,11 @@ class afcBridgeBoxSwitch:
         if unit not in self.confirmed:
             self.confirmed.append(unit)
         self.afc.save_vars()
+        if left:
+            error_str = (f"{self.name}: {unit} enters inlet {saw[0]}, but {lane.name} was not "
+                         f"reeled back and is still in it. Run LANE_UNLOAD LANE={lane.name}, "
+                         "then go on.")
+            raise SwitchError(error_str)
         return saw[0]
 
     def _clear(self, gcmd: GCodeCommand) -> None:

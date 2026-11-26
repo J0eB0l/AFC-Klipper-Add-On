@@ -897,6 +897,11 @@ AMS_MODE_FOLLOWING = 4
 #: Hard ceiling on any single move's watchdog, in seconds.
 MOVE_DEADLINE_MAX_S = 35.0
 
+#: After a feed is stopped: the longest its reports are waited for, and how long they have to
+#: stay quiet before the next move is sent, in seconds.
+FEED_STOP_MAX_S = 6.0
+FEED_STOP_QUIET_S = 1.0
+
 #: How far before a retract wait its ran-out report reaches back for the unit's narration, in
 #: seconds.
 DEADLINE_REPORT_BACK_S = 15.0
@@ -12173,8 +12178,45 @@ class afcBambuAMS(afcUnit):
                 self.stop()
             finally:
                 self._load_in_progress = False
+        self._wait_feed_stopped()
         self.eject_lane(lane, gcmd)
         return found
+
+    def _report_seqs(self) -> Tuple[Optional[tuple], int]:
+        """
+        The counters the unit's reports of a move count on.
+
+        :return tuple: (the `_settle_seqs` counters, the tray releases)
+        """
+        return self._settle_seqs(), self._tray_release_seq()
+
+    def _wait_feed_stopped(self) -> float:
+        """
+        Wait until the unit's reports of a feed that was just stopped have come in and gone
+        quiet. One that comes in after the next move was sent ends that move's wait, and the
+        stop that follows a wait cuts the move short.
+
+        :return float: seconds waited
+        """
+        reactor = self.afc.reactor
+        began = reactor.monotonic()
+        now = began
+        last = self._report_seqs()
+        heard: Optional[float] = None
+        while now - began < FEED_STOP_MAX_S:
+            reactor.pause(now + 0.05)
+            now = reactor.monotonic()
+            seqs = self._report_seqs()
+            if seqs != last:
+                last = seqs
+                heard = now
+            elif (heard is not None
+                  and now - heard >= FEED_STOP_QUIET_S):
+                break
+        said = "" if heard is not None else ", and it reported nothing"
+        self.logger.debug(f"{self.name}: waited {now - began:.1f}s for the stopped feed to "
+                          f"settle{said}")
+        return now - began
 
 
 def load_config_prefix(config: Any) -> afcBambuAMS:

@@ -30773,6 +30773,9 @@ class TestAfcBambuAMSFeedTo:
             self.at: List[float] = []
             #: The unit's _load_in_progress at each check.
             self.loading: List[bool] = []
+            #: At each wait for the stopped feed: the last frame the bridge had been sent, and
+            #: how many reel-backs had begun.
+            self.settled: List[Tuple[dict, int]] = []
 
         def __call__(self) -> bool:
             """:return bool: the next scripted answer"""
@@ -30788,7 +30791,7 @@ class TestAfcBambuAMSFeedTo:
              reeled: bool = True, **kwargs: Any
              ) -> Tuple[afcBambuAMS, Any, "TestAfcBambuAMSFeedTo._Check", List[tuple]]:
         """
-        lane1 on bay 0, with eject_lane stood in for.
+        lane1 on bay 0, with eject_lane and the wait for the stopped feed stood in for.
 
         :param monkeypatch: pytest's monkeypatch fixture
         :param script: the check's answers
@@ -30804,7 +30807,13 @@ class TestAfcBambuAMSFeedTo:
             ejected.append((lane, gcmd, unit._bridge.sent[-1]))
             return reeled
         unit.eject_lane = eject
-        return unit, unit.lanes["lane1"], self._Check(unit, script), ejected
+        check = self._Check(unit, script)
+
+        def settle() -> float:
+            check.settled.append((unit._bridge.sent[-1], len(ejected)))
+            return 0.0
+        unit._wait_feed_stopped = settle
+        return unit, unit.lanes["lane1"], check, ejected
 
     @staticmethod
     def _kicks(unit: afcBambuAMS) -> List[float]:
@@ -30849,7 +30858,8 @@ class TestAfcBambuAMSFeedTo:
         gcmd = FakeGcmd()
         assert unit.feed_to(lane, check, gcmd) is True
         assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
-        # The reel-back begins once the feed is stopped.
+        # The stopped feed is waited out once, after the stop and before the reel-back.
+        assert check.settled == [(self.STOP, 0)]
         assert ejected == [(lane, gcmd, self.STOP)]
         assert unit._load_in_progress is False
         assert unit.logger.messages == []
@@ -31026,10 +31036,19 @@ class TestAfcBambuAMSFeedTo:
                         values={"afc_unload_bowden_length": 500.0, "eject_buffer": 200.0})
         lane = unit.lanes["lane1"]
 
+        retracts: List[float] = []
+
         def on_send(bridge: FakeBridge, frame: dict) -> None:
-            if frame["cmd"] == "retract":
+            if (frame["cmd"] == "stop"
+                    and bridge.finish[0] == 0
+                    and frame is bridge.sent[3]):
+                # The stopped feed's own report, which comes in late.
+                _p6_at(unit, unit.reactor.now + 0.72, lambda: setattr(
+                    bridge, "finish", (1, True, "[AMS_DEV] STEP:odom reset tray 0")))
+            elif frame["cmd"] == "retract":
+                retracts.append(unit.reactor.now)
                 _p6_at(unit, unit.reactor.now + 0.05, lambda: setattr(
-                    bridge, "finish", (1, True, "[AMS_SWITCH]feed finish 0")))
+                    bridge, "finish", (2, True, "[AMS_SWITCH]pull sucess")))
         unit._bridge.on_send = on_send
         assert unit.feed_to(lane, self._Check(unit, [True]), FakeGcmd()) is True
         assert unit._bridge.sent == [
@@ -31037,11 +31056,17 @@ class TestAfcBambuAMSFeedTo:
             self.STOP, self.SELECT,
             {"cmd": "retract", "unit": 0, "slot": 0, "mm": 950.0, "mmps": 20.0},
             self.STOP]
+        # The feed was stopped at 100.1, and the retract waits out its report and a quiet second.
+        assert len(retracts) == 1
+        assert 101.84 < retracts[0] < 101.96
         assert lane.loaded_to_hub is False
         assert (unit._load_in_progress, unit._unload_in_progress) == (False, False)
+        # The reel-back ends on its own report, not on the stopped feed's.
         assert unit.logger.messages == [
+            ("debug", f"Bambu_AMS_1: waited {retracts[0] - 100.1:.1f}s for the stopped feed "
+                      "to settle"),
             ("debug", "Bambu_AMS_1: move ended on NARRATION after 0.1s (ok=True): "
-                      "[AMS_SWITCH]feed finish 0")]
+                      "[AMS_SWITCH]pull sucess")]
 
     # the load flag
 
@@ -31068,6 +31093,7 @@ class TestAfcBambuAMSFeedTo:
         assert unit._load_in_progress is False
         # The feed is stopped, or the bridge goes on repeating it. The lane is not reeled back.
         assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert check.settled == []
         assert ejected == []
         assert unit.logger.messages == []
 
@@ -31084,8 +31110,97 @@ class TestAfcBambuAMSFeedTo:
         assert check.loading == [True]
         assert unit._load_in_progress is False
         assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED]
+        assert check.settled == []
         assert ejected == []
         assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSReportSeqs:
+    """The counters a unit's reports of a move count on."""
+
+    def test_the_settle_counters_and_the_tray_releases(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        bridge = unit._bridge
+        bridge.finish = (3, True, "feed finish")
+        bridge.switch = (5, "state_switch finish")
+        bridge.assist = 7
+        bridge.tray_release = {0: (11, 2)}
+        assert unit._report_seqs() == ((3, 5, 7), 11)
+
+    def test_no_bridge_counts_nothing(self, monkeypatch):
+        unit = _p6_unit(monkeypatch, offline=True)
+        assert unit._bridge is None
+        assert unit._report_seqs() == (None, 0)
+
+
+class TestAfcBambuAMSWaitFeedStopped:
+    """
+    After a feed is stopped: wait until the unit's reports of it have come in and stayed quiet
+    for a second, for six seconds at the most.
+    """
+
+    @staticmethod
+    def _said(waited: float, nothing: bool = False) -> LogLine:
+        """
+        :param waited: seconds the wait took
+        :param nothing: whether the unit reported nothing
+        :return LogLine: what the wait logs
+        """
+        tail = ", and it reported nothing" if nothing else ""
+        return ("debug", f"Bambu_AMS_1: waited {waited:.1f}s for the stopped feed to "
+                         f"settle{tail}")
+
+    @staticmethod
+    def _steps(unit: afcBambuAMS) -> List[float]:
+        """
+        :param unit: the unit that waited
+        :return list: how far apart its looks were
+        """
+        pauses = [100.0] + unit.reactor.pauses
+        return [later - sooner for sooner, later in zip(pauses, pauses[1:])]
+
+    @pytest.mark.parametrize("report", [
+        lambda bridge: setattr(bridge, "finish", (1, True, "odom reset tray 0")),
+        lambda bridge: setattr(bridge, "switch", (1, "state_switch finish")),
+        lambda bridge: setattr(bridge, "assist", 1),
+        lambda bridge: bridge.tray_release.update({0: (1, 0)}),
+    ], ids=["a-finish", "a-state-switch", "an-assist-end", "a-tray-release"])
+    def test_a_report_is_waited_for_and_then_a_second_of_quiet(self, monkeypatch, report):
+        unit = _p6_unit(monkeypatch)
+        _p6_at(unit, 100.32, lambda: report(unit._bridge))
+        waited = unit._wait_feed_stopped()
+        # Heard at the look after 0.32s, then quiet for a second.
+        assert 1.34 < waited < 1.46
+        assert unit.reactor.now == pytest.approx(100.0 + waited)
+        assert self._steps(unit) == pytest.approx([0.05] * len(unit.reactor.pauses))
+        assert unit.logger.messages == [self._said(waited)]
+
+    def test_each_further_report_starts_the_quiet_second_again(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        bridge = unit._bridge
+        _p6_at(unit, 100.32, lambda: setattr(bridge, "finish", (1, True, "feed finish 0")))
+        _p6_at(unit, 101.02, lambda: setattr(bridge, "finish", (2, True, "odom reset tray 0")))
+        waited = unit._wait_feed_stopped()
+        # A second after the first report it is not quiet yet: the second one came 0.7s on.
+        assert 2.04 < waited < 2.16
+        assert unit.logger.messages == [self._said(waited)]
+
+    def test_a_unit_that_reports_nothing_is_waited_for_six_seconds(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        waited = unit._wait_feed_stopped()
+        # A second with no report does not end it: quiet only counts after a report.
+        assert 6.0 <= waited < 6.11
+        assert unit.logger.messages == [self._said(waited, nothing=True)]
+
+    def test_reports_that_never_go_quiet_end_it_after_six_seconds_too(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        bridge = unit._bridge
+        for count in range(1, 20):
+            _p6_at(unit, 100.0 + 0.5 * count, lambda count=count: setattr(
+                bridge, "finish", (count, True, "feed finish 0")))
+        waited = unit._wait_feed_stopped()
+        assert 6.0 <= waited < 6.11
+        assert unit.logger.messages == [self._said(waited)]
 
 
 class TestModuleImport:

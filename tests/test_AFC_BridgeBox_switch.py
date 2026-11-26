@@ -61,6 +61,8 @@ class FakeChain(afcBridgeBox):
         self.uids: Dict[str, Optional[str]] = {}
         # The popups other modules queued behind the chain's own.
         self.offers: List[Tuple[Any, ...]] = []
+        # The lanes of each unit that was put on its extruder, by name.
+        self.joined: List[List[str]] = []
 
     def unit_names(self) -> List[str]:
         return list(self.bays)
@@ -75,6 +77,9 @@ class FakeChain(afcBridgeBox):
     def offer(self, key: str, title: str, lines: List[str],
               buttons: List[Tuple[str, str, str]]) -> None:
         self.offers.append((key, title, lines, buttons))
+
+    def _clear_standalone(self, lanes: List[Any]) -> None:
+        self.joined.append([lane.name for lane in lanes])
 
     def units_arriving(self) -> bool:
         return self.arriving
@@ -1110,28 +1115,35 @@ class TestAfcBridgeBoxSwitchStartUnit:
         mine = add_lane(printer, "lane9", "Ace2_1")
         another = add_lane(printer, "lane1", "Turtle_1", extruder="extruder1")
         switch = make_switch(printer, connect=False)
+        switch.chain = FakeChain()
         switch.lanes = [mine, another]
         switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
         assert mine.extruder_obj.name == "extruder1"
         assert another.extruder_obj.name == "extruder1"
+        # The chain is told of the lanes that were put on an extruder, and of no other.
+        assert switch.chain.joined == [["lane9"]]
 
     def test_a_saved_extruder_wins_over_the_start(self):
         printer = make_printer()
         lane = add_lane(printer, "lane9", "Ace2_1", extruder="extruder1")
         switch = make_switch(printer, connect=False)
+        switch.chain = FakeChain()
         switch.lanes = [lane]
         switch._saved_lanes = {"lane9": "extruder"}
         switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
         assert lane.extruder_obj.name == "extruder"
+        assert switch.chain.joined == [["lane9"]]
 
     def test_a_saved_extruder_the_switch_does_not_feed_is_ignored(self):
         printer = make_printer(extruders=["extruder", "extruder1", "extruder2"])
         lane = add_lane(printer, "lane9", "Ace2_1")
         switch = make_switch(printer, connect=False)
+        switch.chain = FakeChain()
         switch.lanes = [lane]
         switch._saved_lanes = {"lane9": "extruder2"}
         switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
         assert lane.extruder_obj.name == "extruder1"
+        assert switch.chain.joined == [["lane9"]]
 
     def test_a_unit_that_is_named_on_an_inlet_keeps_its_buffer(self):
         switch = finding(inlet_b=["Chain_1", "Bambu_AMS_2"])
@@ -1163,17 +1175,22 @@ class TestAfcBridgeBoxSwitchStartUnit:
         unit.behind.clear()
         lane = lane_of(switch, "Bambu_AMS_1")
         lane.set_extruder(extruder_of(switch, on))
+        switch.chain.joined.clear()
         switch._start_unit(unit)
         # It keeps the chain's own buffer until then, which is only assumed to be its own.
         assert unit.behind == [("Buffer", "chip")]
         assert unit.assumed is True
         assert lane.extruder_obj.name == on
+        # No lane was put on an extruder.
+        assert switch.chain.joined == [[]]
 
     def test_but_a_lane_saved_on_one_of_the_switchs_extruders_is_put_there(self):
         switch = finding()
         switch._saved_lanes = {"lane_Bambu_AMS_1": "extruder1"}
+        switch.chain.joined.clear()
         switch._start_unit(ams_of(switch, "Bambu_AMS_1"))
         assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder1"
+        assert switch.chain.joined == [["lane_Bambu_AMS_1"]]
 
     def test_and_one_saved_on_an_extruder_the_switch_does_not_feed_stays(self):
         switch = finding()
@@ -5830,6 +5847,39 @@ class TestAfcBridgeBoxSwitchIdentify:
         assert switch._found == {"AAAA": "B"}
         assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
         assert lane.extruder_obj.name == "extruder1"
+
+    def test_a_lane_that_is_still_in_the_inlet_it_found_is_an_error(self):
+        switch, lane, _feed = self._switch()
+        feed = feeding(switch, "Bambu_AMS_1", "B", lingers=True)
+        with pytest.raises(SwitchError) as err:
+            switch._identify(lane, MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: Bambu_AMS_1 enters inlet B, but lane_Bambu_AMS_1 was not reeled back "
+            "and is still in it. Run LANE_UNLOAD LANE=lane_Bambu_AMS_1, then go on.")
+        assert feed.call_count == 1
+        # The inlet was given its time to read empty.
+        assert switch.reactor.pause.call_count == switch_mod._CLEAR_POLLS
+        # What was found is kept.
+        assert switch._found == {"AAAA": "B"}
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
+        assert lane.extruder_obj.name == "extruder1"
+        assert switch.confirmed == ["Bambu_AMS_1"]
+        switch.afc.save_vars.assert_called_once_with()
+        assert switch._moving is False
+
+    def test_filament_in_the_inlet_that_did_not_read_the_lane_is_not_its_error(self):
+        switch, lane, _feed = self._switch("B")
+        chain = chain_of(switch)
+        fed = ams_of(switch, "Bambu_AMS_1").feed_to.side_effect
+
+        def feed_to(lane: FakeLane, seen: Any, gcmd: Any) -> bool:
+            saw = fed(lane, seen, gcmd)
+            # Something enters inlet A once the lane is back.
+            chain.fill(a=True)
+            return saw
+        ams_of(switch, "Bambu_AMS_1").feed_to = MagicMock(side_effect=feed_to)
+        assert switch._identify(lane, MockGCodeCommand()) == "B"
+        assert switch._found == {"AAAA": "B"}
 
     def _not_found(self, switch: afcBridgeBoxSwitch, lane: FakeLane, said: str) -> None:
         """Check no inlet is found, with ``said``, and the switch is left as it was."""
