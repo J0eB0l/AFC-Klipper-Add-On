@@ -542,6 +542,44 @@ class _SweptSection:
 _AUTO_LOCK = threading.Lock()
 
 
+def place_chain(inlets: Dict[str, List[str]], chain: str, bays: List[str],
+                is_unit: bool = False) -> Dict[str, List[str]]:
+    """
+    A filament switch's inlets with one chain's bays put on them. A bay an inlet names enters that
+    inlet. The chain's name on an inlet stands for every bay the other inlet does not name. The
+    bays no inlet names join the inlet that names one, so a unit that takes a bay later has an
+    inlet.
+
+    :param inlets: inlet letter -> the unit and chain names written on it
+    :param chain: the chain's name
+    :param bays: the units the chain makes for its bays
+    :param is_unit: an AFC unit has the chain's name, which then stands for that unit
+    :return dict: inlet letter -> names, the chain's name replaced with its bays
+    :raises ValueError: the chain's units are on both inlets and some of its bays on neither
+    """
+    placed: Dict[str, List[str]] = {}
+    for letter, names in inlets.items():
+        across = [name for there, others in inlets.items() if there != letter for name in others]
+        units: List[str] = []
+        for name in names:
+            if (name == chain
+                and not is_unit):
+                units += [bay for bay in bays if bay not in across]
+            else:
+                units.append(name)
+        placed[letter] = units
+    named = [letter for letter, units in placed.items() if any(bay in units for bay in bays)]
+    rest = [bay for bay in bays if not any(bay in units for units in placed.values())]
+    if (rest
+        and len(named) > 1):
+        error_str = (f"has units of chain {chain} on both inlets. Put {chain} itself on the "
+                     f"inlet its other units enter.")
+        raise ValueError(error_str)
+    if named:
+        placed[named[0]] += rest
+    return placed
+
+
 class afcBridgeBox:
     """
     The chain master: parses the roster and fabricates unit sections.
@@ -628,6 +666,8 @@ class afcBridgeBox:
                 self._fabricate_buffer = False
             else:
                 self.buffer = f"{self.unit_prefix}_Buffer"
+        # What each filament switch section writes on its inlets (see _second_buffer).
+        self._switch_inlets = self._read_switch_inlets(config)
         # 0 = the next lane number after every declared lane, computed once and remembered.
         self.lane_base = config.getint("lane_base", 0)
         self._lane_base_set = bool(self.lane_base)
@@ -1033,6 +1073,10 @@ class afcBridgeBox:
                     break
                 error_str = self._overlap_error(a, b)
                 raise ValueError(error_str)
+        inlet, second = self._second_buffer([b["name"] for b in bays])
+        # The second buffer and its chip are named for the inlet it feeds.
+        second_buffer = f"{self.buffer}_{inlet}"
+        second_chip = f"{self.buffer_chip_name}_inlet_{inlet.lower()}"
         for b in sorted(bays, key=lambda x: x["lane"]):
             name, lane_no, slots = b["name"], b["lane"], b["slots"]
             unit_keys: Dict[str, Any] = {
@@ -1042,8 +1086,8 @@ class afcBridgeBox:
                 "hub": name,
                 "auto_error_recovery": True,
                 "measure_on_insert": True,
-                "buffer": self.buffer,
-                "buffer_chip_name": self.buffer_chip_name,
+                "buffer": second_buffer if name in second else self.buffer,
+                "buffer_chip_name": second_chip if name in second else self.buffer_chip_name,
                 "pool": True,
             }
             if not b["spare"]:
@@ -1081,15 +1125,70 @@ class afcBridgeBox:
                 "bound": None,
                 "spare": b["spare"],
             })
+        # Last: a buffer's adc_pin needs a unit's chip.
         if self._fabricate_buffer:
-            # Last: the buffer's adc_pin needs a unit's chip.
-            sections.append((f"AFC_buffer {self.buffer}", {
-                "type": self.buffer_type,
-                "adc_pin": f"{self.buffer_chip_name}:fps",
-                "deadband": 0.48,
-                "filament_error_sensitivity": 0,
-            }))
+            sections.append(self._buffer_section(self.buffer, self.buffer_chip_name))
+        if second:
+            sections.append(self._buffer_section(second_buffer, second_chip))
         return sections
+
+    def _buffer_section(self, name: str, chip: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        The [AFC_buffer] section this chain makes for a buffer.
+
+        :param name: the buffer's name
+        :param chip: the pin chip that reads it
+        :return tuple: (section name, {key: value})
+        """
+        return (f"AFC_buffer {name}", {
+            "type": self.buffer_type,
+            "adc_pin": f"{chip}:fps",
+            "deadband": 0.48,
+            "filament_error_sensitivity": 0,
+        })
+
+    @staticmethod
+    def _read_switch_inlets(config: Any) -> List[Dict[str, List[str]]]:
+        """
+        What each [AFC_BridgeBox_switch] section in the config writes on its inlets.
+
+        :param config: this section's wrapper (for the merged fileconfig)
+        :return list: one {inlet letter: names} per filament switch section
+        """
+        fc = getattr(config, "fileconfig", None)
+        found: List[Dict[str, List[str]]] = []
+        for sec in (fc.sections() if fc else []):
+            if sec.split()[0] != "AFC_BridgeBox_switch":
+                continue
+            opts = dict(fc.items(sec))
+            found.append({letter: [name.strip()
+                                   for name in opts.get(f"inlet_{letter.lower()}", "").split(",")
+                                   if name.strip()]
+                          for letter in ("A", "B")})
+        return found
+
+    def _second_buffer(self, bays: List[str]) -> Tuple[str, List[str]]:
+        """
+        The bays that are behind a second buffer. A buffer feeds one inlet of a filament switch,
+        so when a switch has this chain's bays on both inlets, the inlet with fewer of them has a
+        buffer of its own.
+
+        :param bays: the units this chain makes for its bays
+        :return tuple: (that inlet's letter, its bays), or ("", []) with every bay behind one
+        buffer
+        """
+        for inlets in self._switch_inlets:
+            try:
+                placed = place_chain(inlets, self.name, bays, self.name in bays)
+            except ValueError:
+                # The switch refuses its own section when it connects.
+                continue
+            on = {letter: [bay for bay in bays if bay in placed[letter]] for letter in placed}
+            if (on["A"]
+                and on["B"]):
+                letter = "A" if len(on["A"]) < len(on["B"]) else "B"
+                return letter, on[letter]
+        return "", []
 
     _BASE_SECTION = "AFC_BridgeBox"
     #: Prefix of the unit sections this module fabricates (not _BASE_SECTION).

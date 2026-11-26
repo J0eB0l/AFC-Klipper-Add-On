@@ -34,6 +34,7 @@ from extras.AFC_BridgeBox import (
     lane_in_toolhead,
     load_config_prefix,
     next_free_tool,
+    place_chain,
     unset_tool_loaded,
 )
 from extras.AFC_lane import AFCLane, AFCLaneState
@@ -900,6 +901,65 @@ def _p6_consistent(master: afcBridgeBox) -> None:
             assert afc.tool_cmds.get(cmd) == lane.name, cmd
             assert afc.gcode.ready_gcode_handlers.get(cmd) is not None, cmd
     assert afc.tool_cmds == owner
+
+
+class TestPlaceChain:
+    """Which inlet of a filament switch each bay of a chain enters."""
+
+    BAYS = ["Bay_1", "Bay_2", "Bay_3"]
+
+    def test_a_switch_that_names_nothing_of_the_chain_is_left_as_written(self):
+        inlets = {"A": ["Turtle_1"], "B": ["Ace2_1"]}
+        assert place_chain(inlets, "Chain_1", self.BAYS) == inlets
+
+    def test_the_chain_is_replaced_by_its_bays_where_it_stood(self):
+        inlets = {"A": ["Turtle_1", "Chain_1", "Ace2_1"], "B": []}
+        assert place_chain(inlets, "Chain_1", self.BAYS) == {
+            "A": ["Turtle_1", "Bay_1", "Bay_2", "Bay_3", "Ace2_1"], "B": []}
+        # What was written is not edited.
+        assert inlets == {"A": ["Turtle_1", "Chain_1", "Ace2_1"], "B": []}
+
+    def test_the_chain_keeps_off_the_bays_the_other_inlet_names(self):
+        inlets = {"A": ["Chain_1"], "B": ["Bay_2"]}
+        assert place_chain(inlets, "Chain_1", self.BAYS) == {
+            "A": ["Bay_1", "Bay_3"], "B": ["Bay_2"]}
+        inlets = {"A": ["Bay_1", "Bay_3"], "B": ["Chain_1"]}
+        assert place_chain(inlets, "Chain_1", self.BAYS) == {
+            "A": ["Bay_1", "Bay_3"], "B": ["Bay_2"]}
+
+    def test_a_chain_on_both_inlets_puts_every_bay_on_both(self):
+        inlets = {"A": ["Chain_1"], "B": ["Chain_1"]}
+        assert place_chain(inlets, "Chain_1", self.BAYS) == {
+            "A": self.BAYS, "B": self.BAYS}
+
+    def test_a_chain_name_that_is_a_unit_stays_the_unit(self):
+        inlets = {"A": ["Chain_1"], "B": ["Ace2_1"]}
+        assert place_chain(inlets, "Chain_1", self.BAYS, True) == inlets
+
+    def test_the_bays_no_inlet_names_join_the_inlet_that_names_one(self):
+        assert place_chain({"A": ["Turtle_1"], "B": ["Bay_2"]}, "Chain_1",
+                           self.BAYS) == {
+            "A": ["Turtle_1"], "B": ["Bay_2", "Bay_1", "Bay_3"]}
+        assert place_chain({"A": ["Bay_3", "Bay_1"], "B": ["Ace2_1"]},
+                           "Chain_1", self.BAYS) == {
+            "A": ["Bay_3", "Bay_1", "Bay_2"], "B": ["Ace2_1"]}
+
+    def test_bays_named_on_both_inlets_with_none_left_over_stay_as_named(self):
+        inlets = {"A": ["Bay_1", "Bay_3"], "B": ["Bay_2"]}
+        assert place_chain(inlets, "Chain_1", self.BAYS) == inlets
+
+    def test_bays_named_on_both_inlets_with_one_on_neither_are_refused(self):
+        inlets = {"A": ["Bay_1"], "B": ["Bay_2"]}
+        with pytest.raises(ValueError) as exc:
+            place_chain(inlets, "Chain_1", self.BAYS)
+        assert str(exc.value) == (
+            "has units of chain Chain_1 on both inlets. Put Chain_1 itself "
+            "on the inlet its other units enter.")
+        assert inlets == {"A": ["Bay_1"], "B": ["Bay_2"]}
+
+    def test_a_chain_without_bays_leaves_nothing_where_it_stood(self):
+        assert place_chain({"A": ["Chain_1"], "B": ["Ace2_1"]}, "Chain_1",
+                           []) == {"A": [], "B": ["Ace2_1"]}
 
 
 class TestNormModel:
@@ -2065,6 +2125,29 @@ class TestAfcBridgeBoxInit:
         assert handlers[-1] == m._scout_ready
         assert handlers.index(unit._handle_ready) < len(handlers) - 1
         _bbx_quiet(m.printer)
+
+    def test_the_units_behind_a_second_buffer_get_their_own_chip(self,
+                                                                 tmp_path):
+        # A filament switch has the HT on the inlet the rest of the chain is not on.
+        printer = make_printer(fabricate=True)
+        printer.add_section("AFC_BridgeBox_switch Switch_1",
+                            {"inlet_a": "chain1", "inlet_b": "Bambu_AMS_HT_1"})
+        m = _bbx_boot(tmp_path, printer, roster=_SWITCH_ROSTER, buffer=None)
+        assert m._switch_inlets == [{"A": ["chain1"],
+                                     "B": ["Bambu_AMS_HT_1"]}]
+        chips = printer._bambu_buffer_chips
+        assert {name: [unit.name for unit in chip._units]
+                for name, chip in chips.items()} == {
+            "bambu_buffer": ["Bambu_AMS_1", "Bambu_AMS_2"],
+            "bambu_buffer_inlet_b": ["Bambu_AMS_HT_1"]}
+        assert {unit.name: unit.buffer_name
+                for chip in chips.values() for unit in chip._units} == {
+            "Bambu_AMS_1": "Bambu_AMS_Buffer",
+            "Bambu_AMS_2": "Bambu_AMS_Buffer",
+            "Bambu_AMS_HT_1": "Bambu_AMS_Buffer_B"}
+        assert [s for s in _bbx_loaded(m) if s.startswith("AFC_buffer ")] == [
+            "AFC_buffer Bambu_AMS_Buffer", "AFC_buffer Bambu_AMS_Buffer_B"]
+        _bbx_quiet(printer)
 
     # the automatic lane base
 
@@ -4745,6 +4828,73 @@ class TestAfcBridgeBoxRosterSections:
             "AFC_BambuAMS Bambu_AMS_HT_1", "AFC_lane lane28",
             "AFC_hub Bambu_AMS_HT_1", "temperature_sensor Bambu_AMS_HT_1"]
 
+    # a second buffer for the bays on a filament switch's other inlet
+
+    def _buffers(self, master: afcBridgeBox) -> Dict[str, Tuple[str, str]]:
+        """
+        :param master: a built master
+        :return dict: unit name -> (the buffer it names, the chip that reads it)
+        """
+        return {s.split()[1]: (keys["buffer"], keys["buffer_chip_name"])
+                for s, keys in self._sections(master).items()
+                if s.startswith("AFC_BambuAMS ")}
+
+    def test_a_bay_on_the_other_inlet_names_the_second_buffer(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1")
+        assert self._buffers(m) == {
+            "Bambu_AMS_1": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_2": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_HT_1": ("Bamb_1_B", "bambu_buffer_inlet_b")}
+        sections = self._sections(m)
+        # The chain's own buffer is the config's here, so only the second one is made.
+        assert [s for s in sections if s.startswith("AFC_buffer ")] == [
+            "AFC_buffer Bamb_1_B"]
+        assert list(sections)[-1] == "AFC_buffer Bamb_1_B"
+        assert sections["AFC_buffer Bamb_1_B"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_b:fps")
+
+    def test_the_second_buffer_is_named_for_the_inlet_it_feeds(self, tmp_path):
+        m = _bbx_switched(tmp_path, "Bambu_AMS_2", "chain1")
+        assert self._buffers(m) == {
+            "Bambu_AMS_1": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_2": ("Bamb_1_A", "bambu_buffer_inlet_a"),
+            "Bambu_AMS_HT_1": ("Bamb_1", "bambu_buffer")}
+        assert self._sections(m)["AFC_buffer Bamb_1_A"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_a:fps")
+
+    def test_a_chain_that_makes_its_buffer_makes_both(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1", buffer=None)
+        assert self._buffers(m) == {
+            "Bambu_AMS_1": ("Bambu_AMS_Buffer", "bambu_buffer"),
+            "Bambu_AMS_2": ("Bambu_AMS_Buffer", "bambu_buffer"),
+            "Bambu_AMS_HT_1": ("Bambu_AMS_Buffer_B", "bambu_buffer_inlet_b")}
+        sections = self._sections(m)
+        assert list(sections)[-2:] == ["AFC_buffer Bambu_AMS_Buffer",
+                                       "AFC_buffer Bambu_AMS_Buffer_B"]
+        assert sections["AFC_buffer Bambu_AMS_Buffer"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer:fps")
+        assert sections["AFC_buffer Bambu_AMS_Buffer_B"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_b:fps")
+
+    def test_a_chain_on_one_inlet_makes_no_second_buffer(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Turtle_1", buffer=None)
+        assert set(self._buffers(m).values()) == {
+            ("Bambu_AMS_Buffer", "bambu_buffer")}
+        assert [s for s in self._sections(m)
+                if s.startswith("AFC_buffer ")] == [
+            "AFC_buffer Bambu_AMS_Buffer"]
+
+    def test_the_second_buffer_is_loaded_after_its_units(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1", buffer=None)
+        loaded = _bbx_loaded(m)
+        assert loaded[-2:] == ["AFC_buffer Bambu_AMS_Buffer",
+                               "AFC_buffer Bambu_AMS_Buffer_B"]
+        assert _bbx_keys(m, "AFC_BambuAMS Bambu_AMS_HT_1")["buffer"] == (
+            "Bambu_AMS_Buffer_B")
+        assert _bbx_keys(m, "AFC_buffer Bambu_AMS_Buffer_B")["adc_pin"] == (
+            "bambu_buffer_inlet_b:fps")
+        _bbx_quiet(m.printer)
+
     # fixed bands: AMS low, HT high, no collapse
 
     def test_two_ams_then_ht_pack_12_16_20(self, tmp_path):
@@ -5034,6 +5184,120 @@ class TestAfcBridgeBoxRosterSections:
             "ht": common | {"heater", "dry_max_temp"},
             "ams2": common | {"heater", "dry_max_temp"},
             "boxed": common}
+
+
+#: A pool's bays behind a two-AMS, one-HT roster, as _roster_sections names them.
+_SWITCH_ROSTER = f"boxed:{A}, boxed:{B}, ht:{C}"
+
+
+def _bbx_switched(tmp_path: pathlib.Path, inlet_a: str, inlet_b: str,
+                  name: str = "chain1", **opts: Any) -> afcBridgeBox:
+    """
+    :param tmp_path: where the chain keeps its files
+    :param inlet_a: what a filament switch section writes on inlet A
+    :param inlet_b: what it writes on inlet B
+    :param name: the chain's name
+    :return afcBridgeBox: a chain of two AMS and an HT on a printer whose config holds that switch
+    """
+    printer = make_printer()
+    printer.add_section("AFC_BridgeBox_switch Switch_1",
+                        {"inlet_a": inlet_a, "inlet_b": inlet_b,
+                         "outlet_a": "extruder", "outlet_b": "extruder1"})
+    opts.setdefault("roster", _SWITCH_ROSTER)
+    return _bbx_boot(tmp_path, printer, name, **opts)
+
+
+class TestAfcBridgeBoxBufferSection:
+    def test_the_section_names_the_buffer_and_reads_its_chip(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._buffer_section("Bamb_1_B", "bambu_buffer_inlet_b") == (
+            "AFC_buffer Bamb_1_B",
+            {"type": "bambu", "adc_pin": "bambu_buffer_inlet_b:fps",
+             "deadband": 0.48, "filament_error_sensitivity": 0})
+        _bbx_quiet(m.printer)
+
+    def test_the_chains_buffer_type_is_used(self, tmp_path):
+        m = _bbx_boot(tmp_path, buffer_type="FPS")
+        assert m._buffer_section("Own", "chip") == (
+            "AFC_buffer Own",
+            {"type": "FPS", "adc_pin": "chip:fps", "deadband": 0.48,
+             "filament_error_sensitivity": 0})
+        _bbx_quiet(m.printer)
+
+
+class TestAfcBridgeBoxReadSwitchInlets:
+    def test_a_config_with_no_merged_file_has_none(self):
+        assert afcBridgeBox._read_switch_inlets(object()) == []
+
+    def test_a_config_with_no_switch_has_none(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._switch_inlets == []
+        _bbx_quiet(m.printer)
+
+    def test_each_switch_sections_inlets_are_read_as_written(self, tmp_path):
+        printer = make_printer()
+        printer.add_section("AFC_BridgeBox_switch Switch_1",
+                            {"inlet_a": "chain1, Turtle_1 ,",
+                             "outlet_a": "extruder"})
+        printer.add_section("AFC_BridgeBox_switch Switch_2",
+                            {"inlet_a": "Ace2_1", "inlet_b": "Bambu_AMS_HT_1"})
+        # Neither a switch: an override section and a name that only starts like one.
+        printer.add_section("AFC_BridgeBox Bambu_AMS_1", {"inlet_a": "x"})
+        printer.add_section("AFC_BridgeBox_switches Switch_3",
+                            {"inlet_a": "y"})
+        m = _bbx_boot(tmp_path, printer)
+        assert m._switch_inlets == [
+            {"A": ["chain1", "Turtle_1"], "B": []},
+            {"A": ["Ace2_1"], "B": ["Bambu_AMS_HT_1"]}]
+        _bbx_quiet(printer)
+
+
+class TestAfcBridgeBoxSecondBuffer:
+    BAYS = ["Bambu_AMS_1", "Bambu_AMS_2", "Bambu_AMS_HT_1"]
+
+    def test_no_switch_keeps_every_bay_behind_one_buffer(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._second_buffer(self.BAYS) == ("", [])
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_on_one_inlet_has_one_buffer(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Turtle_1")
+        assert m._second_buffer(self.BAYS) == ("", [])
+        _bbx_quiet(m.printer)
+
+    def test_a_bay_on_the_other_inlet_is_behind_a_second_buffer(self,
+                                                                tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1")
+        assert m._second_buffer(self.BAYS) == ("B", ["Bambu_AMS_HT_1"])
+        _bbx_quiet(m.printer)
+
+    def test_the_inlet_with_fewer_bays_has_the_second_buffer(self, tmp_path):
+        m = _bbx_switched(tmp_path, "Bambu_AMS_2", "chain1")
+        assert m._second_buffer(self.BAYS) == ("A", ["Bambu_AMS_2"])
+        _bbx_quiet(m.printer)
+
+    def test_with_as_many_bays_on_each_inlet_b_has_the_second_buffer(
+            self, tmp_path):
+        m = _bbx_switched(tmp_path, "Bambu_AMS_1", "Bambu_AMS_2")
+        assert m._second_buffer(["Bambu_AMS_1", "Bambu_AMS_2"]) == (
+            "B", ["Bambu_AMS_2"])
+        _bbx_quiet(m.printer)
+
+    def test_a_section_the_switch_will_refuse_is_passed_over(self, tmp_path):
+        # Units on both inlets and a bay on neither: the next section is still read.
+        m = _bbx_switched(tmp_path, "Bambu_AMS_1", "Bambu_AMS_2")
+        assert m._second_buffer(self.BAYS) == ("", [])
+        m._switch_inlets.append({"A": ["chain1"], "B": ["Bambu_AMS_2"]})
+        assert m._second_buffer(self.BAYS) == ("B", ["Bambu_AMS_2"])
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_named_like_one_of_its_bays_is_read_as_that_bay(
+            self, tmp_path):
+        # The name stands for the unit, so the other bays have no inlet and nothing is split.
+        m = _bbx_switched(tmp_path, "Bambu_AMS_1", "Bambu_AMS_HT_1",
+                          name="Bambu_AMS_1")
+        assert m._second_buffer(self.BAYS) == ("", [])
+        _bbx_quiet(m.printer)
 
 
 class TestAfcBridgeBoxLoadedLaneNumbers:

@@ -18,9 +18,15 @@ loaded into either extruder.
     outlet_b_length: 1010
 
 The letters are the ones printed on the switch. `chain` may be left out when there is one chain.
-A BridgeBox chain's units share its buffer, which feeds one inlet. The chain's name on an inlet,
-or the name of any one of its units, puts every unit that chain makes for its bays on that inlet,
-so a unit that is plugged into the chain later enters it too.
+A buffer feeds one inlet, and a BridgeBox chain's units share its buffer. The chain's name on an
+inlet, or the name of any one of its units, puts every unit that chain makes for its bays on that
+inlet, so a unit that is plugged into the chain later enters it too.
+
+A chain can feed both inlets with a buffer on each. The units behind the second buffer are named
+on the other inlet, and the chain makes them a buffer of their own, named for that inlet:
+
+    inlet_a: Chain_1
+    inlet_b: Bambu_AMS_HT_1
 
 An inlet's units start on the extruder of the outlet with the same letter, and an empty inlet rests
 on that outlet. A lane goes to the other extruder with `AFC_BRIDGEBOX_SWITCH_ASSIGN`, and every
@@ -47,7 +53,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 from configfile import error
 
 from extras.AFC import State
-from extras.AFC_BridgeBox import afcBridgeBox
+from extras.AFC_BridgeBox import afcBridgeBox, place_chain
 from extras.AFC_lane import AFCLane
 from extras.AFC_respond import AFCprompt
 from extras.AFC_unit import afcUnit
@@ -259,9 +265,8 @@ class afcBridgeBoxSwitch:
         """
         self.chain = self._find_chain()
         self.chain_name = self.chain.name
-        self._expand_chains()
+        self._place_chains()
         self._check_section()
-        self._follow_chains()
         problems = self._missing() + self._clashes()
         if problems:
             raise error(problems[0])
@@ -375,39 +380,21 @@ class afcBridgeBoxSwitch:
         return {obj.name: obj for _name, obj in self.printer.lookup_objects("AFC_BridgeBox")
                 if isinstance(obj, afcBridgeBox)}
 
-    def _expand_chains(self) -> None:
+    def _place_chains(self) -> None:
         """
-        Replace a chain named on an inlet with the units that chain makes for its bays. A unit
-        of that name is left as the unit.
+        Put each chain's bays on the inlets: a chain's name stands for the bays the other inlet
+        does not name, and the bays no inlet names follow the ones that are named, so a unit that
+        takes a bay later enters an inlet too. A unit that has a chain's name is left as the unit.
         """
-        chains = self._chains()
         known = [obj.name for _name, obj in self.printer.lookup_objects()
                  if isinstance(obj, afcUnit)]
-        for letter in LETTERS:
-            units: List[str] = []
-            for name in self.inlets[letter]:
-                if (name in chains
-                    and name not in known):
-                    units += chains[name].unit_names()
-                else:
-                    units.append(name)
-            self.inlets[letter] = units
-
-    def _follow_chains(self) -> None:
-        """
-        Put every bay of a chain on the inlet that names one of its units, so a unit that takes
-        a bay later enters it too. A chain with units on both inlets is refused.
-        """
         for chain in self._chains().values():
-            bays = chain.unit_names()
-            named = [letter for letter in LETTERS
-                     if any(bay in self.inlets[letter] for bay in bays)]
-            if len(named) > 1:
-                error_str = (f"[{self.fullname}] has units of chain {chain.name} on both inlets. "
-                             "A chain's buffer feeds one inlet.")
+            try:
+                self.inlets = place_chain(self.inlets, chain.name, chain.unit_names(),
+                                          chain.name in known)
+            except ValueError as e:
+                error_str = f"[{self.fullname}] {e}"
                 raise error(error_str)
-            if named:
-                self.inlets[named[0]] += [bay for bay in bays if self.inlet_of(bay) is None]
 
     def _find_chain(self) -> afcBridgeBox:
         """

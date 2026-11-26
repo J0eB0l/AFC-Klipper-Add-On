@@ -197,6 +197,36 @@ auto_drop: True
 #[AFC_BambuAMS_rfid]
 
 
+# ---- Filament switch ----
+# A filament switch on the chain's bus sends each of its two inlets to one
+# of two extruders, so a lane can be loaded into either. Name what is
+# plumbed into each inlet and the extruder each outlet feeds. The letters
+# are the ones printed on the switch.
+# A chain's units share its buffer, which feeds one inlet: name the chain
+# there, and an AMS plugged into it later enters that inlet too. Any other
+# unit goes by its own name.
+# A chain can feed both inlets with a buffer on each: name the units behind
+# the second buffer on the other inlet (inlet_b: Bambu_AMS_HT_1), and the
+# chain makes them a buffer of their own.
+# An inlet's units start on the extruder of the outlet with the same
+# letter. A lane a print sends to the other extruder goes back once that
+# print is over and the lane is out of its toolhead; one sent there at any
+# other time stays. The outlet lengths are the tube from each outlet to its
+# toolhead in mm; AFC_CALIBRATION measures them from its filament switch
+# entry.
+#   AFC_BRIDGEBOX_SWITCH_ASSIGN LANE=lane4 EXTRUDER=extruder1
+#                               send a lane to the other extruder
+#   AFC_BRIDGEBOX_SWITCH_ROUTE  show the inlets and outlets
+#[AFC_BridgeBox_switch Switch_1]
+#chain: Chain_1
+#inlet_a: Chain_1
+#inlet_b: Turtle_1
+#outlet_a: extruder
+#outlet_b: extruder1
+#outlet_a_length: 850
+#outlet_b_length: 1010
+
+
 # ---- Drying and other commands ----
 # Drying (AMS 2 Pro and AMS HT): templates/AFC_Dryer.cfg adds a web panel
 # that finds every heated unit by itself. From the console:
