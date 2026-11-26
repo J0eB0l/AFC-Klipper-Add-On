@@ -34,8 +34,15 @@ _MASTER_OPTIONS = frozenset({
     "enroll_grace", "claim_grace", "flap_claim_grace", "flap_window",
     "afc_bowden_length", "td1_bowden_length", "dry_max_temp", "auto_vars_file",
     "state_file", "roster", "hotplug_poll", "connection", "wifi_ssid",
-    "wifi_password",
+    "wifi_password", "filament_switch", "switch_inlet_a", "switch_inlet_b",
+    "switch_outlet_a", "switch_outlet_b", "switch_outlet_a_length",
+    "switch_outlet_b_length",
 })
+
+#: What a filament switch of the chain's own is given: each is written switch_<key> in the
+#: chain's section, and what a calibration finds is saved under that name in the chain's state.
+_SWITCH_KEYS = ("inlet_a", "inlet_b", "outlet_a", "outlet_b", "outlet_a_length",
+                "outlet_b_length")
 
 _STRUCTURAL_KEYS = frozenset(
     {"serial_port", "tcp_key", "unit_uid", "unit", "hub", "extruder", "buffer",
@@ -666,7 +673,13 @@ class afcBridgeBox:
                 self._fabricate_buffer = False
             else:
                 self.buffer = f"{self.unit_prefix}_Buffer"
-        # What each filament switch section writes on its inlets (see _second_buffer).
+        # False keeps the chain from making a filament switch of its own, and from offering one.
+        self._switch_wanted: Optional[bool] = config.getboolean("filament_switch", None)
+        # What the chain gives a filament switch of its own, None with none.
+        self._switch_keys = self._read_switch_keys(config)
+        # Whether a switch that answers on the bus was looked at since this start.
+        self._switch_seen = False
+        # What each filament switch names on its inlets (see _second_buffer).
         self._switch_inlets = self._read_switch_inlets(config)
         # The inlet a second buffer feeds, "" with every bay behind one buffer.
         self._second_inlet = ""
@@ -799,6 +812,8 @@ class afcBridgeBox:
         self._flush_maps()
         self._migrate_name_learned(names_before)
         sections = self._fold_and_sweep(config, sections)
+        if self._switch_keys is not None:
+            sections.append(self._switch_section())
 
         # A bay name clashing with another AFC unit is refused before a duplicate-lane crash.
         foreign = self._foreign_unit_names(config)
@@ -836,6 +851,8 @@ class afcBridgeBox:
         # After the fabrication loop, so the first unit owns the bridge.
         self.printer.register_event_handler("klippy:ready", self._scout_ready)
         self.printer.register_event_handler("afc:save_vars", self._handle_save_vars)
+        self.printer.register_event_handler("afc:tool_load_prepare",
+                                            self._handle_tool_load_prepare)
 
     @staticmethod
     def _parse_roster(raw: str) -> List[Dict[str, Any]]:
@@ -1151,24 +1168,87 @@ class afcBridgeBox:
             "filament_error_sensitivity": 0,
         })
 
-    @staticmethod
-    def _read_switch_inlets(config: Any) -> List[Dict[str, List[str]]]:
+    def _read_switch_keys(self, config: Any) -> Optional[Dict[str, str]]:
         """
-        What each [AFC_BridgeBox_switch] section in the config writes on its inlets.
+        What this chain gives a filament switch of its own: the switch_ options of its section,
+        and what was saved for the ones the section leaves out. The chain has a switch when
+        `filament_switch` is on, a switch_ option is set, or one was added with
+        AFC_BRIDGEBOX_SWITCH_ADD, and it has none with `filament_switch: False`.
+
+        :param config: this section's wrapper
+        :return dict: the switch's options, with `by_hand` naming the ones the section sets, or
+        None when the chain has no switch of its own
+        """
+        hand: Dict[str, str] = {}
+        for key in _SWITCH_KEYS:
+            value = config.get(f"switch_{key}", None)
+            if value is not None:
+                hand[key] = value.strip()
+        if self._switch_wanted is False:
+            return None
+        cp = self._read_state()
+        sec = f"{self._BASE_SECTION} {self.name}"
+        saved = dict(cp.items(sec)) if cp.has_section(sec) else {}
+        if not (self._switch_wanted
+                or hand
+                or saved.get("switch")):
+            return None
+        keys = {key: saved[f"switch_{key}"] for key in _SWITCH_KEYS
+                if saved.get(f"switch_{key}")}
+        for key, value in hand.items():
+            # An option that is left empty stands for nothing, and is not looked for.
+            keys.pop(key, None)
+            if value:
+                keys[key] = value
+        if hand:
+            keys["by_hand"] = ", ".join(hand)
+        return keys
+
+    def _switch_section(self) -> Tuple[str, Dict[str, Any]]:
+        """
+        The section of the chain's own filament switch, which has the chain's name.
+
+        :return tuple: (section name, its options)
+        """
+        keys: Dict[str, Any] = {"chain": self.name, "chain_made": True}
+        keys.update(self._switch_keys or {})
+        return f"AFC_BridgeBox_switch {self.name}", keys
+
+    @staticmethod
+    def _split_inlets(opts: Dict[str, Any]) -> Dict[str, List[str]]:
+        """
+        The names a filament switch's options put on each inlet.
+
+        :param opts: a switch's options
+        :return dict: inlet letter -> the names on it
+        """
+        return {letter: [name.strip()
+                         for name in str(opts.get(f"inlet_{letter.lower()}", "")).split(",")
+                         if name.strip()]
+                for letter in ("A", "B")}
+
+    def _read_switch_inlets(self, config: Any) -> List[Dict[str, List[str]]]:
+        """
+        What each filament switch names on its inlets: the chain's own switch, then every
+        [AFC_BridgeBox_switch] section in the config. The chain's own switch has the chain on
+        both inlets unless its options put the chain on one, so the inlet of each unit they do
+        not name is found by loading.
 
         :param config: this section's wrapper (for the merged fileconfig)
-        :return list: one {inlet letter: names} per filament switch section
+        :return list: one {inlet letter: names} per filament switch
         """
-        fc = getattr(config, "fileconfig", None)
         found: List[Dict[str, List[str]]] = []
+        if self._switch_keys is not None:
+            own = self._split_inlets(self._switch_keys)
+            if (self.name not in own["A"]
+                and self.name not in own["B"]):
+                own = {letter: names + [self.name] for letter, names in own.items()}
+            found.append(own)
+        fc = getattr(config, "fileconfig", None)
         for sec in (fc.sections() if fc else []):
             if sec.split()[0] != "AFC_BridgeBox_switch":
                 continue
-            opts = dict(fc.items(sec))
-            found.append({letter: [name.strip()
-                                   for name in opts.get(f"inlet_{letter.lower()}", "").split(",")
-                                   if name.strip()]
-                          for letter in ("A", "B")})
+            found.append(self._split_inlets(dict(fc.items(sec))))
         return found
 
     def inlet_buffer(self, inlet: Optional[str]) -> Tuple[str, str]:
@@ -2348,6 +2428,12 @@ class afcBridgeBox:
                            "Set or show the filament switch on a chain's bus: "
                            "AFC_BRIDGEBOX_SWITCH [CHAIN=<chain>] [ROUTE=<0-3>]. ROUTE=0 "
                            "releases it, 1 and 2 move one actuator each, 3 moves both.")
+        self._register_mux("AFC_BRIDGEBOX_SWITCH_ADD", self.cmd_AFC_BRIDGEBOX_SWITCH_ADD,
+                           "Give a chain the filament switch on its bus, which is set up "
+                           "after a restart: AFC_BRIDGEBOX_SWITCH_ADD [CHAIN=<chain>]")
+        self._register_mux("AFC_BRIDGEBOX_SWITCH_FORGET", self.cmd_AFC_BRIDGEBOX_SWITCH_FORGET,
+                           "Take a chain's own filament switch away, with what was found for "
+                           "it: AFC_BRIDGEBOX_SWITCH_FORGET [CHAIN=<chain>]")
         self._register_mux("AFC_BRIDGEBOX_REPLACE", self.cmd_AFC_BRIDGEBOX_REPLACE,
                            "Forget an offline unit and put a new unit on its bay, live: "
                            "AFC_BRIDGEBOX_REPLACE [CHAIN=<chain>] UID=<new uid> "
@@ -2498,6 +2584,85 @@ class afcBridgeBox:
         bridge.send({"cmd": "fswitch", "route": route})
         return True
 
+    def _has_switch(self) -> bool:
+        """
+        Whether a filament switch is configured on this chain.
+
+        :return bool: True with a switch of the chain's own or a switch section on this chain
+        """
+        if self._switch_keys is not None:
+            return True
+        return any(getattr(switch, "chain", None) is self
+                   for _name, switch in self.printer.lookup_objects("AFC_BridgeBox_switch"))
+
+    def _switch_unset(self) -> bool:
+        """
+        Whether a filament switch answers on this chain's bus that nothing is configured for.
+
+        :return bool: True while the chain's lanes go through a switch nothing points
+        """
+        st = self.switch_state()
+        return (st is not None
+                and st["on"]
+                and self._switch_wanted is not False
+                and bool(getattr(self, "_pool_units", None))
+                and not self._has_switch())
+
+    def _offer_switch(self) -> None:
+        """
+        Queue the prompt that offers to set up a filament switch, once for each start, when one
+        answers on this chain's bus and none is configured on the chain.
+        """
+        if self._switch_seen:
+            return
+        st = self.switch_state()
+        if (st is None
+            or not st["on"]):
+            return
+        self._switch_seen = True
+        if self._switch_unset():
+            self._queue_popup(("switch", self.name))
+
+    def _prompt_switch(self) -> None:
+        """
+        Open the prompt that offers to set up the filament switch on this chain's bus. It stays
+        until it is answered.
+        """
+        lines = [f"{self.name}: a filament switch answers on this chain's bus, and it is not "
+                 "set up. The chain's lanes do not load until it is.",
+                 "Set it up to give the chain the switch. Klipper then has to restart, and "
+                 "after that a prompt offers to find its inlets and outlets."]
+        buttons = [("Set up the switch", f"AFC_BRIDGEBOX_SWITCH_ADD CHAIN={self.name}",
+                    "primary")]
+        self._prompt(f"{self.name} filament switch", lines, buttons, timeout=0.0)
+
+    def _handle_tool_load_prepare(self, lane: Any, gcmd: AFCGcmd) -> bool:
+        """
+        Keep a lane of this chain from loading through a filament switch that is not set up.
+
+        :param lane: the lane about to be loaded
+        :param gcmd: command context the load runs through
+        :return bool: False stops the load
+        """
+        if (lane.unit not in self.unit_names()
+            or not self._switch_unset()):
+            return True
+        afc = self.printer.lookup_object("AFC")
+        afc.error.AFC_error(f"{self.name}: {lane.name} is not loaded, the filament switch on "
+                            f"this chain's bus is not set up. Run AFC_BRIDGEBOX_SWITCH_ADD "
+                            f"CHAIN={self.name} first.",
+                            pause=afc.function.in_print(), gcmd=gcmd)
+        return False
+
+    def save_switch(self, keys: Dict[str, Any]) -> None:
+        """
+        Save what was found for the chain's own filament switch, for the next start.
+
+        :param keys: one of _SWITCH_KEYS -> its value, "" for one that is not known any more
+        """
+        self._state_set({f"{self._BASE_SECTION} {self.name}":
+                         {f"switch_{key}": value for key, value in keys.items()}})
+
     def cmd_AFC_BRIDGEBOX_SWITCH(self, gcmd: Any) -> None:
         """
         Set or show the filament switch on this chain's bus.
@@ -2540,6 +2705,92 @@ class afcBridgeBox:
         gcmd.respond_info(f"{self.name}: filament switch route {st['route']}, at "
                           f"{self._SWITCH_AT[st['position']]}, {inlets} "
                           f"(readings {', '.join(str(v) for v in st['values'])})")
+
+    def cmd_AFC_BRIDGEBOX_SWITCH_ADD(self, gcmd: Any) -> None:
+        """
+        Give this chain the filament switch on its bus.
+
+        The chain remembers that it has a switch. After a Klipper restart it makes the switch,
+        with no section of its own, and a prompt offers to find its inlets and outlets. What is
+        found is kept with the chain, and `switch_inlet_a`, `switch_inlet_b`, `switch_outlet_a`,
+        `switch_outlet_b`, `switch_outlet_a_length` and `switch_outlet_b_length` in the chain's
+        section set one by hand. Refused in a print, on a chain that already has a filament
+        switch, on one whose section has `filament_switch: False`, and on one with no bays.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_SWITCH_ADD [CHAIN=<chain>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_SWITCH_ADD CHAIN=chain1
+        ```
+        """
+        error_str = ""
+        if self._is_printing():
+            error_str = (f"AFC_BRIDGEBOX_SWITCH_ADD: not during a print, {self.name} takes "
+                         f"its filament switch at a restart")
+        elif self._has_switch():
+            error_str = f"AFC_BRIDGEBOX_SWITCH_ADD: {self.name} already has a filament switch"
+        elif self._switch_wanted is False:
+            error_str = (f"AFC_BRIDGEBOX_SWITCH_ADD: [{self._BASE_SECTION} {self.name}] has "
+                         f"filament_switch: False. Take that line out first.")
+        elif not getattr(self, "_pool_units", None):
+            error_str = (f"AFC_BRIDGEBOX_SWITCH_ADD: {self.name} has no bays, so it has no "
+                         f"unit to send through a filament switch")
+        if error_str:
+            raise gcmd.error(error_str)
+        self._state_set({f"{self._BASE_SECTION} {self.name}": {"switch": "1"}})
+        self._switch_seen = True
+        gcmd.respond_info(f"{self.name}: its filament switch is saved. RESTART, and a prompt "
+                          f"offers to find its inlets and outlets.")
+        self._prompt(f"{self.name} filament switch",
+                     [f"{self.name}: its filament switch is saved. Klipper has to restart to "
+                      "make it, and after that a prompt offers to find its inlets and outlets."],
+                     [("Restart Klipper", "RESTART", "primary")], timeout=0.0)
+
+    def cmd_AFC_BRIDGEBOX_SWITCH_FORGET(self, gcmd: Any) -> None:
+        """
+        Take this chain's own filament switch away, with the outlets and tube lengths that were
+        found for it and the inlet found for each of its units.
+
+        After a Klipper restart the chain has no switch, and one that still answers on its bus
+        is offered again. The switch_ options in the chain's section are left as they are, and
+        they give the chain its switch back. Refused in a print, and on a chain that has no
+        switch of its own.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_SWITCH_FORGET [CHAIN=<chain>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_SWITCH_FORGET CHAIN=chain1
+        ```
+        """
+        error_str = ""
+        if self._is_printing():
+            error_str = (f"AFC_BRIDGEBOX_SWITCH_FORGET: not during a print, {self.name} "
+                         f"gives its filament switch up at a restart")
+        elif self._switch_keys is None:
+            error_str = (f"AFC_BRIDGEBOX_SWITCH_FORGET: {self.name} has no filament switch of "
+                         f"its own")
+        if error_str:
+            raise gcmd.error(error_str)
+        keys = {"switch": ""}
+        keys.update({f"switch_{key}": "" for key in _SWITCH_KEYS})
+        self._state_set({f"{self._BASE_SECTION} {self.name}": keys})
+        switch = self.printer.lookup_object(self._switch_section()[0], None)
+        if switch is not None:
+            switch.forget()
+        gcmd.respond_info(f"{self.name}: its filament switch is forgotten. RESTART to go on "
+                          f"without it.")
+        self._prompt(f"{self.name} filament switch",
+                     [f"{self.name}: its filament switch is forgotten, with what was found for "
+                      "it. Klipper has to restart to go on without it."],
+                     [("Restart Klipper", "RESTART", "primary")], timeout=0.0)
 
     def cmd_AFC_BRIDGEBOX_RESET_WIFI(self, gcmd: Any) -> None:
         """
@@ -4867,6 +5118,7 @@ class afcBridgeBox:
                             self._queue_popup(("removed", b, gone))
                 self._track_absence(eventtime, bridge, online_uids, online_idx, online_since)
                 self._offer_replace(eventtime, online_uids, online_since)
+                self._offer_switch()
                 # One dialog per _POPUP_HOLD, so a burst of plug/unplugs is shown in turn.
                 self._pump_popups(eventtime)
             # The "chain" command only reads cached state and never touches the bus.
@@ -5416,8 +5668,8 @@ class afcBridgeBox:
         other (Mainsail shows only the newest prompt).
 
         :param ev: ("new", uid), ("removed", uid, name), ("replace", uid),
-        ("firmware", uid, name, version it runs, the image offered) or
-        ("offer", key, title, lines, buttons)
+        ("firmware", uid, name, version it runs, the image offered),
+        ("offer", key, title, lines, buttons) or ("switch", chain name)
         """
         q = getattr(self, "_popup_queue", None)
         if q is None:
@@ -5437,13 +5689,15 @@ class afcBridgeBox:
             or eventtime < getattr(self, "_popup_active_until", 0.0)):
             return
         for ev in list(q):
-            # An update offer waits for an idle printer.
-            if (ev[0] == "firmware"
+            # An update offer and a filament switch offer wait for an idle printer.
+            if (ev[0] in ("firmware", "switch")
                 and self._is_printing()):
                 continue
             q.remove(ev)
             if ev[0] == "firmware":
                 self._prompt_firmware(*ev[1:])
+            elif ev[0] == "switch":
+                self._prompt_switch()
             elif ev[0] == "new":
                 if self._bay_of_uid(ev[1]) is None:
                     continue

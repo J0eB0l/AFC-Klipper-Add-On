@@ -51,6 +51,14 @@ at any other time stays where it is put.
 their difference is used: it is added to a lane's tube length while the lane goes through the
 outlet its unit does not start on. `AFC_BRIDGEBOX_SWITCH_CALIBRATION` measures them, and they may
 be set by hand.
+
+A chain can make its switch itself, and then the switch has no section: `AFC_BRIDGEBOX_SWITCH_ADD`
+gives a chain the switch that answers on its bus. That switch has the chain's name and each of
+its chain's units is found by loading. `AFC_BRIDGEBOX_SWITCH_SETUP` finds those inlets, and the
+toolhead each outlet feeds: a lane is fed through the outlet until a toolhead sensor reads it. Its
+lanes do not load until an outlet has its toolhead. What is found is kept with the chain, and the
+options above set one by hand in the chain's section, each with `switch_` before its name. A
+toolhead that loads by buffer ramming has no sensor to read, so its outlet is set by hand.
 """
 
 from __future__ import annotations
@@ -172,6 +180,14 @@ class afcBridgeBoxSwitch:
         self.name: str = self.fullname.split()[-1]
         self.chain_name: Optional[str] = config.get("chain", None)
         self.chain: Optional[afcBridgeBox] = None
+        # A switch its chain made has no section: its options are in the chain's.
+        self.chain_made: bool = config.getboolean("chain_made", False)
+        self.section: str = self.fullname
+        if self.chain_made:
+            self.section = f"AFC_BridgeBox {self.chain_name}"
+        # The options of a switch its chain made that the chain's section sets by hand.
+        self.by_hand: List[str] = [key.strip() for key in config.getlist("by_hand", [])
+                                   if key.strip()]
         self.inlets: Dict[str, List[str]] = {}
         self.outlets: Dict[str, Optional[str]] = {}
         # The tube from each outlet to its toolhead in mm. Only their difference is used.
@@ -184,13 +200,17 @@ class afcBridgeBoxSwitch:
                                                    above=0.)
         # The chains on both inlets, whose units are each found by loading (see _place_chains).
         self.finding: List[str] = [name for name in self.inlets["A"] if name in self.inlets["B"]]
+        # The chain of a switch it made is on both, unless its section puts it on one.
+        if (self.chain_made
+            and self.chain_name not in self.inlets["A"]
+            and self.chain_name not in self.inlets["B"]):
+            self.finding.append(self.chain_name)
         for letter in LETTERS:
             self.inlets[letter] = [name for name in self.inlets[letter]
                                    if name not in self.finding]
         self._check_section()
         # The outlet each inlet's units start on: its own letter, else the only outlet.
-        self.start: Dict[str, str] = {letter: letter if self.outlets[letter] is not None
-                                      else other(letter) for letter in LETTERS}
+        self.start: Dict[str, str] = self._starts()
         # The outlet each inlet rests on while it is empty.
         self.rest: Dict[str, str] = dict(self.start)
         self.lanes: List[AFCLane] = []
@@ -217,6 +237,12 @@ class afcBridgeBoxSwitch:
         self._offsets: Dict[Any, float] = {}
         # The inlets that read filament since this was last cleared.
         self._seen: Dict[str, bool] = {letter: False for letter in LETTERS}
+        # The extruders whose toolhead sensor is watched while a lane is fed through an outlet,
+        # and the ones that read filament since.
+        self._watched: Dict[str, AFCExtruder] = {}
+        self._read: List[str] = []
+        # Whether the prompt that offers to set the switch up was opened.
+        self._setup_offered = False
         # The units whose own calibration gave no tube length.
         self._lengthless: List[str] = []
         # The lane that is being measured by loading it: nothing is added to its tube.
@@ -248,6 +274,8 @@ class afcBridgeBoxSwitch:
                        self.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help)
         self._register("AFC_BRIDGEBOX_SWITCH_IDENTIFY", self.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY,
                        self.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY_help)
+        self._register("AFC_BRIDGEBOX_SWITCH_SETUP", self.cmd_AFC_BRIDGEBOX_SWITCH_SETUP,
+                       self.cmd_AFC_BRIDGEBOX_SWITCH_SETUP_help)
 
     def _register(self, command: str, handler: Any, desc: str) -> None:
         """
@@ -267,21 +295,71 @@ class afcBridgeBoxSwitch:
 
     def _check_section(self) -> None:
         """
-        Refuse a section that names no unit, no extruder or one extruder on both outlets.
+        Refuse a section that names no unit, no extruder or one extruder on both outlets. A
+        switch its chain made may name neither: its units and its extruders are found.
         """
         error_str = ""
-        if not (self.inlets["A"]
-                or self.inlets["B"]
-                or self.finding):
-            error_str = f"[{self.fullname}] names no unit. Add inlet_a or inlet_b."
-        elif (self.outlets["A"] is None
-              and self.outlets["B"] is None):
-            error_str = f"[{self.fullname}] names no extruder. Add outlet_a or outlet_b."
-        elif self.outlets["A"] == self.outlets["B"]:
-            error_str = (f"[{self.fullname}] has {self.outlets['A']} on both outlets. An "
+        if (not self.chain_made
+            and not (self.inlets["A"]
+                     or self.inlets["B"]
+                     or self.finding)):
+            error_str = f"[{self.section}] names no unit. Add inlet_a or inlet_b."
+        elif (not self.chain_made
+              and not self.extruders()):
+            error_str = f"[{self.section}] names no extruder. Add outlet_a or outlet_b."
+        elif (self.extruders()
+              and self.outlets["A"] == self.outlets["B"]):
+            error_str = (f"[{self.section}] has {self.outlets['A']} on both outlets. An "
                          "outlet feeds one extruder.")
         if error_str:
             raise error(error_str)
+
+    def _starts(self) -> Dict[str, str]:
+        """
+        The outlet each inlet's units start on: the one with its own letter, or the other one
+        when only that outlet has an extruder.
+
+        :return dict: inlet letter -> outlet letter
+        """
+        starts: Dict[str, str] = {}
+        for letter in LETTERS:
+            starts[letter] = letter
+            if (self.outlets[letter] is None
+                and self.outlets[other(letter)] is not None):
+                starts[letter] = other(letter)
+        return starts
+
+    def _key(self, key: str) -> str:
+        """
+        One of the switch's options as it is written: in its own section, or with `switch_`
+        before it in the section of the chain that made the switch.
+
+        :param key: the option's name in a switch section
+        :return str: the option's name where this switch's options are written
+        """
+        return f"switch_{key}" if self.chain_made else key
+
+    def _length_keys(self) -> str:
+        """
+        The two tube length options as they are written, for a message that says to set them.
+
+        :return str: both names
+        """
+        return f"{self._key('outlet_a_length')} and {self._key('outlet_b_length')}"
+
+    def _save(self, keys: Dict[str, Any]) -> None:
+        """
+        Save some of the switch's options: in its own section, or with its chain for a switch
+        the chain made.
+
+        :param keys: the option's name in a switch section -> its value, "" for one that is not
+        known any more
+        """
+        if self.chain_made:
+            self.chain.save_switch(keys)
+            return
+        for key, value in keys.items():
+            self.afc.function.ConfigRewrite(self.fullname, key, value)
 
     def handle_connect(self) -> None:
         """
@@ -307,6 +385,9 @@ class afcBridgeBoxSwitch:
                           and obj.unit in self.units())]
         # A lane AFC saved as loaded is in that toolhead, whatever was saved for the switch.
         self._saved_lanes = {**saved["lanes"], **self._saved_loaded()}
+        if not self.extruders():
+            # What was saved was for outlets the switch does not have now.
+            self._saved_lanes = {}
         self._by_print = [name for name in saved["by_print"] if name in self._saved_lanes]
         self._due_back = [name for name in saved["due_back"] if name in self._saved_lanes]
         self.confirmed = [unit for unit in saved["confirmed"]
@@ -369,19 +450,20 @@ class afcBridgeBoxSwitch:
         :param data: what AFC is about to save
         """
         away = {lane.name: lane.extruder_obj.name for lane in self.lanes
-                if (self.inlet_of(lane.unit) is not None
+                if (self.extruders()
+                    and self.inlet_of(lane.unit) is not None
                     and lane.extruder_obj.name != self.start_extruder(lane.unit))}
         data["system"].setdefault("switches", {})[self.name] = {
             "lanes": away, "confirmed": list(self.confirmed),
             "by_print": list(self._by_print), "due_back": list(self._due_back),
             "found": dict(self._found)}
 
-    def start_extruder(self, unit: str) -> str:
+    def start_extruder(self, unit: str) -> Optional[str]:
         """
         The extruder a unit's lanes start on: the one its inlet's own outlet feeds.
 
         :param unit: a unit of this switch
-        :return str: AFC extruder name
+        :return str: AFC extruder name, None while no outlet has its toolhead
         """
         return self.outlets[self.start[self.inlet_of(unit)]]
 
@@ -447,7 +529,7 @@ class afcBridgeBoxSwitch:
                 if (name not in chains
                     or name in known)]
         if both:
-            error_str = (f"[{self.fullname}] has {', '.join(both)} on both inlets. A unit "
+            error_str = (f"[{self.section}] has {', '.join(both)} on both inlets. A unit "
                          "enters one inlet.")
             raise error(error_str)
         for chain in chains.values():
@@ -459,7 +541,7 @@ class afcBridgeBoxSwitch:
                 self.inlets = place_chain(self.inlets, chain.name, chain.unit_names(),
                                           chain.name in known)
             except ValueError as e:
-                error_str = f"[{self.fullname}] {e}"
+                error_str = f"[{self.section}] {e}"
                 raise error(error_str)
 
     def _find_chain(self) -> afcBridgeBox:
@@ -476,12 +558,12 @@ class afcBridgeBoxSwitch:
             name = next(iter(chains))
         elif (name is None
               and chains):
-            error_str = (f"[{self.fullname}] needs chain: there are {len(chains)} BridgeBox "
+            error_str = (f"[{self.section}] needs chain: there are {len(chains)} BridgeBox "
                          f"chains ({', '.join(chains)}).")
         elif name is None:
-            error_str = f"[{self.fullname}] needs a BridgeBox chain, and none is configured."
+            error_str = f"[{self.section}] needs a BridgeBox chain, and none is configured."
         elif name not in chains:
-            error_str = (f"[{self.fullname}] names chain {name}, and there is no "
+            error_str = (f"[{self.section}] names chain {name}, and there is no "
                          f"[AFC_BridgeBox {name}] chain.")
         if error_str:
             raise error(error_str)
@@ -495,9 +577,9 @@ class afcBridgeBoxSwitch:
         """
         units = [obj.name for _name, obj in self.printer.lookup_objects()
                  if isinstance(obj, afcUnit)]
-        problems = [f"[{self.fullname}] names unit {name}, and there is no AFC unit of that name."
+        problems = [f"[{self.section}] names unit {name}, and there is no AFC unit of that name."
                     for name in self.units() if name not in units]
-        problems += [f"[{self.fullname}] names extruder {name}, and there is no "
+        problems += [f"[{self.section}] names extruder {name}, and there is no "
                      f"[AFC_extruder {name}]."
                      for name in self.extruders()
                      if self.printer.lookup_object(f"AFC_extruder {name}", None) is None]
@@ -516,10 +598,10 @@ class afcBridgeBoxSwitch:
             shared = ([unit for unit in self.units() if unit in switch.units()]
                       + [name for name in self.extruders() if name in switch.extruders()])
             if switch._find_chain() is self.chain:
-                problems.append(f"[{self.fullname}] and [{switch.fullname}] are both on chain "
+                problems.append(f"[{self.section}] and [{switch.section}] are both on chain "
                                 f"{self.chain_name}. A chain's bus carries one filament switch.")
             if shared:
-                problems.append(f"[{self.fullname}] and [{switch.fullname}] both name "
+                problems.append(f"[{self.section}] and [{switch.section}] both name "
                                 f"{', '.join(shared)}.")
         return problems
 
@@ -559,6 +641,16 @@ class afcBridgeBoxSwitch:
         """
         return (f"the inlet of {unit} is not known. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY "
                 f"UNIT={unit} first.")
+
+    def _unset(self) -> str:
+        """
+        What to do about a switch none of whose outlets has its toolhead.
+
+        :return str: the sentence an error about that ends with
+        """
+        return ("the toolhead each outlet feeds is not known. Run AFC_BRIDGEBOX_SWITCH_SETUP "
+                f"SWITCH={self.name} first, or set {self._key('outlet_a')} and "
+                f"{self._key('outlet_b')}.")
 
     def extruders(self) -> List[str]:
         """
@@ -791,8 +883,12 @@ class afcBridgeBoxSwitch:
     def _offer(self) -> None:
         """
         Open a prompt, once for each AMS, that offers to find the inlet of the units whose
-        inlet is not known.
+        inlet is not known. A switch that has no toolhead on an outlet yet offers to be set up
+        first, once.
         """
+        if not self.extruders():
+            self._offer_setup()
+            return
         unfound = self.unfound()
         uids = [self._held.get(unit) for unit in unfound]
         new = [uid for uid in uids if uid not in self._offered]
@@ -808,6 +904,32 @@ class afcBridgeBoxSwitch:
                  "Put a spool in the unit and pick it. One lane is fed to the switch and reeled "
                  "back, and a lane that is loaded through the switch is unloaded first."]
         self.chain.offer(self.name, f"{self.name} new AMS", lines, buttons)
+
+    def _offer_setup(self) -> None:
+        """
+        Open the prompt, once, that offers to set up a switch none of whose outlets has its
+        toolhead. With a toolhead that loads by buffer ramming it says to set the outlets by
+        hand, and offers the inlets alone.
+        """
+        if self._setup_offered:
+            return
+        self._setup_offered = True
+        lines = [f"{self.name}: the filament switch is not set up yet, and its lanes do not "
+                 "load until it is."]
+        label = "Set up"
+        ramming = self._ramming()
+        if ramming:
+            label = "Find the inlets"
+            lines += [ramming,
+                      "The inlets can be found now. Put a spool in each unit, then pick "
+                      f"{label}: one lane of each unit is fed to the switch and reeled back."]
+        else:
+            lines.append("Put a spool in each unit and unload the toolheads the switch feeds, "
+                         f"then pick {label}. One lane of each unit is fed to the switch to "
+                         "find its inlet, then a lane is fed through each outlet until a "
+                         "toolhead sensor reads it. Each lane is reeled back.")
+        buttons = [(label, f"AFC_BRIDGEBOX_SWITCH_SETUP SWITCH={self.name}", "primary")]
+        self.chain.offer(self.name, f"{self.name} filament switch", lines, buttons)
 
     def _send_back(self) -> None:
         """
@@ -863,6 +985,9 @@ class afcBridgeBoxSwitch:
 
         :return list: what keeps an inlet from getting there, one message each
         """
+        if not self.extruders():
+            # There is nowhere to point an inlet until an outlet has its toolhead.
+            return []
         try:
             inlets = self.state()["inlets"]
         except SwitchError as ex:
@@ -1070,7 +1195,8 @@ class afcBridgeBoxSwitch:
     def handle_tool_load_prepare(self, lane: AFCLane, gcmd: AFCGcmd) -> bool:
         """
         Point a lane's inlet at its extruder's outlet before AFC loads the lane. A lane of a
-        unit whose inlet is not known is not loaded.
+        unit whose inlet is not known is not loaded, and neither is any lane of a switch none
+        of whose outlets has its toolhead.
 
         :param lane: the lane about to be loaded
         :param gcmd: command context the load runs through
@@ -1080,9 +1206,13 @@ class afcBridgeBoxSwitch:
         if (lane.tool_loaded
             or lane.unit not in self.units()):
             return True
-        if inlet is None:
-            self.afc.error.AFC_error(f"{self.name}: {lane.name} is not loaded, "
-                                     f"{self._need(lane.unit)}",
+        need = ""
+        if not self.extruders():
+            need = self._unset()
+        elif inlet is None:
+            need = self._need(lane.unit)
+        if need:
+            self.afc.error.AFC_error(f"{self.name}: {lane.name} is not loaded, {need}",
                                      pause=self.afc.function.in_print(), gcmd=gcmd)
             return False
         # Set before anything pauses, so the watch does not send this inlet back to rest.
@@ -1222,9 +1352,11 @@ class afcBridgeBoxSwitch:
                                       if (lane.unit in live
                                           and lane.extruder_obj.name == name)), key=in_order))
             lines.append(f"Outlet {letter}: {name or 'no extruder'} ({lanes or 'no lane'})")
+        if not self.extruders():
+            lines.append("Outlets not set up: run AFC_BRIDGEBOX_SWITCH_SETUP, or set "
+                         f"{self._key('outlet_a')} and {self._key('outlet_b')}")
         if not self.calibrated():
-            lines.append("Tube lengths not set: run AFC_CALIBRATION, or set outlet_a_length and "
-                         "outlet_b_length")
+            lines.append(f"Tube lengths not set: run AFC_CALIBRATION, or set {self._length_keys()}")
         waiting = [unit for unit in live if unit not in self.confirmed]
         if waiting:
             lines.append(f"Not seen at their inlet yet: {', '.join(waiting)}")
@@ -1371,15 +1503,21 @@ class afcBridgeBoxSwitch:
         """
         Put one of this switch's lanes on one of its extruders and save the choice. While a
         print runs the choice is for that print, at any other time it is kept. A lane of a unit
-        whose inlet is not known is refused.
+        whose inlet is not known is refused, and so is any lane of a switch none of whose
+        outlets has its toolhead.
 
         :param lane: the lane
         :param extruder: AFC extruder name, None for the one the lane's unit starts on
         :param unload: True to unload the lane first when it is loaded in a toolhead
         :param gcmd: the command, for its answer and the unload
         """
-        if self.inlet_of(lane.unit) is None:
-            error_str = f"{self.name}: {lane.name} stays where it is, {self._need(lane.unit)}"
+        need = ""
+        if not self.extruders():
+            need = self._unset()
+        elif self.inlet_of(lane.unit) is None:
+            need = self._need(lane.unit)
+        if need:
+            error_str = f"{self.name}: {lane.name} stays where it is, {need}"
             raise gcmd.error(error_str)
         extruder = extruder or self.start_extruder(lane.unit)
         was = lane.extruder_obj.name
@@ -1448,7 +1586,8 @@ class afcBridgeBoxSwitch:
         A switch with units whose inlet is found by loading first offers what to calibrate, the
         inlets or the outlets, and OUTLETS=1 goes on to the units that can measure. A prompt
         says what is being done, and the prompt that offers the units opens again with the
-        outcome.
+        outcome. On a switch its chain made, the prompt for the outlets also offers to find the
+        toolhead each outlet feeds.
 
         Usage
         -------
@@ -1466,11 +1605,8 @@ class afcBridgeBoxSwitch:
         if name is None:
             if unit is not None:
                 self._lane_menu(unit, gcmd)
-            elif (self._floating
-                  and not gcmd.get_int("OUTLETS", 0)):
-                self._menu(gcmd)
             else:
-                self._calibration_menu(gcmd)
+                self._open_menu(gcmd, bool(gcmd.get_int("OUTLETS", 0)))
             return
         lane = self.lane(name)
         prompt = AFCprompt(gcmd, self.logger)
@@ -1494,19 +1630,35 @@ class afcBridgeBoxSwitch:
             raise
         for letter in LETTERS:
             self.lengths[letter] = round(lengths[letter], 1)
-            self.afc.function.ConfigRewrite(self.fullname, f"outlet_{letter.lower()}_length",
-                                            self.lengths[letter])
+        self._save({f"outlet_{letter.lower()}_length": self.lengths[letter]
+                    for letter in LETTERS})
         found = (f"{self.name}: with {lane.name} the tube through outlet A is "
                  f"{self.lengths['A']} mm and through outlet B {self.lengths['B']} mm")
         gcmd.respond_info(found)
         self._calibration_menu(gcmd, found)
 
-    def _menu(self, gcmd: GCodeCommand) -> None:
+    def _open_menu(self, gcmd: GCodeCommand, outlets: bool, outcome: str = "") -> None:
+        """
+        Open the prompt a calibration starts from: the one that offers what to calibrate on a
+        switch with units whose inlet is found by loading, else the one for the outlets.
+
+        :param gcmd: the command the prompt answers
+        :param outlets: True for the outlets' prompt on any switch
+        :param outcome: what the last run gave or why it failed, shown above the offer
+        """
+        if (self._floating
+            and not outlets):
+            self._menu(gcmd, outcome)
+        else:
+            self._calibration_menu(gcmd, outcome)
+
+    def _menu(self, gcmd: GCodeCommand, outcome: str = "") -> None:
         """
         Open the prompt that offers what to calibrate on a switch with units whose inlet is
         found by loading: the inlets or the outlets.
 
         :param gcmd: the command the prompt answers
+        :param outcome: what the last run gave or why it failed, shown above the offer
         """
         buttons = [("Inlets", f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}", "primary"),
                    ("Outlets", f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name} OUTLETS=1",
@@ -1517,6 +1669,12 @@ class afcBridgeBoxSwitch:
         unfound = self.unfound()
         if unfound:
             text += f" Inlet not known yet: {', '.join(unfound)}."
+        if not self.extruders():
+            text += " The toolhead each outlet feeds is not known yet: Outlets finds them."
+        elif not self.calibrated():
+            text += " The tube lengths are not measured yet."
+        if outcome:
+            text = f"{outcome}\n{text}"
         back = [("Back to unit selection", "AFC_CALIBRATION", "info")]
         AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Calibration", text, buttons,
                                                      True, None, back)
@@ -1534,12 +1692,15 @@ class afcBridgeBoxSwitch:
 
     def _calibration_menu(self, gcmd: GCodeCommand, outcome: str = "") -> None:
         """
-        Open the prompt that offers the units whose lanes can measure the outlets.
+        Open the prompt that offers the units whose lanes can measure the outlets, and on a
+        switch its chain made to find the toolhead each outlet feeds.
 
         :param gcmd: the command the prompt answers
         :param outcome: what the last run measured or why it failed, shown above the offer
         """
-        lanes = self._measuring_lanes()
+        lanes: Dict[str, List[AFCLane]] = {}
+        if self.extruders():
+            lanes = self._measuring_lanes()
         command = f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}"
         buttons = [(unit, f"{command} UNIT={unit}", "primary" if index % 2 == 0 else "secondary")
                    for index, unit in enumerate(lanes)]
@@ -1552,7 +1713,15 @@ class afcBridgeBoxSwitch:
                      "unloaded again to measure.")
         if not buttons:
             text = ("No lane that can measure is loaded in its unit. Load one, or set "
-                    "outlet_a_length and outlet_b_length in the switch's section by hand.")
+                    f"{self._length_keys()} in [{self.section}] by hand.")
+        if not self.extruders():
+            text = ("The toolhead each outlet feeds is not known yet. Find the toolheads feeds "
+                    "a lane through each outlet until a toolhead sensor reads it, and reels it "
+                    "back. Unload the toolheads first.")
+        if self._to_find():
+            buttons.append(("Find the toolheads",
+                            f"AFC_BRIDGEBOX_SWITCH_SETUP SWITCH={self.name} OUTLETS=1",
+                            "default"))
         if outcome:
             text = f"{outcome}\n{text}"
         AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Outlets", text, buttons,
@@ -1571,8 +1740,7 @@ class afcBridgeBoxSwitch:
             error_str = f"{self.name}: {unit} is not a unit of this switch"
         elif not lanes:
             error_str = (f"{self.name}: no lane that can measure is loaded in {unit}. Load one, "
-                         "pick another unit, or set outlet_a_length and outlet_b_length by "
-                         "hand.")
+                         f"pick another unit, or set {self._length_keys()} by hand.")
         if error_str:
             raise gcmd.error(error_str)
         command = f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}"
@@ -1626,8 +1794,7 @@ class afcBridgeBoxSwitch:
             error_str = f"{self.name}: one outlet is in use, so there is nothing to measure"
         elif tube is None:
             error_str = (f"{self.name}: {lane.name} has no hub that holds a tube length. Use a "
-                         "lane of another unit, or set outlet_a_length and outlet_b_length by "
-                         "hand.")
+                         f"lane of another unit, or set {self._length_keys()} by hand.")
         elif loaded:
             error_str = (f"{self.name}: unload {', '.join(dict.fromkeys(loaded))} first. The "
                          "toolheads have to be empty to measure.")
@@ -1693,8 +1860,7 @@ class afcBridgeBoxSwitch:
             if lane.unit not in self._lengthless:
                 self._lengthless.append(lane.unit)
             error_str = (f"{self.name}: the unit of {lane.name} measures no tube length. Use a "
-                         "lane of another unit, or set outlet_a_length and outlet_b_length by "
-                         "hand.")
+                         f"lane of another unit, or set {self._length_keys()} by hand.")
         elif not self._seen[inlet]:
             saw = (f"Inlet {other(inlet)} did" if self._seen[other(inlet)]
                    else "Neither inlet did")
@@ -1807,29 +1973,54 @@ class afcBridgeBoxSwitch:
             and unit.lower() == "all"):
             units = self._all()
         prompt = AFCprompt(gcmd, self.logger)
-        # What each unit before this one gave.
+        # What each unit before the one that is being found gave.
         done: List[str] = []
+        try:
+            self._identify_units(units, name, done, prompt, gcmd)
+        except SwitchError as ex:
+            self._identify_menu(gcmd, "\n".join(done + [str(ex)]))
+            raise gcmd.error(str(ex))
+        except Exception:
+            # The prompt has no button, so it is not left open.
+            prompt.p_end()
+            raise
+        self._identify_menu(gcmd, "\n".join(done))
+
+    def _identify_units(self, units: List[Optional[str]], name: Optional[str], done: List[str],
+                        prompt: AFCprompt, gcmd: GCodeCommand) -> None:
+        """
+        Find the inlet of each of some units, one after the other until one fails, with a
+        prompt that says what is being done.
+
+        :param units: the units, or None for the unit of the lane that is named
+        :param name: the lane to feed, None for each unit's first that holds filament
+        :param done: what each unit gave, added to as each is found
+        :param prompt: the prompt that says what is being done
+        :param gcmd: the command the unloads and the feeds run through
+        """
         for unit in units:
-            try:
-                lane = self._identify_lane(unit, name)
-                text = (f"Finding the inlet of {lane.unit}: {lane.name} is fed to the switch "
-                        "and reeled back. A lane that is loaded through the switch is unloaded "
-                        "first.")
-                prompt.create_custom_p(f"{self.name} Inlets", "\n".join(done + [text]), None,
-                                       False, None, None)
-                inlet = self._identify(lane, gcmd)
-            except SwitchError as ex:
-                self._identify_menu(gcmd, "\n".join(done + [str(ex)]))
-                raise gcmd.error(str(ex))
-            except Exception:
-                # The prompt has no button, so it is not left open.
-                prompt.p_end()
-                raise
-            found = (f"{self.name}: {lane.unit} enters inlet {inlet}. Its lanes start on "
-                     f"{self.start_extruder(lane.unit)}.")
+            lane = self._identify_lane(unit, name)
+            text = (f"Finding the inlet of {lane.unit}: {lane.name} is fed to the switch and "
+                    "reeled back. A lane that is loaded through the switch is unloaded first.")
+            prompt.create_custom_p(f"{self.name} Inlets", "\n".join(done + [text]), None,
+                                   False, None, None)
+            found = self._entered(lane.unit, self._identify(lane, gcmd))
             gcmd.respond_info(found)
             done.append(found)
-        self._identify_menu(gcmd, "\n".join(done))
+
+    def _entered(self, unit: str, inlet: str) -> str:
+        """
+        What finding a unit's inlet gave.
+
+        :param unit: the unit
+        :param inlet: the inlet found for it, `A` or `B`
+        :return str: the sentence that says so, with the extruder its lanes start on when the
+        outlets have their toolheads
+        """
+        found = f"{self.name}: {unit} enters inlet {inlet}."
+        if self.extruders():
+            found += f" Its lanes start on {self.start_extruder(unit)}."
+        return found
 
     def _all(self) -> List[str]:
         """
@@ -1935,7 +2126,8 @@ class afcBridgeBoxSwitch:
         error_str = ""
         if not saw:
             error_str = (f"{self.name}: {lane.name} was fed and neither inlet read filament. "
-                         f"Check that {unit} is plumbed into the switch.")
+                         f"Put the spool of {unit} in again so its feeder takes the filament, "
+                         "and check that the unit is plumbed into the switch.")
         elif len(saw) > 1:
             error_str = (f"{self.name}: both inlets read filament while {lane.name} was fed, "
                          f"so the inlet of {unit} is not known. Check that nothing else is in "
@@ -1988,6 +2180,333 @@ class afcBridgeBoxSwitch:
         """
         self._look()
         return any(self._seen.values())
+
+    cmd_AFC_BRIDGEBOX_SWITCH_SETUP_help = ("AFC_BRIDGEBOX_SWITCH_SETUP [SWITCH=<switch>] "
+                                           "[OUTLETS=1] [LANE=<lane>]. Finds the inlet of each "
+                                           "unit of a filament switch and the toolhead each of "
+                                           "its outlets feeds")
+
+    def cmd_AFC_BRIDGEBOX_SWITCH_SETUP(self, gcmd: GCodeCommand) -> None:
+        """
+        Set up a filament switch by feeding lanes through it.
+
+        One lane of each unit whose inlet is not known is fed to the switch and reeled back, as
+        AFC_BRIDGEBOX_SWITCH_IDENTIFY does. Then, on a switch its chain made that has no
+        toolhead on an outlet yet, a lane is fed through each outlet until a toolhead sensor
+        reads it, and reeled back: that toolhead is the one the outlet feeds. The toolheads
+        have to be empty. An outlet the chain's section sets stays as it is set, and one
+        through which no sensor read the lane stays as it was. A toolhead that loads by buffer
+        ramming has no sensor to read, so its outlet is set by hand. A unit whose inlet is not
+        found does not keep the rest from being set up. OUTLETS=1 leaves the inlets out and
+        finds the toolheads, also when they are known, and LANE names the lane that is fed
+        through the outlets. A prompt says what is being done, and the calibration prompt opens
+        again with the outcome.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_SWITCH_SETUP [SWITCH=<switch>] [OUTLETS=1] [LANE=<lane>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_SWITCH_SETUP SWITCH=Chain_1
+        ```
+        """
+        outlets = bool(gcmd.get_int("OUTLETS", 0))
+        name = gcmd.get("LANE", None)
+        prompt = AFCprompt(gcmd, self.logger)
+        # What each step before the one that is being run gave, and why the ones that failed
+        # did. A step that fails does not keep the ones after it from being run.
+        done: List[str] = []
+        failed: List[str] = []
+        try:
+            for unit in ([] if outlets else self.unfound()):
+                try:
+                    self._identify_units([unit], None, done, prompt, gcmd)
+                except SwitchError as ex:
+                    failed.append(str(ex))
+                    done.append(str(ex))
+            if (outlets
+                or not self.extruders()):
+                try:
+                    self._find_toolheads(name, done, prompt, gcmd)
+                except SwitchError as ex:
+                    failed.append(str(ex))
+                    done.append(str(ex))
+        except Exception:
+            # The prompt has no button, so it is not left open.
+            prompt.p_end()
+            raise
+        if not done:
+            done.append(f"{self.name}: every inlet and the toolhead of an outlet are known, so "
+                        "there is nothing to set up.")
+        self._open_menu(gcmd, outlets, "\n".join(done))
+        if failed:
+            error_str = "\n".join(failed)
+            raise gcmd.error(error_str)
+
+    def _find_toolheads(self, name: Optional[str], done: List[str], prompt: AFCprompt,
+                        gcmd: GCodeCommand) -> None:
+        """
+        Find the toolhead each outlet feeds with one lane, with a prompt that says what is being
+        done.
+
+        :param name: the lane to feed, None for the first that can be
+        :param done: what each step gave, added to with what each outlet gave
+        :param prompt: the prompt that says what is being done
+        :param gcmd: the command the unloads and the feeds run through
+        """
+        lane = self._outlet_lane(name)
+        text = (f"Finding the toolhead each outlet feeds: {lane.name} is fed through each "
+                "outlet until a toolhead sensor reads it, and reeled back.")
+        prompt.create_custom_p(f"{self.name} Outlets", "\n".join(done + [text]), None, False,
+                               None, None)
+        found = self._find_outlets(lane, gcmd)
+        gcmd.respond_info("\n".join(found))
+        done.extend(found)
+
+    def _to_find(self) -> List[str]:
+        """
+        The outlets whose toolhead can be found by feeding a lane: those of a switch its chain
+        made that the chain's section does not set.
+
+        :return list: outlet letters
+        """
+        if not self.chain_made:
+            return []
+        return [letter for letter in LETTERS if f"outlet_{letter.lower()}" not in self.by_hand]
+
+    def _ramming(self) -> str:
+        """
+        Why the toolheads cannot be found by feeding a lane, when an extruder the switch's lanes
+        are on loads by buffer ramming: it has no toolhead sensor to read.
+
+        :return str: the sentence that says so and what to set by hand, "" when none does
+        """
+        names = sorted({lane.extruder_obj.name for lane in self.lanes
+                        if lane.extruder_obj.tool_start == "buffer"})
+        if not names:
+            return ""
+        return (f"{self.name}: the toolhead each outlet feeds cannot be found by feeding a "
+                f"lane. With buffer ramming on {' and '.join(names)} there is no toolhead "
+                f"sensor to read. Set {self._key('outlet_a')} and {self._key('outlet_b')} in "
+                f"[{self.section}] by hand, then RESTART.")
+
+    def _sensor(self, extruder: AFCExtruder) -> Optional[bool]:
+        """
+        What an extruder's toolhead sensor reads.
+
+        :param extruder: an AFC extruder
+        :return bool: True with filament at the sensor, None for an extruder that has no
+        toolhead sensor of its own
+        """
+        sensor = extruder.fila_tool_start
+        if (sensor is None
+            or extruder.tool_start == "virtual"):
+            return None
+        # A motion sensor says filament is there until it has moved, its switch says it now.
+        if hasattr(sensor, "runout_buttun_state"):
+            return bool(sensor.runout_buttun_state)
+        return bool(extruder.tool_start_state)
+
+    def _toolheads(self) -> Dict[str, AFCExtruder]:
+        """
+        The extruders an outlet's toolhead can be found among: every AFC extruder with a
+        toolhead sensor of its own that reads empty, but for the ones another filament switch
+        feeds.
+
+        :return dict: extruder name -> extruder
+        """
+        fed = [name for _name, switch in self.printer.lookup_objects("AFC_BridgeBox_switch")
+               if switch is not self
+               for name in switch.extruders()]
+        return {extruder.name: extruder
+                for _name, extruder in self.printer.lookup_objects("AFC_extruder")
+                if (extruder.name not in fed
+                    and self._sensor(extruder) is False)}
+
+    def _saw_toolhead(self) -> bool:
+        """
+        Note the watched extruders whose toolhead sensor reads filament now, and say whether
+        one did since `_read` was cleared.
+
+        :return bool: True once a watched toolhead sensor read filament
+        """
+        self._read += [name for name, extruder in self._watched.items()
+                       if (name not in self._read
+                           and self._sensor(extruder))]
+        return bool(self._read)
+
+    def _outlet_lane(self, name: Optional[str]) -> AFCLane:
+        """
+        The lane to feed through the outlets: the one named, else the first that holds filament
+        of a unit whose inlet is known.
+
+        :param name: the lane to feed, None for the first that can be
+        :return AFCLane: the lane
+        """
+        lane = self.lane(name) if name is not None else None
+        if name is None:
+            lane = next((held for held in self.lanes
+                         if (held.load_state
+                             and self.inlet_of(held.unit) is not None)), None)
+        error_str = ""
+        if (name is not None
+            and lane is None):
+            error_str = f"{self.name}: {name} is not a lane of this switch"
+        elif lane is None:
+            error_str = (f"{self.name}: no lane of a unit whose inlet is known holds filament. "
+                         "Put a spool in one first.")
+        elif self.inlet_of(lane.unit) is None:
+            error_str = (f"{self.name}: {lane.name} cannot find the toolheads, "
+                         f"{self._need(lane.unit)}")
+        elif not lane.load_state:
+            error_str = f"{self.name}: {lane.name} holds no filament. Put a spool in it first."
+        if error_str:
+            raise SwitchError(error_str)
+        return lane
+
+    def _find_outlets(self, lane: AFCLane, gcmd: GCodeCommand) -> List[str]:
+        """
+        Find the toolhead each outlet feeds that the chain's section does not set, one outlet
+        after the other with one lane. What is found is put on the outlets and saved, also when
+        a later outlet fails.
+
+        :param lane: a lane that holds filament, of a unit whose inlet is known
+        :param gcmd: the command the unloads and the feeds run through
+        :return list: what each outlet gave, one line each
+        """
+        inlet = self.inlet_of(lane.unit)
+        letters = self._to_find()
+        error_str = ""
+        if self.afc.function.in_print():
+            error_str = f"{self.name}: the toolheads are not found while a print runs"
+        elif not letters:
+            error_str = (f"{self.name}: its outlets are set in [{self.section}], so there is no "
+                         "toolhead to find")
+        elif self._ramming():
+            error_str = self._ramming()
+        if error_str:
+            raise SwitchError(error_str)
+        found: Dict[str, str] = {}
+        lines: List[str] = []
+        try:
+            with self._own():
+                self._clear(gcmd)
+                self._check_toolheads()
+                for letter in letters:
+                    taken = [self.outlets[fixed] for fixed in LETTERS if fixed not in letters]
+                    name = self._find_outlet(lane, inlet, letter, taken + list(found.values()),
+                                             gcmd)
+                    if name is None:
+                        lines.append(f"{self.name}: no toolhead sensor read {lane.name} through "
+                                     f"outlet {letter}, which stays as it was. An outlet that "
+                                     "feeds a toolhead with no sensor is set with "
+                                     f"{self._key(f'outlet_{letter.lower()}')}.")
+                    else:
+                        found[letter] = name
+                        lines.append(f"{self.name}: outlet {letter} feeds {name}.")
+                    if self.state()["inlets"][inlet]["filament"]:
+                        error_str = (f"{self.name}: {lane.name} was not reeled back from outlet "
+                                     f"{letter} and is still in inlet {inlet}. Run LANE_UNLOAD "
+                                     f"LANE={lane.name}, then find the toolheads again.")
+                        raise SwitchError(error_str)
+        finally:
+            self._set_outlets(found)
+        if not self.extruders():
+            error_str = (f"{self.name}: no toolhead sensor read {lane.name} through an outlet. "
+                         "Check the tubes from the switch to the toolheads, or set "
+                         f"{self._key('outlet_a')} and {self._key('outlet_b')} by hand.")
+            raise SwitchError(error_str)
+        return lines
+
+    def _check_toolheads(self) -> None:
+        """
+        Refuse to feed a lane through the outlets while the toolhead sensor of an extruder the
+        switch's lanes are on reads filament: a lane cannot be seen arriving there.
+        """
+        full = sorted({held.extruder_obj.name for held in self.lanes
+                       if self._sensor(held.extruder_obj)})
+        if full:
+            error_str = (f"{self.name}: the toolhead sensor of {' and '.join(full)} reads "
+                         "filament. Unload it first, a lane cannot be seen arriving there.")
+            raise SwitchError(error_str)
+
+    def _find_outlet(self, lane: AFCLane, inlet: str, outlet: str, taken: List[Optional[str]],
+                     gcmd: GCodeCommand) -> Optional[str]:
+        """
+        Find the toolhead one outlet feeds: point the lane's inlet at the outlet, feed the lane
+        until a toolhead sensor reads it, and reel it back.
+
+        :param lane: the lane to feed
+        :param inlet: the lane's inlet
+        :param outlet: the outlet to feed it through
+        :param taken: the extruders the other outlet feeds, which are not watched
+        :param gcmd: the command the feed runs through
+        :return str: the extruder whose toolhead sensor read the lane, None when none did
+        """
+        self._watched = {name: extruder for name, extruder in self._toolheads().items()
+                         if name not in taken}
+        self._read = []
+        error_str = ""
+        if not self._watched:
+            error_str = (f"{self.name}: no toolhead sensor that reads empty is left to find "
+                         f"outlet {outlet} with")
+            raise SwitchError(error_str)
+        self.set_inlet(inlet, outlet)
+        lane.unit_obj.feed_to(lane, self._saw_toolhead, gcmd)
+        self._wait_clear(inlet)
+        if len(self._read) > 1:
+            error_str = (f"{self.name}: the toolhead sensors of {' and '.join(self._read)} read "
+                         f"filament while {lane.name} was fed through outlet {outlet}, so its "
+                         "toolhead is not known.")
+            raise SwitchError(error_str)
+        return self._read[0] if self._read else None
+
+    def _set_outlets(self, found: Dict[str, str]) -> None:
+        """
+        Put the extruders that were found on their outlets and save them. When an outlet's
+        extruder changed, the tube lengths that were measured are dropped, and every unit's
+        lanes go to the extruder they start on now.
+
+        :param found: outlet letter -> the extruder found for it
+        """
+        was = dict(self.outlets)
+        for letter, name in found.items():
+            # An extruder is on one outlet.
+            if self.outlets[other(letter)] == name:
+                self.outlets[other(letter)] = None
+            self.outlets[letter] = name
+        if self.outlets == was:
+            return
+        keys: Dict[str, Any] = {}
+        for letter in LETTERS:
+            key = f"outlet_{letter.lower()}"
+            if key not in self.by_hand:
+                keys[key] = self.outlets[letter] or ""
+            if f"{key}_length" not in self.by_hand:
+                self.lengths[letter] = None
+                keys[f"{key}_length"] = ""
+        self._save(keys)
+        self.start = self._starts()
+        self.rest = dict(self.start)
+        # What was kept for the lanes was for the outlets as they were.
+        self._saved_lanes = {}
+        self._by_print = []
+        self._due_back = []
+        for unit in self.units():
+            if unit in self.afc.units:
+                self._start_unit(self.afc.units[unit])
+        self.afc.save_vars()
+
+    def forget(self) -> None:
+        """
+        Forget what was found for the switch by loading and saved with AFC: the inlet of each
+        AMS, and the units seen at their inlet.
+        """
+        self._found = {}
+        self.confirmed = []
+        self.afc.save_vars()
 
     def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
         """

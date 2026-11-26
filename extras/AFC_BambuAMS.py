@@ -12141,6 +12141,7 @@ class afcBambuAMS(afcUnit):
         if self._bridge is None:
             self.logger.warning(f"{self.name}: bridge not connected, cannot feed {lane.name}")
             return False
+        self._wait_scan(self._slot_of(lane))
         ok, slot = self.select_lane(lane, gcmd=gcmd)
         if not ok:
             self.logger.warning(f"{self.name}: lane {lane.name} is not mapped to an AMS slot")
@@ -12179,6 +12180,27 @@ class afcBambuAMS(afcUnit):
         self._wait_feed_stopped()
         self.eject_lane(lane, gcmd)
         return found
+
+    def _wait_scan(self, slot: Optional[int]) -> float:
+        """
+        Wait while the unit scans the spool in a bay, for `SCAN_VERDICT_CAP` at the most: a unit
+        does not feed a spool it is scanning.
+
+        :param slot: 0-based AMS slot index on this unit, None for a lane that has none
+        :return float: seconds waited
+        """
+        reactor = self.afc.reactor
+        began = reactor.monotonic()
+        now = began
+        while (slot is not None
+               and self._scan_t0[slot] is not None
+               and now - began < self.SCAN_VERDICT_CAP):
+            reactor.pause(now + 0.5)
+            now = reactor.monotonic()
+        if now > began:
+            self.logger.debug(f"{self.name}: waited {now - began:.1f}s for the scan of the "
+                              f"spool in slot {slot} before feeding it")
+        return now - began
 
     def _report_seqs(self) -> Tuple[Optional[tuple], int]:
         """

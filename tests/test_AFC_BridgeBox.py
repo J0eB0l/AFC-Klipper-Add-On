@@ -2682,6 +2682,12 @@ class TestAfcBridgeBoxInit:
             "Set or show the filament switch on a chain's bus: "
             "AFC_BRIDGEBOX_SWITCH [CHAIN=<chain>] [ROUTE=<0-3>]. ROUTE=0 "
             "releases it, 1 and 2 move one actuator each, 3 moves both."),
+        "AFC_BRIDGEBOX_SWITCH_ADD": (
+            "Give a chain the filament switch on its bus, which is set up after a restart: "
+            "AFC_BRIDGEBOX_SWITCH_ADD [CHAIN=<chain>]"),
+        "AFC_BRIDGEBOX_SWITCH_FORGET": (
+            "Take a chain's own filament switch away, with what was found for it: "
+            "AFC_BRIDGEBOX_SWITCH_FORGET [CHAIN=<chain>]"),
     }
 
     @staticmethod
@@ -2704,7 +2710,9 @@ class TestAfcBridgeBoxInit:
                         m.cmd_AFC_BRIDGEBOX_RESET_WIFI,
                     "AFC_BRIDGEBOX_FORGET_BOARD":
                         m.cmd_AFC_BRIDGEBOX_FORGET_BOARD,
-                    "AFC_BRIDGEBOX_SWITCH": m.cmd_AFC_BRIDGEBOX_SWITCH}
+                    "AFC_BRIDGEBOX_SWITCH": m.cmd_AFC_BRIDGEBOX_SWITCH,
+                    "AFC_BRIDGEBOX_SWITCH_ADD": m.cmd_AFC_BRIDGEBOX_SWITCH_ADD,
+                    "AFC_BRIDGEBOX_SWITCH_FORGET": m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET}
         assert self._bridgebox_mux(m.printer) == {
             cmd: ("CHAIN", {"chain1": fn, None: fn})
             for cmd, fn in handlers.items()}
@@ -2719,6 +2727,35 @@ class TestAfcBridgeBoxInit:
                       None: m1.cmd_AFC_BRIDGEBOX_REPLACE,
                       "chain2": m2.cmd_AFC_BRIDGEBOX_REPLACE})
         _bbx_quiet(printer)
+
+    def test_a_chain_with_no_filament_switch_of_its_own_makes_none(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER)
+        assert (m._switch_wanted, m._switch_keys, m._switch_seen) == (None, None, False)
+        assert "AFC_BridgeBox_switch chain1" not in _bbx_loaded(m)
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_with_a_filament_switch_of_its_own_makes_its_section_last(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, filament_switch=True,
+                      switch_outlet_a="extruder")
+        assert (m._switch_wanted, m._switch_seen) == (True, False)
+        assert m._switch_keys == {"outlet_a": "extruder", "by_hand": "outlet_a"}
+        assert _bbx_loaded(m)[-1] == "AFC_BridgeBox_switch chain1"
+        assert _bbx_keys(m, "AFC_BridgeBox_switch chain1") == {
+            "chain": "chain1", "chain_made": "True", "outlet_a": "extruder",
+            "by_hand": "outlet_a"}
+        _bbx_quiet(m.printer)
+
+    def test_filament_switch_false_is_kept_as_no(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, filament_switch=False)
+        assert (m._switch_wanted, m._switch_keys) == (False, None)
+        assert "AFC_BridgeBox_switch chain1" not in _bbx_loaded(m)
+        _bbx_quiet(m.printer)
+
+    def test_the_chain_is_asked_before_a_lane_loads(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m.printer._event_handlers["afc:tool_load_prepare"] == [
+            m._handle_tool_load_prepare]
+        _bbx_quiet(m.printer)
 
     def test_every_command_help_shows_chain(self, tmp_path):
         printer = make_printer()
@@ -5437,9 +5474,152 @@ class TestAfcBridgeBoxBufferSection:
         _bbx_quiet(m.printer)
 
 
+class TestAfcBridgeBoxReadSwitchKeys:
+    def test_a_chain_with_nothing_set_or_saved_has_no_switch(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._switch_keys is None
+        _bbx_quiet(m.printer)
+
+    def test_filament_switch_alone_gives_it_one_with_nothing_set(self, tmp_path):
+        m = _bbx_boot(tmp_path, filament_switch=True)
+        assert m._switch_keys == {}
+        _bbx_quiet(m.printer)
+
+    def test_an_option_of_the_switch_alone_gives_it_one(self, tmp_path):
+        m = _bbx_boot(tmp_path, switch_outlet_a="extruder")
+        assert m._switch_keys == {"outlet_a": "extruder", "by_hand": "outlet_a"}
+        _bbx_quiet(m.printer)
+
+    def test_a_switch_that_was_added_alone_gives_it_one(self, tmp_path):
+        record_chain_state(tmp_path, switch="1")
+        m = _bbx_boot(tmp_path)
+        assert m._switch_keys == {}
+        _bbx_quiet(m.printer)
+
+    def test_what_was_saved_for_the_switch_is_given_to_it(self, tmp_path):
+        record_chain_state(tmp_path, switch="1", switch_outlet_a="extruder1",
+                           switch_outlet_b="extruder", switch_outlet_a_length="850.0",
+                           switch_outlet_b_length="1010.5")
+        m = _bbx_boot(tmp_path)
+        assert m._switch_keys == {"outlet_a": "extruder1", "outlet_b": "extruder",
+                                  "outlet_a_length": "850.0", "outlet_b_length": "1010.5"}
+        _bbx_quiet(m.printer)
+
+    def test_what_is_saved_as_not_known_is_left_out(self, tmp_path):
+        record_chain_state(tmp_path, switch="1", switch_outlet_a="extruder1",
+                           switch_outlet_a_length="", switch_outlet_b="")
+        m = _bbx_boot(tmp_path)
+        assert m._switch_keys == {"outlet_a": "extruder1"}
+        _bbx_quiet(m.printer)
+
+    def test_what_was_saved_for_a_switch_that_was_forgotten_gives_it_none(self, tmp_path):
+        record_chain_state(tmp_path, switch="", switch_outlet_a="extruder1")
+        m = _bbx_boot(tmp_path)
+        assert m._switch_keys is None
+        _bbx_quiet(m.printer)
+
+    def test_an_option_takes_the_place_of_what_was_saved(self, tmp_path):
+        record_chain_state(tmp_path, switch="1", switch_outlet_a="extruder1",
+                           switch_outlet_b="extruder")
+        m = _bbx_boot(tmp_path, switch_outlet_a="extruder2")
+        assert m._switch_keys == {"outlet_a": "extruder2", "outlet_b": "extruder",
+                                  "by_hand": "outlet_a"}
+        _bbx_quiet(m.printer)
+
+    def test_an_option_left_empty_stands_for_nothing_whatever_was_saved(self, tmp_path):
+        record_chain_state(tmp_path, switch="1", switch_outlet_a="extruder1",
+                           switch_outlet_b="extruder")
+        m = _bbx_boot(tmp_path, switch_outlet_a="")
+        assert m._switch_keys == {"outlet_b": "extruder", "by_hand": "outlet_a"}
+        _bbx_quiet(m.printer)
+
+    def test_every_option_is_read_without_the_blanks_around_it_and_named_in_order(
+            self, tmp_path):
+        m = _bbx_boot(tmp_path, switch_outlet_b_length="1010", switch_outlet_a_length=" 850 ",
+                      switch_outlet_b=" extruder", switch_outlet_a="extruder1 ",
+                      switch_inlet_b="Bambu_AMS_2 , chain1", switch_inlet_a=" Bambu_AMS_1 ")
+        assert m._switch_keys == {
+            "inlet_a": "Bambu_AMS_1", "inlet_b": "Bambu_AMS_2 , chain1",
+            "outlet_a": "extruder1", "outlet_b": "extruder", "outlet_a_length": "850",
+            "outlet_b_length": "1010",
+            "by_hand": "inlet_a, inlet_b, outlet_a, outlet_b, outlet_a_length, outlet_b_length"}
+        _bbx_quiet(m.printer)
+
+    def test_filament_switch_false_gives_it_none_whatever_is_set_or_saved(self, tmp_path):
+        record_chain_state(tmp_path, switch="1", switch_outlet_a="extruder1")
+        m = _bbx_boot(tmp_path, filament_switch=False, switch_outlet_b="extruder")
+        assert m._switch_keys is None
+        _bbx_quiet(m.printer)
+
+
+class TestAfcBridgeBoxSwitchSection:
+    def test_the_section_has_the_chains_name_and_says_the_chain_made_it(self, tmp_path):
+        m = _bbx_boot(tmp_path, filament_switch=True)
+        assert m._switch_section() == ("AFC_BridgeBox_switch chain1",
+                                       {"chain": "chain1", "chain_made": True})
+        _bbx_quiet(m.printer)
+
+    def test_it_carries_what_the_chain_gives_its_switch(self, tmp_path):
+        m = _bbx_boot(tmp_path, name="chain2", switch_outlet_b="extruder1")
+        assert m._switch_section() == (
+            "AFC_BridgeBox_switch chain2",
+            {"chain": "chain2", "chain_made": True, "outlet_b": "extruder1",
+             "by_hand": "outlet_b"})
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_with_no_switch_of_its_own_still_has_the_name(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._switch_keys is None
+        assert m._switch_section() == ("AFC_BridgeBox_switch chain1",
+                                       {"chain": "chain1", "chain_made": True})
+        _bbx_quiet(m.printer)
+
+
+class TestAfcBridgeBoxSplitInlets:
+    def test_the_names_on_each_inlet_without_the_blanks(self):
+        assert afcBridgeBox._split_inlets(
+            {"inlet_a": "chain1, Turtle_1 ,", "inlet_b": " Ace2_1", "outlet_a": "extruder"}) == {
+                "A": ["chain1", "Turtle_1"], "B": ["Ace2_1"]}
+
+    def test_an_inlet_that_is_not_set_has_none(self):
+        assert afcBridgeBox._split_inlets({"inlet_b": "Ace2_1"}) == {"A": [], "B": ["Ace2_1"]}
+        assert afcBridgeBox._split_inlets({}) == {"A": [], "B": []}
+
+
 class TestAfcBridgeBoxReadSwitchInlets:
-    def test_a_config_with_no_merged_file_has_none(self):
-        assert afcBridgeBox._read_switch_inlets(object()) == []
+    def test_a_config_with_no_merged_file_has_none(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._read_switch_inlets(object()) == []
+        _bbx_quiet(m.printer)
+
+    def test_the_chains_own_switch_has_the_chain_on_both_inlets(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, filament_switch=True)
+        assert m._switch_inlets == [{"A": ["chain1"], "B": ["chain1"]}]
+        _bbx_quiet(m.printer)
+
+    def test_a_unit_its_options_name_stays_on_its_inlet_beside_the_chain(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, switch_inlet_b="Bambu_AMS_HT_1")
+        assert m._switch_inlets == [{"A": ["chain1"], "B": ["Bambu_AMS_HT_1", "chain1"]}]
+        _bbx_quiet(m.printer)
+
+    @pytest.mark.parametrize("options, inlets", [
+        ({"switch_inlet_a": "chain1", "switch_inlet_b": "Bambu_AMS_HT_1"},
+         {"A": ["chain1"], "B": ["Bambu_AMS_HT_1"]}),
+        ({"switch_inlet_b": "chain1"}, {"A": [], "B": ["chain1"]})])
+    def test_a_chain_its_options_put_on_one_inlet_stays_on_that_one(self, tmp_path, options,
+                                                                    inlets):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, **options)
+        assert m._switch_inlets == [inlets]
+        _bbx_quiet(m.printer)
+
+    def test_the_chains_own_switch_comes_before_the_switch_sections(self, tmp_path):
+        printer = make_printer()
+        printer.add_section("AFC_BridgeBox_switch Switch_2",
+                            {"inlet_a": "Ace2_1", "inlet_b": "Turtle_1"})
+        m = _bbx_boot(tmp_path, printer, roster=_SWITCH_ROSTER, filament_switch=True)
+        assert m._switch_inlets == [{"A": ["chain1"], "B": ["chain1"]},
+                                    {"A": ["Ace2_1"], "B": ["Turtle_1"]}]
+        _bbx_quiet(printer)
 
     def test_a_config_with_no_switch_has_none(self, tmp_path):
         m = _bbx_boot(tmp_path)
@@ -15752,6 +15932,39 @@ class TestAfcBridgeBoxPumpPopups:
         assert (m._popup_queue, m._popup_active_until) == ([], 70.0)
         assert _p6_log(m) == []
 
+    def test_a_filament_switch_offer_shows_on_an_idle_printer(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        m._queue_popup(("switch", "chain1"))
+        _p6_quiet(m)
+        m._pump_popups(50.0)
+        assert _p6_console(m) == _FS_OFFER
+        assert (m._popup_queue, m._popup_active_until) == ([], 70.0)
+        assert _p6_log(m) == []
+
+    def test_a_filament_switch_offer_waits_out_a_print_while_others_show(self, tmp_path,
+                                                                        monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        m._queue_popup(("switch", "chain1"))
+        m._queue_popup(("removed", D, "Charlie"))
+        _p6_quiet(m)
+        m.printer.set_print_state("printing")
+        m._pump_popups(50.0)
+        removed = _p6_popup(
+            "AMS removed: Charlie",
+            ["Charlie (UID DDDD) was unplugged; its bay went back to the pool.",
+             "A re-plug takes it back while it is free, else the lowest free "
+             "bay of its family. Or forget it if it is not coming back:"],
+            ["Forget Charlie|AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=DDDD|error"])
+        # The removal queued behind it shows; the offer keeps its place.
+        assert _p6_console(m) == removed
+        assert (m._popup_queue, m._popup_active_until) == ([("switch", "chain1")], 70.0)
+        # The print over, the offer shows.
+        m.printer.set_print_state("complete")
+        m._pump_popups(70.0)
+        assert _p6_console(m) == removed + _FS_OFFER
+        assert (m._popup_queue, m._popup_active_until) == ([], 90.0)
+        assert _p6_log(m) == []
+
 
 class TestAfcBridgeBoxRestoreReturned:
     """A unit back while still bound runs its own follower restore."""
@@ -18705,6 +18918,335 @@ class TestAfcBridgeBoxSwitchSetRoute:
         use_bridges(monkeypatch, {WIFI_USB: bridge})
         assert m.switch_set_route(2) is False
         assert bridge.sent == []
+
+
+def _fs_chain(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+              fs: Optional[dict] = TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS,
+              **options: Any) -> afcBridgeBox:
+    """
+    :param fs: what the filament switch on the chain's bus last reported, None for no switch
+    :return afcBridgeBox: a chain that only scouts, whose one bay is named One
+    """
+    m = _wifi_master(tmp_path, monkeypatch, **options)
+    status: dict = {"units": []}
+    if fs is not None:
+        status["fs"] = fs
+    use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status=status)})
+    m._pool_units = [{"name": "One", "bound": None}]
+    return m
+
+
+#: The prompt that offers to set up a filament switch nothing is configured for.
+_FS_OFFER = _p6_popup(
+    "chain1 filament switch",
+    ["chain1: a filament switch answers on this chain's bus, and it is not set up. The "
+     "chain's lanes do not load until it is.",
+     "Set it up to give the chain the switch. Klipper then has to restart, and after that a "
+     "prompt offers to find its inlets and outlets."],
+    ["Set up the switch|AFC_BRIDGEBOX_SWITCH_ADD CHAIN=chain1|primary"])
+
+
+def _fs_restart(text: str) -> List[LogLine]:
+    """:return list: the console lines of a prompt that says ``text`` and offers a restart"""
+    return _p6_popup("chain1 filament switch", [text], ["Restart Klipper|RESTART|primary"])
+
+
+class TestAfcBridgeBoxHasSwitch:
+    def test_a_chain_with_no_switch_has_none(self, tmp_path, monkeypatch):
+        assert _fs_chain(tmp_path, monkeypatch)._has_switch() is False
+
+    def test_a_switch_of_the_chains_own(self, tmp_path, monkeypatch):
+        assert _fs_chain(tmp_path, monkeypatch, filament_switch=True)._has_switch() is True
+
+    def test_a_switch_section_on_this_chain(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.printer.add_object("AFC_BridgeBox_switch Switch_1", types.SimpleNamespace(chain=m))
+        assert m._has_switch() is True
+
+    @pytest.mark.parametrize("chain", [None, object()])
+    def test_a_switch_section_on_another_chain_or_on_none_yet_is_not_its(self, tmp_path,
+                                                                         monkeypatch, chain):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.printer.add_object("AFC_BridgeBox_switch Switch_1",
+                             types.SimpleNamespace(chain=chain))
+        assert m._has_switch() is False
+
+    def test_a_switch_that_has_no_chain_to_show_is_not_its(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.printer.add_object("AFC_BridgeBox_switch Switch_1", types.SimpleNamespace())
+        assert m._has_switch() is False
+
+
+class TestAfcBridgeBoxSwitchUnset:
+    FS = TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS
+
+    def test_a_switch_that_answers_with_none_configured(self, tmp_path, monkeypatch):
+        assert _fs_chain(tmp_path, monkeypatch)._switch_unset() is True
+
+    def test_no_switch_has_answered(self, tmp_path, monkeypatch):
+        assert _fs_chain(tmp_path, monkeypatch, fs=None)._switch_unset() is False
+
+    def test_a_switch_that_stopped_answering(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch, fs=dict(self.FS, on=False))
+        assert m._switch_unset() is False
+
+    def test_a_chain_that_is_to_have_no_switch(self, tmp_path, monkeypatch):
+        assert _fs_chain(tmp_path, monkeypatch, filament_switch=False)._switch_unset() is False
+
+    def test_a_chain_that_has_its_switch(self, tmp_path, monkeypatch):
+        assert _fs_chain(tmp_path, monkeypatch, filament_switch=True)._switch_unset() is False
+
+    def test_a_chain_with_no_bays(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        # A chain that only scouts makes no units, so it has none to send through a switch.
+        del m._pool_units
+        assert m._switch_unset() is False
+
+
+class TestAfcBridgeBoxOfferSwitch:
+    FS = TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS
+
+    def test_a_switch_nothing_is_configured_for_is_offered_once(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m._offer_switch()
+        assert m._popup_queue == [("switch", "chain1")]
+        assert m._switch_seen is True
+        m._popup_queue.clear()
+        m._offer_switch()
+        assert m._popup_queue == []
+        assert _p6_console(m) == []
+        assert _p6_log(m) == []
+
+    @pytest.mark.parametrize("fs", [None, dict(FS, on=False)])
+    def test_until_a_switch_answers_nothing_is_looked_at(self, tmp_path, monkeypatch, fs):
+        m = _fs_chain(tmp_path, monkeypatch, fs=fs)
+        m._offer_switch()
+        assert not hasattr(m, "_popup_queue")
+        # One that answers later is still offered.
+        assert m._switch_seen is False
+
+    def test_a_switch_that_is_configured_is_not_offered(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch, filament_switch=True)
+        m._offer_switch()
+        assert not hasattr(m, "_popup_queue")
+        assert m._switch_seen is True
+
+    def test_the_watch_offers_it(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        live_bridges()[m.serial_port].status["fs"] = self.FS
+        _p6_quiet(m)
+        _p6_tick(m, 100, 100)
+        assert m._switch_seen is True
+        assert _p6_console(m) == _FS_OFFER
+        assert m._popup_queue == []
+        assert _p6_log(m) == []
+
+
+class TestAfcBridgeBoxPromptSwitch:
+    def test_it_offers_to_set_the_switch_up_and_stays_until_answered(self, tmp_path,
+                                                                     monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        armed = len(m.printer.reactor.callbacks)
+        m._prompt_switch()
+        assert _p6_console(m) == _FS_OFFER
+        assert m.printer.reactor.callbacks[armed:] == []
+        assert _p6_log(m) == []
+
+
+class TestAfcBridgeBoxHandleToolLoadPrepare:
+    SAID = ("chain1: lane24 is not loaded, the filament switch on this chain's bus is not set "
+            "up. Run AFC_BRIDGEBOX_SWITCH_ADD CHAIN=chain1 first.")
+
+    @staticmethod
+    def _lane(unit: str = "One") -> Any:
+        """:return Any: a lane of ``unit`` that is about to be loaded"""
+        return types.SimpleNamespace(name="lane24", unit=unit)
+
+    @pytest.mark.parametrize("state, pause", [("standby", False), ("printing", True)])
+    def test_a_lane_of_the_chain_does_not_load_through_a_switch_that_is_not_set_up(
+            self, tmp_path, monkeypatch, state, pause):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.printer.set_print_state(state)
+        assert m._handle_tool_load_prepare(self._lane(), _p3_cmd()) is False
+        # A print is paused over it.
+        assert m.printer.afc.error.calls == [("AFC_error", (self.SAID, pause), {})]
+        assert _p6_log(m) == []
+
+    def test_afc_asks_it_before_a_lane_loads(self, tmp_path, monkeypatch):
+        m = _bbx_boot(tmp_path)
+        status = {"units": [], "fs": TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS}
+        use_bridges(monkeypatch, {m.serial_port: FakeBridge(status=status)})
+        lane = self._lane(m.unit_names()[0])
+        assert m.printer.send_event("afc:tool_load_prepare", lane, _p3_cmd()) == [False]
+        assert m.printer.afc.error.messages == [("AFC_error", self.SAID)]
+
+    def test_a_lane_of_another_unit_loads(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        assert m._handle_tool_load_prepare(self._lane("Turtle_1"), _p3_cmd()) is True
+        assert m.printer.afc.error.calls == []
+
+    @pytest.mark.parametrize("fs, options", [
+        (None, {}), (TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS, {"filament_switch": True})])
+    def test_with_no_switch_or_one_that_is_configured_the_lane_loads(self, tmp_path,
+                                                                     monkeypatch, fs, options):
+        m = _fs_chain(tmp_path, monkeypatch, fs=fs, **options)
+        assert m._handle_tool_load_prepare(self._lane(), _p3_cmd()) is True
+        assert m.printer.afc.error.calls == []
+
+
+class TestAfcBridgeBoxSaveSwitch:
+    def test_each_value_is_saved_with_the_chain_under_its_switch_name(self, tmp_path,
+                                                                      monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.save_switch({"outlet_a": "extruder1", "outlet_a_length": 851.9, "outlet_b": ""})
+        cp = m._read_state()
+        assert dict(cp.items(SEC)) == {"switch_outlet_a": "extruder1",
+                                       "switch_outlet_a_length": "851.9",
+                                       "switch_outlet_b": ""}
+
+    def test_what_else_is_saved_for_the_chain_is_kept(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m._state_set({SEC: {"switch": "1", "switch_outlet_b": "extruder"}})
+        m.save_switch({"outlet_b": "extruder1"})
+        assert dict(m._read_state().items(SEC)) == {"switch": "1",
+                                                    "switch_outlet_b": "extruder1"}
+
+    def test_the_next_start_gives_the_switch_what_was_saved(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch, filament_switch=True)
+        m.save_switch({"outlet_a": "extruder1", "outlet_a_length": "", "outlet_b": "extruder"})
+        again = _wifi_master(tmp_path, monkeypatch, filament_switch=True)
+        assert again._switch_keys == {"outlet_a": "extruder1", "outlet_b": "extruder"}
+
+
+class TestAfcBridgeBoxCmdAFCBridgeboxSwitchAdd:
+    SAVED = ("chain1: its filament switch is saved. Klipper has to restart to make it, and "
+             "after that a prompt offers to find its inlets and outlets.")
+
+    def test_the_chain_remembers_its_switch_and_offers_a_restart(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        armed = len(m.printer.reactor.callbacks)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_SWITCH_ADD(cmd)
+        assert m._state_get(SEC, "switch") == "1"
+        assert m._switch_seen is True
+        assert cmd.messages == [
+            ("respond_info", "chain1: its filament switch is saved. RESTART, and a prompt "
+                             "offers to find its inlets and outlets.")]
+        assert _p6_console(m) == _fs_restart(self.SAVED)
+        # The prompt stays until it is answered.
+        assert m.printer.reactor.callbacks[armed:] == []
+        assert _p6_log(m) == []
+
+    def test_the_next_start_makes_the_switch(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.cmd_AFC_BRIDGEBOX_SWITCH_ADD(_p3_cmd())
+        again = _bbx_boot(tmp_path)
+        assert again._switch_keys == {}
+        assert _bbx_loaded(again)[-1] == "AFC_BridgeBox_switch chain1"
+
+    def _refused(self, m: afcBridgeBox, said: str) -> None:
+        """Check the chain is given no switch, with ``said``."""
+        cmd = _p3_cmd()
+        with pytest.raises(Exception) as err:
+            m.cmd_AFC_BRIDGEBOX_SWITCH_ADD(cmd)
+        assert str(err.value) == f"AFC_BRIDGEBOX_SWITCH_ADD: {said}"
+        cmd.error.assert_called_once_with(f"AFC_BRIDGEBOX_SWITCH_ADD: {said}")
+        assert m._state_get(SEC, "switch") is None
+        assert m._switch_seen is False
+        assert cmd.messages == []
+        assert _p6_console(m) == []
+
+    def test_it_is_refused_in_a_print(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        m.printer.set_print_state("printing")
+        self._refused(m, "not during a print, chain1 takes its filament switch at a restart")
+
+    def test_a_chain_that_has_a_switch_is_refused(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch, filament_switch=True)
+        self._refused(m, "chain1 already has a filament switch")
+
+    def test_a_chain_that_is_to_have_none_is_refused(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch, filament_switch=False)
+        self._refused(m, "[AFC_BridgeBox chain1] has filament_switch: False. Take that line "
+                         "out first.")
+
+    def test_a_chain_with_no_bays_is_refused(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        del m._pool_units
+        self._refused(m, "chain1 has no bays, so it has no unit to send through a filament "
+                         "switch")
+
+
+class TestAfcBridgeBoxCmdAFCBridgeboxSwitchForget:
+    GONE = ("chain1: its filament switch is forgotten, with what was found for it. Klipper has "
+            "to restart to go on without it.")
+    #: What a set up switch of the chain's own leaves saved.
+    KEPT = {"switch": "1", "switch_outlet_a": "extruder1", "switch_outlet_b": "extruder",
+            "switch_outlet_a_length": "850.0", "switch_outlet_b_length": "1010.5"}
+
+    @staticmethod
+    def _blank() -> Dict[str, str]:
+        """:return dict: everything a chain saves for its switch, each as not known"""
+        names = ("inlet_a", "inlet_b", "outlet_a", "outlet_b", "outlet_a_length",
+                 "outlet_b_length")
+        return dict({"switch": ""}, **{f"switch_{name}": "" for name in names})
+
+    def _set_up(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> afcBridgeBox:
+        """:return afcBridgeBox: a chain that started with a set up switch of its own"""
+        record_chain_state(tmp_path, roster="", **self.KEPT)
+        return _fs_chain(tmp_path, monkeypatch)
+
+    def test_everything_saved_for_the_switch_is_blanked_and_a_restart_offered(
+            self, tmp_path, monkeypatch):
+        m = self._set_up(tmp_path, monkeypatch)
+        armed = len(m.printer.reactor.callbacks)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(cmd)
+        saved = dict(m._read_state().items(SEC))
+        assert {key: saved[key] for key in self._blank()} == self._blank()
+        assert cmd.messages == [
+            ("respond_info", "chain1: its filament switch is forgotten. RESTART to go on "
+                             "without it.")]
+        assert _p6_console(m) == _fs_restart(self.GONE)
+        assert m.printer.reactor.callbacks[armed:] == []
+        assert _p6_log(m) == []
+
+    def test_the_switch_forgets_what_was_found_by_loading(self, tmp_path, monkeypatch):
+        m = self._set_up(tmp_path, monkeypatch)
+        forgot = []
+        m.printer.add_object("AFC_BridgeBox_switch chain1",
+                             types.SimpleNamespace(chain=m, forget=lambda: forgot.append(1)))
+        m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(_p3_cmd())
+        assert forgot == [1]
+
+    def test_the_next_start_has_no_switch(self, tmp_path, monkeypatch):
+        m = self._set_up(tmp_path, monkeypatch)
+        m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(_p3_cmd())
+        again = _wifi_master(tmp_path, monkeypatch)
+        assert again._switch_keys is None
+        assert "AFC_BridgeBox_switch chain1" not in _bbx_loaded(again)
+
+    def _refused(self, m: afcBridgeBox, said: str) -> None:
+        """Check nothing is forgotten, with ``said``."""
+        was = dict(m._read_state().items(SEC)) if m._read_state().has_section(SEC) else {}
+        cmd = _p3_cmd()
+        with pytest.raises(Exception) as err:
+            m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(cmd)
+        assert str(err.value) == f"AFC_BRIDGEBOX_SWITCH_FORGET: {said}"
+        cmd.error.assert_called_once_with(f"AFC_BRIDGEBOX_SWITCH_FORGET: {said}")
+        now = dict(m._read_state().items(SEC)) if m._read_state().has_section(SEC) else {}
+        assert now == was
+        assert cmd.messages == []
+        assert _p6_console(m) == []
+
+    def test_it_is_refused_in_a_print(self, tmp_path, monkeypatch):
+        m = self._set_up(tmp_path, monkeypatch)
+        m.printer.set_print_state("printing")
+        self._refused(m, "not during a print, chain1 gives its filament switch up at a restart")
+
+    def test_a_chain_with_no_switch_of_its_own_is_refused(self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch)
+        self._refused(m, "chain1 has no filament switch of its own")
 
 
 class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:

@@ -1249,20 +1249,21 @@ class BambuPrinter(MockPrinter):
         """
         self.send_event("klippy:connect")
 
-    def send_event(self, event: str, *args: Any) -> None:
+    def send_event(self, event: str, *args: Any) -> list:
         """
         :param event: the event; klippy:connect runs each handler once, and
           klippy:ready needs an isolated bridge table for a Bambu handler
         :param args: the event's arguments
+        :return list: what each handler returned, none for klippy:connect
         """
         handlers = list(self._event_handlers.get(event, []))
         if event == "klippy:connect":
             for handler in handlers:
                 self.run_connect_handler(handler)
-            return
+            return []
         if event == "klippy:ready" and _bambu_ready_owners(handlers):
             _require_isolated_bridges("klippy:ready")
-        super().send_event(event, *args)
+        return super().send_event(event, *args)
 
     def set_print_state(self, state: str) -> None:
         """

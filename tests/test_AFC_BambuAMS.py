@@ -31172,6 +31172,22 @@ class TestAfcBambuAMSFeedTo:
         assert ejected == []
         assert unit.logger.messages == []
 
+    def test_a_scan_of_the_bays_spool_is_waited_for_before_the_lane_is_selected(self,
+                                                                                monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch, script=(True,))
+        waited: List[Tuple[Optional[int], int]] = []
+        unit._wait_scan = lambda slot: waited.append((slot, len(unit._bridge.sent))) or 0.0
+        assert unit.feed_to(lane, check, FakeGcmd()) is True
+        # Asked for lane1's bay, before a frame was sent.
+        assert waited == [(0, 0)]
+
+    def test_with_no_bridge_no_scan_is_waited_for(self, monkeypatch):
+        unit, lane, check, _ejected = self._rig(monkeypatch, offline=True)
+        waited: List[Optional[int]] = []
+        unit._wait_scan = lambda slot: waited.append(slot) or 0.0
+        assert unit.feed_to(lane, check, FakeGcmd()) is False
+        assert waited == []
+
 
 class TestAfcBambuAMSReportSeqs:
     """The counters a unit's reports of a move count on."""
@@ -31189,6 +31205,62 @@ class TestAfcBambuAMSReportSeqs:
         unit = _p6_unit(monkeypatch, offline=True)
         assert unit._bridge is None
         assert unit._report_seqs() == (None, 0)
+
+
+class TestAfcBambuAMSWaitScan:
+    """
+    Before a feed: wait while the unit scans the spool in the bay, for ninety seconds at the
+    most.
+    """
+
+    @staticmethod
+    def _said(waited: float) -> LogLine:
+        """
+        :param waited: seconds the wait took
+        :return LogLine: what the wait logs
+        """
+        return ("debug", f"Bambu_AMS_1: waited {waited:.1f}s for the scan of the spool in slot "
+                         "0 before feeding it")
+
+    def test_a_bay_that_is_not_being_scanned_is_not_waited_for(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        assert unit._wait_scan(0) == 0.0
+        assert unit.reactor.pauses == []
+        assert unit.logger.messages == []
+
+    def test_another_bays_scan_is_not_waited_for(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        unit._scan_t0[1] = 100.0
+        assert unit._wait_scan(0) == 0.0
+        assert unit.reactor.pauses == []
+        assert unit.logger.messages == []
+
+    def test_a_lane_that_has_no_bay_is_not_waited_for(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        unit._scan_t0[0] = 100.0
+        assert unit._wait_scan(None) == 0.0
+        assert unit.reactor.pauses == []
+        assert unit.logger.messages == []
+
+    def test_a_scan_is_waited_for_until_it_is_over(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        unit._scan_t0[0] = 100.0
+        _p6_at(unit, 107.2, lambda: unit._release_scan_hold(0))
+        waited = unit._wait_scan(0)
+        # The bay is looked at every half second, and the look after 7.2s finds the scan over.
+        assert waited == pytest.approx(7.5)
+        assert unit.reactor.now == pytest.approx(107.5)
+        assert unit._scan_t0[0] is None
+        assert unit.logger.messages == [self._said(7.5)]
+
+    def test_a_scan_that_does_not_end_is_waited_for_ninety_seconds(self, monkeypatch):
+        unit = _p6_unit(monkeypatch)
+        unit._scan_t0[0] = 100.0
+        waited = unit._wait_scan(0)
+        assert waited == pytest.approx(90.0)
+        # The scan is left open: the wait only looks.
+        assert unit._scan_t0[0] == 100.0
+        assert unit.logger.messages == [self._said(90.0)]
 
 
 class TestAfcBambuAMSWaitFeedStopped:
