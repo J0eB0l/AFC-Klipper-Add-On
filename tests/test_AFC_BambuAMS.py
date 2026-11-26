@@ -4815,14 +4815,13 @@ class TestAfcBambuAMSRecoverToBay:
         lane._load_state = hub_reads
         assert (lane.tool_loaded, lane.status.name) == (True, "TOOLED")
         unit._recover_to_bay(lane, FakeGcmd())
+        # No relink: that takes every unit on the bus off it.
         assert bridge.sent == [
-            {"cmd": "relink"},
             {"cmd": "assist", "unit": 0, "slot": 0, "on": False},  # follower
             {"cmd": "stop"},
             {"cmd": "select", "unit": 0, "slot": 0},
             {"cmd": "retract", "unit": 0, "slot": 0, "mm": 3450.0,
              "mmps": 20.0},                                       # reeled back
-            {"cmd": "info"},
             {"cmd": "stop"}]
         assert unit.logger.messages == [(
             "debug", "Bambu_AMS_1: move ended on NARRATION after "
@@ -4860,11 +4859,70 @@ class TestAfcBambuAMSRecoverToBay:
                                slots=[slot_info(0, material="PLA")])
         lane = unit.lanes["lane1"]
         unit._recover_to_bay(lane, FakeGcmd())
-        # Neither the relink nor the reel-back went out.
+        # The reel-back did not go out.
         assert bridge.sent == []
         assert unit.logger.messages == [(
             "warning", "Bambu_AMS_1: recover reel-back for lane1 "
                        "did not complete: port closed")]
+        # The lane is settled from the bay all the same.
+        assert (lane.tool_loaded, lane.loaded_to_hub, lane.status.name) == (
+            False, True, "LOADED")
+        assert unit.afc.save_vars.calls == [((), {})]
+
+    @staticmethod
+    def _latched(after: int) -> Tuple[afcBambuAMS, Any, FakeBridge]:
+        """
+        lane1 threaded to the toolhead on a unit that is latched in its error state.
+
+        :param after: the state the unit reports once it was re-homed
+        :return tuple: (the unit, its lane1, its bridge)
+        """
+        printer = make_printer(now=1000.0)
+        printer.reactor.run_in_pause = True
+
+        def _answer(_bridge: FakeBridge, frame: Dict[str, Any]) -> None:
+            """:param frame: what the unit was sent"""
+            if frame.get("cmd") == "rehome":
+                bridge.status = _p6_frame(ustate=after)
+            elif frame.get("cmd") == "retract":
+                printer.reactor.register_callback(
+                    lambda _et: setattr(bridge, "finish", (1, True, "retract done")),
+                    printer.reactor.now + 3.0)
+
+        bridge = FakeBridge(on_send=_answer)
+        unit = make_bambu_unit(printer=printer, bridge=bridge,
+                               lanes=[LaneSpec("lane1", 0, tool_loaded=True)],
+                               slots=[slot_info(0, material="PLA")])
+        bridge.status = _p6_frame(ustate=7)
+        return unit, unit.lanes["lane1"], bridge
+
+    def test_a_unit_that_is_latched_is_re_homed_before_the_reel_back(self):
+        unit, lane, bridge = self._latched(after=2)
+        unit._recover_to_bay(lane, FakeGcmd())
+        cmds = [frame["cmd"] for frame in bridge.sent]
+        # Re-homed, which leaves the other units on the bus, then reeled back.
+        assert cmds[:5] == ["assist", "rehome", "stop", "select", "retract"]
+        assert "relink" not in cmds
+        assert unit.logger.messages == [
+            ("debug", "Bambu_AMS_1: unit is latched in error (state 7) before the reel-back "
+                      "for lane1, re-homing to clear it first"),
+            ("debug", "Bambu_AMS_1: lane1, error cleared by the re-home (state 7 -> 2), "
+                      "continuing with the reel-back"),
+            ("debug", "Bambu_AMS_1: move ended on NARRATION after 3.0s (ok=True): "
+                      "retract done")]
+        assert (lane.tool_loaded, lane.status.name) == (False, "LOADED")
+        assert unit.afc.save_vars.calls == [((), {})]
+
+    def test_a_unit_that_stays_latched_is_sent_no_reel_back(self):
+        unit, lane, bridge = self._latched(after=7)
+        unit._recover_to_bay(lane, FakeGcmd())
+        assert [frame["cmd"] for frame in bridge.sent] == ["assist", "rehome"]
+        assert unit.logger.messages == [
+            ("debug", "Bambu_AMS_1: unit is latched in error (state 7) before the reel-back "
+                      "for lane1, re-homing to clear it first"),
+            ("warning", "Bambu_AMS_1: lane1, the unit would not leave its error state after "
+                        "a re-home, so it is jammed rather than merely latched. Not sending "
+                        "the reel-back.")]
         # The lane is settled from the bay all the same.
         assert (lane.tool_loaded, lane.loaded_to_hub, lane.status.name) == (
             False, True, "LOADED")

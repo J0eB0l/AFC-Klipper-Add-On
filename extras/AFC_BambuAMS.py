@@ -3069,24 +3069,22 @@ class afcBambuAMS(afcUnit):
 
     def _recover_to_bay(self, lane: Any, gcmd: AFCGcmd) -> None:
         """
-        Relink the AMS, stop it, reel this lane's filament back to the bay, and clear its
-        loaded/error state.
+        Stop the AMS, reel this lane's filament back to the bay, and clear its loaded/error
+        state. A unit that is latched in its error state is re-homed first, which leaves the
+        other units on the bus.
 
         :param lane: The lane to recover
         :param gcmd: command context the reel-back and LED macros run through
         """
-        # A TIMEOUT/error (state:7) blocks the reel-back.
-        try:
-            self.relink()
-        except Exception:
-            pass
         # So the re-arm timer doesn't fight the reel-back.
         try:
             self.set_feed_assist(lane, False)
         except Exception:
             pass
         try:
-            self.eject_lane(lane, gcmd)
+            # A TIMEOUT/error (state:7) blocks the reel-back.
+            if self._clear_latched_error(lane, "the reel-back"):
+                self.eject_lane(lane, gcmd)
         except Exception as e:
             self.logger.warning(f"{self.name}: recover reel-back for "
                                 f"{getattr(lane, 'name', '?')} did not complete: {e}")
