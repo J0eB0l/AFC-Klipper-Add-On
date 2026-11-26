@@ -107,6 +107,10 @@ class SwitchError(Exception):
     """A route the switch cannot take. The message says why."""
 
 
+class SwitchResetError(SwitchError):
+    """A measurement that stopped and left AFC's prompt to reset its lane open."""
+
+
 def other(letter: str) -> str:
     """
     The other inlet, or the other outlet.
@@ -792,6 +796,8 @@ class afcBridgeBoxSwitch:
         self._offered += new
         command = f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}"
         buttons = [(unit, f"{command} UNIT={unit}", "primary") for unit in unfound]
+        if len(unfound) > 1:
+            buttons.append(("All new units", f"{command} UNIT=all", "default"))
         lines = [f"{self.name}: the inlet of {', '.join(unfound)} is not known yet. The lanes "
                  "of a unit do not load until its inlet is found.",
                  "Put a spool in the unit and pick it. One lane is fed to the switch and reeled "
@@ -1219,7 +1225,7 @@ class afcBridgeBoxSwitch:
             lines.append(f"Not seen at their inlet yet: {', '.join(waiting)}")
         if unfound:
             lines.append(f"Inlet not known: {', '.join(unfound)}. Run "
-                         "AFC_BRIDGEBOX_SWITCH_IDENTIFY, or pick the switch's inlets in "
+                         "AFC_BRIDGEBOX_SWITCH_IDENTIFY, or pick the switch and its inlets in "
                          "AFC_CALIBRATION")
         return "\n".join(lines)
 
@@ -1412,19 +1418,15 @@ class afcBridgeBoxSwitch:
 
     def handle_calibration_buttons(self, buttons: List[Tuple[str, str, str]]) -> None:
         """
-        Add this switch to AFC's calibration menu, and its inlets when it has units that are
-        found by loading.
+        Add this switch to AFC's calibration menu.
 
         :param buttons: the menu's buttons so far, each a label, a command and a style
         """
         buttons.append((f"{self.name} filament switch",
                         f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}", "primary"))
-        if self._floating:
-            buttons.append((f"{self.name} inlets",
-                            f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}", "primary"))
 
     cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help = ("AFC_BRIDGEBOX_SWITCH_CALIBRATION "
-                                                 "[SWITCH=<switch>] [UNIT=<unit>] "
+                                                 "[SWITCH=<switch>] [OUTLETS=1] [UNIT=<unit>] "
                                                  "[LANE=<lane>]. Measures the tube from each "
                                                  "outlet of a filament switch to its toolhead")
 
@@ -1438,10 +1440,15 @@ class afcBridgeBoxSwitch:
         path when it loads has the lane loaded into each toolhead and unloaded again instead.
         Each run also checks the lane shows at the inlet its unit is configured on. Without
         LANE a prompt offers the units that can measure, and with UNIT the lanes of that unit.
+        A switch with units whose inlet is found by loading first offers what to calibrate, the
+        inlets or the outlets, and OUTLETS=1 goes on to the units that can measure. A prompt
+        says what is being done, and the prompt that offers the units opens again with the
+        outcome.
 
         Usage
         -------
-        `AFC_BRIDGEBOX_SWITCH_CALIBRATION [SWITCH=<switch>] [UNIT=<unit>] [LANE=<lane>]`
+        `AFC_BRIDGEBOX_SWITCH_CALIBRATION [SWITCH=<switch>] [OUTLETS=1] [UNIT=<unit>]
+        [LANE=<lane>]`
 
         Example
         -------
@@ -1452,31 +1459,80 @@ class afcBridgeBoxSwitch:
         name = gcmd.get("LANE", None)
         unit = gcmd.get("UNIT", None)
         if name is None:
-            if unit is None:
-                self._calibration_menu(gcmd)
-            else:
+            if unit is not None:
                 self._lane_menu(unit, gcmd)
+            elif (self._floating
+                  and not gcmd.get_int("OUTLETS", 0)):
+                self._menu(gcmd)
+            else:
+                self._calibration_menu(gcmd)
             return
         lane = self.lane(name)
+        prompt = AFCprompt(gcmd, self.logger)
         try:
             if lane is None:
                 error_str = f"{self.name}: {name} is not a lane of this switch"
                 raise SwitchError(error_str)
+            text = (f"Measuring the tube from each outlet to its toolhead with {lane.name}. The "
+                    "lane goes to each toolhead in turn and back.")
+            prompt.create_custom_p(f"{self.name} Outlets", text, None, False, None, None)
             lengths = self._measure(lane, gcmd)
-        except SwitchError as ex:
+        except SwitchResetError as ex:
+            # AFC's prompt to reset the lane is open, and stays.
             raise gcmd.error(str(ex))
+        except SwitchError as ex:
+            self._calibration_menu(gcmd, str(ex))
+            raise gcmd.error(str(ex))
+        except Exception:
+            # The prompt has no button, so it is not left open.
+            prompt.p_end()
+            raise
         for letter in LETTERS:
             self.lengths[letter] = round(lengths[letter], 1)
             self.afc.function.ConfigRewrite(self.fullname, f"outlet_{letter.lower()}_length",
                                             self.lengths[letter])
-        gcmd.respond_info(f"{self.name}: with {lane.name} the tube through outlet A is "
-                          f"{self.lengths['A']} mm and through outlet B {self.lengths['B']} mm")
+        found = (f"{self.name}: with {lane.name} the tube through outlet A is "
+                 f"{self.lengths['A']} mm and through outlet B {self.lengths['B']} mm")
+        gcmd.respond_info(found)
+        self._calibration_menu(gcmd, found)
 
-    def _calibration_menu(self, gcmd: GCodeCommand) -> None:
+    def _menu(self, gcmd: GCodeCommand) -> None:
+        """
+        Open the prompt that offers what to calibrate on a switch with units whose inlet is
+        found by loading: the inlets or the outlets.
+
+        :param gcmd: the command the prompt answers
+        """
+        buttons = [("Inlets", f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}", "primary"),
+                   ("Outlets", f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name} OUTLETS=1",
+                    "secondary")]
+        text = ("Inlets finds the inlet each unit is plumbed into, by feeding one of its lanes "
+                "to the switch. Outlets measures the tube from each outlet to its toolhead, "
+                "with a lane of a unit whose inlet is known.")
+        unfound = self.unfound()
+        if unfound:
+            text += f" Inlet not known yet: {', '.join(unfound)}."
+        back = [("Back to unit selection", "AFC_CALIBRATION", "info")]
+        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Calibration", text, buttons,
+                                                     True, None, back)
+
+    def _back(self) -> List[Tuple[str, str, str]]:
+        """
+        The footer button of a prompt that offers units: back to the prompt that offers what to
+        calibrate, or to AFC's calibration prompt when this switch has none.
+
+        :return list: one button, a label, a command and a style
+        """
+        if self._floating:
+            return [("Back", f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}", "info")]
+        return [("Back to unit selection", "AFC_CALIBRATION", "info")]
+
+    def _calibration_menu(self, gcmd: GCodeCommand, outcome: str = "") -> None:
         """
         Open the prompt that offers the units whose lanes can measure the outlets.
 
         :param gcmd: the command the prompt answers
+        :param outcome: what the last run measured or why it failed, shown above the offer
         """
         lanes = self._measuring_lanes()
         command = f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}"
@@ -1492,9 +1548,10 @@ class afcBridgeBoxSwitch:
         if not buttons:
             text = ("No lane that can measure is loaded in its unit. Load one, or set "
                     "outlet_a_length and outlet_b_length in the switch's section by hand.")
-        back = [("Back to unit selection", "AFC_CALIBRATION", "info")]
-        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Calibration", text, buttons,
-                                                     True, None, back)
+        if outcome:
+            text = f"{outcome}\n{text}"
+        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Outlets", text, buttons,
+                                                     True, None, self._back())
 
     def _lane_menu(self, unit: str, gcmd: GCodeCommand) -> None:
         """
@@ -1521,8 +1578,8 @@ class afcBridgeBoxSwitch:
         text = f"Select a loaded lane from {unit} to measure the tube from each outlet with."
         if self._by_load(lanes[0]):
             text += " It is loaded into each toolhead and unloaded again to measure."
-        back = [("Back", command, "info")]
-        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Calibration {unit}", text,
+        back = [("Back", f"{command} OUTLETS=1", "info")]
+        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Outlets {unit}", text,
                                                      None, True, rows, back)
 
     def _measuring_lanes(self) -> Dict[str, List[AFCLane]]:
@@ -1625,7 +1682,8 @@ class afcBridgeBoxSwitch:
             error_str = (f"{self.name}: {lane.name} did not measure the tube to {extruder} "
                          f"through outlet {outlet}.{reason} Reset {lane.name} before the next "
                          "try.")
-            self._offer_reset(lane, length, gcmd)
+            if self._offer_reset(lane, length, gcmd):
+                raise SwitchResetError(error_str)
         elif length <= 0:
             if lane.unit not in self._lengthless:
                 self._lengthless.append(lane.unit)
@@ -1641,7 +1699,7 @@ class afcBridgeBoxSwitch:
             raise SwitchError(error_str)
         return float(length)
 
-    def _offer_reset(self, lane: AFCLane, moved: float, gcmd: GCodeCommand) -> None:
+    def _offer_reset(self, lane: AFCLane, moved: float, gcmd: GCodeCommand) -> bool:
         """
         Open AFC's failed calibration prompt for a lane that stopped on its way to the toolhead
         and left filament past its hub. The prompt's button pulls the lane back to the hub,
@@ -1650,13 +1708,15 @@ class afcBridgeBoxSwitch:
         :param lane: the lane that did not measure
         :param moved: mm the lane's calibration says it fed before it stopped
         :param gcmd: the command the prompt answers
+        :return bool: True when the prompt was opened
         """
         if not moved:
-            return
+            return False
         if not getattr(lane.hub_obj, "state", False):
-            return
+            return False
         self.afc.run_script(f"AFC_CALI_FAIL TITLE='{self.name} Calibration Failed' "
                             f"FAIL={lane.name} DISTANCE={abs(moved):.1f} RESET=1", gcmd=gcmd)
+        return True
 
     def _load_to_measure(self, lane: AFCLane, inlet: str,
                          gcmd: GCodeCommand) -> Tuple[bool, str, float]:
@@ -1716,7 +1776,10 @@ class afcBridgeBoxSwitch:
         through the switch is unloaded first. It is for the units of a chain that is on both
         inlets, and an AMS that is new on such a chain does not load until it was run. Without
         UNIT and LANE a prompt offers those units, and with UNIT alone the unit's first lane
-        that holds filament is fed.
+        that holds filament is fed. UNIT=all runs every unit whose inlet is not known, one
+        after the other until one fails, and every unit once all are known. A prompt says what
+        is being done, and the prompt that offers the units opens again with the outcome, for
+        the next unit.
 
         Usage
         -------
@@ -1734,20 +1797,52 @@ class afcBridgeBoxSwitch:
             and unit is None):
             self._identify_menu(gcmd)
             return
-        AFCprompt(gcmd, self.logger).p_end()
-        try:
-            lane = self._identify_lane(unit, name)
-            inlet = self._identify(lane, gcmd)
-        except SwitchError as ex:
-            raise gcmd.error(str(ex))
-        gcmd.respond_info(f"{self.name}: {lane.unit} enters inlet {inlet}. Its lanes start on "
-                          f"{self.start_extruder(lane.unit)}.")
+        units = [unit]
+        if (name is None
+            and unit.lower() == "all"):
+            units = self._all()
+        prompt = AFCprompt(gcmd, self.logger)
+        # What each unit before this one gave.
+        done: List[str] = []
+        for unit in units:
+            try:
+                lane = self._identify_lane(unit, name)
+                text = (f"Finding the inlet of {lane.unit}: {lane.name} is fed to the switch "
+                        "and reeled back. A lane that is loaded through the switch is unloaded "
+                        "first.")
+                prompt.create_custom_p(f"{self.name} Inlets", "\n".join(done + [text]), None,
+                                       False, None, None)
+                inlet = self._identify(lane, gcmd)
+            except SwitchError as ex:
+                self._identify_menu(gcmd, "\n".join(done + [str(ex)]))
+                raise gcmd.error(str(ex))
+            except Exception:
+                # The prompt has no button, so it is not left open.
+                prompt.p_end()
+                raise
+            found = (f"{self.name}: {lane.unit} enters inlet {inlet}. Its lanes start on "
+                     f"{self.start_extruder(lane.unit)}.")
+            gcmd.respond_info(found)
+            done.append(found)
+        self._identify_menu(gcmd, "\n".join(done))
 
-    def _identify_menu(self, gcmd: GCodeCommand) -> None:
+    def _all(self) -> List[str]:
         """
-        Open the prompt that offers the units whose inlet is found by loading.
+        The units `UNIT=all` finds the inlet of: the ones whose inlet is not known, and once
+        every inlet is known every unit that is found by loading.
+
+        :return list: unit names
+        """
+        live = self.live_units()
+        return self.unfound() or [unit for unit in self._floating if unit in live]
+
+    def _identify_menu(self, gcmd: GCodeCommand, outcome: str = "") -> None:
+        """
+        Open the prompt that offers the units whose inlet is found by loading, and all of
+        them at once when that is more than one.
 
         :param gcmd: the command the prompt answers
+        :param outcome: what the last run found or why it failed, shown above the offer
         """
         command = f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}"
         live = self.live_units()
@@ -1760,15 +1855,19 @@ class afcBridgeBoxSwitch:
                 buttons.append((f"{unit}: new", f"{command} UNIT={unit}", "primary"))
             else:
                 buttons.append((f"{unit}: inlet {inlet}", f"{command} UNIT={unit}", "secondary"))
+        if len(self._all()) > 1:
+            buttons.append(("All new units" if self.unfound() else "All units",
+                            f"{command} UNIT=all", "default"))
         text = ("Feeds one lane of a unit to the switch and reels it back, to find the inlet "
                 "the unit is plumbed into. A lane that is loaded through the switch is unloaded "
                 "first. Put a spool in the unit, then pick it.")
         if not buttons:
             text = ("No unit's inlet is found by loading. That is for the units of a chain that "
                     "is on both inlets in the switch's section.")
-        back = [("Back to unit selection", "AFC_CALIBRATION", "info")]
+        if outcome:
+            text = f"{outcome}\n{text}"
         AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Inlets", text, buttons, True,
-                                                     None, back)
+                                                     None, self._back())
 
     def _identify_lane(self, unit: Optional[str], name: Optional[str]) -> AFCLane:
         """

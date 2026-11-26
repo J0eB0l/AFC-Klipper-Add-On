@@ -14,6 +14,7 @@ from extras.AFC_BridgeBox import afcBridgeBox
 from extras.AFC_BridgeBox_switch import (
     LETTERS,
     SwitchError,
+    SwitchResetError,
     afcBridgeBoxSwitch,
     in_order,
     load_config_prefix,
@@ -285,6 +286,19 @@ def plumbed(chain: Optional[FakeChain] = None, **values: Any) -> afcBridgeBoxSwi
 # The bays of a chain that is on both inlets, and the AMS each one holds.
 BAYS = {"Bambu_AMS_1": "AAAA", "Bambu_AMS_2": "BBBB"}
 BOTH = {"inlet_a": ["Chain_1"], "inlet_b": ["Chain_1"]}
+
+# How a prompt with a cancel button ends, and how one with no button does.
+CANCEL = [("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
+                  "MSG=action:prompt_end|warning"),
+          ("raw", "// action:prompt_show")]
+SHOW = ("raw", "// action:prompt_show")
+END = ("raw", "// action:prompt_end")
+# The footer of a prompt that goes back to AFC's calibration prompt, and of one that goes back
+# to the prompt that offers what to calibrate on a switch.
+TO_AFC = [("raw", "// action:prompt_footer_button Back to unit selection|AFC_CALIBRATION|"
+                  "info")] + CANCEL
+TO_SWITCH = [("raw", "// action:prompt_footer_button Back|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                     "SWITCH=Switch_1|info")] + CANCEL
 
 
 def finding(chain: Optional[FakeChain] = None, connect: bool = True,
@@ -2048,14 +2062,17 @@ class TestAfcBridgeBoxSwitchOffer:
         """:return tuple: the button that finds a unit's inlet"""
         return (unit, f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1 UNIT={unit}", "primary")
 
-    def test_every_unit_whose_inlet_is_not_known_is_offered(self):
+    # Offered with more than one unit, to find them one after the other.
+    ALL = ("All new units", "AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1 UNIT=all", "default")
+
+    def test_every_unit_whose_inlet_is_not_known_is_offered_and_all_of_them_at_once(self):
         switch = finding()
         switch._offer()
         assert chain_of(switch).offers == [
             ("Switch_1", "Switch_1 new AMS",
              ["Switch_1: the inlet of Bambu_AMS_1, Bambu_AMS_2 is not known yet. The lanes of a "
               "unit do not load until its inlet is found.", self.HOW],
-             [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2")])]
+             [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2"), self.ALL])]
         assert switch._offered == ["AAAA", "BBBB"]
 
     def test_an_ams_is_offered_once(self):
@@ -2070,6 +2087,7 @@ class TestAfcBridgeBoxSwitchOffer:
         found(switch, Bambu_AMS_2="A")
         switch._offer()
         chain = chain_of(switch)
+        # One unit is offered alone.
         assert chain.offers[0][3] == [self._button("Bambu_AMS_1")]
         chain.uids["Bambu_AMS_2"] = "CCCC"
         switch._follow()
@@ -2078,7 +2096,7 @@ class TestAfcBridgeBoxSwitchOffer:
             "Switch_1", "Switch_1 new AMS",
             ["Switch_1: the inlet of Bambu_AMS_1, Bambu_AMS_2 is not known yet. The lanes of a "
              "unit do not load until its inlet is found.", self.HOW],
-            [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2")])
+            [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2"), self.ALL])
         assert switch._offered == ["AAAA", "CCCC"]
 
     def test_with_every_inlet_known_nothing_is_offered(self):
@@ -3643,7 +3661,7 @@ class TestAfcBridgeBoxSwitchReport:
             "Outlet B: extruder1 (lane_Bambu_AMS_2)\n"
             "Not seen at their inlet yet: Bambu_AMS_2\n"
             "Inlet not known: Bambu_AMS_1. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY, or pick the "
-            "switch's inlets in AFC_CALIBRATION")
+            "switch and its inlets in AFC_CALIBRATION")
 
     def test_a_switch_that_is_not_answering(self):
         switch = plumbed(FakeChain(state=None))
@@ -4140,14 +4158,13 @@ class TestAfcBridgeBoxSwitchHandleCalibrationButtons:
             ("Switch_1 filament switch", "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1",
              "primary")]
 
-    def test_a_switch_with_units_that_are_found_by_loading_adds_its_inlets(self):
+    def test_a_switch_with_units_that_are_found_by_loading_adds_one_button_too(self):
         switch = finding()
         buttons: List[Tuple[str, str, str]] = []
         switch.handle_calibration_buttons(buttons)
         assert buttons == [
             ("Switch_1 filament switch", "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1",
-             "primary"),
-            ("Switch_1 inlets", "AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1", "primary")]
+             "primary")]
 
     def test_afc_asks_for_it_when_it_builds_its_calibration_menu(self):
         printer = make_printer()
@@ -4160,16 +4177,57 @@ class TestAfcBridgeBoxSwitchHandleCalibrationButtons:
 
 
 class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
-    def test_without_a_lane_it_opens_the_menu(self):
+    @staticmethod
+    def _measuring(lane: str) -> List[Tuple[str, str]]:
+        """:return list: the lines of the prompt that says a lane is measuring"""
+        return [("raw", "// action:prompt_begin Switch_1 Outlets"),
+                ("raw", "// action:prompt_text Measuring the tube from each outlet to its "
+                        f"toolhead with {lane}. The lane goes to each toolhead in turn and "
+                        "back."),
+                SHOW]
+
+    @staticmethod
+    def _again(outcome: str) -> List[Tuple[str, str]]:
+        """:return list: the lines of the units' prompt with an outcome, no unit to offer"""
+        menu = TestAfcBridgeBoxSwitchCalibrationMenu
+        return [menu.BEGIN, ("raw", f"// action:prompt_text {outcome}"), menu.NO_LANE] + TO_AFC
+
+    @pytest.mark.parametrize("params", [{}, {"OUTLETS": 1}, {"OUTLETS": 0}])
+    def test_without_a_lane_it_opens_the_menu(self, params):
         switch = plumbed(**LENGTHS)
         switch._measure = MagicMock()
-        gcmd = MockGCodeCommand()
+        gcmd = MockGCodeCommand(params)
         switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
         menu = TestAfcBridgeBoxSwitchCalibrationMenu
         assert switch.logger.messages == [menu.BEGIN, menu.NO_LANE] + menu.FOOT
         switch._measure.assert_not_called()
         assert switch.lengths == {"A": 850.0, "B": 1010.0}
         switch.afc.function.ConfigRewrite.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+
+    @pytest.mark.parametrize("params", [{}, {"OUTLETS": 0}])
+    def test_with_units_that_are_found_by_loading_it_first_offers_what_to_calibrate(self,
+                                                                                    params):
+        switch = finding()
+        switch._measure = MagicMock()
+        gcmd = MockGCodeCommand(params)
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        menu = TestAfcBridgeBoxSwitchMenu
+        assert switch.logger.messages == [
+            menu.BEGIN, ("raw", menu.PICK[1] + " Inlet not known yet: Bambu_AMS_1, "
+                                               "Bambu_AMS_2."),
+            menu.INLETS, menu.OUTLETS] + TO_AFC
+        switch._measure.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+
+    def test_with_outlets_it_goes_on_to_the_units_that_can_measure(self):
+        switch = finding()
+        switch._measure = MagicMock()
+        gcmd = MockGCodeCommand({"OUTLETS": 1})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        menu = TestAfcBridgeBoxSwitchCalibrationMenu
+        assert switch.logger.messages == [menu.BEGIN, menu.NO_LANE] + TO_SWITCH
+        switch._measure.assert_not_called()
         gcmd.respond_info.assert_not_called()
 
     def test_with_a_unit_it_opens_that_units_lanes(self):
@@ -4182,7 +4240,7 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
         switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
         menu = TestAfcBridgeBoxSwitchLaneMenu
         assert switch.logger.messages == [
-            ("raw", "// action:prompt_begin Switch_1 Calibration Ace2_1"),
+            ("raw", "// action:prompt_begin Switch_1 Outlets Ace2_1"),
             ("raw", "// action:prompt_text Select a loaded lane from Ace2_1 to measure the tube "
                     "from each outlet with."),
             menu.ROW, menu.button("lane_Ace2_1", "primary"), menu.ROW_END] + menu.FOOT
@@ -4209,7 +4267,9 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
         switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
         switch._measure.assert_called_once_with(lane, gcmd)
         assert switch.lengths == {"A": 850.0, "B": 1010.0}
-        assert switch.logger.messages == []
+        assert switch.logger.messages == self._measuring("lane_Ace2_1") + self._again(
+            "Switch_1: with lane_Ace2_1 the tube through outlet A is 850.0 mm and through "
+            "outlet B 1010.0 mm")
 
     def test_a_lane_that_is_not_on_this_switch(self):
         switch = plumbed(**LENGTHS)
@@ -4222,6 +4282,9 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
         assert switch.lengths == {"A": 850.0, "B": 1010.0}
         switch.afc.function.ConfigRewrite.assert_not_called()
         gcmd.respond_info.assert_not_called()
+        # Nothing was measuring, so the units' prompt opens with the reason alone.
+        assert switch.logger.messages == self._again(
+            "Switch_1: lane0 is not a lane of this switch")
 
     def test_a_measurement_that_fails_is_the_commands_error_and_keeps_the_lengths(self):
         switch = plumbed(**LENGTHS)
@@ -4233,7 +4296,33 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
         assert switch.lengths == {"A": 850.0, "B": 1010.0}
         switch.afc.function.ConfigRewrite.assert_not_called()
         gcmd.respond_info.assert_not_called()
-        assert switch.logger.messages == []
+        assert switch.logger.messages == self._measuring("lane_Turtle_1") + self._again(
+            "Switch_1: it did not work")
+
+    def test_a_measurement_that_left_the_lane_reset_prompt_open_does_not_replace_it(self):
+        switch = plumbed(**LENGTHS)
+        switch._measure = MagicMock(side_effect=SwitchResetError("Switch_1: reset it"))
+        gcmd = MockGCodeCommand({"LANE": "lane_Turtle_1"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        assert str(err.value) == "Switch_1: reset it"
+        assert switch.lengths == {"A": 850.0, "B": 1010.0}
+        switch.afc.function.ConfigRewrite.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+        assert switch.logger.messages == self._measuring("lane_Turtle_1")
+
+    def test_any_other_failure_closes_the_prompt_and_is_passed_on(self):
+        switch = plumbed(**LENGTHS)
+        switch._measure = MagicMock(side_effect=RuntimeError("the link dropped"))
+        gcmd = MockGCodeCommand({"LANE": "lane_Turtle_1"})
+        with pytest.raises(RuntimeError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION(gcmd)
+        assert str(err.value) == "the link dropped"
+        assert switch.lengths == {"A": 850.0, "B": 1010.0}
+        switch.afc.function.ConfigRewrite.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+        gcmd.error.assert_not_called()
+        assert switch.logger.messages == self._measuring("lane_Turtle_1") + [END]
 
     def test_both_lengths_are_rounded_kept_and_saved_to_the_section(self):
         switch = plumbed()
@@ -4245,10 +4334,10 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
         assert switch.lengths == {"A": 851.9, "B": 1012.1}
         assert switch.afc.function.ConfigRewrite.call_args_list == [
             call(SECTION, "outlet_a_length", 851.9), call(SECTION, "outlet_b_length", 1012.1)]
-        gcmd.respond_info.assert_called_once_with(
-            "Switch_1: with lane_Ace2_1 the tube through outlet A is 851.9 mm and through "
-            "outlet B 1012.1 mm")
-        assert switch.logger.messages == []
+        said = ("Switch_1: with lane_Ace2_1 the tube through outlet A is 851.9 mm and through "
+                "outlet B 1012.1 mm")
+        gcmd.respond_info.assert_called_once_with(said)
+        assert switch.logger.messages == self._measuring("lane_Ace2_1") + self._again(said)
 
     def test_a_lane_measures_both_tubes_from_start_to_end(self):
         switch = plumbed(SimChain(route=2))
@@ -4271,17 +4360,14 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
 
 
 class TestAfcBridgeBoxSwitchCalibrationMenu:
-    BEGIN = ("raw", "// action:prompt_begin Switch_1 Calibration")
+    BEGIN = ("raw", "// action:prompt_begin Switch_1 Outlets")
     PICK = ("raw", "// action:prompt_text Measures the tube from each outlet to its toolhead "
                    "with one lane, so a lane loads the right distance through either outlet. "
                    "Unload the toolheads, then pick the unit to measure with.")
     NO_LANE = ("raw", "// action:prompt_text No lane that can measure is loaded in its unit. "
                       "Load one, or set outlet_a_length and outlet_b_length in the switch's "
                       "section by hand.")
-    FOOT = [("raw", "// action:prompt_footer_button Back to unit selection|AFC_CALIBRATION|info"),
-            ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
-                    "MSG=action:prompt_end|warning"),
-            ("raw", "// action:prompt_show")]
+    FOOT = TO_AFC
 
     @staticmethod
     def _button(unit: str, style: str) -> Tuple[str, str]:
@@ -4315,6 +4401,27 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [self.BEGIN, self.NO_LANE] + self.FOOT
 
+    def test_the_outcome_of_the_last_run_is_shown_above_the_offer(self):
+        switch = plumbed()
+        lane_of(switch, "Turtle_1").load_state = True
+        add_hub(lane_of(switch, "Turtle_1"))
+        switch._calibration_menu(MockGCodeCommand(), "Switch_1: it did not work")
+        assert switch.logger.messages == [
+            self.BEGIN, ("raw", "// action:prompt_text Switch_1: it did not work"), self.PICK,
+            self._button("Turtle_1", "primary")] + self.FOOT
+
+    def test_and_above_what_to_do_when_no_lane_can_measure(self):
+        switch = plumbed()
+        switch._calibration_menu(MockGCodeCommand(), "Switch_1: it did not work")
+        assert switch.logger.messages == [
+            self.BEGIN, ("raw", "// action:prompt_text Switch_1: it did not work"),
+            self.NO_LANE] + self.FOOT
+
+    def test_with_units_that_are_found_by_loading_it_goes_back_to_what_to_calibrate(self):
+        switch = finding()
+        switch._calibration_menu(MockGCodeCommand())
+        assert switch.logger.messages == [self.BEGIN, self.NO_LANE] + TO_SWITCH
+
     def test_a_unit_that_measures_by_loading_is_said_to(self):
         switch = plumbed()
         for unit in ("Bambu_AMS_1", "Turtle_1"):
@@ -4341,17 +4448,50 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
             self._button("Ace2_1", "secondary")] + self.FOOT
 
 
+class TestAfcBridgeBoxSwitchMenu:
+    BEGIN = ("raw", "// action:prompt_begin Switch_1 Calibration")
+    PICK = ("raw", "// action:prompt_text Inlets finds the inlet each unit is plumbed into, by "
+                   "feeding one of its lanes to the switch. Outlets measures the tube from each "
+                   "outlet to its toolhead, with a lane of a unit whose inlet is known.")
+    INLETS = ("raw", "// action:prompt_button Inlets|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+                     "SWITCH=Switch_1|primary")
+    OUTLETS = ("raw", "// action:prompt_button Outlets|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                      "SWITCH=Switch_1 OUTLETS=1|secondary")
+
+    def test_it_offers_the_inlets_and_the_outlets(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A", Bambu_AMS_2="B")
+        switch._menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self.INLETS, self.OUTLETS] + TO_AFC
+
+    def test_the_units_whose_inlet_is_not_known_are_named(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A")
+        switch._menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, ("raw", self.PICK[1] + " Inlet not known yet: Bambu_AMS_2."),
+            self.INLETS, self.OUTLETS] + TO_AFC
+
+
+class TestAfcBridgeBoxSwitchBack:
+    def test_a_switch_with_units_that_are_found_by_loading_goes_back_to_its_own_prompt(self):
+        assert finding()._back() == [
+            ("Back", "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1", "info")]
+
+    def test_any_other_switch_goes_back_to_afcs_calibration_prompt(self):
+        assert plumbed()._back() == [("Back to unit selection", "AFC_CALIBRATION", "info")]
+
+
 class TestAfcBridgeBoxSwitchLaneMenu:
-    BEGIN = ("raw", "// action:prompt_begin Switch_1 Calibration Turtle_1")
+    BEGIN = ("raw", "// action:prompt_begin Switch_1 Outlets Turtle_1")
     PICK = ("raw", "// action:prompt_text Select a loaded lane from Turtle_1 to measure the "
                    "tube from each outlet with.")
     ROW = ("raw", "// action:prompt_button_group_start")
     ROW_END = ("raw", "// action:prompt_button_group_end")
+    # Back to the units that can measure, past the prompt that offers what to calibrate.
     FOOT = [("raw", "// action:prompt_footer_button Back|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
-                    "SWITCH=Switch_1|info"),
-            ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
-                    "MSG=action:prompt_end|warning"),
-            ("raw", "// action:prompt_show")]
+                    "SWITCH=Switch_1 OUTLETS=1|info")] + CANCEL
 
     @staticmethod
     def button(lane: str, style: str) -> Tuple[str, str]:
@@ -4927,8 +5067,11 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
         measuring(switch, lane, Run(moved, done=False, why="Error occurred"))
         gcmd = MockGCodeCommand()
         with patch.object(switch.afc, "run_script") as run_script, \
-                pytest.raises(SwitchError):
+                pytest.raises(SwitchResetError) as err:
             switch._measure_outlet(lane, "A", "B", gcmd)
+        assert str(err.value) == (
+            "Switch_1: lane_Turtle_1 did not measure the tube to extruder1 through outlet B. "
+            "Error occurred. Reset lane_Turtle_1 before the next try.")
         run_script.assert_called_once_with(
             "AFC_CALI_FAIL TITLE='Switch_1 Calibration Failed' FAIL=lane_Turtle_1 "
             "DISTANCE=300.0 RESET=1", gcmd=gcmd)
@@ -4940,8 +5083,10 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
         lane.hub_obj.state = at_hub
         measuring(switch, lane, Run(moved, done=False, why="Error occurred"))
         with patch.object(switch.afc, "run_script") as run_script, \
-                pytest.raises(SwitchError):
+                pytest.raises(SwitchError) as err:
             switch._measure_outlet(lane, "A", "B", MockGCodeCommand())
+        # No prompt is left open, so it is not the error that keeps one.
+        assert type(err.value) is SwitchError
         run_script.assert_not_called()
 
     def test_a_run_that_measures_offers_no_lane_reset(self):
@@ -5017,6 +5162,47 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
                                   "outlet B")
         lane.unit_obj.calibrate_bowden.assert_not_called()
         assert switch._moving is False
+
+
+class TestAfcBridgeBoxSwitchOfferReset:
+    @staticmethod
+    def _switch(at_hub: bool) -> Tuple[afcBridgeBoxSwitch, FakeLane]:
+        """:return tuple: a switch, and Turtle_1's lane with a hub that reads ``at_hub``"""
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        add_hub(lane).state = at_hub
+        return switch, lane
+
+    @pytest.mark.parametrize("moved", [300.0, -300.0, 12.34])
+    def test_a_lane_that_fed_and_is_at_its_hub_gets_afcs_prompt(self, moved):
+        switch, lane = self._switch(True)
+        gcmd = MockGCodeCommand()
+        with patch.object(switch.afc, "run_script") as run_script:
+            assert switch._offer_reset(lane, moved, gcmd) is True
+        distance = {300.0: "300.0", -300.0: "300.0", 12.34: "12.3"}[moved]
+        run_script.assert_called_once_with(
+            "AFC_CALI_FAIL TITLE='Switch_1 Calibration Failed' FAIL=lane_Turtle_1 "
+            f"DISTANCE={distance} RESET=1", gcmd=gcmd)
+
+    @pytest.mark.parametrize("moved", [0.0, 0])
+    def test_a_lane_that_did_not_feed_gets_none(self, moved):
+        switch, lane = self._switch(True)
+        with patch.object(switch.afc, "run_script") as run_script:
+            assert switch._offer_reset(lane, moved, MockGCodeCommand()) is False
+        run_script.assert_not_called()
+
+    def test_a_lane_whose_hub_is_clear_gets_none(self):
+        switch, lane = self._switch(False)
+        with patch.object(switch.afc, "run_script") as run_script:
+            assert switch._offer_reset(lane, 300.0, MockGCodeCommand()) is False
+        run_script.assert_not_called()
+
+    def test_a_lane_with_no_hub_gets_none(self):
+        switch, lane = self._switch(True)
+        lane.hub_obj = None
+        with patch.object(switch.afc, "run_script") as run_script:
+            assert switch._offer_reset(lane, 300.0, MockGCodeCommand()) is False
+        run_script.assert_not_called()
 
 
 class TestAfcBridgeBoxSwitchLoadToMeasure:
@@ -5140,7 +5326,31 @@ def feeding(switch: afcBridgeBoxSwitch, unit: str, *shows: str,
 
 
 class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
-    END = ("raw", "// action:prompt_end")
+    @staticmethod
+    def _finding(unit: str) -> List[Tuple[str, str]]:
+        """:return list: the lines of the prompt that says a unit's own lane is fed"""
+        return [("raw", "// action:prompt_begin Switch_1 Inlets"),
+                ("raw", f"// action:prompt_text Finding the inlet of {unit}: lane_{unit} is fed "
+                        "to the switch and reeled back. A lane that is loaded through the "
+                        "switch is unloaded first."),
+                SHOW]
+
+    @staticmethod
+    def _again(outcome: str, first: str, second: str) -> List[Tuple[str, str]]:
+        """
+        :return list: the lines of the units' prompt with an outcome, each unit `new` or the
+        inlet found for it
+        """
+        menu = TestAfcBridgeBoxSwitchIdentifyMenu
+        states = {"Bambu_AMS_1": first, "Bambu_AMS_2": second}
+        buttons = [menu.button(unit, state, "primary" if state == "new" else "secondary")
+                   for unit, state in states.items()]
+        if (first, second) == ("new", "new"):
+            buttons.append(menu.ALL_NEW)
+        elif "new" not in (first, second):
+            buttons.append(menu.ALL)
+        lines = [("raw", f"// action:prompt_text {line}") for line in outcome.split("\n")]
+        return [menu.BEGIN] + lines + [menu.PICK] + buttons + menu.FOOT
 
     def test_without_a_unit_or_a_lane_it_opens_the_menu(self):
         switch = finding()
@@ -5150,7 +5360,7 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
         menu = TestAfcBridgeBoxSwitchIdentifyMenu
         assert switch.logger.messages == [
             menu.BEGIN, menu.PICK, menu.button("Bambu_AMS_1", "new", "primary"),
-            menu.button("Bambu_AMS_2", "new", "primary")] + menu.FOOT
+            menu.button("Bambu_AMS_2", "new", "primary"), menu.ALL_NEW] + menu.FOOT
         switch._identify.assert_not_called()
         gcmd.respond_info.assert_not_called()
 
@@ -5167,10 +5377,11 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
         gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
         switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
         switch._identify.assert_called_once_with(lane, gcmd)
-        # The prompt that offered the unit is closed.
-        assert switch.logger.messages == [self.END]
-        gcmd.respond_info.assert_called_once_with(
-            "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1.")
+        said = "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1."
+        # What is being done takes the place of the offer, then the offer opens with the outcome.
+        assert switch.logger.messages == self._finding("Bambu_AMS_2") + self._again(
+            said, "new", "inlet B")
+        gcmd.respond_info.assert_called_once_with(said)
 
     def test_with_a_lane_that_lane_is_fed_and_its_unit_is_the_one_found(self):
         switch = finding()
@@ -5185,9 +5396,10 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
         gcmd = MockGCodeCommand({"LANE": "lane_Bambu_AMS_1"})
         switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
         switch._identify.assert_called_once_with(lane, gcmd)
-        assert switch.logger.messages == [self.END]
-        gcmd.respond_info.assert_called_once_with(
-            "Switch_1: Bambu_AMS_1 enters inlet A. Its lanes start on extruder.")
+        said = "Switch_1: Bambu_AMS_1 enters inlet A. Its lanes start on extruder."
+        assert switch.logger.messages == self._finding("Bambu_AMS_1") + self._again(
+            said, "inlet A", "new")
+        gcmd.respond_info.assert_called_once_with(said)
 
     def test_a_lane_that_cannot_be_fed_is_the_commands_error(self):
         switch = finding()
@@ -5195,10 +5407,11 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
         gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
         with pytest.raises(CommandError) as err:
             switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
-        assert str(err.value) == ("Switch_1: no lane of Bambu_AMS_2 holds filament. Put a spool "
-                                  "in it first.")
+        said = "Switch_1: no lane of Bambu_AMS_2 holds filament. Put a spool in it first."
+        assert str(err.value) == said
         switch._identify.assert_not_called()
-        assert switch.logger.messages == [self.END]
+        # No lane was fed, so the offer opens with the reason alone.
+        assert switch.logger.messages == self._again(said, "new", "new")
         gcmd.respond_info.assert_not_called()
 
     def test_an_inlet_that_was_not_found_is_the_commands_error(self):
@@ -5209,7 +5422,118 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
         with pytest.raises(CommandError) as err:
             switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
         assert str(err.value) == "Switch_1: it did not work"
-        assert switch.logger.messages == [self.END]
+        assert switch.logger.messages == self._finding("Bambu_AMS_2") + self._again(
+            "Switch_1: it did not work", "new", "new")
+        gcmd.respond_info.assert_not_called()
+
+    def test_any_other_failure_closes_the_prompt_and_is_passed_on(self):
+        switch = finding()
+        lane_of(switch, "Bambu_AMS_2").load_state = True
+        switch._identify = MagicMock(side_effect=RuntimeError("the link dropped"))
+        gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
+        with pytest.raises(RuntimeError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        assert str(err.value) == "the link dropped"
+        assert switch.logger.messages == self._finding("Bambu_AMS_2") + [END]
+        gcmd.respond_info.assert_not_called()
+        gcmd.error.assert_not_called()
+
+    @staticmethod
+    def _all(switch: afcBridgeBoxSwitch, fails: Optional[str] = None) -> MagicMock:
+        """
+        Script the run that finds an inlet: Bambu_AMS_1 enters A and Bambu_AMS_2 enters B, but
+        for the unit that ``fails``. Both units hold filament.
+
+        :return MagicMock: the switch's _identify
+        """
+        for unit in BAYS:
+            lane_of(switch, unit).load_state = True
+
+        def identify(fed: FakeLane, gcmd: Any) -> str:
+            if fed.unit == fails:
+                raise SwitchError(f"Switch_1: {fed.name} did not work")
+            inlet = "A" if fed.unit == "Bambu_AMS_1" else "B"
+            switch.inlets[inlet].append(fed.unit)
+            return inlet
+
+        switch._identify = MagicMock(side_effect=identify)
+        return switch._identify
+
+    FIRST = "Switch_1: Bambu_AMS_1 enters inlet A. Its lanes start on extruder."
+    SECOND = "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1."
+
+    @pytest.mark.parametrize("unit", ["all", "ALL", "All"])
+    def test_all_finds_every_unit_whose_inlet_is_not_known_one_after_the_other(self, unit):
+        switch = finding()
+        identify = self._all(switch)
+        gcmd = MockGCodeCommand({"UNIT": unit})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        assert identify.call_args_list == [call(lane_of(switch, "Bambu_AMS_1"), gcmd),
+                                           call(lane_of(switch, "Bambu_AMS_2"), gcmd)]
+        second = self._finding("Bambu_AMS_2")
+        # What the first unit gave stays above what is being done for the second.
+        second.insert(1, ("raw", f"// action:prompt_text {self.FIRST}"))
+        assert switch.logger.messages == self._finding("Bambu_AMS_1") + second + self._again(
+            f"{self.FIRST}\n{self.SECOND}", "inlet A", "inlet B")
+        assert gcmd.respond_info.call_args_list == [call(self.FIRST), call(self.SECOND)]
+
+    def test_all_leaves_out_a_unit_whose_inlet_is_known(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A")
+        identify = self._all(switch)
+        gcmd = MockGCodeCommand({"UNIT": "all"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        identify.assert_called_once_with(lane_of(switch, "Bambu_AMS_2"), gcmd)
+        assert switch.logger.messages == self._finding("Bambu_AMS_2") + self._again(
+            self.SECOND, "inlet A", "inlet B")
+        gcmd.respond_info.assert_called_once_with(self.SECOND)
+
+    def test_all_stops_at_the_first_unit_that_fails(self):
+        switch = finding()
+        identify = self._all(switch, fails="Bambu_AMS_1")
+        gcmd = MockGCodeCommand({"UNIT": "all"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        said = "Switch_1: lane_Bambu_AMS_1 did not work"
+        assert str(err.value) == said
+        identify.assert_called_once_with(lane_of(switch, "Bambu_AMS_1"), gcmd)
+        assert switch.logger.messages == self._finding("Bambu_AMS_1") + self._again(
+            said, "new", "new")
+        gcmd.respond_info.assert_not_called()
+
+    def test_a_unit_that_fails_after_another_keeps_what_the_other_gave(self):
+        switch = finding()
+        identify = self._all(switch, fails="Bambu_AMS_2")
+        gcmd = MockGCodeCommand({"UNIT": "all"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        said = "Switch_1: lane_Bambu_AMS_2 did not work"
+        assert str(err.value) == said
+        assert identify.call_count == 2
+        second = self._finding("Bambu_AMS_2")
+        second.insert(1, ("raw", f"// action:prompt_text {self.FIRST}"))
+        assert switch.logger.messages == self._finding("Bambu_AMS_1") + second + self._again(
+            f"{self.FIRST}\n{said}", "inlet A", "new")
+        gcmd.respond_info.assert_called_once_with(self.FIRST)
+
+    def test_all_with_a_lane_feeds_that_lane_alone(self):
+        switch = finding()
+        identify = self._all(switch)
+        gcmd = MockGCodeCommand({"UNIT": "all", "LANE": "lane_Bambu_AMS_2"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        identify.assert_called_once_with(lane_of(switch, "Bambu_AMS_2"), gcmd)
+        assert switch.logger.messages == self._finding("Bambu_AMS_2") + self._again(
+            self.SECOND, "new", "inlet B")
+        gcmd.respond_info.assert_called_once_with(self.SECOND)
+
+    def test_all_on_a_switch_with_no_unit_to_find_opens_the_menu(self):
+        switch = plumbed()
+        switch._identify = MagicMock()
+        gcmd = MockGCodeCommand({"UNIT": "all"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        menu = TestAfcBridgeBoxSwitchIdentifyMenu
+        assert switch.logger.messages == [menu.BEGIN, menu.NO_UNIT] + TO_AFC
+        switch._identify.assert_not_called()
         gcmd.respond_info.assert_not_called()
 
     def test_a_unit_is_found_from_start_to_end(self):
@@ -5238,12 +5562,11 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
         assert switch._found == {"AAAA": "A", "BBBB": "B"}
         assert lane.extruder_obj is extruder_of(switch, "extruder1")
         assert ams_of(switch, "Bambu_AMS_2").behind[-1] == ("Buffer_B", "chip_inlet_b")
-        assert switch.logger.messages == [
-            self.END,
+        said = "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1."
+        assert switch.logger.messages == self._finding("Bambu_AMS_2") + [
             ("info", "Switch_1: unloading lane_Bambu_AMS_1 from extruder, both inlets have to "
-                     "be empty to find one")]
-        gcmd.respond_info.assert_called_once_with(
-            "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1.")
+                     "be empty to find one")] + self._again(said, "inlet A", "inlet B")
+        gcmd.respond_info.assert_called_once_with(said)
 
 
 class TestAfcBridgeBoxSwitchIdentifyMenu:
@@ -5253,10 +5576,11 @@ class TestAfcBridgeBoxSwitchIdentifyMenu:
                    "through the switch is unloaded first. Put a spool in the unit, then pick it.")
     NO_UNIT = ("raw", "// action:prompt_text No unit's inlet is found by loading. That is for "
                       "the units of a chain that is on both inlets in the switch's section.")
-    FOOT = [("raw", "// action:prompt_footer_button Back to unit selection|AFC_CALIBRATION|info"),
-            ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
-                    "MSG=action:prompt_end|warning"),
-            ("raw", "// action:prompt_show")]
+    FOOT = TO_SWITCH
+    ALL_NEW = ("raw", "// action:prompt_button All new units|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+                      "SWITCH=Switch_1 UNIT=all|default")
+    ALL = ("raw", "// action:prompt_button All units|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+                  "SWITCH=Switch_1 UNIT=all|default")
 
     @staticmethod
     def button(unit: str, state: str, style: str) -> Tuple[str, str]:
@@ -5268,9 +5592,25 @@ class TestAfcBridgeBoxSwitchIdentifyMenu:
         switch = finding()
         found(switch, Bambu_AMS_2="B")
         switch._identify_menu(MockGCodeCommand())
+        # One unit is new, so there is nothing to run all at once.
         assert switch.logger.messages == [
             self.BEGIN, self.PICK, self.button("Bambu_AMS_1", "new", "primary"),
             self.button("Bambu_AMS_2", "inlet B", "secondary")] + self.FOOT
+
+    def test_several_new_units_are_also_offered_all_at_once(self):
+        switch = finding()
+        switch._identify_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self.button("Bambu_AMS_1", "new", "primary"),
+            self.button("Bambu_AMS_2", "new", "primary"), self.ALL_NEW] + self.FOOT
+
+    def test_with_every_inlet_known_all_units_are_offered_at_once(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A", Bambu_AMS_2="B")
+        switch._identify_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self.button("Bambu_AMS_1", "inlet A", "secondary"),
+            self.button("Bambu_AMS_2", "inlet B", "secondary"), self.ALL] + self.FOOT
 
     def test_a_bay_that_holds_no_unit_now_is_not_offered(self):
         switch = finding()
@@ -5289,7 +5629,55 @@ class TestAfcBridgeBoxSwitchIdentifyMenu:
     def test_a_switch_with_no_unit_to_find_says_what_it_is_for(self):
         switch = plumbed()
         switch._identify_menu(MockGCodeCommand())
-        assert switch.logger.messages == [self.BEGIN, self.NO_UNIT] + self.FOOT
+        # It has no prompt that offers what to calibrate, so it goes back to AFC's.
+        assert switch.logger.messages == [self.BEGIN, self.NO_UNIT] + TO_AFC
+
+    def test_the_outcome_of_the_last_run_is_shown_above_the_offer(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="B")
+        switch._identify_menu(MockGCodeCommand(), "Switch_1: it did not work")
+        assert switch.logger.messages == [
+            self.BEGIN, ("raw", "// action:prompt_text Switch_1: it did not work"), self.PICK,
+            self.button("Bambu_AMS_1", "new", "primary"),
+            self.button("Bambu_AMS_2", "inlet B", "secondary")] + self.FOOT
+
+    def test_and_above_what_it_is_for_on_a_switch_with_no_unit_to_find(self):
+        switch = plumbed()
+        switch._identify_menu(MockGCodeCommand(), "Switch_1: it did not work")
+        assert switch.logger.messages == [
+            self.BEGIN, ("raw", "// action:prompt_text Switch_1: it did not work"),
+            self.NO_UNIT] + TO_AFC
+
+
+class TestAfcBridgeBoxSwitchAll:
+    def test_the_units_whose_inlet_is_not_known(self):
+        assert finding()._all() == ["Bambu_AMS_1", "Bambu_AMS_2"]
+
+    def test_a_unit_whose_inlet_is_known_is_left_out_while_another_is_not(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="B")
+        assert switch._all() == ["Bambu_AMS_2"]
+
+    def test_with_every_inlet_known_it_is_every_unit_that_is_found_by_loading(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="B", Bambu_AMS_2="A")
+        assert switch._all() == ["Bambu_AMS_1", "Bambu_AMS_2"]
+
+    @pytest.mark.parametrize("inlets", [{}, {"Bambu_AMS_2": "A"}])
+    def test_a_bay_that_holds_no_unit_now_is_not_one(self, inlets):
+        switch = finding()
+        found(switch, **inlets)
+        ams_of(switch, "Bambu_AMS_1").pool = True
+        assert switch._all() == ["Bambu_AMS_2"]
+
+    def test_a_unit_that_is_named_on_an_inlet_is_not_one(self):
+        switch = finding(inlet_b=["Chain_1", "Bambu_AMS_2"])
+        found(switch, Bambu_AMS_1="A")
+        assert switch.live_units() == ["Bambu_AMS_1", "Bambu_AMS_2"]
+        assert switch._all() == ["Bambu_AMS_1"]
+
+    def test_a_switch_with_no_unit_that_is_found_by_loading_has_none(self):
+        assert plumbed()._all() == []
 
 
 class TestAfcBridgeBoxSwitchIdentifyLane:
