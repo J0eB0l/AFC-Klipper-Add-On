@@ -269,7 +269,8 @@ class afcBridgeBoxSwitch:
                       if (isinstance(obj, AFCLane)
                           and self.inlet_of(obj.unit) is not None)]
         saved = self._saved()
-        self._saved_lanes = saved["lanes"]
+        # A lane AFC saved as loaded is in that toolhead, whatever was saved for the switch.
+        self._saved_lanes = {**saved["lanes"], **self._saved_loaded()}
         self._by_print = [name for name in saved["by_print"] if name in self._saved_lanes]
         self._due_back = [name for name in saved["due_back"] if name in self._saved_lanes]
         self.confirmed = [unit for unit in saved["confirmed"] if unit in self.units()]
@@ -304,6 +305,21 @@ class afcBridgeBoxSwitch:
                     "due_back": list(saved.get("due_back", []))}
         except (OSError, ValueError, KeyError, TypeError):
             return {"lanes": {}, "confirmed": [], "by_print": [], "due_back": []}
+
+    def _saved_loaded(self) -> Dict[str, str]:
+        """
+        The lanes AFC saved as loaded in one of the switch's toolheads.
+
+        :return dict: lane name -> extruder name, empty when nothing usable is saved
+        """
+        try:
+            with open(f"{self.afc.VarFile}.unit") as file:
+                extruders = json.load(file)["system"]["extruders"]
+            return {extruders[name]["lane_loaded"]: name for name in self.extruders()
+                    if (name in extruders
+                        and extruders[name]["lane_loaded"])}
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
 
     def handle_save_vars(self, data: Dict[str, Any]) -> None:
         """
@@ -658,10 +674,13 @@ class afcBridgeBoxSwitch:
     def _send_back(self) -> None:
         """
         Put the lanes that are due back on their unit's starting extruder, each once it is out
-        of its toolhead and not on its way into one.
+        of its toolhead and not on its way into one. A lane of a bay that holds no unit now
+        waits for its unit: what AFC saved for it is not on the lane until then.
         """
+        live = self.live_units()
         back = [lane for lane in self.lanes
                 if (lane.name in self._due_back
+                    and lane.unit in live
                     and not lane.tool_loaded
                     and lane not in self._routed.values())]
         for lane in back:

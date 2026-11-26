@@ -663,6 +663,21 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert switch._saved_lanes == {"lane1": "extruder1"}
         assert lane.extruder_obj.name == "extruder1"
 
+    def test_a_lane_saved_as_loaded_starts_on_that_toolhead(self, tmp_path):
+        printer = make_printer()
+        printer._afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {
+            "extruders": {"extruder": {"lane_loaded": "lane9"},
+                          "extruder1": {"lane_loaded": "lane1"}},
+            "switches": {"Switch_1": {"lanes": {"lane9": "extruder1"}, "confirmed": [],
+                                      "by_print": ["lane1"], "due_back": ["lane9"]}}}}))
+        lanes = [add_lane(printer, "lane1", "Turtle_1"), add_lane(printer, "lane9", "Ace2_1")]
+        switch = make_switch(printer)
+        # What AFC saved as loaded wins over what was saved for the switch.
+        assert switch._saved_lanes == {"lane9": "extruder", "lane1": "extruder1"}
+        assert [lane.extruder_obj.name for lane in lanes] == ["extruder1", "extruder"]
+        assert (switch._by_print, switch._due_back) == (["lane1"], ["lane9"])
+
     def test_the_saved_units_of_this_switch_are_confirmed_again(self, tmp_path):
         printer = make_printer()
         printer._afc.VarFile = str(tmp_path / "AFC.var")
@@ -802,6 +817,38 @@ class TestAfcBridgeBoxSwitchSaved:
     def test_nothing_usable_saved_reads_as_nothing(self, tmp_path, text):
         assert self._switch(tmp_path, text)._saved() == {
             "lanes": {}, "confirmed": [], "by_print": [], "due_back": []}
+
+
+class TestAfcBridgeBoxSwitchSavedLoaded:
+    @staticmethod
+    def _switch(tmp_path, text: Optional[str]) -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: a switch whose AFC saved ``text``, None for no file"""
+        switch = make_switch(connect=False)
+        switch.afc.VarFile = str(tmp_path / "AFC.var")
+        if text is not None:
+            (tmp_path / "AFC.var.unit").write_text(text)
+        return switch
+
+    def test_the_lanes_loaded_in_the_switchs_toolheads(self, tmp_path):
+        saved = {"system": {"extruders": {
+            "extruder": {"lane_loaded": "lane9"}, "extruder1": {"lane_loaded": "lane1"},
+            # Not one of the switch's.
+            "extruder2": {"lane_loaded": "lane20"}}}}
+        assert self._switch(tmp_path, json.dumps(saved))._saved_loaded() == {
+            "lane9": "extruder", "lane1": "extruder1"}
+
+    def test_an_empty_toolhead_and_one_that_was_not_saved_name_no_lane(self, tmp_path):
+        saved = {"system": {"extruders": {"extruder": {"lane_loaded": None}}}}
+        assert self._switch(tmp_path, json.dumps(saved))._saved_loaded() == {}
+
+    @pytest.mark.parametrize("text", [
+        None, "", "{not json", "{}", '{"system": {}}', '{"system": null}',
+        '{"system": {"extruders": null}}', '{"system": {"extruders": 5}}',
+        '{"system": {"extruders": {"extruder": 5}}}',
+        '{"system": {"extruders": {"extruder": {}}}}',
+        '{"system": {"extruders": {"extruder": {"lane_loaded": ["lane1"]}}}}'])
+    def test_nothing_usable_saved_reads_as_no_lane(self, tmp_path, text):
+        assert self._switch(tmp_path, text)._saved_loaded() == {}
 
 
 class TestAfcBridgeBoxSwitchHandleSaveVars:
@@ -1649,6 +1696,21 @@ class TestAfcBridgeBoxSwitchSendBack:
             ("info", "Switch_1: lane_Turtle_1 is back on extruder, the print that put it on "
                      "extruder1 is over")]
         switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_lane_of_a_bay_that_holds_no_unit_waits_for_its_unit(self):
+        switch = self._switch()
+        switch._due_back = ["lane_Bambu_AMS_1"]
+        # Its saved record, loaded in extruder1 or not, is not on the lane until it is claimed.
+        switch.afc.units["Bambu_AMS_1"].pool = True
+        switch._send_back()
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj is extruder_of(switch, "extruder1")
+        assert switch._due_back == ["lane_Bambu_AMS_1"]
+        assert switch.logger.messages == []
+        switch.afc.save_vars.assert_not_called()
+        switch.afc.units["Bambu_AMS_1"].pool = False
+        switch._send_back()
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj is extruder_of(switch, "extruder")
+        assert switch._due_back == []
 
     def test_a_lane_that_is_not_due_back_stays(self):
         switch = self._switch()
