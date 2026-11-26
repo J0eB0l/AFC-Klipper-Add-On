@@ -1708,6 +1708,31 @@ class TestBambuBufferChipReading:
         bridge.mot_unit = 1
         assert _bambu_chip_of(first)._reading() == 0.2
 
+    def test_a_unit_only_assumed_to_be_behind_the_buffer_is_read_last(self):
+        first, second, bridge = _two_units_one_chip(_two_buffer_frame())
+        first.buffer_assumed = True
+        # The first unit's own reading is 0.2, and it is not read first for being first.
+        assert _bambu_chip_of(first)._reading() == 0.8
+        # Nor for being the one reported moving.
+        bridge.mot_unit = 0
+        assert _bambu_chip_of(first)._reading() == 0.8
+        assert second.buffer_assumed is False
+
+    def test_a_unit_only_assumed_is_read_when_no_other_unit_has_a_reading(self):
+        frame = _two_buffer_frame()
+        del frame["units"][1]["buff"]
+        first, _second, _bridge = _two_units_one_chip(frame)
+        first.buffer_assumed = True
+        assert _bambu_chip_of(first)._reading() == 0.2
+
+    def test_of_units_that_are_all_only_assumed_the_one_reported_moving_is_read_first(self):
+        first, second, bridge = _two_units_one_chip(_two_buffer_frame())
+        first.buffer_assumed = True
+        second.buffer_assumed = True
+        assert _bambu_chip_of(first)._reading() == 0.2
+        bridge.mot_unit = 1
+        assert _bambu_chip_of(first)._reading() == 0.8
+
 
 class TestBambuBufferChipUpdate:
     def test_update_streams_unit_value(self):
@@ -22235,6 +22260,7 @@ class TestAfcBambuAMSUseBuffer:
         assert self._behind(unit) == {self.CHIP: [unit, other], self.SECOND_CHIP: []}
         assert (unit.buffer_name, unit.buffer_chip_name) == (self.BUFFER, self.CHIP)
         assert unit.buffer_obj is first
+        assert unit.buffer_assumed is False
         assert list(first.lanes) == ["lane12", "lane13", "lane20"]
         assert list(second.lanes) == []
         assert (first.rebinds, second.rebinds) == (0, 0)
@@ -22243,7 +22269,7 @@ class TestAfcBambuAMSUseBuffer:
     def test_a_chip_that_is_not_there_leaves_the_unit_where_it_was(self, monkeypatch):
         unit, other, first, second = self._rig(monkeypatch)
         with pytest.raises(KeyError) as caught:
-            unit.use_buffer(self.SECOND, "no_such_chip")
+            unit.use_buffer(self.SECOND, "no_such_chip", assumed=True)
         assert caught.value.args == ("no_such_chip",)
         self._unmoved(unit, other, first, second)
 
@@ -22259,9 +22285,40 @@ class TestAfcBambuAMSUseBuffer:
             return real(name, *default)
         monkeypatch.setattr(unit.printer, "lookup_object", lookup)
         with pytest.raises(configparser.Error) as caught:
-            unit.use_buffer("No_Such_Buffer", self.SECOND_CHIP)
+            unit.use_buffer("No_Such_Buffer", self.SECOND_CHIP, assumed=True)
         assert caught.value is missing
         self._unmoved(unit, other, first, second)
+
+    def test_a_unit_starts_behind_a_buffer_that_is_known(self, monkeypatch):
+        unit, other, _first, _second = self._rig(monkeypatch)
+        assert (unit.buffer_assumed, other.buffer_assumed) == (False, False)
+
+    def test_a_buffer_that_is_only_assumed_is_marked(self, monkeypatch):
+        unit, other, _first, second = self._rig(monkeypatch)
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP, assumed=True)
+        assert unit.buffer_obj is second
+        assert (unit.buffer_assumed, other.buffer_assumed) == (True, False)
+        assert unit.logger.messages == []
+
+    def test_a_buffer_that_is_known_takes_the_mark_off(self, monkeypatch):
+        unit, _other, _first, second = self._rig(monkeypatch)
+        unit.buffer_assumed = True
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert unit.buffer_obj is second
+        assert unit.buffer_assumed is False
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("was, assumed", [(False, True), (True, False)])
+    def test_the_same_buffer_and_chip_still_takes_the_mark(self, monkeypatch, was, assumed):
+        unit, other, first, second = self._rig(monkeypatch)
+        unit.buffer_assumed = was
+        unit.use_buffer(self.BUFFER, self.CHIP, assumed=assumed)
+        assert unit.buffer_assumed is assumed
+        # Nothing else changes.
+        assert self._behind(unit) == {self.CHIP: [unit, other], self.SECOND_CHIP: []}
+        assert unit.buffer_obj is first
+        assert (first.rebinds, second.rebinds) == (0, 0)
+        assert unit.logger.messages == []
 
 
 class TestAfcBambuAMSInIdleToolhead:

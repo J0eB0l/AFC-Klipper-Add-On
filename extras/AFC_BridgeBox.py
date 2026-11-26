@@ -5457,7 +5457,8 @@ class afcBridgeBox:
                     self._replace_offered.discard(ev[1])
                     continue
             elif ev[0] == "offer":
-                self._prompt(ev[2], ev[3], ev[4], timeout=self._POPUP_HOLD)
+                # It waits for an answer, so it stays until it is closed or the next popup shows.
+                self._prompt(ev[2], ev[3], ev[4], timeout=0.0)
             else:
                 self._prompt_removed_unit(ev[1], ev[2], timeout=self._POPUP_HOLD)
             self._popup_active_until = eventtime + self._POPUP_HOLD

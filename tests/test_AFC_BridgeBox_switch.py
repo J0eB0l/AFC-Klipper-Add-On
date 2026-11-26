@@ -143,10 +143,13 @@ class FakeAms(FakeUnit):
         self.pool = False
         # The buffer and chip it was put behind, in turn.
         self.behind: List[Tuple[str, str]] = []
+        # Whether the last of them was only assumed, None before the first.
+        self.assumed: Optional[bool] = None
         self.feed_to = MagicMock(return_value=False)
 
-    def use_buffer(self, buffer: str, chip: str) -> None:
+    def use_buffer(self, buffer: str, chip: str, assumed: bool = False) -> None:
         self.behind.append((buffer, chip))
+        self.assumed = assumed
 
 
 class FakePathUnit(FakeUnit):
@@ -858,6 +861,7 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert switch.lanes == [lane_of(switch, unit) for unit in BAYS]
         assert [lane.extruder_obj.name for lane in switch.lanes] == ["extruder", "extruder"]
         assert [ams_of(switch, unit).behind for unit in BAYS] == [[("Buffer", "chip")]] * 2
+        assert [ams_of(switch, unit).assumed for unit in BAYS] == [True, True]
 
     def test_a_unit_enters_the_inlet_saved_for_the_ams_in_its_bay(self, tmp_path):
         switch = finding(connect=False)
@@ -872,8 +876,10 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
         assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder1"
         assert ams_of(switch, "Bambu_AMS_2").behind == [("Buffer_B", "chip_inlet_b")]
+        assert ams_of(switch, "Bambu_AMS_2").assumed is False
         assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
         assert ams_of(switch, "Bambu_AMS_1").behind == [("Buffer", "chip")]
+        assert ams_of(switch, "Bambu_AMS_1").assumed is True
         # A unit whose inlet is not known was not seen at one.
         assert switch.confirmed == ["Bambu_AMS_2"]
 
@@ -1130,6 +1136,8 @@ class TestAfcBridgeBoxSwitchStartUnit:
         lane_of(switch, "Bambu_AMS_1").set_extruder(extruder_of(switch, other_extruder(start)))
         switch._start_unit(unit)
         assert unit.behind == [behind]
+        # Its buffer is known now.
+        assert unit.assumed is False
         assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == start
         # The other unit's lane is left alone.
         assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder"
@@ -1142,8 +1150,9 @@ class TestAfcBridgeBoxSwitchStartUnit:
         lane = lane_of(switch, "Bambu_AMS_1")
         lane.set_extruder(extruder_of(switch, on))
         switch._start_unit(unit)
-        # It keeps the chain's own buffer until then.
+        # It keeps the chain's own buffer until then, which is only assumed to be its own.
         assert unit.behind == [("Buffer", "chip")]
+        assert unit.assumed is True
         assert lane.extruder_obj.name == on
 
     def test_but_a_lane_saved_on_one_of_the_switchs_extruders_is_put_there(self):

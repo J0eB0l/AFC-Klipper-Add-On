@@ -813,11 +813,13 @@ class _BambuBufferChip:
     def _reading(self) -> Optional[float]:
         """
         The buffer value to publish. Every unit behind the buffer reports it, and the one a motion
-        report names has the newest reading.
+        report names has the newest reading. A unit that is only assumed to be behind this buffer
+        may report another one, so it is read when no other unit has a reading.
 
         :return Optional[float]: 0.0..1.0, or None while no unit on this chip has a reading
         """
-        units = sorted(self._units, key=lambda u: not u.buffer_reading_live())
+        units = sorted(self._units,
+                       key=lambda u: (u.buffer_assumed, not u.buffer_reading_live()))
         for unit in units:
             v = unit.fps_buffer_value()
             if v is not None:
@@ -1449,6 +1451,8 @@ class afcBambuAMS(afcUnit):
         self.printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
         # A buffer is optional, so the 'bambu_buffer' ADC pin is best-effort.
         self.buffer_chip_name = config.get("buffer_chip_name", _BUFFER_CHIP_NAME)
+        # True while it is not known which buffer the unit is plumbed behind (see use_buffer).
+        self.buffer_assumed: bool = False
         try:
             _register_bambu_buffer_chip(self)
         except Exception as e:
@@ -8572,21 +8576,25 @@ class afcBambuAMS(afcUnit):
         v = b / 100.0  # compressed (100) -> 1.0, empty (0) -> 0.0
         return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
 
-    def use_buffer(self, buffer: str, chip: str) -> None:
+    def use_buffer(self, buffer: str, chip: str, assumed: bool = False) -> None:
         """
         Put this unit behind another buffer of its bridge: that buffer's chip takes the unit's
         reading, and the unit's lanes take the buffer.
 
         :param buffer: name of the [AFC_buffer] the unit is plumbed behind
         :param chip: name of the pin chip that reads that buffer
+        :param assumed: True when it is not known that the unit is plumbed behind this buffer.
+        Its reading then counts only while no other unit behind the buffer has one
         """
         if (buffer == self.buffer_name
             and chip == self.buffer_chip_name):
+            self.buffer_assumed = assumed
             return
         chips = self.printer._bambu_buffer_chips
         # Both are looked up first, so a name that is not there leaves the unit where it was.
         taking = chips[chip]
         buffer_obj = self.printer.lookup_object(f"AFC_buffer {buffer}")
+        self.buffer_assumed = assumed
         for held in chips.values():
             held.drop_unit(self)
         taking.add_unit(self)

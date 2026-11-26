@@ -402,7 +402,8 @@ class afcBridgeBoxSwitch:
         inlet = self.inlet_of(unit_obj.name)
         chain = self._floating.get(unit_obj.name)
         if chain is not None:
-            unit_obj.use_buffer(*chain.inlet_buffer(inlet))
+            # Until its inlet is found, the buffer it reports may be the other one.
+            unit_obj.use_buffer(*chain.inlet_buffer(inlet), assumed=inlet is None)
         start = self.start_extruder(unit_obj.name) if inlet is not None else None
         for lane in self.lanes:
             if lane.unit != unit_obj.name:

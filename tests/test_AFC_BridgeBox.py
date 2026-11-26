@@ -15676,9 +15676,8 @@ class TestAfcBridgeBoxPumpPopups:
         assert _p6_console(m) == offer
         # The offer left the queue, and the removal behind it waits out the hold.
         assert (m._popup_queue, m._popup_active_until) == ([("removed", D, "Charlie")], 70.0)
-        # It closes itself when its hold is over, not after the 45s a prompt stays by default.
-        ((_close, when),) = reactor.callbacks[armed:]
-        assert when == reactor.now + 20.0
+        # It waits for an answer, so nothing is armed to close it.
+        assert reactor.callbacks[armed:] == []
         m._pump_popups(69.0)
         assert _p6_console(m) == offer
         assert (m._popup_queue, m._popup_active_until) == ([("removed", D, "Charlie")], 70.0)
