@@ -374,6 +374,91 @@ class TestAFCBambuBufferBoundUnits:
         assert buf.logger.messages == []
 
 
+class TestAFCBambuBufferRebind:
+    """
+    rebind: the next _bound_units looks again, after a lane took or left the buffer, and the
+    odometer history starts over.
+    """
+
+    def test_the_remembered_set_is_dropped(self):
+        buf, units = make_bambu_gate_buffer()
+        assert buf._bound_units() == units
+        assert buf._odom_units == units
+
+        buf.rebind()
+
+        assert buf._odom_units is None
+        assert buf.logger.messages == []
+
+    def test_a_unit_whose_lane_took_the_buffer_is_found(self):
+        buf, (unit,) = make_bambu_gate_buffer()
+        late = add_bambu_gate_unit(buf, "Bambu_AMS_9", "Some_Other_Buffer", "lane90")
+        first = buf._bound_units()
+        assert first == [unit]
+        late.lanes["lane90"].buffer_name = BAMBU_GATE_BUFFER
+        # The remembered set still stands: the buffer has not looked again.
+        assert buf._bound_units() is first
+
+        buf.rebind()
+
+        assert buf._odom_units is None
+        assert buf._bound_units() == [unit, late]
+        assert buf._odom_units == [unit, late]
+        assert buf.logger.messages == []
+
+    def test_a_unit_whose_lane_left_the_buffer_is_gone(self):
+        buf, (stays, leaves) = make_bambu_gate_buffer(units=("Bambu_AMS_1", "Bambu_AMS_HT_1"))
+        first = buf._bound_units()
+        assert first == [stays, leaves]
+        leaves.lanes["lane12"].buffer_name = "Some_Other_Buffer"
+        assert buf._bound_units() is first
+
+        buf.rebind()
+
+        assert buf._odom_units is None
+        assert buf._bound_units() == [stays]
+        assert buf._odom_units == [stays]
+        assert buf.logger.messages == []
+
+    def test_the_odometer_history_starts_over(self):
+        buf, (unit,) = make_bambu_gate_buffer()
+        buf._odom_prev = {unit.name: 2.5, "Bambu_AMS_HT_1": 0.4}
+        buf._last_move_t = 12.0
+        buf._odom_moved = True
+
+        buf.rebind()
+
+        assert buf._odom_prev == {}
+        assert buf._last_move_t is None
+        assert buf._odom_moved is False
+        assert buf.logger.messages == []
+
+    def test_a_move_of_a_unit_that_left_confirms_nothing(self):
+        buf, (stays, leaves) = make_bambu_gate_buffer(units=("Bambu_AMS_1", "Bambu_AMS_HT_1"))
+        # The unit that leaves moved and went still, which the gate reads as an arrival.
+        buf._odom_prev = {leaves.name: 2.5}
+        buf._odom_moved = True
+        buf._last_move_t = 10.0
+        buf._now_t = 10.0 + buf.odom_still_seconds
+        assert buf._odom_confirms() is True
+        leaves.lanes["lane12"].buffer_name = "Some_Other_Buffer"
+
+        buf.rebind()
+
+        assert buf._bound_units() == [stays]
+        assert buf._odom_confirms() is False
+        assert buf.logger.messages == []
+
+    def test_the_latch_of_a_load_is_kept(self):
+        buf, _units = make_bambu_gate_buffer()
+        buf._gate_latched = True
+
+        buf.rebind()
+
+        assert buf._gate_latched is True
+        assert buf.logger.messages == []
+
+
 class TestAFCBambuBufferUpdateOdom:
     """_update_odom: folding each sample's odometer readings into the stillness run."""
 

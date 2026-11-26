@@ -207,7 +207,9 @@ auto_drop: True
 # unit goes by its own name.
 # A chain can feed both inlets with a buffer on each: name the units behind
 # the second buffer on the other inlet (inlet_b: Bambu_AMS_HT_1), and the
-# chain makes them a buffer of their own.
+# chain makes them a buffer of their own. Or name the chain on both inlets
+# and name no unit: each AMS is then fed to the switch once to find its
+# inlet, and an AMS that is new on the chain does not load until it was.
 # An inlet's units start on the extruder of the outlet with the same
 # letter. A lane a print sends to the other extruder goes back once that
 # print is over and the lane is out of its toolhead; one sent there at any
@@ -217,6 +219,9 @@ auto_drop: True
 #   AFC_BRIDGEBOX_SWITCH_ASSIGN LANE=lane4 EXTRUDER=extruder1
 #                               send a lane to the other extruder
 #   AFC_BRIDGEBOX_SWITCH_ROUTE  show the inlets and outlets
+#   AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Bambu_AMS_2
+#                               feed a lane to the switch to find the inlet
+#                               the unit is plumbed into
 #[AFC_BridgeBox_switch Switch_1]
 #chain: Chain_1
 #inlet_a: Chain_1

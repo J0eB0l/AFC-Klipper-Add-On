@@ -58,6 +58,7 @@ from tests.bambu_helpers import (
     FabricatedSection,
     FakeAfcSpool,
     FakeBridge,
+    FakeBuffer,
     FakeGcmd,
     FakeSpoolmanClient,
     FakeToolheadExtruder,
@@ -1626,6 +1627,49 @@ class TestBambuBufferChipAddUnit:
         assert (chip._unit, chip._units) == (first, [first])
         second = make_bambu_unit("Bambu_AMS_2", printer=printer, ams_index=1)
         assert (chip._unit, chip._units) == (first, [first, second])
+
+
+class TestBambuBufferChipDropUnit:
+    def test_a_unit_behind_the_chip_no_longer_feeds_its_reading(self):
+        first, second, _bridge = _two_units_one_chip(_two_buffer_frame())
+        chip = _bambu_chip_of(first)
+        assert chip._units == [first, second]
+        assert chip._reading() == 0.2                  # the first unit's
+        chip.drop_unit(first)
+        assert chip._units == [second]
+        assert chip._reading() == 0.8                  # only the second's is left
+        assert first.logger.messages == []
+
+    def test_the_last_unit_out_leaves_the_chip_with_no_reading(self):
+        unit = make_bambu_unit(bridge=FakeBridge(status={"buff": 70, "buffn": 3}))
+        chip = _bambu_chip_of(unit)
+        assert chip._reading() == 0.7
+        chip.drop_unit(unit)
+        assert chip._units == []
+        assert chip._reading() is None
+        assert unit.logger.messages == []
+
+    def test_a_unit_that_is_not_behind_the_chip_changes_nothing(self):
+        printer = make_printer()
+        first = make_bambu_unit("Bambu_AMS_1", printer=printer,
+                                bridge=FakeBridge(status=_two_buffer_frame()))
+        elsewhere = make_bambu_unit("Bambu_AMS_2", printer=printer, ams_index=1,
+                                    values={"buffer_chip_name": "other"})
+        chip = _bambu_chip_of(first)
+        assert chip._units == [first]
+        chip.drop_unit(elsewhere)
+        assert (chip._unit, chip._units) == (first, [first])
+        assert chip._reading() == 0.2
+        assert _bambu_chip_of(elsewhere)._units == [elsewhere]
+        assert first.logger.messages == []
+
+    def test_a_unit_already_taken_out_is_not_taken_out_again(self):
+        first, second, _bridge = _two_units_one_chip(None)
+        chip = _bambu_chip_of(first)
+        chip.drop_unit(second)
+        chip.drop_unit(second)
+        assert (chip._unit, chip._units) == (first, [first])
+        assert first.logger.messages == []
 
 
 class TestBambuBufferChipReading:
@@ -21996,6 +22040,230 @@ class TestAfcBambuAMSFpsBufferValue:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSUseBuffer:
+    """
+    A unit goes behind another buffer of its bridge: the chip that publishes its reading, the
+    buffer it and its lanes name, and each buffer told to look again for its units.
+    """
+
+    BUFFER = "Bambu_AMS_Buffer"
+    SECOND = "Bambu_AMS_Buffer_B"
+    CHIP = "bambu_buffer"
+    SECOND_CHIP = "bambu_buffer_inlet_b"
+
+    class _GateBuffer(FakeBuffer):
+        """A buffer that counts being told to look again for its units."""
+
+        def __init__(self, name: str) -> None:
+            """
+            :param name: the buffer's name
+            """
+            super().__init__(name)
+            self.rebinds = 0
+
+        def rebind(self) -> None:
+            """Count the call."""
+            self.rebinds += 1
+
+    def _rig(self, monkeypatch: pytest.MonkeyPatch, *,
+             gated: Sequence[bool] = (True, True),
+             buffered: bool = True) -> Tuple[afcBambuAMS, afcBambuAMS, Any, Any]:
+        """
+        Bambu_AMS_1 (lane12, lane13, buffer reading 0.2) and Bambu_AMS_2 (lane20, reading 0.8) on
+        one bridge, both behind the first buffer's chip, and a second buffer whose chip has no
+        unit yet.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param gated: whether the first and the second buffer can be told to `rebind`
+        :param buffered: False for a Bambu_AMS_1 that names no buffer
+        :return tuple: (Bambu_AMS_1, Bambu_AMS_2, the first buffer, the second buffer)
+        """
+        printer = make_printer(monkeypatch=monkeypatch)
+        buffers = []
+        for name, gate in zip((self.BUFFER, self.SECOND), gated):
+            buffer = self._GateBuffer(name) if gate else FakeBuffer(name)
+            printer.add_object(buffer.section, buffer)
+            buffers.append(buffer)
+        bridge = FakeBridge(status=_two_buffer_frame())
+        unit = make_bambu_unit(printer=printer, bridge=bridge, lanes=["lane12", "lane13"],
+                               values={"buffer": self.BUFFER} if buffered else {})
+        other = make_bambu_unit("Bambu_AMS_2", printer=printer, bridge=bridge, ams_index=1,
+                                lanes=[LaneSpec("lane20", 0)], values={"buffer": self.BUFFER})
+        _register_bambu_buffer_chip(
+            TestRegisterBambuBufferChip._ScoutStub(printer, self.SECOND_CHIP))
+        return unit, other, buffers[0], buffers[1]
+
+    @staticmethod
+    def _behind(unit: afcBambuAMS) -> Dict[str, List[Any]]:
+        """
+        :param unit: a unit of the printer
+        :return dict: chip name -> the units behind that chip, in its order
+        """
+        chips = unit.printer._bambu_buffer_chips
+        return {name: list(chip._units) for name, chip in chips.items()}
+
+    @staticmethod
+    def _readings(unit: afcBambuAMS) -> Dict[str, Optional[float]]:
+        """
+        :param unit: a unit of the printer
+        :return dict: chip name -> the reading that chip publishes
+        """
+        chips = unit.printer._bambu_buffer_chips
+        return {name: chip._reading() for name, chip in chips.items()}
+
+    def test_the_same_buffer_and_chip_changes_nothing(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        unit.use_buffer(self.BUFFER, self.CHIP)
+        # Not taken out and put back, which would leave it the last unit behind its chip.
+        assert self._behind(unit) == {self.CHIP: [unit, other], self.SECOND_CHIP: []}
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.BUFFER, self.CHIP)
+        assert unit.buffer_obj is first
+        assert list(first.lanes) == ["lane12", "lane13", "lane20"]
+        assert (first.rebinds, second.rebinds) == (0, 0)
+        assert unit.logger.messages == []
+
+    def test_the_same_buffer_read_by_another_chip_moves_the_unit(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        unit.use_buffer(self.BUFFER, self.SECOND_CHIP)
+        assert self._behind(unit) == {self.CHIP: [other], self.SECOND_CHIP: [unit]}
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.BUFFER, self.SECOND_CHIP)
+        assert unit.buffer_obj is first
+        assert list(first.lanes) == ["lane12", "lane13", "lane20"]
+        # Told as the buffer the unit was behind and again as the one it is behind now.
+        assert (first.rebinds, second.rebinds) == (2, 0)
+        assert unit.logger.messages == []
+
+    def test_another_buffer_read_by_the_same_chip_moves_the_unit(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        unit.use_buffer(self.SECOND, self.CHIP)
+        # Taken out and put back, so it is now the last unit behind its chip.
+        assert self._behind(unit) == {self.CHIP: [other, unit], self.SECOND_CHIP: []}
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.SECOND, self.CHIP)
+        assert unit.buffer_obj is second
+        assert list(first.lanes) == ["lane20"]
+        assert list(second.lanes) == ["lane12", "lane13"]
+        assert (first.rebinds, second.rebinds) == (1, 1)
+        assert unit.logger.messages == []
+
+    def test_the_named_chip_takes_the_units_reading(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.BUFFER, self.CHIP)
+        assert unit.buffer_obj is first
+        assert self._behind(unit) == {self.CHIP: [unit, other], self.SECOND_CHIP: []}
+        assert self._readings(unit) == {self.CHIP: 0.2, self.SECOND_CHIP: None}
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert self._behind(unit) == {self.CHIP: [other], self.SECOND_CHIP: [unit]}
+        assert self._readings(unit) == {self.CHIP: 0.8, self.SECOND_CHIP: 0.2}
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.SECOND, self.SECOND_CHIP)
+        assert unit.buffer_obj is second
+        assert (first.rebinds, second.rebinds) == (1, 1)
+        assert unit.logger.messages == []
+
+    def test_the_unit_leaves_every_chip_it_was_behind(self, monkeypatch):
+        unit, other, _first, _second = self._rig(monkeypatch)
+        third = "bambu_buffer_inlet_a"
+        _register_bambu_buffer_chip(TestRegisterBambuBufferChip._ScoutStub(unit.printer, third))
+        unit.printer._bambu_buffer_chips[third].add_unit(unit)
+        assert self._behind(unit) == {self.CHIP: [unit, other], self.SECOND_CHIP: [], third: [unit]}
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert self._behind(unit) == {self.CHIP: [other], self.SECOND_CHIP: [unit], third: []}
+        assert unit.buffer_chip_name == self.SECOND_CHIP
+        assert unit.logger.messages == []
+
+    def test_the_units_lanes_take_the_buffer_and_another_units_do_not(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        for name in ("lane12", "lane13"):
+            assert unit.lanes[name].buffer_obj is second
+            assert unit.lanes[name].buffer_name == self.SECOND
+            assert second.lanes[name] is unit.lanes[name]
+        assert list(second.lanes) == ["lane12", "lane13"]
+        assert other.lanes["lane20"].buffer_obj is first
+        assert other.lanes["lane20"].buffer_name == self.BUFFER
+        assert list(first.lanes) == ["lane20"]
+        assert unit.logger.messages == []
+
+    def test_a_lane_object_that_names_no_unit_is_passed_over(self, monkeypatch):
+        unit, _other, _first, second = self._rig(monkeypatch)
+        stray = SimpleNamespace(set_buffer=Recorder())
+        unit.printer.add_object("AFC_lane lane99", stray)
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert stray.set_buffer.calls == []
+        assert list(second.lanes) == ["lane12", "lane13"]
+        assert unit.buffer_obj is second
+        assert unit.logger.messages == []
+
+    def test_an_old_buffer_that_cannot_look_again_is_left_alone(self, monkeypatch):
+        unit, _other, first, second = self._rig(monkeypatch, gated=(False, True))
+        assert not hasattr(first, "rebind")
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert unit.buffer_obj is second
+        assert second.rebinds == 1
+        assert unit.logger.messages == []
+
+    def test_a_new_buffer_that_cannot_look_again_is_left_alone(self, monkeypatch):
+        unit, _other, first, second = self._rig(monkeypatch, gated=(True, False))
+        assert not hasattr(second, "rebind")
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert unit.buffer_obj is second
+        assert first.rebinds == 1
+        assert unit.logger.messages == []
+
+    def test_a_unit_that_was_behind_no_buffer_takes_one(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch, buffered=False)
+        assert (unit.buffer_name, unit.buffer_obj) == (None, None)
+        assert unit.lanes["lane12"].buffer_obj is None
+        unit.use_buffer(self.SECOND, self.SECOND_CHIP)
+        assert self._behind(unit) == {self.CHIP: [other], self.SECOND_CHIP: [unit]}
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.SECOND, self.SECOND_CHIP)
+        assert unit.buffer_obj is second
+        assert unit.lanes["lane12"].buffer_obj is second
+        assert list(second.lanes) == ["lane12", "lane13"]
+        # Only the buffer it took is told: there was none before.
+        assert (first.rebinds, second.rebinds) == (0, 1)
+        assert unit.logger.messages == []
+
+    def _unmoved(self, unit: afcBambuAMS, other: afcBambuAMS, first: Any, second: Any) -> None:
+        """
+        Assert that Bambu_AMS_1 is behind the first buffer and its chip as the rig made it.
+
+        :param unit: Bambu_AMS_1
+        :param other: Bambu_AMS_2
+        :param first: the first buffer
+        :param second: the second buffer
+        """
+        assert self._behind(unit) == {self.CHIP: [unit, other], self.SECOND_CHIP: []}
+        assert (unit.buffer_name, unit.buffer_chip_name) == (self.BUFFER, self.CHIP)
+        assert unit.buffer_obj is first
+        assert list(first.lanes) == ["lane12", "lane13", "lane20"]
+        assert list(second.lanes) == []
+        assert (first.rebinds, second.rebinds) == (0, 0)
+        assert unit.logger.messages == []
+
+    def test_a_chip_that_is_not_there_leaves_the_unit_where_it_was(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        with pytest.raises(KeyError) as caught:
+            unit.use_buffer(self.SECOND, "no_such_chip")
+        assert caught.value.args == ("no_such_chip",)
+        self._unmoved(unit, other, first, second)
+
+    def test_a_buffer_that_is_not_there_leaves_the_unit_where_it_was(self, monkeypatch):
+        unit, other, first, second = self._rig(monkeypatch)
+        missing = configparser.Error("Unknown config object 'AFC_buffer No_Such_Buffer'")
+        real = unit.printer.lookup_object
+
+        def lookup(name: str, *default: Any) -> Any:
+            # klippy raises for an object that is not there and has no default.
+            if name == "AFC_buffer No_Such_Buffer":
+                raise missing
+            return real(name, *default)
+        monkeypatch.setattr(unit.printer, "lookup_object", lookup)
+        with pytest.raises(configparser.Error) as caught:
+            unit.use_buffer("No_Such_Buffer", self.SECOND_CHIP)
+        assert caught.value is missing
+        self._unmoved(unit, other, first, second)
+
+
 class TestAfcBambuAMSInIdleToolhead:
     @staticmethod
     def _unit(monkeypatch: pytest.MonkeyPatch,
@@ -30418,6 +30686,349 @@ class TestAfcBambuAMSEjectLane:
         assert unit.logger.messages == [
             ("warning", "Bambu_AMS_1: bridge not connected, cannot "
                         "eject lane20")]
+
+
+class TestAfcBambuAMSFeedTo:
+    """
+    Feed a lane out of its bay until a check sees its filament: select, prime, feed, ask the
+    check every tenth of a second, then stop and reel the lane back.
+    """
+
+    SELECT = {"cmd": "select", "unit": 0, "slot": 0}
+    PRIME = {"cmd": "prime", "unit": 0, "slot": 0}
+    #: What one ask for the feed sends (load_retry_pulse 100mm at 20mm/s).
+    FEED = {"cmd": "feed", "unit": 0, "slot": 0, "mm": 100.0, "mmps": 20.0}
+    STOP = {"cmd": "stop"}
+
+    class _Check:
+        """The check a feed runs under: scripted answers, and the unit as each one found it."""
+
+        def __init__(self, unit: afcBambuAMS, script: Sequence[bool]) -> None:
+            """
+            :param unit: the unit that feeds
+            :param script: what successive checks answer, the last one from then on
+            """
+            self.unit = unit
+            self.script = list(script)
+            #: An exception every check raises instead of answering.
+            self.raises: Optional[BaseException] = None
+            #: The unit's clock at each check.
+            self.at: List[float] = []
+            #: The unit's _load_in_progress at each check.
+            self.loading: List[bool] = []
+
+        def __call__(self) -> bool:
+            """:return bool: the next scripted answer"""
+            self.at.append(self.unit.reactor.now)
+            self.loading.append(self.unit._load_in_progress)
+            if self.raises is not None:
+                raise self.raises
+            if len(self.script) > 1:
+                return self.script.pop(0)
+            return self.script[0]
+
+    def _rig(self, monkeypatch: pytest.MonkeyPatch, script: Sequence[bool] = (False,),
+             reeled: bool = True, **kwargs: Any
+             ) -> Tuple[afcBambuAMS, Any, "TestAfcBambuAMSFeedTo._Check", List[tuple]]:
+        """
+        lane1 on bay 0, with eject_lane stood in for.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param script: the check's answers
+        :param reeled: what the stand-in eject_lane returns
+        :param kwargs: further _p6_unit arguments
+        :return tuple: (the unit, its lane1, the check, each eject_lane call as the lane, the
+        gcmd and the last frame the bridge had been sent by then)
+        """
+        unit = _p6_unit(monkeypatch, **kwargs)
+        ejected: List[tuple] = []
+
+        def eject(lane: Any, gcmd: Any) -> bool:
+            ejected.append((lane, gcmd, unit._bridge.sent[-1]))
+            return reeled
+        unit.eject_lane = eject
+        return unit, unit.lanes["lane1"], self._Check(unit, script), ejected
+
+    @staticmethod
+    def _kicks(unit: afcBambuAMS) -> List[float]:
+        """
+        :param unit: the unit that feeds
+        :return list: filled with the unit's clock at each feed the bridge is sent
+        """
+        kicks: List[float] = []
+
+        def on_send(_bridge: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "feed":
+                kicks.append(unit.reactor.now)
+        unit._bridge.on_send = on_send
+        return kicks
+
+    def test_no_bridge_warns_and_feeds_nothing(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch, offline=True)
+        assert unit._bridge is None
+        assert unit.feed_to(lane, check, FakeGcmd()) is False
+        assert check.at == []
+        assert unit.reactor.pauses == []
+        assert ejected == []
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == [
+            ("warning", "Bambu_AMS_1: bridge not connected, cannot feed lane1")]
+
+    def test_a_lane_with_no_bay_warns_and_feeds_nothing(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch)
+        unit._slot_map = {}
+        assert unit.feed_to(lane, check, FakeGcmd()) is False
+        assert unit._bridge.sent == []
+        assert check.at == []
+        assert unit.reactor.pauses == []
+        assert ejected == []
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == [
+            ("warning", "Bambu_AMS_1: lane lane1 is not mapped to an AMS slot")]
+
+    def test_a_plain_ams_is_primed_then_fed_until_it_is_seen(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch, script=[True])
+        assert (unit._is_ht(), unit._is_lite(), unit._heating_now()) == (False, False, False)
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is True
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        # The reel-back begins once the feed is stopped.
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("kwargs, busy", [
+        ({"model": "ht"}, (True, False, False)),
+        ({"model": "lite"}, (False, True, False)),
+        ({"drying": True}, (False, False, True)),
+    ], ids=["an-ams-ht", "an-ams-lite", "a-unit-that-is-heating"])
+    def test_the_prime_is_skipped_for(self, monkeypatch, kwargs, busy):
+        unit, lane, check, ejected = self._rig(monkeypatch, script=[True], **kwargs)
+        # Each of the three alone keeps the prime back.
+        assert (unit._is_ht(), unit._is_lite(), unit._heating_now()) == busy
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is True
+        assert unit._bridge.sent == [self.SELECT, self.FEED, self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    def test_the_frames_name_the_units_index_the_lanes_bay_and_the_retry_pulse(
+            self, monkeypatch):
+        unit, lane, check, ejected = self._rig(
+            monkeypatch, script=[True], ams_index=2, lanes=[LaneSpec("lane1", 3)],
+            values={"load_retry_pulse": 60.0})
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is True
+        assert unit._bridge.sent == [
+            {"cmd": "select", "unit": 2, "slot": 3},
+            {"cmd": "prime", "unit": 2, "slot": 3},
+            {"cmd": "feed", "unit": 2, "slot": 3, "mm": 60.0, "mmps": 20.0},
+            self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit.logger.messages == []
+
+    # how long it feeds
+
+    def test_with_no_timeout_it_feeds_for_as_long_as_a_load_is_given(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(
+            monkeypatch, values={"afc_bowden_length": 600.0, "load_retry_timeout": 2.0,
+                                 "load_retry_interval": 1000.0})
+        # The bowden at the 60mm/s a deadline is sized with, and load_retry_timeout on top.
+        given = 600.0 / 60.0 + 2.0
+        assert given < 180.0
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is False
+        assert 100.0 + given <= unit.reactor.now < 100.0 + given + 0.2
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    def test_with_no_timeout_it_never_feeds_past_the_load_ceiling(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(
+            monkeypatch, values={"afc_bowden_length": 12000.0, "load_retry_timeout": 40.0,
+                                 "load_retry_interval": 1000.0})
+        # 12m of bowden at 60mm/s, and load_retry_timeout on top, is over the 180s ceiling.
+        given = 12000.0 / 60.0 + 40.0
+        assert given > 180.0
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is False
+        assert 100.0 + 180.0 <= unit.reactor.now < 100.0 + 180.0 + 0.2
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    def test_a_timeout_that_is_given_is_the_one_used(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch)
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd, timeout=0.35) is False
+        # The fourth look is the first one past 100.35.
+        assert unit.reactor.pauses == pytest.approx([100.1, 100.2, 100.3, 100.4])
+        assert check.at == pytest.approx([100.1, 100.2, 100.3, 100.4])
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    def test_a_timeout_that_is_given_is_not_held_to_the_load_ceiling(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(
+            monkeypatch, values={"load_retry_interval": 1000.0})
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd, timeout=200.0) is False
+        assert 300.0 <= unit.reactor.now < 300.2
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit.logger.messages == []
+
+    def test_a_timeout_of_zero_is_not_taken_for_none(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch)
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd, timeout=0.0) is False
+        # No time to feed in, but the unit is still stopped and the lane reeled back.
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.STOP]
+        assert check.at == []
+        assert unit.reactor.pauses == []
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    # how often the feed is asked for
+
+    def test_the_feed_is_asked_for_before_the_first_look(self, monkeypatch):
+        unit, lane, check, _ejected = self._rig(monkeypatch, script=[True])
+        kicks = self._kicks(unit)
+        assert unit.feed_to(lane, check, FakeGcmd()) is True
+        assert kicks == [100.0]
+        assert check.at == pytest.approx([100.1])
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert unit.logger.messages == []
+
+    def test_the_feed_is_not_asked_for_again_short_of_the_retry_interval(self, monkeypatch):
+        unit, lane, check, _ejected = self._rig(monkeypatch, script=[False, True])
+        assert unit.load_retry_interval == 4.0
+        kicks = self._kicks(unit)
+        # The first look lasts until 3.9s after the feed was asked for.
+        _p6_at(unit, 100.05, lambda: setattr(unit.reactor, "now", 103.9))
+        assert unit.feed_to(lane, check, FakeGcmd()) is True
+        assert kicks == [100.0]
+        assert check.at == pytest.approx([103.9, 104.0])
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert unit.logger.messages == []
+
+    def test_the_feed_is_asked_for_again_once_the_retry_interval_is_up(self, monkeypatch):
+        unit, lane, check, _ejected = self._rig(monkeypatch, script=[False, True])
+        assert unit.load_retry_interval == 4.0
+        kicks = self._kicks(unit)
+        # The first look lasts until exactly 4s after the feed was asked for.
+        _p6_at(unit, 100.05, lambda: setattr(unit.reactor, "now", 104.0))
+        assert unit.feed_to(lane, check, FakeGcmd()) is True
+        assert kicks == [100.0, 104.0]
+        assert check.at == pytest.approx([104.0, 104.1])
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.FEED, self.STOP]
+        assert unit.logger.messages == []
+
+    def test_the_retry_interval_runs_from_the_last_feed_asked_for(self, monkeypatch):
+        # Looks 0.1s apart are 0.55s past the last feed on every sixth one.
+        unit, lane, check, _ejected = self._rig(
+            monkeypatch, script=[False] * 12 + [True], values={"load_retry_interval": 0.55})
+        kicks = self._kicks(unit)
+        assert unit.feed_to(lane, check, FakeGcmd()) is True
+        assert kicks == pytest.approx([100.0, 100.6, 101.2])
+        assert check.at == pytest.approx([100.0 + 0.1 * look for look in range(1, 14)])
+        assert unit._bridge.sent == [self.SELECT, self.PRIME] + [self.FEED] * 3 + [self.STOP]
+        assert unit.logger.messages == []
+
+    # how it ends
+
+    def test_it_ends_at_the_first_look_that_sees_the_filament(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch, script=[False, False, True, False])
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is True
+        # No look after the one that saw it.
+        assert check.at == pytest.approx([100.1, 100.2, 100.3])
+        assert check.script == [False]
+        assert unit.reactor.pauses == pytest.approx([100.1, 100.2, 100.3])
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    def test_the_answer_is_the_checks_whatever_the_reel_back_says(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch, script=[True], reeled=False)
+        gcmd = FakeGcmd()
+        assert unit.feed_to(lane, check, gcmd) is True
+        assert ejected == [(lane, gcmd, self.STOP)]
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert unit.logger.messages == []
+
+    def test_the_lane_is_reeled_back_into_its_bay(self, monkeypatch):
+        # The real eject_lane: afc_unload_bowden_length 500 + the 250mm hub + eject_buffer 200.
+        unit = _p6_unit(monkeypatch, lanes=[LaneSpec("lane1", 0, loaded_to_hub=True)],
+                        values={"afc_unload_bowden_length": 500.0, "eject_buffer": 200.0})
+        lane = unit.lanes["lane1"]
+
+        def on_send(bridge: FakeBridge, frame: dict) -> None:
+            if frame["cmd"] == "retract":
+                _p6_at(unit, unit.reactor.now + 0.05, lambda: setattr(
+                    bridge, "finish", (1, True, "[AMS_SWITCH]feed finish 0")))
+        unit._bridge.on_send = on_send
+        assert unit.feed_to(lane, self._Check(unit, [True]), FakeGcmd()) is True
+        assert unit._bridge.sent == [
+            self.SELECT, self.PRIME, self.FEED, self.STOP,
+            self.STOP, self.SELECT,
+            {"cmd": "retract", "unit": 0, "slot": 0, "mm": 950.0, "mmps": 20.0},
+            self.STOP]
+        assert lane.loaded_to_hub is False
+        assert (unit._load_in_progress, unit._unload_in_progress) == (False, False)
+        assert unit.logger.messages == [
+            ("debug", "Bambu_AMS_1: move ended on NARRATION after 0.1s (ok=True): "
+                      "[AMS_SWITCH]feed finish 0")]
+
+    # the load flag
+
+    def test_the_load_flag_is_up_from_the_prime_to_the_stop(self, monkeypatch):
+        unit, lane, check, _ejected = self._rig(monkeypatch, script=[False, True])
+        during: List[Tuple[str, bool]] = []
+        unit._bridge.on_send = lambda _bridge, frame: during.append(
+            (frame["cmd"], unit._load_in_progress))
+        assert unit._load_in_progress is False
+        assert unit.feed_to(lane, check, FakeGcmd()) is True
+        assert during == [("select", False), ("prime", True), ("feed", True), ("stop", True)]
+        assert check.loading == [True, True]
+        assert unit._load_in_progress is False
+        assert unit.logger.messages == []
+
+    def test_a_check_that_raises_still_stops_the_feed(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch)
+        gone = RuntimeError("switch gone")
+        check.raises = gone
+        with pytest.raises(RuntimeError) as caught:
+            unit.feed_to(lane, check, FakeGcmd())
+        assert caught.value is gone
+        assert check.loading == [True]
+        assert unit._load_in_progress is False
+        # The feed is stopped, or the bridge goes on repeating it. The lane is not reeled back.
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED, self.STOP]
+        assert ejected == []
+        assert unit.logger.messages == []
+
+    def test_a_stop_that_raises_still_takes_the_load_flag_down(self, monkeypatch):
+        unit, lane, check, ejected = self._rig(monkeypatch, script=[True])
+        gone = RuntimeError("bridge gone")
+
+        def stop() -> bool:
+            raise gone
+        unit.stop = stop
+        with pytest.raises(RuntimeError) as caught:
+            unit.feed_to(lane, check, FakeGcmd())
+        assert caught.value is gone
+        assert check.loading == [True]
+        assert unit._load_in_progress is False
+        assert unit._bridge.sent == [self.SELECT, self.PRIME, self.FEED]
+        assert ejected == []
+        assert unit.logger.messages == []
 
 
 class TestModuleImport:

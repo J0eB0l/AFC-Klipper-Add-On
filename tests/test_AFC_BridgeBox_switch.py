@@ -56,9 +56,24 @@ class FakeChain(afcBridgeBox):
         self.polls = 0
         # Whether a unit that answers on the bus has no bay yet.
         self.arriving = False
+        # The AMS each bay holds or is kept for, by unit name.
+        self.uids: Dict[str, Optional[str]] = {}
+        # The popups other modules queued behind the chain's own.
+        self.offers: List[Tuple[Any, ...]] = []
 
     def unit_names(self) -> List[str]:
         return list(self.bays)
+
+    def bay_uid(self, bay: str) -> Optional[str]:
+        return self.uids.get(bay)
+
+    def inlet_buffer(self, inlet: Optional[str]) -> Tuple[str, str]:
+        # The chain's second buffer is behind inlet B.
+        return ("Buffer_B", "chip_inlet_b") if inlet == "B" else ("Buffer", "chip")
+
+    def offer(self, key: str, title: str, lines: List[str],
+              buttons: List[Tuple[str, str, str]]) -> None:
+        self.offers.append((key, title, lines, buttons))
 
     def units_arriving(self) -> bool:
         return self.arriving
@@ -118,6 +133,20 @@ class FakeUnit(afcUnit):
     def __init__(self, name: str) -> None:
         self.name = name
         self.calibrate_bowden = MagicMock()
+
+
+class FakeAms(FakeUnit):
+    """A unit a chain makes for a bay: it goes behind a buffer and feeds a lane to the switch."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.pool = False
+        # The buffer and chip it was put behind, in turn.
+        self.behind: List[Tuple[str, str]] = []
+        self.feed_to = MagicMock(return_value=False)
+
+    def use_buffer(self, buffer: str, chip: str) -> None:
+        self.behind.append((buffer, chip))
 
 
 class FakePathUnit(FakeUnit):
@@ -250,8 +279,47 @@ def plumbed(chain: Optional[FakeChain] = None, **values: Any) -> afcBridgeBoxSwi
     return make_switch(printer, **values)
 
 
+# The bays of a chain that is on both inlets, and the AMS each one holds.
+BAYS = {"Bambu_AMS_1": "AAAA", "Bambu_AMS_2": "BBBB"}
+BOTH = {"inlet_a": ["Chain_1"], "inlet_b": ["Chain_1"]}
+
+
+def finding(chain: Optional[FakeChain] = None, connect: bool = True,
+            **values: Any) -> afcBridgeBoxSwitch:
+    """
+    :return afcBridgeBoxSwitch: a switch with Chain_1 on both inlets, so its bays Bambu_AMS_1
+    and Bambu_AMS_2 are found by loading. Each has one lane named after it, on `extruder`
+    """
+    chain = chain or SimChain()
+    chain.bays = list(BAYS)
+    chain.uids = dict(BAYS)
+    printer = make_printer([chain], units=[])
+    for unit in BAYS:
+        printer._objects[f"AFC_Unit {unit}"] = printer._afc.units[unit] = FakeAms(unit)
+        add_lane(printer, f"lane_{unit}", unit)
+    return make_switch(printer, connect=connect, **dict(BOTH, **values))
+
+
+def found(switch: afcBridgeBoxSwitch, **inlets: str) -> None:
+    """Put units that are found by loading on the inlet found for the AMS in their bay."""
+    for unit, inlet in inlets.items():
+        switch._found[chain_of(switch).uids[unit]] = inlet
+    switch._follow()
+    switch.afc.save_vars.reset_mock()
+
+
+def ams_of(switch: afcBridgeBoxSwitch, unit: str) -> FakeAms:
+    """:return FakeAms: one of the units ``finding`` made"""
+    return switch.afc.units[unit]
+
+
+def other_extruder(name: str) -> str:
+    """:return str: the other one of the two extruders a switch feeds"""
+    return "extruder1" if name == "extruder" else "extruder"
+
+
 def lane_of(switch: afcBridgeBoxSwitch, unit: str) -> FakeLane:
-    """:return FakeLane: the lane ``plumbed`` made for a unit"""
+    """:return FakeLane: the lane ``plumbed`` or ``finding`` made for a unit"""
     return switch.printer._objects[f"AFC_lane lane_{unit}"]
 
 
@@ -465,6 +533,18 @@ class TestAfcBridgeBoxSwitchInit:
         assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1"], "B": ["Ace2_1"]}
         assert switch.outlets == {"A": "extruder", "B": "extruder1"}
         assert (switch._report_by, switch._reported) == (None, [])
+        assert switch.finding == []
+
+    def test_a_name_on_both_inlets_is_kept_apart_to_be_found_by_loading(self):
+        switch = make_switch(connect=False, inlet_a=["Chain_1", "Turtle_1", "Chain_2"],
+                             inlet_b=["Ace2_1", "Chain_2", "Chain_1"])
+        assert switch.finding == ["Chain_1", "Chain_2"]
+        assert switch.inlets == {"A": ["Turtle_1"], "B": ["Ace2_1"]}
+
+    def test_a_section_with_only_a_chain_on_both_inlets_is_taken(self):
+        switch = make_switch(connect=False, **BOTH)
+        assert switch.finding == ["Chain_1"]
+        assert switch.inlets == {"A": [], "B": []}
 
     def test_the_chain_is_kept_as_named(self):
         assert make_switch(connect=False, chain="Chain_2").chain_name == "Chain_2"
@@ -513,6 +593,8 @@ class TestAfcBridgeBoxSwitchInit:
         assert switch._saved_lanes == {}
         assert (switch._by_print, switch._due_back, switch._printing) == ([], [], False)
         assert switch.confirmed == []
+        assert (switch._floating, switch._found, switch._held) == ({}, {}, {})
+        assert switch._offered == []
         assert switch._offsets == {}
         assert switch._seen == {"A": False, "B": False}
         assert switch._lengthless == []
@@ -532,7 +614,7 @@ class TestAfcBridgeBoxSwitchInit:
             "afc:save_vars": [switch.handle_save_vars],
             "afc:calibration_buttons": [switch.handle_calibration_buttons]}
         route, assign = "AFC_BRIDGEBOX_SWITCH_ROUTE", "AFC_BRIDGEBOX_SWITCH_ASSIGN"
-        calibration = "AFC_BRIDGEBOX_SWITCH_CALIBRATION"
+        calibration, identify = "AFC_BRIDGEBOX_SWITCH_CALIBRATION", "AFC_BRIDGEBOX_SWITCH_IDENTIFY"
         assert printer._gcode.register_mux_command.call_args_list == [
             call(route, "SWITCH", "Switch_1", switch.cmd_AFC_BRIDGEBOX_SWITCH_ROUTE,
                  desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_ROUTE_help),
@@ -545,7 +627,11 @@ class TestAfcBridgeBoxSwitchInit:
             call(calibration, "SWITCH", "Switch_1", switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION,
                  desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help),
             call(calibration, "SWITCH", None, switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION,
-                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help)]
+                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help),
+            call(identify, "SWITCH", "Switch_1", switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY,
+                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY_help),
+            call(identify, "SWITCH", None, switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY,
+                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY_help)]
 
     def test_a_bad_section_is_refused(self):
         with pytest.raises(Exception) as err:
@@ -584,8 +670,6 @@ class TestAfcBridgeBoxSwitchRegister:
 class TestAfcBridgeBoxSwitchCheckSection:
     @pytest.mark.parametrize("values, said", [
         (dict(inlet_a=None, inlet_b=None), "names no unit. Add inlet_a or inlet_b."),
-        (dict(inlet_b=["Turtle_1", "Bambu_AMS_1"]),
-         "has Bambu_AMS_1, Turtle_1 on both inlets. A unit enters one inlet."),
         (dict(outlet_a=None, outlet_b=None), "names no extruder. Add outlet_a or outlet_b."),
         (dict(outlet_b="extruder"),
          "has extruder on both outlets. An outlet feeds one extruder."),
@@ -596,7 +680,9 @@ class TestAfcBridgeBoxSwitchCheckSection:
         assert str(err.value) == f"[{SECTION}] {said}"
 
     @pytest.mark.parametrize("values", [
-        dict(inlet_a=None), dict(inlet_b=None), dict(outlet_a=None), dict(outlet_b=None), {}])
+        dict(inlet_a=None), dict(inlet_b=None), dict(outlet_a=None), dict(outlet_b=None), {},
+        # A chain on both inlets, whose units are found by loading, is a unit to name.
+        BOTH])
     def test_what_it_takes(self, values):
         make_switch(connect=False, **values)._check_section()
 
@@ -762,6 +848,46 @@ class TestAfcBridgeBoxSwitchHandleConnect:
             make_switch(inlet_a=["Chain_1"], inlet_b=None)
         assert str(err.value) == f"[{SECTION}] names no unit. Add inlet_a or inlet_b."
 
+    def test_the_units_of_a_chain_on_both_inlets_wait_to_be_found(self):
+        switch = finding()
+        chain = chain_of(switch)
+        assert switch._floating == {"Bambu_AMS_1": chain, "Bambu_AMS_2": chain}
+        assert switch.inlets == {"A": [], "B": []}
+        assert (switch._found, switch._held) == ({}, BAYS)
+        # Their lanes are the switch's all the same, and stay on the extruder they are on.
+        assert switch.lanes == [lane_of(switch, unit) for unit in BAYS]
+        assert [lane.extruder_obj.name for lane in switch.lanes] == ["extruder", "extruder"]
+        assert [ams_of(switch, unit).behind for unit in BAYS] == [[("Buffer", "chip")]] * 2
+
+    def test_a_unit_enters_the_inlet_saved_for_the_ams_in_its_bay(self, tmp_path):
+        switch = finding(connect=False)
+        switch.afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {"switches": {"Switch_1": {
+            "lanes": {}, "confirmed": ["Bambu_AMS_1", "Bambu_AMS_2"],
+            "found": {"BBBB": "B", "CCCC": "A"}}}}}))
+        switch.handle_connect()
+        # What was found for an AMS that holds no bay now is kept until the watch drops it.
+        assert switch._found == {"BBBB": "B", "CCCC": "A"}
+        assert switch._held == BAYS
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
+        assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder1"
+        assert ams_of(switch, "Bambu_AMS_2").behind == [("Buffer_B", "chip_inlet_b")]
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
+        assert ams_of(switch, "Bambu_AMS_1").behind == [("Buffer", "chip")]
+        # A unit whose inlet is not known was not seen at one.
+        assert switch.confirmed == ["Bambu_AMS_2"]
+
+    def test_a_bay_that_holds_no_ams_enters_no_inlet(self, tmp_path):
+        chain = SimChain()
+        switch = finding(chain, connect=False)
+        chain.uids = {"Bambu_AMS_1": "AAAA"}
+        switch.afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {"switches": {"Switch_1": {
+            "lanes": {}, "confirmed": [], "found": {"AAAA": "A"}}}}}))
+        switch.handle_connect()
+        assert switch._held == {"Bambu_AMS_1": "AAAA", "Bambu_AMS_2": None}
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": []}
+
 
 class TestAfcBridgeBoxSwitchHandleReady:
     def test_it_starts_the_watch_one_period_from_now(self):
@@ -790,7 +916,16 @@ class TestAfcBridgeBoxSwitchSaved:
                          "by_print": ["lane20"], "due_back": []}}}}
         assert self._switch(tmp_path, json.dumps(saved))._saved() == {
             "lanes": {"lane1": "extruder1", "lane2": "extruder1"}, "confirmed": ["Turtle_1"],
-            "by_print": ["lane1"], "due_back": ["lane2"]}
+            "by_print": ["lane1"], "due_back": ["lane2"], "found": {}}
+
+    def test_the_inlet_found_for_each_ams(self, tmp_path):
+        saved = {"system": {"switches": {"Switch_1": {
+            "lanes": {}, "confirmed": [],
+            # Only an inlet's letter is one that was found.
+            "found": {"AAAA": "A", "BBBB": "B", "CCCC": "C", "DDDD": None, "EEEE": 1}}}}}
+        assert self._switch(tmp_path, json.dumps(saved))._saved() == {
+            "lanes": {}, "confirmed": [], "by_print": [], "due_back": [],
+            "found": {"AAAA": "A", "BBBB": "B"}}
 
     @pytest.mark.parametrize("extra, by_print, due_back", [
         ({}, [], []), ({"by_print": ["lane1"]}, ["lane1"], []),
@@ -801,7 +936,7 @@ class TestAfcBridgeBoxSwitchSaved:
             {"lanes": {"lane1": "extruder1"}, "confirmed": ["Turtle_1"]}, **extra)}}}
         assert self._switch(tmp_path, json.dumps(saved))._saved() == {
             "lanes": {"lane1": "extruder1"}, "confirmed": ["Turtle_1"],
-            "by_print": by_print, "due_back": due_back}
+            "by_print": by_print, "due_back": due_back, "found": {}}
 
     @pytest.mark.parametrize("text", [
         None, "", "{not json", "{}", '{"system": {}}', '{"system": null}',
@@ -819,10 +954,14 @@ class TestAfcBridgeBoxSwitchSaved:
         '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
         '"confirmed": [], "by_print": 5}}}}',
         '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
-        '"confirmed": [], "due_back": 5}}}}'])
+        '"confirmed": [], "due_back": 5}}}}',
+        '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
+        '"confirmed": [], "found": 5}}}}',
+        '{"system": {"switches": {"Switch_1": {"lanes": {"lane1": "extruder1"}, '
+        '"confirmed": [], "found": "ab"}}}}'])
     def test_nothing_usable_saved_reads_as_nothing(self, tmp_path, text):
         assert self._switch(tmp_path, text)._saved() == {
-            "lanes": {}, "confirmed": [], "by_print": [], "due_back": []}
+            "lanes": {}, "confirmed": [], "by_print": [], "due_back": [], "found": {}}
 
 
 class TestAfcBridgeBoxSwitchSavedLoaded:
@@ -863,7 +1002,7 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         data: Dict[str, Any] = {"system": {}}
         switch.handle_save_vars(data)
         assert data == {"system": {"switches": {"Switch_1": {
-            "lanes": {}, "confirmed": [], "by_print": [], "due_back": []}}}}
+            "lanes": {}, "confirmed": [], "by_print": [], "due_back": [], "found": {}}}}}
 
     def test_lanes_off_their_starting_extruder_are_listed(self):
         switch = plumbed()
@@ -874,7 +1013,7 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         assert data == {"system": {"switches": {
             "Switch_2": {"lane20": "extruder3"},
             "Switch_1": {"lanes": {"lane_Turtle_1": "extruder1", "lane_Ace2_1": "extruder"},
-                         "confirmed": [], "by_print": [], "due_back": []}}}}
+                         "confirmed": [], "by_print": [], "due_back": [], "found": {}}}}}
 
     def test_the_lanes_a_print_moved_are_listed_in_lists_of_their_own(self):
         switch = plumbed()
@@ -887,7 +1026,7 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         saved = data["system"]["switches"]["Switch_1"]
         assert saved == {"lanes": {"lane_Turtle_1": "extruder1", "lane_Ace2_1": "extruder"},
                          "confirmed": [], "by_print": ["lane_Turtle_1"],
-                         "due_back": ["lane_Ace2_1"]}
+                         "due_back": ["lane_Ace2_1"], "found": {}}
         # What is saved does not change with the switch's own lists.
         assert saved["by_print"] is not switch._by_print
         assert saved["due_back"] is not switch._due_back
@@ -899,9 +1038,31 @@ class TestAfcBridgeBoxSwitchHandleSaveVars:
         switch.handle_save_vars(data)
         saved = data["system"]["switches"]["Switch_1"]
         assert saved == {"lanes": {}, "confirmed": ["Turtle_1", "Ace2_1"], "by_print": [],
-                         "due_back": []}
+                         "due_back": [], "found": {}}
         # What is saved does not grow with the switch's own list.
         assert saved["confirmed"] is not switch.confirmed
+
+    def test_the_inlet_found_for_each_ams_is_listed(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A", Bambu_AMS_2="B")
+        for unit in BAYS:
+            lane_of(switch, unit).set_extruder(extruder_of(switch, "extruder1"))
+        data: Dict[str, Any] = {"system": {}}
+        switch.handle_save_vars(data)
+        saved = data["system"]["switches"]["Switch_1"]
+        # Only the lane of the unit on inlet A is off the extruder its unit starts on.
+        assert saved == {"lanes": {"lane_Bambu_AMS_1": "extruder1"}, "confirmed": [],
+                         "by_print": [], "due_back": [], "found": {"AAAA": "A", "BBBB": "B"}}
+        assert saved["found"] is not switch._found
+
+    @pytest.mark.parametrize("extruder", ["extruder", "extruder1"])
+    def test_a_lane_of_a_unit_whose_inlet_is_not_known_is_off_no_starting_extruder(self,
+                                                                                    extruder):
+        switch = finding()
+        lane_of(switch, "Bambu_AMS_1").set_extruder(extruder_of(switch, extruder))
+        data: Dict[str, Any] = {"system": {}}
+        switch.handle_save_vars(data)
+        assert data["system"]["switches"]["Switch_1"]["lanes"] == {}
 
 
 class TestAfcBridgeBoxSwitchStartExtruder:
@@ -951,6 +1112,51 @@ class TestAfcBridgeBoxSwitchStartUnit:
         switch._saved_lanes = {"lane9": "extruder2"}
         switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
         assert lane.extruder_obj.name == "extruder1"
+
+    def test_a_unit_that_is_named_on_an_inlet_keeps_its_buffer(self):
+        switch = finding(inlet_b=["Chain_1", "Bambu_AMS_2"])
+        unit = ams_of(switch, "Bambu_AMS_2")
+        assert "Bambu_AMS_2" not in switch._floating
+        assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder1"
+        assert unit.behind == []
+
+    @pytest.mark.parametrize("inlet, behind, start", [
+        ("A", ("Buffer", "chip"), "extruder"), ("B", ("Buffer_B", "chip_inlet_b"), "extruder1")])
+    def test_a_unit_that_was_found_goes_behind_its_inlets_buffer(self, inlet, behind, start):
+        switch = finding()
+        unit = ams_of(switch, "Bambu_AMS_1")
+        switch.inlets[inlet].append("Bambu_AMS_1")
+        unit.behind.clear()
+        lane_of(switch, "Bambu_AMS_1").set_extruder(extruder_of(switch, other_extruder(start)))
+        switch._start_unit(unit)
+        assert unit.behind == [behind]
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == start
+        # The other unit's lane is left alone.
+        assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder"
+
+    @pytest.mark.parametrize("on", ["extruder", "extruder1"])
+    def test_while_its_inlet_is_not_known_its_lanes_stay_where_they_are(self, on):
+        switch = finding()
+        unit = ams_of(switch, "Bambu_AMS_1")
+        unit.behind.clear()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        lane.set_extruder(extruder_of(switch, on))
+        switch._start_unit(unit)
+        # It keeps the chain's own buffer until then.
+        assert unit.behind == [("Buffer", "chip")]
+        assert lane.extruder_obj.name == on
+
+    def test_but_a_lane_saved_on_one_of_the_switchs_extruders_is_put_there(self):
+        switch = finding()
+        switch._saved_lanes = {"lane_Bambu_AMS_1": "extruder1"}
+        switch._start_unit(ams_of(switch, "Bambu_AMS_1"))
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder1"
+
+    def test_and_one_saved_on_an_extruder_the_switch_does_not_feed_stays(self):
+        switch = finding()
+        switch._saved_lanes = {"lane_Bambu_AMS_1": "extruder2"}
+        switch._start_unit(ams_of(switch, "Bambu_AMS_1"))
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
 
 
 class TestAfcBridgeBoxSwitchChains:
@@ -1057,6 +1263,48 @@ class TestAfcBridgeBoxSwitchPlaceChains:
                                   "Chain_2 itself on the inlet its other units enter.")
         # Nothing was added for it.
         assert switch.inlets == self.AS_NAMED
+
+    def test_the_bays_of_a_chain_on_both_inlets_are_found_by_loading(self):
+        chains = [FakeChain("Chain_1", bays=["Bay_0", "Bay_1"]),
+                  FakeChain("Chain_2", bays=["Bay_4"])]
+        switch = self._switch(chains, inlet_a=["Chain_1", "Chain_2"], inlet_b=["Chain_1"])
+        switch._place_chains()
+        assert switch._floating == {"Bay_0": chains[0], "Bay_1": chains[0]}
+        # A chain on one inlet has its bays on that inlet as ever.
+        assert switch.inlets == {"A": ["Bay_4"], "B": []}
+
+    def test_a_bay_of_such_a_chain_that_an_inlet_names_stays_on_that_inlet(self):
+        chain = FakeChain(bays=["Bay_0", "Ace2_1", "Bay_2"])
+        switch = self._switch([chain], inlet_a=["Chain_1"], inlet_b=["Chain_1", "Ace2_1"])
+        switch._place_chains()
+        assert switch._floating == {"Bay_0": chain, "Bay_2": chain}
+        assert switch.inlets == {"A": [], "B": ["Ace2_1"]}
+
+    def test_a_unit_on_both_inlets_is_refused(self):
+        switch = self._switch([FakeChain(bays=["Bay_0"])],
+                              inlet_b=["Turtle_1", "Ace2_1", "Bambu_AMS_1"])
+        with pytest.raises(error) as err:
+            switch._place_chains()
+        assert str(err.value) == (f"[{SECTION}] has Bambu_AMS_1, Turtle_1 on both inlets. A unit "
+                                  "enters one inlet.")
+        assert switch._floating == {}
+
+    def test_so_is_a_name_that_is_neither_a_chain_nor_a_unit(self):
+        switch = self._switch([FakeChain(bays=["Bay_0"])], inlet_a=["Nothing_1"],
+                              inlet_b=["Nothing_1"])
+        with pytest.raises(error) as err:
+            switch._place_chains()
+        assert str(err.value) == (f"[{SECTION}] has Nothing_1 on both inlets. A unit enters one "
+                                  "inlet.")
+
+    def test_so_is_a_chain_whose_name_is_also_a_units(self):
+        chains = [FakeChain(), FakeChain("Turtle_1", bays=["Bay_1", "Bay_2"])]
+        switch = self._switch(chains, inlet_a=["Turtle_1"], inlet_b=["Turtle_1"])
+        with pytest.raises(error) as err:
+            switch._place_chains()
+        assert str(err.value) == (f"[{SECTION}] has Turtle_1 on both inlets. A unit enters one "
+                                  "inlet.")
+        assert switch._floating == {}
 
 
 class TestAfcBridgeBoxSwitchFindChain:
@@ -1171,6 +1419,17 @@ class TestAfcBridgeBoxSwitchUnits:
     def test_inlet_a_first(self):
         assert make_switch().units() == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
 
+    def test_the_units_whose_inlet_is_not_known_come_last(self):
+        switch = finding()
+        assert switch.units() == ["Bambu_AMS_1", "Bambu_AMS_2"]
+        found(switch, Bambu_AMS_2="A")
+        assert switch.units() == ["Bambu_AMS_2", "Bambu_AMS_1"]
+
+    def test_a_unit_that_was_found_is_listed_once_at_its_inlet(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="B", Bambu_AMS_2="A")
+        assert switch.units() == ["Bambu_AMS_2", "Bambu_AMS_1"]
+
 
 class TestAfcBridgeBoxSwitchLiveUnits:
     ALL = ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
@@ -1194,6 +1453,29 @@ class TestAfcBridgeBoxSwitchLiveUnits:
         switch = make_switch(make_printer(connected=False))
         assert switch.afc.units == {}
         assert switch.live_units() == self.ALL
+
+
+class TestAfcBridgeBoxSwitchUnfound:
+    def test_a_switch_whose_units_are_all_named_has_none(self):
+        assert make_switch().unfound() == []
+
+    def test_the_units_in_use_whose_inlet_is_still_to_be_found(self):
+        switch = finding()
+        assert switch.unfound() == ["Bambu_AMS_1", "Bambu_AMS_2"]
+        found(switch, Bambu_AMS_1="B")
+        assert switch.unfound() == ["Bambu_AMS_2"]
+
+    def test_a_bay_that_holds_no_unit_now_has_no_inlet_to_find(self):
+        switch = finding()
+        ams_of(switch, "Bambu_AMS_1").pool = True
+        assert switch.unfound() == ["Bambu_AMS_2"]
+
+
+class TestAfcBridgeBoxSwitchNeed:
+    def test_it_names_the_unit_and_the_command_for_it(self):
+        assert make_switch()._need("Bambu_AMS_2") == (
+            "the inlet of Bambu_AMS_2 is not known. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+            "UNIT=Bambu_AMS_2 first.")
 
 
 class TestAfcBridgeBoxSwitchExtruders:
@@ -1477,8 +1759,10 @@ class TestAfcBridgeBoxSwitchWatch:
         switch.afc.prep_done = True
         switch._look = MagicMock()
         switch._release = MagicMock()
+        switch._follow = MagicMock()
         switch._note_arrivals = MagicMock()
         switch._send_back = MagicMock()
+        switch._offer = MagicMock()
         switch._settle = MagicMock(return_value=["a problem"])
         switch._say = MagicMock()
         return switch
@@ -1488,8 +1772,10 @@ class TestAfcBridgeBoxSwitchWatch:
         """Assert the watch looked at the inlets and for a print, and did nothing else."""
         switch._look.assert_called_once_with()
         switch._release.assert_called_once_with(False)
+        switch._follow.assert_not_called()
         switch._note_arrivals.assert_not_called()
         switch._send_back.assert_not_called()
+        switch._offer.assert_not_called()
         switch._settle.assert_not_called()
         switch._say.assert_not_called()
 
@@ -1502,15 +1788,17 @@ class TestAfcBridgeBoxSwitchWatch:
             return ["a problem"]
 
         switch._release.side_effect = lambda printing: held.append(("release", printing))
+        switch._follow.side_effect = lambda: held.append(("follow", switch._moving))
         switch._note_arrivals.side_effect = lambda: held.append(("arrivals", switch._moving))
         switch._send_back.side_effect = lambda: held.append(("back", switch._moving))
+        switch._offer.side_effect = lambda: held.append(("offer", switch._moving))
         switch._settle.side_effect = settle
         switch._say.side_effect = lambda problems: held.append(("say", switch._moving))
         assert switch._watch(55.0) == 101.0
         switch._look.assert_called_once_with()
         switch._say.assert_called_once_with(["a problem"])
-        assert held == [("release", False), ("arrivals", False), ("back", False),
-                        ("settle", True, 1), ("say", True)]
+        assert held == [("release", False), ("follow", False), ("arrivals", False),
+                        ("back", False), ("offer", False), ("settle", True, 1), ("say", True)]
         assert switch._moving is False
 
     def test_while_a_print_runs_no_lane_is_sent_back(self):
@@ -1519,7 +1807,10 @@ class TestAfcBridgeBoxSwitchWatch:
         assert switch._watch(55.0) == 101.0
         switch._release.assert_called_once_with(True)
         switch._send_back.assert_not_called()
-        # The switch is still brought in line with the lanes.
+        # Nor is a prompt opened over the print.
+        switch._offer.assert_not_called()
+        # The switch is still brought in line with the lanes and the units in the bays.
+        switch._follow.assert_called_once_with()
         switch._note_arrivals.assert_called_once_with()
         switch._say.assert_called_once_with(["a problem"])
 
@@ -1600,6 +1891,200 @@ class TestAfcBridgeBoxSwitchWatch:
                     + TestAfcBridgeBoxSwitchHandlePrep.OUTLETS)]
         assert switch._reported == ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]
         assert switch._report_by is None
+
+    def test_an_ams_that_took_a_bay_loses_the_bays_inlet_and_is_offered_once(self):
+        switch = finding(SimChain(route=2))
+        chain = chain_of(switch)
+        found(switch, Bambu_AMS_1="A", Bambu_AMS_2="B")
+        switch._offered = ["AAAA", "BBBB"]
+        switch.afc.prep_done = True
+        switch._reported = switch.live_units()
+        chain.uids["Bambu_AMS_2"] = "CCCC"
+        switch._watch(55.0)
+        switch._watch(56.0)
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": []}
+        assert switch._found == {"AAAA": "A"}
+        assert [offer[:2] for offer in chain.offers] == [("Switch_1", "Switch_1 new AMS")]
+        assert switch._offered == ["AAAA", "BBBB", "CCCC"]
+
+
+class TestAfcBridgeBoxSwitchFollow:
+    def test_a_switch_with_no_unit_to_find_has_nothing_to_follow(self):
+        switch = plumbed()
+        switch._follow()
+        assert switch._held == {}
+        assert switch.inlets == {"A": ["Bambu_AMS_1", "Turtle_1"], "B": ["Ace2_1"]}
+        switch.afc.save_vars.assert_not_called()
+
+    def test_a_unit_enters_the_inlet_found_for_the_ams_in_its_bay(self):
+        switch = finding()
+        switch._found = {"BBBB": "B"}
+        switch._follow()
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
+        assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder1"
+        assert ams_of(switch, "Bambu_AMS_2").behind == [("Buffer", "chip"),
+                                                        ("Buffer_B", "chip_inlet_b")]
+        # The unit whose AMS has no inlet yet is left as it is.
+        assert ams_of(switch, "Bambu_AMS_1").behind == [("Buffer", "chip")]
+        assert (switch._found, switch._held) == ({"BBBB": "B"}, BAYS)
+        switch.afc.save_vars.assert_not_called()
+
+    def test_a_unit_that_is_on_its_inlet_is_left_there(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="B")
+        unit = ams_of(switch, "Bambu_AMS_2")
+        unit.behind.clear()
+        switch._follow()
+        assert unit.behind == []
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
+        # An AMS that holds its bay keeps what was found for it.
+        assert switch._found == {"BBBB": "B"}
+        switch.afc.save_vars.assert_not_called()
+
+    def test_a_bay_another_ams_took_has_no_inlet_and_the_ams_that_left_is_forgotten(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A", Bambu_AMS_2="B")
+        switch.confirmed = ["Bambu_AMS_1", "Bambu_AMS_2"]
+        chain_of(switch).uids["Bambu_AMS_2"] = "CCCC"
+        switch._follow()
+        assert switch._found == {"AAAA": "A"}
+        assert switch._held == {"Bambu_AMS_1": "AAAA", "Bambu_AMS_2": "CCCC"}
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": []}
+        assert switch.confirmed == ["Bambu_AMS_1"]
+        # It is back behind the chain's own buffer, and its lane stays where it was.
+        assert ams_of(switch, "Bambu_AMS_2").behind[-1] == ("Buffer", "chip")
+        assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder1"
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_an_ams_that_moved_to_another_bay_takes_its_inlet_along(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="B")
+        chain_of(switch).uids = {"Bambu_AMS_1": "BBBB", "Bambu_AMS_2": None}
+        switch._follow()
+        assert switch._found == {"BBBB": "B"}
+        assert switch._held == {"Bambu_AMS_1": "BBBB", "Bambu_AMS_2": None}
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
+        switch.afc.save_vars.assert_not_called()
+
+    def test_an_ams_that_left_before_its_inlet_was_found_leaves_nothing_to_forget(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="B")
+        chain_of(switch).uids["Bambu_AMS_1"] = None
+        switch._follow()
+        assert switch._found == {"BBBB": "B"}
+        assert switch._held == {"Bambu_AMS_1": None, "Bambu_AMS_2": "BBBB"}
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
+        switch.afc.save_vars.assert_not_called()
+
+
+class TestAfcBridgeBoxSwitchPlace:
+    def test_a_unit_is_put_on_an_inlet_and_started_there(self):
+        switch = finding()
+        switch.confirmed = ["Bambu_AMS_1"]
+        switch._saved_lanes = {"lane_Bambu_AMS_1": "extruder", "lane_Bambu_AMS_2": "extruder1"}
+        switch._by_print = ["lane_Bambu_AMS_1", "lane_Bambu_AMS_2"]
+        switch._due_back = ["lane_Bambu_AMS_2", "lane_Bambu_AMS_1"]
+        switch._place("Bambu_AMS_1", "B")
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
+        # What was kept for its lane was for the inlet it had. The other unit's is left.
+        assert switch._saved_lanes == {"lane_Bambu_AMS_2": "extruder1"}
+        assert (switch._by_print, switch._due_back) == (["lane_Bambu_AMS_2"],
+                                                        ["lane_Bambu_AMS_2"])
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder1"
+        assert ams_of(switch, "Bambu_AMS_1").behind[-1] == ("Buffer_B", "chip_inlet_b")
+        assert switch.confirmed == ["Bambu_AMS_1"]
+
+    def test_a_unit_moves_from_one_inlet_to_the_other(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="B", Bambu_AMS_2="B")
+        switch._place("Bambu_AMS_1", "A")
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": ["Bambu_AMS_2"]}
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
+        assert ams_of(switch, "Bambu_AMS_1").behind[-1] == ("Buffer", "chip")
+
+    def test_a_unit_whose_inlet_is_no_longer_known_is_taken_off_and_was_not_seen_at_one(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="B", Bambu_AMS_2="B")
+        switch.confirmed = ["Bambu_AMS_1", "Bambu_AMS_2"]
+        switch._place("Bambu_AMS_1", None)
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
+        assert switch.confirmed == ["Bambu_AMS_2"]
+        assert ams_of(switch, "Bambu_AMS_1").behind[-1] == ("Buffer", "chip")
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder1"
+
+    def test_a_unit_that_was_not_seen_at_its_inlet_is_only_taken_off(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="B")
+        switch.confirmed = ["Bambu_AMS_2"]
+        switch._place("Bambu_AMS_1", None)
+        assert switch.inlets == {"A": [], "B": []}
+        assert switch.confirmed == ["Bambu_AMS_2"]
+
+    def test_a_unit_afc_does_not_have_yet_is_started_once_it_connects(self):
+        switch = finding()
+        unit = switch.afc.units.pop("Bambu_AMS_1")
+        unit.behind.clear()
+        switch._place("Bambu_AMS_1", "B")
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
+        assert unit.behind == []
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
+
+
+class TestAfcBridgeBoxSwitchOffer:
+    HOW = ("Put a spool in the unit and pick it. One lane is fed to the switch and reeled back, "
+           "and a lane that is loaded through the switch is unloaded first.")
+
+    @staticmethod
+    def _button(unit: str) -> Tuple[str, str, str]:
+        """:return tuple: the button that finds a unit's inlet"""
+        return (unit, f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1 UNIT={unit}", "primary")
+
+    def test_every_unit_whose_inlet_is_not_known_is_offered(self):
+        switch = finding()
+        switch._offer()
+        assert chain_of(switch).offers == [
+            ("Switch_1", "Switch_1 new AMS",
+             ["Switch_1: the inlet of Bambu_AMS_1, Bambu_AMS_2 is not known yet. The lanes of a "
+              "unit do not load until its inlet is found.", self.HOW],
+             [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2")])]
+        assert switch._offered == ["AAAA", "BBBB"]
+
+    def test_an_ams_is_offered_once(self):
+        switch = finding()
+        switch._offer()
+        switch._offer()
+        assert len(chain_of(switch).offers) == 1
+        assert switch._offered == ["AAAA", "BBBB"]
+
+    def test_an_ams_that_is_new_is_offered_with_the_ones_still_to_find(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="A")
+        switch._offer()
+        chain = chain_of(switch)
+        assert chain.offers[0][3] == [self._button("Bambu_AMS_1")]
+        chain.uids["Bambu_AMS_2"] = "CCCC"
+        switch._follow()
+        switch._offer()
+        assert chain.offers[1] == (
+            "Switch_1", "Switch_1 new AMS",
+            ["Switch_1: the inlet of Bambu_AMS_1, Bambu_AMS_2 is not known yet. The lanes of a "
+             "unit do not load until its inlet is found.", self.HOW],
+            [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2")])
+        assert switch._offered == ["AAAA", "CCCC"]
+
+    def test_with_every_inlet_known_nothing_is_offered(self):
+        switch = finding()
+        found(switch, Bambu_AMS_1="A", Bambu_AMS_2="B")
+        switch._offer()
+        assert chain_of(switch).offers == []
+        assert switch._offered == []
+
+    def test_a_bay_that_holds_no_unit_now_is_not_offered(self):
+        switch = finding()
+        ams_of(switch, "Bambu_AMS_1").pool = True
+        switch._offer()
+        assert chain_of(switch).offers[0][3] == [self._button("Bambu_AMS_2")]
+        assert switch._offered == ["BBBB"]
 
 
 class TestAfcBridgeBoxSwitchRelease:
@@ -1740,6 +2225,21 @@ class TestAfcBridgeBoxSwitchSendBack:
         assert switch._due_back == ["lane_Turtle_1"]
         assert switch.logger.messages == []
         switch.afc.save_vars.assert_not_called()
+
+    def test_a_lane_of_a_unit_whose_inlet_is_not_known_waits_for_the_inlet(self):
+        switch = finding()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._due_back = ["lane_Bambu_AMS_1"]
+        switch._send_back()
+        assert lane.extruder_obj.name == "extruder1"
+        assert switch._due_back == ["lane_Bambu_AMS_1"]
+        assert switch.logger.messages == []
+        switch.afc.save_vars.assert_not_called()
+        switch.inlets["A"].append("Bambu_AMS_1")
+        switch._send_back()
+        assert lane.extruder_obj.name == "extruder"
+        assert switch._due_back == []
 
     def test_with_no_lane_due_back_nothing_is_saved(self):
         switch = self._switch()
@@ -2151,6 +2651,15 @@ class TestAfcBridgeBoxSwitchSetLength:
         lane = lane_of(switch, "Turtle_1")
         hub = add_hub(lane)
         lane.set_extruder(FakeExtruder("extruder2"))
+        switch._set_length(lane)
+        assert tube_of(hub) == (900.0, 880.0)
+        assert switch._offsets == {}
+
+    def test_a_lane_of_a_unit_whose_inlet_is_not_known_is_left_alone(self):
+        switch = finding(**LENGTHS)
+        lane = lane_of(switch, "Bambu_AMS_1")
+        hub = add_hub(lane)
+        lane.set_extruder(extruder_of(switch, "extruder1"))
         switch._set_length(lane)
         assert tube_of(hub) == (900.0, 880.0)
         assert switch._offsets == {}
@@ -2638,6 +3147,29 @@ class TestAfcBridgeBoxSwitchHandleToolLoadPrepare:
         assert switch._routed == {"A": None, "B": None}
         assert switch._offsets == {}
 
+    @pytest.mark.parametrize("printing", [True, False])
+    def test_a_lane_of_a_unit_whose_inlet_is_not_known_is_not_loaded(self, printing):
+        chain = SimChain(route=0)
+        switch = finding(chain)
+        switch.afc.function.in_print.return_value = printing
+        gcmd = MagicMock()
+        assert switch.handle_tool_load_prepare(lane_of(switch, "Bambu_AMS_1"), gcmd) is False
+        switch.afc.error.AFC_error.assert_called_once_with(
+            "Switch_1: lane_Bambu_AMS_1 is not loaded, the inlet of Bambu_AMS_1 is not known. "
+            "Run AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Bambu_AMS_1 first.",
+            pause=printing, gcmd=gcmd)
+        assert chain.routes == []
+        assert switch._routed == {"A": None, "B": None}
+
+    def test_but_one_that_is_in_its_toolhead_already_needs_nothing(self):
+        chain = SimChain(route=0, position=2, a=True)
+        switch = finding(chain)
+        lane_of(switch, "Bambu_AMS_1").tool_loaded = True
+        assert switch.handle_tool_load_prepare(lane_of(switch, "Bambu_AMS_1"), MagicMock()) is True
+        switch.afc.error.AFC_error.assert_not_called()
+        assert chain.routes == []
+        assert switch._routed == {"A": None, "B": None}
+
     def test_it_points_the_lanes_inlet_and_remembers_the_lane(self):
         chain = SimChain(route=0)
         switch = plumbed(chain)
@@ -3092,6 +3624,18 @@ class TestAfcBridgeBoxSwitchReport:
             f"{self.NOT_SET}\n"
             "Not seen at their inlet yet: Turtle_1")
 
+    def test_the_units_whose_inlet_is_not_known_are_listed_last_and_nowhere_else(self):
+        switch = finding(SimChain(route=2), **LENGTHS)
+        found(switch, Bambu_AMS_2="B")
+        assert switch._report() == (
+            "Inlet A: no unit, at outlet A, empty\n"
+            "Inlet B: Bambu_AMS_2, at outlet B, empty\n"
+            "Outlet A: extruder (no lane)\n"
+            "Outlet B: extruder1 (lane_Bambu_AMS_2)\n"
+            "Not seen at their inlet yet: Bambu_AMS_2\n"
+            "Inlet not known: Bambu_AMS_1. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY, or pick the "
+            "switch's inlets in AFC_CALIBRATION")
+
     def test_a_switch_that_is_not_answering(self):
         switch = plumbed(FakeChain(state=None))
         with pytest.raises(SwitchError) as err:
@@ -3376,6 +3920,19 @@ class TestAfcBridgeBoxSwitchAssignTool:
 
 
 class TestAfcBridgeBoxSwitchAssign:
+    def test_a_lane_of_a_unit_whose_inlet_is_not_known_stays_where_it_is(self):
+        switch = finding()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        gcmd = MockGCodeCommand()
+        with pytest.raises(CommandError) as err:
+            switch.assign(lane, "extruder1", False, gcmd)
+        assert str(err.value) == (
+            "Switch_1: lane_Bambu_AMS_1 stays where it is, the inlet of Bambu_AMS_1 is not "
+            "known. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Bambu_AMS_1 first.")
+        assert lane.extruder_obj.name == "extruder"
+        switch.afc.save_vars.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+
     def test_an_extruder_the_switch_does_not_feed(self):
         switch = plumbed()
         lane = lane_of(switch, "Turtle_1")
@@ -3573,6 +4130,15 @@ class TestAfcBridgeBoxSwitchHandleCalibrationButtons:
             ("Turtle_1", "UNIT_CALIBRATION UNIT=Turtle_1", "primary"),
             ("Switch_1 filament switch", "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1",
              "primary")]
+
+    def test_a_switch_with_units_that_are_found_by_loading_adds_its_inlets(self):
+        switch = finding()
+        buttons: List[Tuple[str, str, str]] = []
+        switch.handle_calibration_buttons(buttons)
+        assert buttons == [
+            ("Switch_1 filament switch", "AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH=Switch_1",
+             "primary"),
+            ("Switch_1 inlets", "AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1", "primary")]
 
     def test_afc_asks_for_it_when_it_builds_its_calibration_menu(self):
         printer = make_printer()
@@ -3870,6 +4436,14 @@ class TestAfcBridgeBoxSwitchMeasuringLanes:
         switch._lengthless = ["Ace2_1"]
         assert switch._measuring_lanes() == {"Turtle_1": [lane_of(switch, "Turtle_1")]}
 
+    def test_a_unit_whose_inlet_is_not_known_is_not_offered(self):
+        switch = finding()
+        for unit in BAYS:
+            lane_of(switch, unit).load_state = True
+            add_hub(lane_of(switch, unit))
+        found(switch, Bambu_AMS_2="A")
+        assert switch._measuring_lanes() == {"Bambu_AMS_2": [lane_of(switch, "Bambu_AMS_2")]}
+
     def test_every_lane_of_each_unit_that_can_in_the_order_of_the_lanes(self):
         printer = make_printer([SimChain()])
         lanes = [add_lane(printer, name, unit) for name, unit in (
@@ -3906,6 +4480,14 @@ class TestAfcBridgeBoxSwitchMeasure:
         assert switch._routed == {"A": None, "B": None}
         assert switch._offsets == {}
         assert switch.confirmed == []
+
+    def test_a_lane_of_a_unit_whose_inlet_is_not_known_cannot_measure(self):
+        switch = finding(SimChain(route=2))
+        lane = lane_of(switch, "Bambu_AMS_1")
+        add_hub(lane)
+        self._refused(switch, lane,
+                      "Switch_1: lane_Bambu_AMS_1 cannot measure, the inlet of Bambu_AMS_1 is "
+                      "not known. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Bambu_AMS_1 first.")
 
     def test_with_one_outlet_in_use_there_is_nothing_to_measure(self):
         switch, lane, _hub = self._switch(outlet_b=None)
@@ -4527,6 +5109,465 @@ class TestAfcBridgeBoxSwitchRestoreTube:
             call("AFC_hub Turtle_1", "afc_unload_bowden_length", 880.0)]
 
 
+def feeding(switch: afcBridgeBoxSwitch, unit: str, *shows: str,
+            lingers: bool = False) -> MagicMock:
+    """
+    Script a unit's feed to the switch: the filament shows at the inlets ``shows`` names, is
+    looked for once and is reeled back, or stays at the inlets when it ``lingers``.
+
+    :return MagicMock: the unit's feed_to
+    """
+    chain = chain_of(switch)
+
+    def feed_to(lane: FakeLane, seen: Any, gcmd: Any) -> bool:
+        chain.fill(**{letter.lower(): True for letter in shows})
+        saw = seen()
+        if not lingers:
+            chain.fill(a=False, b=False)
+        return saw
+
+    ams_of(switch, unit).feed_to = MagicMock(side_effect=feed_to)
+    return ams_of(switch, unit).feed_to
+
+
+class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchIdentify:
+    END = ("raw", "// action:prompt_end")
+
+    def test_without_a_unit_or_a_lane_it_opens_the_menu(self):
+        switch = finding()
+        switch._identify = MagicMock()
+        gcmd = MockGCodeCommand()
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        menu = TestAfcBridgeBoxSwitchIdentifyMenu
+        assert switch.logger.messages == [
+            menu.BEGIN, menu.PICK, menu.button("Bambu_AMS_1", "new", "primary"),
+            menu.button("Bambu_AMS_2", "new", "primary")] + menu.FOOT
+        switch._identify.assert_not_called()
+        gcmd.respond_info.assert_not_called()
+
+    def test_with_a_unit_its_first_lane_that_holds_filament_is_fed(self):
+        switch = finding()
+        lane = lane_of(switch, "Bambu_AMS_2")
+        lane.load_state = True
+
+        def identify(fed: FakeLane, gcmd: Any) -> str:
+            switch.inlets["B"].append("Bambu_AMS_2")
+            return "B"
+
+        switch._identify = MagicMock(side_effect=identify)
+        gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        switch._identify.assert_called_once_with(lane, gcmd)
+        # The prompt that offered the unit is closed.
+        assert switch.logger.messages == [self.END]
+        gcmd.respond_info.assert_called_once_with(
+            "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1.")
+
+    def test_with_a_lane_that_lane_is_fed_and_its_unit_is_the_one_found(self):
+        switch = finding()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        lane.load_state = True
+
+        def identify(fed: FakeLane, gcmd: Any) -> str:
+            switch.inlets["A"].append("Bambu_AMS_1")
+            return "A"
+
+        switch._identify = MagicMock(side_effect=identify)
+        gcmd = MockGCodeCommand({"LANE": "lane_Bambu_AMS_1"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        switch._identify.assert_called_once_with(lane, gcmd)
+        assert switch.logger.messages == [self.END]
+        gcmd.respond_info.assert_called_once_with(
+            "Switch_1: Bambu_AMS_1 enters inlet A. Its lanes start on extruder.")
+
+    def test_a_lane_that_cannot_be_fed_is_the_commands_error(self):
+        switch = finding()
+        switch._identify = MagicMock()
+        gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        assert str(err.value) == ("Switch_1: no lane of Bambu_AMS_2 holds filament. Put a spool "
+                                  "in it first.")
+        switch._identify.assert_not_called()
+        assert switch.logger.messages == [self.END]
+        gcmd.respond_info.assert_not_called()
+
+    def test_an_inlet_that_was_not_found_is_the_commands_error(self):
+        switch = finding()
+        lane_of(switch, "Bambu_AMS_2").load_state = True
+        switch._identify = MagicMock(side_effect=SwitchError("Switch_1: it did not work"))
+        gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        assert str(err.value) == "Switch_1: it did not work"
+        assert switch.logger.messages == [self.END]
+        gcmd.respond_info.assert_not_called()
+
+    def test_a_unit_is_found_from_start_to_end(self):
+        chain = SimChain(route=2, a=True)
+        switch = finding(chain)
+        found(switch, Bambu_AMS_1="A")
+        held = lane_of(switch, "Bambu_AMS_1")
+        held.tool_loaded = True
+        lane = lane_of(switch, "Bambu_AMS_2")
+        lane.load_state = True
+
+        def tool_unload(cur_lane: FakeLane, set_start_time: bool, force_unload: bool,
+                        gcmd: Any) -> bool:
+            cur_lane.tool_loaded = False
+            chain.fill(a=False)
+            return True
+
+        switch.afc.TOOL_UNLOAD = MagicMock(side_effect=tool_unload)
+        feed = feeding(switch, "Bambu_AMS_2", "B")
+        gcmd = MockGCodeCommand({"UNIT": "Bambu_AMS_2"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(gcmd)
+        switch.afc.TOOL_UNLOAD.assert_called_once_with(held, set_start_time=False,
+                                                       force_unload=True, gcmd=gcmd)
+        feed.assert_called_once_with(lane, switch._saw, gcmd)
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": ["Bambu_AMS_2"]}
+        assert switch._found == {"AAAA": "A", "BBBB": "B"}
+        assert lane.extruder_obj is extruder_of(switch, "extruder1")
+        assert ams_of(switch, "Bambu_AMS_2").behind[-1] == ("Buffer_B", "chip_inlet_b")
+        assert switch.logger.messages == [
+            self.END,
+            ("info", "Switch_1: unloading lane_Bambu_AMS_1 from extruder, both inlets have to "
+                     "be empty to find one")]
+        gcmd.respond_info.assert_called_once_with(
+            "Switch_1: Bambu_AMS_2 enters inlet B. Its lanes start on extruder1.")
+
+
+class TestAfcBridgeBoxSwitchIdentifyMenu:
+    BEGIN = ("raw", "// action:prompt_begin Switch_1 Inlets")
+    PICK = ("raw", "// action:prompt_text Feeds one lane of a unit to the switch and reels it "
+                   "back, to find the inlet the unit is plumbed into. A lane that is loaded "
+                   "through the switch is unloaded first. Put a spool in the unit, then pick it.")
+    NO_UNIT = ("raw", "// action:prompt_text No unit's inlet is found by loading. That is for "
+                      "the units of a chain that is on both inlets in the switch's section.")
+    FOOT = [("raw", "// action:prompt_footer_button Back to unit selection|AFC_CALIBRATION|info"),
+            ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
+                    "MSG=action:prompt_end|warning"),
+            ("raw", "// action:prompt_show")]
+
+    @staticmethod
+    def button(unit: str, state: str, style: str) -> Tuple[str, str]:
+        """:return tuple: the line of the button that finds a unit's inlet"""
+        return ("raw", f"// action:prompt_button {unit}: {state}|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+                       f"SWITCH=Switch_1 UNIT={unit}|{style}")
+
+    def test_a_unit_is_new_until_its_inlet_is_found_and_names_it_after(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="B")
+        switch._identify_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self.button("Bambu_AMS_1", "new", "primary"),
+            self.button("Bambu_AMS_2", "inlet B", "secondary")] + self.FOOT
+
+    def test_a_bay_that_holds_no_unit_now_is_not_offered(self):
+        switch = finding()
+        found(switch, Bambu_AMS_2="A")
+        ams_of(switch, "Bambu_AMS_1").pool = True
+        switch._identify_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self.button("Bambu_AMS_2", "inlet A", "secondary")] + self.FOOT
+
+    def test_a_unit_that_is_named_on_an_inlet_is_not_offered(self):
+        switch = finding(inlet_b=["Chain_1", "Bambu_AMS_2"])
+        switch._identify_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, self.PICK, self.button("Bambu_AMS_1", "new", "primary")] + self.FOOT
+
+    def test_a_switch_with_no_unit_to_find_says_what_it_is_for(self):
+        switch = plumbed()
+        switch._identify_menu(MockGCodeCommand())
+        assert switch.logger.messages == [self.BEGIN, self.NO_UNIT] + self.FOOT
+
+
+class TestAfcBridgeBoxSwitchIdentifyLane:
+    NOT_FOUND_BY_LOADING = ("is not found by loading. That is for the units of a chain that is "
+                            "on both inlets in the switch's section.")
+
+    @staticmethod
+    def _switch(**values: Any) -> Tuple[afcBridgeBoxSwitch, List[FakeLane]]:
+        """
+        :return tuple: a switch whose Bambu_AMS_1 also has lane1 to lane3, and those lanes.
+        Only lane2 and lane3 hold filament
+        """
+        switch = finding(connect=False, **values)
+        lanes = [add_lane(switch.printer, name, "Bambu_AMS_1")
+                 for name in ("lane1", "lane2", "lane3")]
+        for lane in lanes[1:]:
+            lane.load_state = True
+        switch.handle_connect()
+        return switch, lanes
+
+    @staticmethod
+    def _refused(switch: afcBridgeBoxSwitch, unit: Optional[str], name: Optional[str],
+                 said: str) -> None:
+        """Check no lane is picked, with ``said``."""
+        with pytest.raises(SwitchError) as err:
+            switch._identify_lane(unit, name)
+        assert str(err.value) == f"Switch_1: {said}"
+
+    def test_a_units_first_lane_that_holds_filament(self):
+        switch, lanes = self._switch()
+        # A lane of another unit that holds filament is not this unit's.
+        lane_of(switch, "Bambu_AMS_2").load_state = True
+        assert [lane.name for lane in switch.lanes][:3] == [
+            "lane_Bambu_AMS_1", "lane_Bambu_AMS_2", "lane1"]
+        assert switch._identify_lane("Bambu_AMS_1", None) is lanes[1]
+
+    @pytest.mark.parametrize("unit", [None, "Bambu_AMS_1", "Bambu_AMS_2"])
+    def test_a_lane_that_is_named_whatever_unit_is_named_with_it(self, unit):
+        switch, lanes = self._switch()
+        assert switch._identify_lane(unit, "lane3") is lanes[2]
+
+    def test_a_lane_that_is_not_on_this_switch(self):
+        switch, _lanes = self._switch()
+        self._refused(switch, "Bambu_AMS_1", "lane9", "lane9 is not a lane of this switch")
+
+    def test_a_unit_that_is_named_on_an_inlet(self):
+        switch, _lanes = self._switch(inlet_b=["Chain_1", "Bambu_AMS_2"])
+        lane_of(switch, "Bambu_AMS_2").load_state = True
+        said = f"the inlet of Bambu_AMS_2 {self.NOT_FOUND_BY_LOADING}"
+        self._refused(switch, "Bambu_AMS_2", None, said)
+        self._refused(switch, None, "lane_Bambu_AMS_2", said)
+
+    def test_a_unit_that_is_not_on_this_switch(self):
+        switch, _lanes = self._switch()
+        self._refused(switch, "Turtle_9", None,
+                      f"the inlet of Turtle_9 {self.NOT_FOUND_BY_LOADING}")
+
+    def test_a_bay_that_holds_no_unit_now(self):
+        switch, _lanes = self._switch()
+        ams_of(switch, "Bambu_AMS_1").pool = True
+        self._refused(switch, "Bambu_AMS_1", None, "Bambu_AMS_1 holds no AMS now")
+
+    def test_a_unit_whose_bay_names_no_ams(self):
+        switch, _lanes = self._switch()
+        chain_of(switch).uids["Bambu_AMS_1"] = None
+        assert "Bambu_AMS_1" in switch.live_units()
+        self._refused(switch, "Bambu_AMS_1", None, "Bambu_AMS_1 holds no AMS now")
+
+    def test_a_unit_with_no_lane_that_holds_filament(self):
+        switch, _lanes = self._switch()
+        self._refused(switch, "Bambu_AMS_2", None,
+                      "no lane of Bambu_AMS_2 holds filament. Put a spool in it first.")
+
+    def test_a_named_lane_that_holds_no_filament(self):
+        switch, _lanes = self._switch()
+        self._refused(switch, None, "lane1", "lane1 holds no filament. Put a spool in it first.")
+
+
+class TestAfcBridgeBoxSwitchIdentify:
+    @staticmethod
+    def _switch(*shows: str) -> Tuple[afcBridgeBoxSwitch, FakeLane, MagicMock]:
+        """
+        :return tuple: a switch at rest, the lane of Bambu_AMS_1, which holds filament, and
+        the unit's feed, at which the filament shows at the inlets ``shows`` names
+        """
+        switch = finding(SimChain(route=2))
+        lane = lane_of(switch, "Bambu_AMS_1")
+        lane.load_state = True
+        return switch, lane, feeding(switch, "Bambu_AMS_1", *shows)
+
+    @pytest.mark.parametrize("inlet, start, behind", [
+        ("A", "extruder", ("Buffer", "chip")), ("B", "extruder1", ("Buffer_B", "chip_inlet_b"))])
+    def test_the_inlet_that_read_the_lane_becomes_its_units(self, inlet, start, behind):
+        switch, lane, feed = self._switch(inlet)
+        lane.set_extruder(extruder_of(switch, other_extruder(start)))
+        gcmd = MockGCodeCommand()
+        assert switch._identify(lane, gcmd) == inlet
+        feed.assert_called_once_with(lane, switch._saw, gcmd)
+        assert switch._found == {"AAAA": inlet}
+        assert switch.inlets == {"A": [], "B": [], inlet: ["Bambu_AMS_1"]}
+        assert lane.extruder_obj.name == start
+        assert ams_of(switch, "Bambu_AMS_1").behind[-1] == behind
+        assert switch.confirmed == ["Bambu_AMS_1"]
+        switch.afc.save_vars.assert_called_once_with()
+        assert switch._moving is False
+
+    def test_the_inlets_are_emptied_and_forgotten_before_the_lane_is_fed(self):
+        switch, lane, feed = self._switch("B")
+        switch._seen = {"A": True, "B": True}
+        order = []
+        switch._clear = MagicMock(side_effect=lambda gcmd: order.append(
+            ("clear", switch._moving, feed.call_count)))
+        gcmd = MockGCodeCommand()
+        # Inlet A read filament before the feed, and only what the feed shows counts.
+        assert switch._identify(lane, gcmd) == "B"
+        switch._clear.assert_called_once_with(gcmd)
+        assert order == [("clear", True, 0)]
+        assert switch._seen == {"A": False, "B": True}
+
+    def test_the_inlet_that_read_it_is_given_time_to_read_empty_again(self):
+        switch, lane, _feed = self._switch("B")
+        switch._clear = MagicMock()
+        switch._wait_clear = MagicMock()
+        switch._identify(lane, MockGCodeCommand())
+        assert switch._wait_clear.call_args_list == [call("B")]
+
+    def test_the_ams_in_the_bay_when_the_lane_was_fed_is_the_one_found(self):
+        switch, lane, _feed = self._switch("B")
+        chain_of(switch).uids["Bambu_AMS_1"] = "CCCC"
+        switch._identify(lane, MockGCodeCommand())
+        assert switch._found == {"CCCC": "B"}
+        assert switch._held == {"Bambu_AMS_1": "CCCC", "Bambu_AMS_2": "BBBB"}
+
+    def test_a_unit_that_is_found_again_at_its_inlet_is_left_as_it_is(self):
+        switch, lane, _feed = self._switch("B")
+        found(switch, Bambu_AMS_1="B")
+        switch.confirmed = ["Bambu_AMS_1"]
+        unit = ams_of(switch, "Bambu_AMS_1")
+        unit.behind.clear()
+        assert switch._identify(lane, MockGCodeCommand()) == "B"
+        assert unit.behind == []
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
+        assert switch.confirmed == ["Bambu_AMS_1"]
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_a_unit_that_is_found_at_the_other_inlet_moves_there(self):
+        switch, lane, _feed = self._switch("B")
+        found(switch, Bambu_AMS_1="A")
+        assert switch._identify(lane, MockGCodeCommand()) == "B"
+        assert switch._found == {"AAAA": "B"}
+        assert switch.inlets == {"A": [], "B": ["Bambu_AMS_1"]}
+        assert lane.extruder_obj.name == "extruder1"
+
+    def _not_found(self, switch: afcBridgeBoxSwitch, lane: FakeLane, said: str) -> None:
+        """Check no inlet is found, with ``said``, and the switch is left as it was."""
+        with pytest.raises(SwitchError) as err:
+            switch._identify(lane, MockGCodeCommand())
+        assert str(err.value) == f"Switch_1: {said}"
+        assert switch._found == {}
+        assert switch.inlets == {"A": [], "B": []}
+        assert switch.confirmed == []
+        assert lane.extruder_obj.name == "extruder"
+        switch.afc.save_vars.assert_not_called()
+        assert switch._moving is False
+
+    def test_a_lane_that_neither_inlet_read(self):
+        switch, lane, feed = self._switch()
+        self._not_found(switch, lane,
+                        "lane_Bambu_AMS_1 was fed and neither inlet read filament. Check that "
+                        "Bambu_AMS_1 is plumbed into the switch.")
+        assert feed.call_count == 1
+
+    def test_a_lane_that_both_inlets_read(self):
+        switch, lane, feed = self._switch("A", "B")
+        self._not_found(switch, lane,
+                        "both inlets read filament while lane_Bambu_AMS_1 was fed, so the inlet "
+                        "of Bambu_AMS_1 is not known. Check that nothing else is in the switch.")
+        assert feed.call_count == 1
+
+    def test_while_a_print_runs_nothing_is_fed(self):
+        switch, lane, feed = self._switch("B")
+        switch._clear = MagicMock()
+        switch.afc.function.in_print.return_value = True
+        self._not_found(switch, lane, "the inlet of Bambu_AMS_1 is not found while a print runs")
+        switch._clear.assert_not_called()
+        feed.assert_not_called()
+
+    def test_inlets_that_cannot_be_emptied_keep_the_lane_from_being_fed(self):
+        switch, lane, feed = self._switch("B")
+        switch._clear = MagicMock(side_effect=SwitchError("Switch_1: it is full"))
+        self._not_found(switch, lane, "it is full")
+        feed.assert_not_called()
+
+
+class TestAfcBridgeBoxSwitchClear:
+    @staticmethod
+    def _loaded(chain: SimChain) -> Tuple[afcBridgeBoxSwitch, List[FakeLane]]:
+        """
+        :return tuple: a switch with both its lanes in a toolhead, lane_Bambu_AMS_1 of a unit
+        whose inlet is not known and lane_Bambu_AMS_2 through inlet B, and the lanes
+        """
+        switch = finding(chain)
+        found(switch, Bambu_AMS_2="B")
+        lanes = [lane_of(switch, unit) for unit in BAYS]
+        for lane in lanes:
+            lane.tool_loaded = True
+        return switch, lanes
+
+    def test_with_no_lane_loaded_and_both_inlets_empty_there_is_nothing_to_do(self):
+        switch = finding(SimChain(route=2))
+        switch.afc.TOOL_UNLOAD = MagicMock()
+        switch._clear(MockGCodeCommand())
+        switch.afc.TOOL_UNLOAD.assert_not_called()
+        switch.reactor.pause.assert_not_called()
+        assert switch.logger.messages == []
+
+    def test_every_lane_that_is_loaded_through_the_switch_is_unloaded(self):
+        chain = SimChain(route=0, a=True, b=True)
+        switch, lanes = self._loaded(chain)
+
+        def tool_unload(cur_lane: FakeLane, set_start_time: bool, force_unload: bool,
+                        gcmd: Any) -> bool:
+            cur_lane.tool_loaded = False
+            chain.fill(**{"a" if cur_lane is lanes[0] else "b": False})
+            return True
+
+        switch.afc.TOOL_UNLOAD = MagicMock(side_effect=tool_unload)
+        gcmd = MockGCodeCommand()
+        switch._clear(gcmd)
+        assert switch.afc.TOOL_UNLOAD.call_args_list == [
+            call(lanes[0], set_start_time=False, force_unload=True, gcmd=gcmd),
+            call(lanes[1], set_start_time=False, force_unload=True, gcmd=gcmd)]
+        assert switch.logger.messages == [
+            ("info", "Switch_1: unloading lane_Bambu_AMS_1 from extruder, both inlets have to "
+                     "be empty to find one"),
+            ("info", "Switch_1: unloading lane_Bambu_AMS_2 from extruder1, both inlets have to "
+                     "be empty to find one")]
+
+    def test_a_lane_that_does_not_unload_stops_it(self):
+        switch, lanes = self._loaded(SimChain(route=0, a=True, b=True))
+        switch.afc.TOOL_UNLOAD = MagicMock(return_value=False)
+        with pytest.raises(SwitchError) as err:
+            switch._clear(MockGCodeCommand())
+        assert str(err.value) == ("Switch_1: lane_Bambu_AMS_1 could not be unloaded from "
+                                  "extruder. Unload it, then try again.")
+        # The other lane is left in its toolhead.
+        assert switch.afc.TOOL_UNLOAD.call_count == 1
+        assert switch.logger.messages == [
+            ("info", "Switch_1: unloading lane_Bambu_AMS_1 from extruder, both inlets have to "
+                     "be empty to find one")]
+
+    @pytest.mark.parametrize("a, b, full", [
+        (True, False, "A"), (False, True, "B"), (True, True, "A and B")])
+    def test_filament_that_stays_in_an_inlet_stops_it(self, a, b, full):
+        switch = finding(SimChain(route=2, a=a, b=b))
+        with pytest.raises(SwitchError) as err:
+            switch._clear(MockGCodeCommand())
+        assert str(err.value) == (f"Switch_1: filament is still in inlet {full}. Pull it out, "
+                                  "then try again.")
+        # Each inlet that reads filament was given its time to read empty.
+        assert switch.reactor.pause.call_count == switch_mod._CLEAR_POLLS * (a + b)
+
+    def test_an_inlet_is_given_time_to_read_empty(self):
+        chain = SimChain(route=2, b=True)
+        switch = finding(chain)
+        switch.reactor.pause.side_effect = lambda until: chain.fill(b=False)
+        switch._clear(MockGCodeCommand())
+        assert switch.reactor.pause.call_count == 1
+
+
+class TestAfcBridgeBoxSwitchSaw:
+    def test_no_inlet_read_filament(self):
+        switch = plumbed(SimChain(route=2))
+        assert switch._saw() is False
+        assert switch._seen == {"A": False, "B": False}
+
+    def test_an_inlet_that_reads_filament_now(self):
+        switch = plumbed(SimChain(route=2, b=True))
+        assert switch._saw() is True
+        assert switch._seen == {"A": False, "B": True}
+
+    def test_an_inlet_that_read_filament_since_it_was_last_cleared(self):
+        switch = plumbed(SimChain(route=2))
+        switch._seen["A"] = True
+        assert switch._saw() is True
+
+
 class TestAfcBridgeBoxSwitchGetStatus:
     def test_an_answering_switch(self):
         switch = plumbed(FakeChain(state=fs(route=2, b=True)), outlet_a_length=850)
@@ -4543,7 +5584,7 @@ class TestAfcBridgeBoxSwitchGetStatus:
             "lengths": {"A": 850.0, "B": None},
             "lanes": {"lane_Bambu_AMS_1": "extruder", "lane_Turtle_1": "extruder",
                       "lane_Ace2_1": "extruder1"},
-            "unconfirmed": ["Bambu_AMS_1", "Turtle_1"]}
+            "unconfirmed": ["Bambu_AMS_1", "Turtle_1"], "unfound": []}
         # Fresh copies, so nothing a reader changes reaches the switch.
         status["inlets"]["A"]["units"].clear()
         status["outlets"].clear()
@@ -4568,7 +5609,7 @@ class TestAfcBridgeBoxSwitchGetStatus:
             "lengths": {"A": 850.0, "B": 1010.0},
             "lanes": {"lane_Bambu_AMS_1": "extruder", "lane_Turtle_1": "extruder1",
                       "lane_Ace2_1": "extruder1"},
-            "unconfirmed": []}
+            "unconfirmed": [], "unfound": []}
 
     def test_bays_that_hold_no_unit_are_left_out_with_their_lanes(self):
         switch = plumbed(FakeChain(state=fs(route=2)))
@@ -4583,7 +5624,7 @@ class TestAfcBridgeBoxSwitchGetStatus:
             "outlets": {"A": "extruder", "B": "extruder1"},
             "lengths": {"A": None, "B": None},
             "lanes": {"lane_Turtle_1": "extruder"},
-            "unconfirmed": ["Turtle_1"]}
+            "unconfirmed": ["Turtle_1"], "unfound": []}
 
     def test_a_switch_that_is_not_answering(self):
         switch = make_switch(make_printer([FakeChain(state=None)]))
@@ -4596,7 +5637,21 @@ class TestAfcBridgeBoxSwitchGetStatus:
             "outlets": {"A": "extruder", "B": "extruder1"},
             "lengths": {"A": None, "B": None},
             "lanes": {},
-            "unconfirmed": ["Bambu_AMS_1", "Turtle_1", "Ace2_1"]}
+            "unconfirmed": ["Bambu_AMS_1", "Turtle_1", "Ace2_1"], "unfound": []}
+
+    def test_the_units_whose_inlet_is_not_known_are_listed_apart_without_their_lanes(self):
+        switch = finding(SimChain(route=2))
+        found(switch, Bambu_AMS_2="B")
+        assert switch.get_status() == {
+            "chain": "Chain_1", "answering": True, "calibrated": False,
+            "inlets": {"A": {"outlet": "A", "target": "A", "filament": False, "units": [],
+                             "lane": None},
+                       "B": {"outlet": "B", "target": "B", "filament": False,
+                             "units": ["Bambu_AMS_2"], "lane": None}},
+            "outlets": {"A": "extruder", "B": "extruder1"},
+            "lengths": {"A": None, "B": None},
+            "lanes": {"lane_Bambu_AMS_2": "extruder1"},
+            "unconfirmed": ["Bambu_AMS_2"], "unfound": ["Bambu_AMS_1"]}
 
 
 class TestLoadConfigPrefix:

@@ -101,6 +101,16 @@ class AFCBambuBuffer(AFCFPSBuffer):
         self._odom_units = found
         return found
 
+    def rebind(self) -> None:
+        """
+        Look again for the units whose lanes name this buffer, after a lane took or left it. The
+        odometer history starts over with them, so a unit that left decides nothing here.
+        """
+        self._odom_units = None
+        self._odom_prev = {}
+        self._last_move_t = None
+        self._odom_moved = False
+
     def _update_odom(self) -> None:
         """
         Fold this sample's odometer readings into the stillness run.

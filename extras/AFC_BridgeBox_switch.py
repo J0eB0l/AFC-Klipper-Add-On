@@ -28,6 +28,16 @@ on the other inlet, and the chain makes them a buffer of their own, named for th
     inlet_a: Chain_1
     inlet_b: Bambu_AMS_HT_1
 
+A chain that is on both inlets has each of its units found by loading, so no unit is named:
+
+    inlet_a: Chain_1
+    inlet_b: Chain_1
+
+`AFC_BRIDGEBOX_SWITCH_IDENTIFY` feeds one lane of a unit to the switch and reels it back. The
+inlet whose sensor read it is the unit's inlet from then on, and the unit goes behind that inlet's
+buffer. An AMS that is new on such a chain does not load until its inlet is found, and what was
+found is kept for as long as the AMS keeps a bay of the chain.
+
 An inlet's units start on the extruder of the outlet with the same letter, and an empty inlet rests
 on that outlet. A lane goes to the other extruder with `AFC_BRIDGEBOX_SWITCH_ASSIGN`, and every
 load points the lane's inlet at its extruder's outlet before filament moves.
@@ -168,6 +178,11 @@ class afcBridgeBoxSwitch:
             self.outlets[letter] = config.get(f"outlet_{letter.lower()}", None)
             self.lengths[letter] = config.getfloat(f"outlet_{letter.lower()}_length", None,
                                                    above=0.)
+        # The chains on both inlets, whose units are each found by loading (see _place_chains).
+        self.finding: List[str] = [name for name in self.inlets["A"] if name in self.inlets["B"]]
+        for letter in LETTERS:
+            self.inlets[letter] = [name for name in self.inlets[letter]
+                                   if name not in self.finding]
         self._check_section()
         # The outlet each inlet's units start on: its own letter, else the only outlet.
         self.start: Dict[str, str] = {letter: letter if self.outlets[letter] is not None
@@ -186,6 +201,14 @@ class afcBridgeBoxSwitch:
         self._printing = False
         # The units a lane of which has shown at its inlet.
         self.confirmed: List[str] = []
+        # The units found by loading, each with its chain.
+        self._floating: Dict[str, afcBridgeBox] = {}
+        # The inlet found for each AMS, by its uid.
+        self._found: Dict[str, str] = {}
+        # The AMS each of those units' bays held at the last look, by unit.
+        self._held: Dict[str, Optional[str]] = {}
+        # The AMS a prompt to find their inlet was opened for.
+        self._offered: List[str] = []
         # The mm added to each tube for the outlet its lane goes through.
         self._offsets: Dict[Any, float] = {}
         # The inlets that read filament since this was last cleared.
@@ -219,6 +242,8 @@ class afcBridgeBoxSwitch:
         self._register("AFC_BRIDGEBOX_SWITCH_CALIBRATION",
                        self.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION,
                        self.cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help)
+        self._register("AFC_BRIDGEBOX_SWITCH_IDENTIFY", self.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY,
+                       self.cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY_help)
 
     def _register(self, command: str, handler: Any, desc: str) -> None:
         """
@@ -238,17 +263,13 @@ class afcBridgeBoxSwitch:
 
     def _check_section(self) -> None:
         """
-        Refuse a section that names no unit, no extruder, a unit on both inlets or one extruder
-        on both outlets.
+        Refuse a section that names no unit, no extruder or one extruder on both outlets.
         """
         error_str = ""
-        both = [unit for unit in self.inlets["A"] if unit in self.inlets["B"]]
         if not (self.inlets["A"]
-                or self.inlets["B"]):
+                or self.inlets["B"]
+                or self.finding):
             error_str = f"[{self.fullname}] names no unit. Add inlet_a or inlet_b."
-        elif both:
-            error_str = (f"[{self.fullname}] has {', '.join(both)} on both inlets. A unit "
-                         "enters one inlet.")
         elif (self.outlets["A"] is None
               and self.outlets["B"] is None):
             error_str = f"[{self.fullname}] names no extruder. Add outlet_a or outlet_b."
@@ -261,24 +282,31 @@ class afcBridgeBoxSwitch:
     def handle_connect(self) -> None:
         """
         Find the chain, check the units and extruders exist and no other switch uses them, then
-        put each unit's lanes on their extruder.
+        put each unit's lanes on their extruder. A unit that is found by loading enters the
+        inlet found for the AMS its bay is kept for.
         """
         self.chain = self._find_chain()
         self.chain_name = self.chain.name
         self._place_chains()
         self._check_section()
+        saved = self._saved()
+        self._found = saved["found"]
+        for unit, chain in self._floating.items():
+            self._held[unit] = chain.bay_uid(unit)
+            if self._held[unit] in self._found:
+                self.inlets[self._found[self._held[unit]]].append(unit)
         problems = self._missing() + self._clashes()
         if problems:
             raise error(problems[0])
         self.lanes = [obj for _name, obj in self.printer.lookup_objects()
                       if (isinstance(obj, AFCLane)
-                          and self.inlet_of(obj.unit) is not None)]
-        saved = self._saved()
+                          and obj.unit in self.units())]
         # A lane AFC saved as loaded is in that toolhead, whatever was saved for the switch.
         self._saved_lanes = {**saved["lanes"], **self._saved_loaded()}
         self._by_print = [name for name in saved["by_print"] if name in self._saved_lanes]
         self._due_back = [name for name in saved["due_back"] if name in self._saved_lanes]
-        self.confirmed = [unit for unit in saved["confirmed"] if unit in self.units()]
+        self.confirmed = [unit for unit in saved["confirmed"]
+                          if self.inlet_of(unit) is not None]
         for unit in self.units():
             if unit in self.afc.units:
                 self._start_unit(self.afc.units[unit])
@@ -299,17 +327,20 @@ class afcBridgeBoxSwitch:
 
         :return dict: `lanes`, lane name -> extruder name for the lanes off the extruder their
         inlet starts on, `confirmed`, the units seen at their inlet, `by_print`, the lanes a
-        print that was running put there, and `due_back`, those of a print that is over. All
-        empty when nothing usable is saved
+        print that was running put there, `due_back`, those of a print that is over, and
+        `found`, AMS uid -> the inlet found for it by loading. All empty when nothing usable is
+        saved
         """
         try:
             with open(f"{self.afc.VarFile}.unit") as file:
                 saved = json.load(file)["system"]["switches"][self.name]
             return {"lanes": dict(saved["lanes"]), "confirmed": list(saved["confirmed"]),
                     "by_print": list(saved.get("by_print", [])),
-                    "due_back": list(saved.get("due_back", []))}
+                    "due_back": list(saved.get("due_back", [])),
+                    "found": {uid: inlet for uid, inlet in dict(saved.get("found", {})).items()
+                              if inlet in LETTERS}}
         except (OSError, ValueError, KeyError, TypeError):
-            return {"lanes": {}, "confirmed": [], "by_print": [], "due_back": []}
+            return {"lanes": {}, "confirmed": [], "by_print": [], "due_back": [], "found": {}}
 
     def _saved_loaded(self) -> Dict[str, str]:
         """
@@ -329,15 +360,17 @@ class afcBridgeBoxSwitch:
     def handle_save_vars(self, data: Dict[str, Any]) -> None:
         """
         Add the lanes that are off their starting extruder, which of them a print put there,
-        and the units seen at their inlet, to what AFC saves.
+        the units seen at their inlet and the inlet found for each AMS, to what AFC saves.
 
         :param data: what AFC is about to save
         """
         away = {lane.name: lane.extruder_obj.name for lane in self.lanes
-                if lane.extruder_obj.name != self.start_extruder(lane.unit)}
+                if (self.inlet_of(lane.unit) is not None
+                    and lane.extruder_obj.name != self.start_extruder(lane.unit))}
         data["system"].setdefault("switches", {})[self.name] = {
             "lanes": away, "confirmed": list(self.confirmed),
-            "by_print": list(self._by_print), "due_back": list(self._due_back)}
+            "by_print": list(self._by_print), "due_back": list(self._due_back),
+            "found": dict(self._found)}
 
     def start_extruder(self, unit: str) -> str:
         """
@@ -360,16 +393,25 @@ class afcBridgeBoxSwitch:
     def _start_unit(self, unit_obj: afcUnit) -> None:
         """
         Put a unit's lanes on the extruder they were saved on, else on the unit's starting
-        extruder, whatever extruder the unit itself names.
+        extruder, whatever extruder the unit itself names. A unit that is found by loading goes
+        behind its inlet's buffer, and while its inlet is not known its lanes stay where they
+        are, but for one saved on an extruder of the switch.
 
         :param unit_obj: a unit of this switch that has connected
         """
-        start = self.start_extruder(unit_obj.name)
+        inlet = self.inlet_of(unit_obj.name)
+        chain = self._floating.get(unit_obj.name)
+        if chain is not None:
+            unit_obj.use_buffer(*chain.inlet_buffer(inlet))
+        start = self.start_extruder(unit_obj.name) if inlet is not None else None
         for lane in self.lanes:
             if lane.unit != unit_obj.name:
                 continue
             saved = self._saved_lanes.get(lane.name, start)
-            lane.set_extruder(self._extruder(saved if saved in self.extruders() else start))
+            if saved not in self.extruders():
+                saved = start
+            if saved is not None:
+                lane.set_extruder(self._extruder(saved))
 
     def _chains(self) -> Dict[str, afcBridgeBox]:
         """
@@ -385,10 +427,24 @@ class afcBridgeBoxSwitch:
         Put each chain's bays on the inlets: a chain's name stands for the bays the other inlet
         does not name, and the bays no inlet names follow the ones that are named, so a unit that
         takes a bay later enters an inlet too. A unit that has a chain's name is left as the unit.
+        A chain that is on both inlets has the bays no inlet names found by loading, and any
+        other name on both inlets is refused.
         """
         known = [obj.name for _name, obj in self.printer.lookup_objects()
                  if isinstance(obj, afcUnit)]
-        for chain in self._chains().values():
+        chains = self._chains()
+        both = [name for name in self.finding
+                if (name not in chains
+                    or name in known)]
+        if both:
+            error_str = (f"[{self.fullname}] has {', '.join(both)} on both inlets. A unit "
+                         "enters one inlet.")
+            raise error(error_str)
+        for chain in chains.values():
+            if chain.name in self.finding:
+                self._floating.update({bay: chain for bay in chain.unit_names()
+                                       if self.inlet_of(bay) is None})
+                continue
             try:
                 self.inlets = place_chain(self.inlets, chain.name, chain.unit_names(),
                                           chain.name in known)
@@ -461,9 +517,10 @@ class afcBridgeBoxSwitch:
         """
         Every unit plumbed into the switch.
 
-        :return list: unit names, inlet A's first
+        :return list: unit names, inlet A's first and those whose inlet is not known last
         """
-        return self.inlets["A"] + self.inlets["B"]
+        return (self.inlets["A"] + self.inlets["B"]
+                + [unit for unit in self._floating if self.inlet_of(unit) is None])
 
     def live_units(self) -> List[str]:
         """
@@ -474,6 +531,24 @@ class afcBridgeBoxSwitch:
         """
         return [unit for unit in self.units()
                 if not getattr(self.afc.units.get(unit), "pool", False)]
+
+    def unfound(self) -> List[str]:
+        """
+        The units in use whose inlet is still to be found by loading.
+
+        :return list: unit names
+        """
+        return [unit for unit in self.live_units() if self.inlet_of(unit) is None]
+
+    def _need(self, unit: str) -> str:
+        """
+        What to do about a unit whose inlet is not known.
+
+        :param unit: unit name
+        :return str: the sentence an error about that unit ends with
+        """
+        return (f"the inlet of {unit} is not known. Run AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+                f"UNIT={unit} first.")
 
     def extruders(self) -> List[str]:
         """
@@ -635,9 +710,11 @@ class afcBridgeBoxSwitch:
         if (self.afc.prep_done
             and self.afc.current_state == State.IDLE
             and not self._moving):
+            self._follow()
             self._note_arrivals()
             if not printing:
                 self._send_back()
+                self._offer()
             with self._own():
                 self._say(self._settle())
         return self.reactor.monotonic() + _WATCH_PERIOD
@@ -658,16 +735,80 @@ class afcBridgeBoxSwitch:
             self.afc.save_vars()
         self._printing = printing
 
+    def _follow(self) -> None:
+        """
+        Keep each unit that is found by loading on the inlet found for the AMS in its bay. A bay
+        another AMS took has no inlet until that AMS is fed to the switch, and what was found
+        for an AMS that left its bay and holds none is forgotten.
+        """
+        held = {unit: chain.bay_uid(unit) for unit, chain in self._floating.items()}
+        gone = [uid for uid in self._held.values()
+                if (uid in self._found
+                    and uid not in held.values())]
+        for uid in gone:
+            del self._found[uid]
+        self._held = held
+        for unit, uid in held.items():
+            inlet = self._found.get(uid)
+            if inlet != self.inlet_of(unit):
+                self._place(unit, inlet)
+        if gone:
+            self.afc.save_vars()
+
+    def _place(self, unit: str, inlet: Optional[str]) -> None:
+        """
+        Put a unit that is found by loading on an inlet, or on none, and its lanes on that
+        inlet's starting extruder and behind its buffer.
+
+        :param unit: a unit that is found by loading
+        :param inlet: `A` or `B`, None for a unit whose inlet is not known
+        """
+        for letter in LETTERS:
+            self.inlets[letter] = [name for name in self.inlets[letter] if name != unit]
+        if inlet is not None:
+            self.inlets[inlet].append(unit)
+        elif unit in self.confirmed:
+            self.confirmed.remove(unit)
+        # What was kept for its lanes was for the inlet the unit had.
+        names = [lane.name for lane in self.lanes if lane.unit == unit]
+        self._saved_lanes = {name: extruder for name, extruder in self._saved_lanes.items()
+                             if name not in names}
+        self._by_print = [name for name in self._by_print if name not in names]
+        self._due_back = [name for name in self._due_back if name not in names]
+        if unit in self.afc.units:
+            self._start_unit(self.afc.units[unit])
+
+    def _offer(self) -> None:
+        """
+        Open a prompt, once for each AMS, that offers to find the inlet of the units whose
+        inlet is not known.
+        """
+        unfound = self.unfound()
+        uids = [self._held.get(unit) for unit in unfound]
+        new = [uid for uid in uids if uid not in self._offered]
+        if not new:
+            return
+        self._offered += new
+        command = f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}"
+        buttons = [(unit, f"{command} UNIT={unit}", "primary") for unit in unfound]
+        lines = [f"{self.name}: the inlet of {', '.join(unfound)} is not known yet. The lanes "
+                 "of a unit do not load until its inlet is found.",
+                 "Put a spool in the unit and pick it. One lane is fed to the switch and reeled "
+                 "back, and a lane that is loaded through the switch is unloaded first."]
+        self.chain.offer(self.name, f"{self.name} new AMS", lines, buttons)
+
     def _send_back(self) -> None:
         """
         Put the lanes that are due back on their unit's starting extruder, each once it is out
         of its toolhead and not on its way into one. A lane of a bay that holds no unit now
-        waits for its unit: what AFC saved for it is not on the lane until then.
+        waits for its unit: what AFC saved for it is not on the lane until then. A lane of a
+        unit whose inlet is not known waits for the inlet.
         """
         live = self.live_units()
         back = [lane for lane in self.lanes
                 if (lane.name in self._due_back
                     and lane.unit in live
+                    and self.inlet_of(lane.unit) is not None
                     and not lane.tool_loaded
                     and lane not in self._routed.values())]
         for lane in back:
@@ -782,10 +923,12 @@ class afcBridgeBoxSwitch:
         """
         tube = self._tube(lane)
         outlet = self.outlet_of(lane.extruder_obj.name)
+        inlet = self.inlet_of(lane.unit)
         if (tube is None
-            or outlet is None):
+            or outlet is None
+            or inlet is None):
             return
-        start = self.start[self.inlet_of(lane.unit)]
+        start = self.start[inlet]
         offset = 0.0
         if (outlet != start
             and self.calibrated()
@@ -914,16 +1057,22 @@ class afcBridgeBoxSwitch:
 
     def handle_tool_load_prepare(self, lane: AFCLane, gcmd: AFCGcmd) -> bool:
         """
-        Point a lane's inlet at its extruder's outlet before AFC loads the lane.
+        Point a lane's inlet at its extruder's outlet before AFC loads the lane. A lane of a
+        unit whose inlet is not known is not loaded.
 
         :param lane: the lane about to be loaded
         :param gcmd: command context the load runs through
         :return bool: False stops the load
         """
         inlet = self.inlet_of(lane.unit)
-        if (inlet is None
-            or lane.tool_loaded):
+        if (lane.tool_loaded
+            or lane.unit not in self.units()):
             return True
+        if inlet is None:
+            self.afc.error.AFC_error(f"{self.name}: {lane.name} is not loaded, "
+                                     f"{self._need(lane.unit)}",
+                                     pause=self.afc.function.in_print(), gcmd=gcmd)
+            return False
         # Set before anything pauses, so the watch does not send this inlet back to rest.
         self._routed[inlet] = lane
         try:
@@ -1038,12 +1187,14 @@ class afcBridgeBoxSwitch:
     def _report(self) -> str:
         """
         One line per inlet: its units, the outlet it is at and what it holds. One per outlet:
-        its extruder and the lanes that feed it. Then what is still to be set up.
+        its extruder and the lanes that feed it. Then what is still to be set up, the units whose
+        inlet is not known last.
 
         :return str: the report
         """
         st = self.state()
-        live = self.live_units()
+        unfound = self.unfound()
+        live = [unit for unit in self.live_units() if unit not in unfound]
         lines = []
         for letter in LETTERS:
             inlet = st["inlets"][letter]
@@ -1065,6 +1216,10 @@ class afcBridgeBoxSwitch:
         waiting = [unit for unit in live if unit not in self.confirmed]
         if waiting:
             lines.append(f"Not seen at their inlet yet: {', '.join(waiting)}")
+        if unfound:
+            lines.append(f"Inlet not known: {', '.join(unfound)}. Run "
+                         "AFC_BRIDGEBOX_SWITCH_IDENTIFY, or pick the switch's inlets in "
+                         "AFC_CALIBRATION")
         return "\n".join(lines)
 
     cmd_AFC_BRIDGEBOX_SWITCH_ROUTE_help = ("AFC_BRIDGEBOX_SWITCH_ROUTE [SWITCH=<switch>] "
@@ -1203,13 +1358,17 @@ class afcBridgeBoxSwitch:
                gcmd: GCodeCommand) -> None:
         """
         Put one of this switch's lanes on one of its extruders and save the choice. While a
-        print runs the choice is for that print, at any other time it is kept.
+        print runs the choice is for that print, at any other time it is kept. A lane of a unit
+        whose inlet is not known is refused.
 
         :param lane: the lane
         :param extruder: AFC extruder name, None for the one the lane's unit starts on
         :param unload: True to unload the lane first when it is loaded in a toolhead
         :param gcmd: the command, for its answer and the unload
         """
+        if self.inlet_of(lane.unit) is None:
+            error_str = f"{self.name}: {lane.name} stays where it is, {self._need(lane.unit)}"
+            raise gcmd.error(error_str)
         extruder = extruder or self.start_extruder(lane.unit)
         was = lane.extruder_obj.name
         if extruder not in self.extruders():
@@ -1252,12 +1411,16 @@ class afcBridgeBoxSwitch:
 
     def handle_calibration_buttons(self, buttons: List[Tuple[str, str, str]]) -> None:
         """
-        Add this switch to AFC's calibration menu.
+        Add this switch to AFC's calibration menu, and its inlets when it has units that are
+        found by loading.
 
         :param buttons: the menu's buttons so far, each a label, a command and a style
         """
         buttons.append((f"{self.name} filament switch",
                         f"AFC_BRIDGEBOX_SWITCH_CALIBRATION SWITCH={self.name}", "primary"))
+        if self._floating:
+            buttons.append((f"{self.name} inlets",
+                            f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}", "primary"))
 
     cmd_AFC_BRIDGEBOX_SWITCH_CALIBRATION_help = ("AFC_BRIDGEBOX_SWITCH_CALIBRATION "
                                                  "[SWITCH=<switch>] [UNIT=<unit>] "
@@ -1365,7 +1528,7 @@ class afcBridgeBoxSwitch:
         """
         The lanes the outlets can be measured with, by unit: the lanes that are loaded in their
         unit and have a tube length to measure. A unit whose calibration gave no length is not
-        offered again.
+        offered again, and neither is one whose inlet is not known.
 
         :return dict: unit -> its lanes that can measure, in the order of the switch's lanes
         """
@@ -1373,7 +1536,8 @@ class afcBridgeBoxSwitch:
         for lane in self.lanes:
             if (lane.load_state
                 and self._tube(lane) is not None
-                and lane.unit not in self._lengthless):
+                and lane.unit not in self._lengthless
+                and self.inlet_of(lane.unit) is not None):
                 lanes.setdefault(lane.unit, []).append(lane)
         return lanes
 
@@ -1393,7 +1557,9 @@ class afcBridgeBoxSwitch:
         if self.afc.current is not None:
             loaded.append(self.afc.current)
         error_str = ""
-        if len(self.extruders()) < 2:
+        if inlet is None:
+            error_str = f"{self.name}: {lane.name} cannot measure, {self._need(lane.unit)}"
+        elif len(self.extruders()) < 2:
             error_str = f"{self.name}: one outlet is in use, so there is nothing to measure"
         elif tube is None:
             error_str = (f"{self.name}: {lane.name} has no hub that holds a tube length. Use a "
@@ -1533,6 +1699,183 @@ class afcBridgeBoxSwitch:
         self.afc.function.ConfigRewrite(tube.fullname, "afc_bowden_length", lengths[0])
         self.afc.function.ConfigRewrite(tube.fullname, "afc_unload_bowden_length", lengths[1])
 
+    cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY_help = ("AFC_BRIDGEBOX_SWITCH_IDENTIFY [SWITCH=<switch>] "
+                                              "[UNIT=<unit>] [LANE=<lane>]. Feeds a lane to a "
+                                              "filament switch to find the inlet its unit is "
+                                              "plumbed into")
+
+    def cmd_AFC_BRIDGEBOX_SWITCH_IDENTIFY(self, gcmd: GCodeCommand) -> None:
+        """
+        Find the inlet a unit is plumbed into by feeding one of its lanes to the filament
+        switch.
+
+        The lane is fed until an inlet reads its filament and is then reeled back into its
+        unit. That inlet is the unit's from then on: its lanes start on the extruder of the
+        outlet with the same letter and go through that inlet's buffer. A lane that is loaded
+        through the switch is unloaded first. It is for the units of a chain that is on both
+        inlets, and an AMS that is new on such a chain does not load until it was run. Without
+        UNIT and LANE a prompt offers those units, and with UNIT alone the unit's first lane
+        that holds filament is fed.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_SWITCH_IDENTIFY [SWITCH=<switch>] [UNIT=<unit>] [LANE=<lane>]`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1 UNIT=Bambu_AMS_2
+        ```
+        """
+        name = gcmd.get("LANE", None)
+        unit = gcmd.get("UNIT", None)
+        if (name is None
+            and unit is None):
+            self._identify_menu(gcmd)
+            return
+        AFCprompt(gcmd, self.logger).p_end()
+        try:
+            lane = self._identify_lane(unit, name)
+            inlet = self._identify(lane, gcmd)
+        except SwitchError as ex:
+            raise gcmd.error(str(ex))
+        gcmd.respond_info(f"{self.name}: {lane.unit} enters inlet {inlet}. Its lanes start on "
+                          f"{self.start_extruder(lane.unit)}.")
+
+    def _identify_menu(self, gcmd: GCodeCommand) -> None:
+        """
+        Open the prompt that offers the units whose inlet is found by loading.
+
+        :param gcmd: the command the prompt answers
+        """
+        command = f"AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH={self.name}"
+        live = self.live_units()
+        buttons = []
+        for unit in self._floating:
+            if unit not in live:
+                continue
+            inlet = self.inlet_of(unit)
+            if inlet is None:
+                buttons.append((f"{unit}: new", f"{command} UNIT={unit}", "primary"))
+            else:
+                buttons.append((f"{unit}: inlet {inlet}", f"{command} UNIT={unit}", "secondary"))
+        text = ("Feeds one lane of a unit to the switch and reels it back, to find the inlet "
+                "the unit is plumbed into. A lane that is loaded through the switch is unloaded "
+                "first. Put a spool in the unit, then pick it.")
+        if not buttons:
+            text = ("No unit's inlet is found by loading. That is for the units of a chain that "
+                    "is on both inlets in the switch's section.")
+        back = [("Back to unit selection", "AFC_CALIBRATION", "info")]
+        AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Inlets", text, buttons, True,
+                                                     None, back)
+
+    def _identify_lane(self, unit: Optional[str], name: Optional[str]) -> AFCLane:
+        """
+        The lane to feed to the switch: the one named, else the unit's first that holds
+        filament.
+
+        :param unit: the unit whose inlet to find, None when the lane names it
+        :param name: the lane to feed, None for the unit's first that holds filament
+        :return AFCLane: the lane
+        """
+        lane = self.lane(name) if name is not None else None
+        if lane is not None:
+            unit = lane.unit
+        elif name is None:
+            lane = next((held for held in self.lanes
+                         if (held.unit == unit
+                             and held.load_state)), None)
+        error_str = ""
+        if (name is not None
+            and lane is None):
+            error_str = f"{self.name}: {name} is not a lane of this switch"
+        elif unit not in self._floating:
+            error_str = (f"{self.name}: the inlet of {unit} is not found by loading. That is "
+                         "for the units of a chain that is on both inlets in the switch's "
+                         "section.")
+        elif (unit not in self.live_units()
+              or self._floating[unit].bay_uid(unit) is None):
+            error_str = f"{self.name}: {unit} holds no AMS now"
+        elif lane is None:
+            error_str = f"{self.name}: no lane of {unit} holds filament. Put a spool in it first."
+        elif not lane.load_state:
+            error_str = f"{self.name}: {lane.name} holds no filament. Put a spool in it first."
+        if error_str:
+            raise SwitchError(error_str)
+        return lane
+
+    def _identify(self, lane: AFCLane, gcmd: GCodeCommand) -> str:
+        """
+        Find the inlet a lane's unit is plumbed into: empty both inlets, feed the lane until an
+        inlet reads its filament, reel it back, and put the unit on that inlet.
+
+        :param lane: a lane that holds filament, of a unit that is found by loading
+        :param gcmd: the command the unloads and the feed run through
+        :return str: the inlet, `A` or `B`
+        """
+        unit = lane.unit
+        if self.afc.function.in_print():
+            error_str = f"{self.name}: the inlet of {unit} is not found while a print runs"
+            raise SwitchError(error_str)
+        with self._own():
+            self._clear(gcmd)
+            self._seen = {letter: False for letter in LETTERS}
+            lane.unit_obj.feed_to(lane, self._saw, gcmd)
+            saw = [letter for letter in LETTERS if self._seen[letter]]
+            for letter in saw:
+                self._wait_clear(letter)
+        error_str = ""
+        if not saw:
+            error_str = (f"{self.name}: {lane.name} was fed and neither inlet read filament. "
+                         f"Check that {unit} is plumbed into the switch.")
+        elif len(saw) > 1:
+            error_str = (f"{self.name}: both inlets read filament while {lane.name} was fed, "
+                         f"so the inlet of {unit} is not known. Check that nothing else is in "
+                         "the switch.")
+        if error_str:
+            raise SwitchError(error_str)
+        self._held[unit] = self._floating[unit].bay_uid(unit)
+        self._found[self._held[unit]] = saw[0]
+        if self.inlet_of(unit) != saw[0]:
+            self._place(unit, saw[0])
+        if unit not in self.confirmed:
+            self.confirmed.append(unit)
+        self.afc.save_vars()
+        return saw[0]
+
+    def _clear(self, gcmd: GCodeCommand) -> None:
+        """
+        Empty both inlets: unload every lane that is loaded through the switch, then check that
+        neither inlet reads filament.
+
+        :param gcmd: the command the unloads run through
+        """
+        for held in [held for held in self.lanes if held.tool_loaded]:
+            self.logger.info(f"{self.name}: unloading {held.name} from "
+                             f"{held.extruder_obj.name}, both inlets have to be empty to find "
+                             "one")
+            if not self._unload(held, gcmd):
+                error_str = (f"{self.name}: {held.name} could not be unloaded from "
+                             f"{held.extruder_obj.name}. Unload it, then try again.")
+                raise SwitchError(error_str)
+        for letter in LETTERS:
+            self._wait_clear(letter)
+        inlets = self.state()["inlets"]
+        full = [letter for letter in LETTERS if inlets[letter]["filament"]]
+        if full:
+            error_str = (f"{self.name}: filament is still in inlet {' and '.join(full)}. Pull "
+                         "it out, then try again.")
+            raise SwitchError(error_str)
+
+    def _saw(self) -> bool:
+        """
+        Look at the switch, and say whether an inlet read filament since `_seen` was cleared.
+
+        :return bool: True once an inlet read filament
+        """
+        self._look()
+        return any(self._seen.values())
+
     def get_status(self, eventtime: Optional[float] = None) -> Dict[str, Any]:
         """
         The switch for the status API.
@@ -1540,14 +1883,15 @@ class afcBridgeBoxSwitch:
         :param eventtime: reactor time of the query, unused
         :return dict: chain, whether the switch answers and is calibrated, each inlet's units
         in use, state and loaded lane, each outlet's extruder and tube length, each lane's
-        extruder and the units not seen at their inlet yet
+        extruder, the units not seen at their inlet yet and those whose inlet is not known
         """
         try:
             inlets = self.state()["inlets"]
         except SwitchError:
             inlets = {letter: {"outlet": None, "filament": None} for letter in LETTERS}
         loaded = {letter: self._loaded(letter) for letter in LETTERS}
-        live = self.live_units()
+        unfound = self.unfound()
+        live = [unit for unit in self.live_units() if unit not in unfound]
         return {"chain": self.chain_name,
                 "answering": inlets["A"]["outlet"] is not None,
                 "calibrated": self.calibrated(),
@@ -1560,7 +1904,8 @@ class afcBridgeBoxSwitch:
                 "lengths": dict(self.lengths),
                 "lanes": {lane.name: lane.extruder_obj.name for lane in self.lanes
                           if lane.unit in live},
-                "unconfirmed": [unit for unit in live if unit not in self.confirmed]}
+                "unconfirmed": [unit for unit in live if unit not in self.confirmed],
+                "unfound": unfound}
 
 
 def load_config_prefix(config: ConfigWrapper) -> afcBridgeBoxSwitch:

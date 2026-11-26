@@ -668,6 +668,8 @@ class afcBridgeBox:
                 self.buffer = f"{self.unit_prefix}_Buffer"
         # What each filament switch section writes on its inlets (see _second_buffer).
         self._switch_inlets = self._read_switch_inlets(config)
+        # The inlet a second buffer feeds, "" with every bay behind one buffer.
+        self._second_inlet = ""
         # 0 = the next lane number after every declared lane, computed once and remembered.
         self.lane_base = config.getint("lane_base", 0)
         self._lane_base_set = bool(self.lane_base)
@@ -815,6 +817,10 @@ class afcBridgeBox:
                 error_str = self._collision_error(section)
                 raise config.error(error_str)
 
+        if self._second_inlet:
+            # A buffer's adc_pin needs its chip, and either buffer may have no unit yet.
+            self._register_scout_chip(config)
+            self._register_scout_chip(config, self.inlet_buffer(self._second_inlet)[1])
         fileconfig = configparser.RawConfigParser()
         for section, keys in sections:
             fileconfig.add_section(section)
@@ -1073,10 +1079,8 @@ class afcBridgeBox:
                     break
                 error_str = self._overlap_error(a, b)
                 raise ValueError(error_str)
-        inlet, second = self._second_buffer([b["name"] for b in bays])
-        # The second buffer and its chip are named for the inlet it feeds.
-        second_buffer = f"{self.buffer}_{inlet}"
-        second_chip = f"{self.buffer_chip_name}_inlet_{inlet.lower()}"
+        self._second_inlet, second = self._second_buffer([b["name"] for b in bays])
+        second_buffer, second_chip = self.inlet_buffer(self._second_inlet)
         for b in sorted(bays, key=lambda x: x["lane"]):
             name, lane_no, slots = b["name"], b["lane"], b["slots"]
             unit_keys: Dict[str, Any] = {
@@ -1128,7 +1132,7 @@ class afcBridgeBox:
         # Last: a buffer's adc_pin needs a unit's chip.
         if self._fabricate_buffer:
             sections.append(self._buffer_section(self.buffer, self.buffer_chip_name))
-        if second:
+        if self._second_inlet:
             sections.append(self._buffer_section(second_buffer, second_chip))
         return sections
 
@@ -1167,17 +1171,36 @@ class afcBridgeBox:
                           for letter in ("A", "B")})
         return found
 
+    def inlet_buffer(self, inlet: Optional[str]) -> Tuple[str, str]:
+        """
+        The buffer a filament switch inlet is fed through. The second buffer and its chip are
+        named for the inlet it feeds.
+
+        :param inlet: the inlet's letter, None for a unit whose inlet is not known
+        :return tuple: (buffer name, the pin chip that reads it)
+        """
+        if (inlet
+            and inlet == self._second_inlet):
+            return f"{self.buffer}_{inlet}", f"{self.buffer_chip_name}_inlet_{inlet.lower()}"
+        return self.buffer, self.buffer_chip_name
+
     def _second_buffer(self, bays: List[str]) -> Tuple[str, List[str]]:
         """
         The bays that are behind a second buffer. A buffer feeds one inlet of a filament switch,
         so when a switch has this chain's bays on both inlets, the inlet with fewer of them has a
-        buffer of its own.
+        buffer of its own. A switch that has the chain's name on both inlets finds each unit's
+        inlet by loading: inlet B has the second buffer, and only the bays inlet B names are
+        behind it from the start.
 
         :param bays: the units this chain makes for its bays
         :return tuple: (that inlet's letter, its bays), or ("", []) with every bay behind one
         buffer
         """
         for inlets in self._switch_inlets:
+            if (self.name in inlets["A"]
+                and self.name in inlets["B"]
+                and self.name not in bays):
+                return "B", [bay for bay in bays if bay in inlets["B"]]
             try:
                 placed = place_chain(inlets, self.name, bays, self.name in bays)
             except ValueError:
@@ -2403,6 +2426,31 @@ class afcBridgeBox:
         """
         return [str(pu["name"]) for pu in self._pool_units]
 
+    def bay_uid(self, bay: str) -> Optional[str]:
+        """
+        Which unit a bay belongs to now.
+
+        :param bay: the name of the unit this chain makes for the bay
+        :return str: the uid of the unit that holds the bay, else of the one it is kept for, None
+        for a bay that is free
+        """
+        pu = next((p for p in self._pool_units if p["name"] == bay), {})
+        return (_norm_uid(pu.get("bound"))
+                or _norm_uid(pu.get("uid"))
+                or None)
+
+    def offer(self, key: str, title: str, lines: List[str],
+              buttons: List[Tuple[str, str, str]]) -> None:
+        """
+        Queue another module's popup behind this chain's own, so neither overwrites the other.
+
+        :param key: what the popup is about. A newer popup with the same key takes its place
+        :param title: dialog title
+        :param lines: body text lines
+        :param buttons: (label, gcode command, style) each
+        """
+        self._queue_popup(("offer", key, title, lines, buttons))
+
     def units_arriving(self) -> bool:
         """
         Whether a unit that answers on the bus is still to be given its bay.
@@ -3627,15 +3675,17 @@ class afcBridgeBox:
         except Exception:
             pass
 
-    def _register_scout_chip(self, config: Any) -> None:
+    def _register_scout_chip(self, config: Any, chip: Optional[str] = None) -> None:
         """
-        Register the bambu_buffer pin chip with no unit behind it.
+        Register a buffer's pin chip with no unit behind it.
 
         :param config: this section's wrapper (unused beyond symmetry)
+        :param chip: the chip's name, None for this chain's own
         """
         import types as _types
         from extras.AFC_BambuAMS import _register_bambu_buffer_chip
-        shim = _types.SimpleNamespace(printer=self.printer, buffer_chip_name=self.buffer_chip_name,
+        shim = _types.SimpleNamespace(printer=self.printer,
+                                      buffer_chip_name=chip or self.buffer_chip_name,
                                       fps_buffer_value=lambda: None, scout_stub=True)
         _register_bambu_buffer_chip(shim)
 
@@ -5365,8 +5415,9 @@ class afcBridgeBox:
         Enqueue a popup event so simultaneous plug/unplugs serialize instead of overwriting each
         other (Mainsail shows only the newest prompt).
 
-        :param ev: ("new", uid), ("removed", uid, name), ("replace", uid) or
-        ("firmware", uid, name, version it runs, the image offered)
+        :param ev: ("new", uid), ("removed", uid, name), ("replace", uid),
+        ("firmware", uid, name, version it runs, the image offered) or
+        ("offer", key, title, lines, buttons)
         """
         q = getattr(self, "_popup_queue", None)
         if q is None:
@@ -5405,6 +5456,8 @@ class afcBridgeBox:
                         auto=True)):
                     self._replace_offered.discard(ev[1])
                     continue
+            elif ev[0] == "offer":
+                self._prompt(ev[2], ev[3], ev[4], timeout=self._POPUP_HOLD)
             else:
                 self._prompt_removed_unit(ev[1], ev[2], timeout=self._POPUP_HOLD)
             self._popup_active_until = eventtime + self._POPUP_HOLD

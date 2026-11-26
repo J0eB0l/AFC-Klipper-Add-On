@@ -2147,6 +2147,140 @@ class TestAfcBridgeBoxInit:
             "Bambu_AMS_HT_1": "Bambu_AMS_Buffer_B"}
         assert [s for s in _bbx_loaded(m) if s.startswith("AFC_buffer ")] == [
             "AFC_buffer Bambu_AMS_Buffer", "AFC_buffer Bambu_AMS_Buffer_B"]
+        assert m._second_inlet == "B"
+        _bbx_quiet(printer)
+
+    # the second buffer's pin chip
+
+    class _WatchingPins(_FakePins):
+        """Klipper's pins object, keeping what the printer had loaded at each registration."""
+
+        def __init__(self, printer: BambuPrinter) -> None:
+            """
+            :param printer: the printer whose loaded sections are read
+            """
+            super().__init__()
+            self._printer = printer
+            #: chip name -> the sections loaded before that chip was registered.
+            self.loaded_before: Dict[str, List[str]] = {}
+
+        def register_chip(self, name: str, chip: Any) -> None:
+            """
+            :param name: the chip name
+            :param chip: the chip
+            """
+            super().register_chip(name, chip)
+            self.loaded_before[name] = [section for section, _wrapper in self._printer.loaded]
+
+    @staticmethod
+    def _scout_chip_calls(monkeypatch: pytest.MonkeyPatch
+                          ) -> List[Tuple[str, Optional[str], List[str]]]:
+        """
+        :param monkeypatch: pytest's monkeypatch
+        :return list: filled, as a chain starts, with (the section of the config given, the chip
+            named, the sections loaded by then) per _register_scout_chip call, which still runs
+        """
+        calls: List[Tuple[str, Optional[str], List[str]]] = []
+        real = afcBridgeBox._register_scout_chip
+
+        def _spy(master: afcBridgeBox, config: Any, chip: Optional[str] = None) -> None:
+            calls.append((config.get_name(), chip, _bbx_loaded(master)))
+            real(master, config, chip)
+
+        monkeypatch.setattr(afcBridgeBox, "_register_scout_chip", _spy)
+        return calls
+
+    @pytest.mark.parametrize("inlet_a, inlet_b, letter, chip", [
+        # The chain on both inlets: no bay is behind inlet B's buffer yet.
+        ("chain1", "chain1", "B", "bambu_buffer_inlet_b"),
+        ("chain1", "Bambu_AMS_HT_1", "B", "bambu_buffer_inlet_b"),
+        ("Bambu_AMS_2", "chain1", "A", "bambu_buffer_inlet_a")])
+    def test_a_second_inlet_registers_both_chips_before_a_section_loads(
+            self, tmp_path, monkeypatch, inlet_a, inlet_b, letter, chip):
+        calls = self._scout_chip_calls(monkeypatch)
+        m = _bbx_switched(tmp_path, inlet_a, inlet_b)
+        assert m._second_inlet == letter
+        # The chain's own chip, which the call names with no chip, then the second one.
+        assert calls == [(SEC, None, []), (SEC, chip, [])]
+        assert list(m.printer._bambu_buffer_chips) == ["bambu_buffer", chip]
+        # The sections came after them.
+        assert _bbx_loaded(m)[0] == "AFC_BambuAMS Bambu_AMS_1"
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_on_one_inlet_registers_no_second_chip(self, tmp_path, monkeypatch):
+        calls = self._scout_chip_calls(monkeypatch)
+        m = _bbx_switched(tmp_path, "chain1", "Turtle_1")
+        assert m._second_inlet == ""
+        assert calls == []
+        assert not hasattr(m.printer, "_bambu_buffer_chips")
+        assert _bbx_loaded(m)[0] == "AFC_BambuAMS Bambu_AMS_1"
+        _bbx_quiet(m.printer)
+
+    def test_no_switch_registers_no_second_chip(self, tmp_path, monkeypatch):
+        calls = self._scout_chip_calls(monkeypatch)
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER)
+        assert m._switch_inlets == []
+        assert m._second_inlet == ""
+        assert calls == []
+        assert not hasattr(m.printer, "_bambu_buffer_chips")
+        _bbx_quiet(m.printer)
+
+    def test_a_scout_with_no_bay_starts_with_no_second_inlet(self, tmp_path, monkeypatch):
+        # Nothing is placed for a chain with no bay, so the chain on both inlets changes nothing.
+        calls = self._scout_chip_calls(monkeypatch)
+        m = _bbx_switched(tmp_path, "chain1", "chain1", roster="")
+        assert m._roster_source == "scout"
+        assert m._switch_inlets == [{"A": ["chain1"], "B": ["chain1"]}]
+        assert m._second_inlet == ""
+        # Its own chip alone, which the call names with no chip.
+        assert calls == [(SEC, None, [])]
+        assert list(m.printer._bambu_buffer_chips) == ["bambu_buffer"]
+        assert m.printer.loaded == []
+        _bbx_quiet(m.printer)
+
+    def test_the_second_chip_of_a_chain_on_both_inlets_has_no_unit_behind_it(self, tmp_path):
+        # Each unit's inlet is found by loading, so every unit starts behind the chain's own chip.
+        printer = make_printer(fabricate=True)
+        pins = self._WatchingPins(printer)
+        printer.add_object("pins", pins)
+        printer.add_section("AFC_BridgeBox_switch Switch_1",
+                            {"inlet_a": "chain1", "inlet_b": "chain1"})
+        m = _bbx_boot(tmp_path, printer, roster=_SWITCH_ROSTER, buffer=None)
+        assert m._second_inlet == "B"
+        # Both chips are there before any section.
+        assert pins.loaded_before == {"bambu_buffer": [], "bambu_buffer_inlet_b": []}
+        chips = printer._bambu_buffer_chips
+        assert chips == pins.chips
+        second = chips["bambu_buffer_inlet_b"]
+        assert (second._unit.scout_stub, second._unit.fps_buffer_value(), second._units) == (
+            True, None, [])
+        assert [unit.name for unit in chips["bambu_buffer"]._units] == [
+            "Bambu_AMS_1", "Bambu_AMS_2", "Bambu_AMS_HT_1"]
+        assert [s for s in _bbx_loaded(m) if s.startswith("AFC_buffer ")] == [
+            "AFC_buffer Bambu_AMS_Buffer", "AFC_buffer Bambu_AMS_Buffer_B"]
+        assert _bbx_keys(m, "AFC_buffer Bambu_AMS_Buffer_B")["adc_pin"] == (
+            "bambu_buffer_inlet_b:fps")
+        _bbx_quiet(printer)
+
+    def test_the_own_chip_of_a_chain_whose_bays_all_start_on_inlet_b_has_no_unit_behind_it(
+            self, tmp_path):
+        printer = make_printer(fabricate=True)
+        pins = self._WatchingPins(printer)
+        printer.add_object("pins", pins)
+        named = "chain1, Bambu_AMS_1, Bambu_AMS_2, Bambu_AMS_HT_1"
+        printer.add_section("AFC_BridgeBox_switch Switch_1",
+                            {"inlet_a": "chain1", "inlet_b": named})
+        m = _bbx_boot(tmp_path, printer, roster=_SWITCH_ROSTER, buffer=None)
+        assert m._second_inlet == "B"
+        assert pins.loaded_before == {"bambu_buffer": [], "bambu_buffer_inlet_b": []}
+        chips = printer._bambu_buffer_chips
+        # The chain's own buffer still has its chip to read, with a stub that has no reading.
+        own = chips["bambu_buffer"]
+        assert (own._unit.scout_stub, own._unit.fps_buffer_value(), own._units) == (
+            True, None, [])
+        assert [unit.name for unit in chips["bambu_buffer_inlet_b"]._units] == [
+            "Bambu_AMS_1", "Bambu_AMS_2", "Bambu_AMS_HT_1"]
+        assert _bbx_keys(m, "AFC_buffer Bambu_AMS_Buffer")["adc_pin"] == "bambu_buffer:fps"
         _bbx_quiet(printer)
 
     # the automatic lane base
@@ -4852,6 +4986,7 @@ class TestAfcBridgeBoxRosterSections:
         assert list(sections)[-1] == "AFC_buffer Bamb_1_B"
         assert sections["AFC_buffer Bamb_1_B"] == dict(
             self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_b:fps")
+        assert m._second_inlet == "B"
 
     def test_the_second_buffer_is_named_for_the_inlet_it_feeds(self, tmp_path):
         m = _bbx_switched(tmp_path, "Bambu_AMS_2", "chain1")
@@ -4861,6 +4996,7 @@ class TestAfcBridgeBoxRosterSections:
             "Bambu_AMS_HT_1": ("Bamb_1", "bambu_buffer")}
         assert self._sections(m)["AFC_buffer Bamb_1_A"] == dict(
             self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_a:fps")
+        assert m._second_inlet == "A"
 
     def test_a_chain_that_makes_its_buffer_makes_both(self, tmp_path):
         m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1", buffer=None)
@@ -4883,6 +5019,7 @@ class TestAfcBridgeBoxRosterSections:
         assert [s for s in self._sections(m)
                 if s.startswith("AFC_buffer ")] == [
             "AFC_buffer Bambu_AMS_Buffer"]
+        assert m._second_inlet == ""
 
     def test_the_second_buffer_is_loaded_after_its_units(self, tmp_path):
         m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1", buffer=None)
@@ -4894,6 +5031,81 @@ class TestAfcBridgeBoxRosterSections:
         assert _bbx_keys(m, "AFC_buffer Bambu_AMS_Buffer_B")["adc_pin"] == (
             "bambu_buffer_inlet_b:fps")
         _bbx_quiet(m.printer)
+
+    @staticmethod
+    def _made_buffers(master: afcBridgeBox) -> List[str]:
+        """
+        :param master: a built master
+        :return list: each [AFC_buffer] section _roster_sections makes, in order and with a section
+            made twice named twice
+        """
+        made = [section for section, _keys in master._roster_sections(master.units)
+                if section.startswith("AFC_buffer ")]
+        _bbx_quiet(master.printer)
+        return made
+
+    def test_a_chain_on_both_inlets_makes_the_second_buffer_with_no_bay_behind_it(
+            self, tmp_path):
+        # Each unit's inlet is found by loading, so inlet B's buffer is made before a unit is on it.
+        m = _bbx_switched(tmp_path, "chain1", "chain1")
+        assert self._made_buffers(m) == ["AFC_buffer Bamb_1_B"]
+        assert m._second_inlet == "B"
+        assert self._buffers(m) == {
+            "Bambu_AMS_1": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_2": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_HT_1": ("Bamb_1", "bambu_buffer")}
+        sections = self._sections(m)
+        assert list(sections)[-1] == "AFC_buffer Bamb_1_B"
+        assert sections["AFC_buffer Bamb_1_B"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_b:fps")
+
+    def test_a_chain_on_both_inlets_that_makes_its_buffer_makes_both(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "chain1", buffer=None)
+        assert self._made_buffers(m) == ["AFC_buffer Bambu_AMS_Buffer",
+                                         "AFC_buffer Bambu_AMS_Buffer_B"]
+        assert m._second_inlet == "B"
+        assert set(self._buffers(m).values()) == {("Bambu_AMS_Buffer", "bambu_buffer")}
+        sections = self._sections(m)
+        assert list(sections)[-2:] == ["AFC_buffer Bambu_AMS_Buffer",
+                                       "AFC_buffer Bambu_AMS_Buffer_B"]
+        assert sections["AFC_buffer Bambu_AMS_Buffer"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer:fps")
+        assert sections["AFC_buffer Bambu_AMS_Buffer_B"] == dict(
+            self.FPS, type="bambu", adc_pin="bambu_buffer_inlet_b:fps")
+
+    def test_a_bay_inlet_b_names_beside_the_chain_starts_behind_the_second_buffer(
+            self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "chain1, Bambu_AMS_HT_1")
+        assert self._made_buffers(m) == ["AFC_buffer Bamb_1_B"]
+        assert m._second_inlet == "B"
+        assert self._buffers(m) == {
+            "Bambu_AMS_1": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_2": ("Bamb_1", "bambu_buffer"),
+            "Bambu_AMS_HT_1": ("Bamb_1_B", "bambu_buffer_inlet_b")}
+
+    def test_no_switch_makes_no_second_buffer(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, buffer=None)
+        assert m._switch_inlets == []
+        # The chain's own buffer once, and no other.
+        assert self._made_buffers(m) == ["AFC_buffer Bambu_AMS_Buffer"]
+        assert m._second_inlet == ""
+        assert set(self._buffers(m).values()) == {("Bambu_AMS_Buffer", "bambu_buffer")}
+
+    def test_no_switch_and_a_buffer_of_the_configs_makes_no_buffer(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER)
+        assert self._made_buffers(m) == []
+        assert m._second_inlet == ""
+        assert set(self._buffers(m).values()) == {("Bamb_1", "bambu_buffer")}
+
+    def test_each_call_stores_the_second_inlet_it_finds(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_HT_1")
+        assert m._second_inlet == "B"
+        m._switch_inlets = [{"A": ["Bambu_AMS_2"], "B": ["chain1"]}]
+        assert self._made_buffers(m) == ["AFC_buffer Bamb_1_A"]
+        assert m._second_inlet == "A"
+        m._switch_inlets = []
+        assert self._made_buffers(m) == []
+        assert m._second_inlet == ""
 
     # fixed bands: AMS low, HT high, no collapse
 
@@ -5297,6 +5509,106 @@ class TestAfcBridgeBoxSecondBuffer:
         m = _bbx_switched(tmp_path, "Bambu_AMS_1", "Bambu_AMS_HT_1",
                           name="Bambu_AMS_1")
         assert m._second_buffer(self.BAYS) == ("", [])
+        _bbx_quiet(m.printer)
+
+    # the chain itself on both inlets: each unit's inlet is found by loading
+
+    def test_a_chain_on_both_inlets_has_its_second_buffer_on_inlet_b(self, tmp_path):
+        # No bay is behind it yet. Placed by its bays, every bay would be behind it.
+        m = _bbx_switched(tmp_path, "chain1", "chain1")
+        assert m._second_buffer(self.BAYS) == ("B", [])
+        _bbx_quiet(m.printer)
+
+    def test_the_bays_inlet_b_names_beside_the_chain_are_behind_it(self, tmp_path):
+        # In bay order, and the chain's bays only: Turtle_1 is another unit.
+        m = _bbx_switched(tmp_path, "chain1",
+                          "Turtle_1, Bambu_AMS_HT_1, chain1, Bambu_AMS_1")
+        assert m._second_buffer(self.BAYS) == ("B", ["Bambu_AMS_1", "Bambu_AMS_HT_1"])
+        _bbx_quiet(m.printer)
+
+    def test_a_bay_inlet_a_names_beside_the_chain_is_not_behind_it(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1, Bambu_AMS_1", "chain1")
+        assert m._second_buffer(self.BAYS) == ("B", [])
+        _bbx_quiet(m.printer)
+
+    def test_a_later_switch_with_the_chain_on_both_inlets_is_read(self, tmp_path):
+        m = _bbx_switched(tmp_path, "Turtle_1", "Turtle_2")
+        assert m._second_buffer(self.BAYS) == ("", [])
+        m._switch_inlets.append({"A": ["chain1"], "B": ["chain1", "Bambu_AMS_2"]})
+        assert m._second_buffer(self.BAYS) == ("B", ["Bambu_AMS_2"])
+        _bbx_quiet(m.printer)
+
+    def test_the_chain_on_inlet_a_alone_is_placed_by_its_bays(self, tmp_path):
+        # Read as a chain on both inlets, inlet B would have the second buffer and both AMS.
+        m = _bbx_switched(tmp_path, "chain1", "Bambu_AMS_1, Bambu_AMS_2")
+        assert m._second_buffer(self.BAYS) == ("A", ["Bambu_AMS_HT_1"])
+        _bbx_quiet(m.printer)
+
+    def test_the_chain_on_inlet_b_alone_is_placed_by_its_bays(self, tmp_path):
+        # Read as a chain on both inlets, no bay would be behind the second buffer.
+        m = _bbx_switched(tmp_path, "Bambu_AMS_1, Bambu_AMS_2", "chain1")
+        assert m._second_buffer(self.BAYS) == ("B", ["Bambu_AMS_HT_1"])
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_named_like_one_of_its_bays_on_both_inlets_is_read_as_that_bay(
+            self, tmp_path):
+        # The name stands for the unit, and a unit on both inlets is a section the switch refuses.
+        m = _bbx_switched(tmp_path, "Bambu_AMS_1", "Bambu_AMS_1", name="Bambu_AMS_1")
+        assert m._second_buffer(self.BAYS) == ("", [])
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_named_like_one_of_its_bays_is_still_placed_by_its_bays(self, tmp_path):
+        # Read as a chain on both inlets, inlet B would have the second buffer and every bay.
+        m = _bbx_switched(tmp_path, "Bambu_AMS_1",
+                          "Bambu_AMS_1, Bambu_AMS_2, Bambu_AMS_HT_1", name="Bambu_AMS_1")
+        assert m._second_buffer(self.BAYS) == ("A", ["Bambu_AMS_1"])
+        _bbx_quiet(m.printer)
+
+
+class TestAfcBridgeBoxInletBuffer:
+    """The buffer, and the pin chip that reads it, behind each inlet of a filament switch."""
+
+    #: The buffer and chip of a chain started by _bbx_boot.
+    OWN = ("Bamb_1", "bambu_buffer")
+
+    def test_the_second_inlet_has_a_buffer_and_chip_named_for_it(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "chain1")
+        assert m._second_inlet == "B"
+        assert m.inlet_buffer("B") == ("Bamb_1_B", "bambu_buffer_inlet_b")
+        _bbx_quiet(m.printer)
+
+    def test_the_names_are_made_of_the_chains_buffer_and_chip(self, tmp_path):
+        m = _bbx_switched(tmp_path, "Bambu_AMS_2", "chain1", buffer=None,
+                          buffer_chip_name="pico_b")
+        assert m._second_inlet == "A"
+        assert m.inlet_buffer("A") == ("Bambu_AMS_Buffer_A", "pico_b_inlet_a")
+        assert m.inlet_buffer("B") == ("Bambu_AMS_Buffer", "pico_b")
+        _bbx_quiet(m.printer)
+
+    def test_the_other_inlet_has_the_chains_own(self, tmp_path):
+        # A letter alone is not enough: it has to be the second inlet's.
+        m = _bbx_switched(tmp_path, "chain1", "chain1")
+        assert m._second_inlet == "B"
+        assert m.inlet_buffer("A") == self.OWN
+        _bbx_quiet(m.printer)
+
+    def test_an_inlet_that_is_not_known_has_the_chains_own(self, tmp_path):
+        m = _bbx_switched(tmp_path, "chain1", "chain1")
+        assert m._second_inlet == "B"
+        assert m.inlet_buffer(None) == self.OWN
+        _bbx_quiet(m.printer)
+
+    def test_with_one_buffer_every_inlet_has_the_chains_own(self, tmp_path):
+        m = _bbx_boot(tmp_path)
+        assert m._second_inlet == ""
+        assert [m.inlet_buffer(inlet) for inlet in ("A", "B", None)] == [self.OWN] * 3
+        _bbx_quiet(m.printer)
+
+    def test_no_letter_is_not_the_second_inlet_of_a_chain_with_one_buffer(self, tmp_path):
+        # "" is what a chain with one buffer keeps as its second inlet, and it names no inlet.
+        m = _bbx_boot(tmp_path)
+        assert m._second_inlet == ""
+        assert m.inlet_buffer("") == self.OWN
         _bbx_quiet(m.printer)
 
 
@@ -9513,6 +9825,57 @@ class TestAfcBridgeBoxChainSnapshot:
         assert afcBridgeBox._chain_snapshot(self._OldBridge()) == {
             "seq": None, "uids": [A], "htmask": 0, "a2mask": 0,
             "a2asks": []}
+
+
+class TestAfcBridgeBoxRegisterScoutChip:
+    """A buffer's pin chip, registered with no unit behind it."""
+
+    @staticmethod
+    def _chain(tmp_path: pathlib.Path) -> Tuple[afcBridgeBox, Any]:
+        """
+        :param tmp_path: where the chain keeps its files
+        :return tuple: an enrolled chain whose chip is pico_b, which registers no chip as it
+            starts, and its printer's pin registry
+        """
+        printer = make_printer()
+        pins = TestAfcBridgeBoxInit._FakePins()
+        printer.add_object("pins", pins)
+        m = _bbx_boot(tmp_path, printer, buffer_chip_name="pico_b")
+        assert pins.chips == {}
+        assert not hasattr(printer, "_bambu_buffer_chips")
+        return m, pins
+
+    @staticmethod
+    def _registered(master: afcBridgeBox, pins: Any) -> Dict[str, Tuple[Any, ...]]:
+        """
+        :param master: the chain
+        :param pins: its printer's pin registry
+        :return dict: chip name -> (the name the chip has, the name its stand-in for a unit has,
+            whether that is marked a scout stub, its buffer reading, the units behind the chip),
+            for every chip registered, which the pin registry holds too
+        """
+        chips = master.printer._bambu_buffer_chips
+        assert pins.chips == chips
+        assert {type(chip) for chip in chips.values()} == {_BambuBufferChip}
+        assert {chip._unit.printer for chip in chips.values()} == {master.printer}
+        return {name: (chip._name, chip._unit.buffer_chip_name, chip._unit.scout_stub,
+                       chip._unit.fps_buffer_value(), chip._units)
+                for name, chip in chips.items()}
+
+    @pytest.mark.parametrize("chip", [(), (None,)])
+    def test_no_chip_name_registers_the_chains_own(self, tmp_path, chip):
+        m, pins = self._chain(tmp_path)
+        m._register_scout_chip(BambuConfig(SEC, m.printer), *chip)
+        assert self._registered(m, pins) == {"pico_b": ("pico_b", "pico_b", True, None, [])}
+        _bbx_quiet(m.printer)
+
+    def test_a_chip_name_registers_that_chip(self, tmp_path):
+        m, pins = self._chain(tmp_path)
+        m._register_scout_chip(BambuConfig(SEC, m.printer), "pico_b_inlet_b")
+        assert self._registered(m, pins) == {
+            "pico_b_inlet_b": ("pico_b_inlet_b", "pico_b_inlet_b", True, None, [])}
+        assert m.buffer_chip_name == "pico_b"
+        _bbx_quiet(m.printer)
 
 
 class TestAfcBridgeBoxScoutReady:
@@ -15292,6 +15655,43 @@ class TestAfcBridgeBoxPumpPopups:
         assert (m._popup_queue, m._popup_active_until) == ([], 131.0)
         assert _p6_log(m) == []
 
+    def test_another_modules_offer_shows_as_it_was_queued(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        m._queue_popup(("offer", "Switch_1", "Switch_1 new AMS",
+                        ["Switch_1 does not know which inlet Bravo, Hot feeds.",
+                         "Put a spool in the unit and pick it."],
+                        [("Bravo", "AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Bravo", "primary"),
+                         ("Hot", "AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Hot", "warning")]))
+        m._queue_popup(("removed", D, "Charlie"))
+        _p6_quiet(m)
+        reactor = m.printer.reactor
+        armed = len(reactor.callbacks)
+        m._pump_popups(50.0)
+        offer = _p6_popup(
+            "Switch_1 new AMS",
+            ["Switch_1 does not know which inlet Bravo, Hot feeds.",
+             "Put a spool in the unit and pick it."],
+            ["Bravo|AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Bravo|primary",
+             "Hot|AFC_BRIDGEBOX_SWITCH_IDENTIFY UNIT=Hot|warning"])
+        assert _p6_console(m) == offer
+        # The offer left the queue, and the removal behind it waits out the hold.
+        assert (m._popup_queue, m._popup_active_until) == ([("removed", D, "Charlie")], 70.0)
+        # It closes itself when its hold is over, not after the 45s a prompt stays by default.
+        ((_close, when),) = reactor.callbacks[armed:]
+        assert when == reactor.now + 20.0
+        m._pump_popups(69.0)
+        assert _p6_console(m) == offer
+        assert (m._popup_queue, m._popup_active_until) == ([("removed", D, "Charlie")], 70.0)
+        m._pump_popups(70.0)
+        assert _p6_console(m) == offer + _p6_popup(
+            "AMS removed: Charlie",
+            ["Charlie (UID DDDD) was unplugged; its bay went back to the pool.",
+             "A re-plug takes it back while it is free, else the lowest free "
+             "bay of its family. Or forget it if it is not coming back:"],
+            ["Forget Charlie|AFC_BRIDGEBOX_FORGET CHAIN=chain1 UID=DDDD|error"])
+        assert (m._popup_queue, m._popup_active_until) == ([], 90.0)
+        assert _p6_log(m) == []
+
     #: CCCC's queued offer of 01.02.03.05 to Bravo, which runs 01.02.03.04.
     BRAVO_OFFER = ("firmware", C, "Bravo", "01.02.03.04",
                    {"version": "01.02.03.05", "file": ""})
@@ -18105,6 +18505,140 @@ class TestAfcBridgeBoxUnitNames:
         m = _wifi_master(tmp_path, monkeypatch)
         m._pool_units = []
         assert m.unit_names() == []
+
+
+class TestAfcBridgeBoxBayUid:
+    """Which unit each bay belongs to now."""
+
+    @staticmethod
+    def _chain(tmp_path: pathlib.Path) -> afcBridgeBox:
+        """
+        :param tmp_path: where the chain keeps its files
+        :return afcBridgeBox: a chain that keeps bay One for AAAA, which no unit holds, and whose
+            bays Two and Hot are free
+        """
+        m = _bbx_boot(tmp_path, roster=f"boxed:{A}", pool_ams=2, pool_ht=1,
+                      ams_names="One, Two", ht_names="Hot")
+        assert [(pu["name"], pu["uid"], pu["bound"]) for pu in m._pool_units] == [
+            ("One", A, None), ("Two", None, None), ("Hot", None, None)]
+        return m
+
+    def test_a_bay_that_is_only_kept_gives_the_unit_it_is_kept_for(self, tmp_path):
+        m = self._chain(tmp_path)
+        assert m.bay_uid("One") == "AAAA"
+        _bbx_quiet(m.printer)
+
+    def test_a_bay_a_unit_holds_gives_that_unit(self, tmp_path):
+        m = self._chain(tmp_path)
+        m._pool_units[1]["bound"] = B
+        assert m.bay_uid("Two") == "BBBB"
+        _bbx_quiet(m.printer)
+
+    def test_the_unit_that_holds_a_bay_comes_before_the_one_it_is_kept_for(self, tmp_path):
+        m = self._chain(tmp_path)
+        m._pool_units[0]["bound"] = C
+        assert m._pool_units[0]["uid"] == A
+        assert m.bay_uid("One") == "CCCC"
+        _bbx_quiet(m.printer)
+
+    def test_the_uid_is_trimmed_and_upper_cased(self, tmp_path):
+        m = self._chain(tmp_path)
+        m._pool_units[0]["uid"] = " aaaa\n"
+        assert m.bay_uid("One") == "AAAA"
+        m._pool_units[0]["bound"] = "\tcccc "
+        assert m.bay_uid("One") == "CCCC"
+        _bbx_quiet(m.printer)
+
+    def test_a_blank_holder_is_no_holder(self, tmp_path):
+        m = self._chain(tmp_path)
+        m._pool_units[0]["bound"] = "  "
+        assert m.bay_uid("One") == "AAAA"
+        _bbx_quiet(m.printer)
+
+    def test_a_free_bay_gives_none(self, tmp_path):
+        m = self._chain(tmp_path)
+        assert m.bay_uid("Two") is None
+        # Blank is free too, and is not given back as it is.
+        m._pool_units[1].update(uid="", bound=" ")
+        assert m.bay_uid("Two") is None
+        _bbx_quiet(m.printer)
+
+    def test_a_name_that_is_no_bay_of_the_chain_gives_none(self, tmp_path):
+        m = self._chain(tmp_path)
+        assert m.bay_uid("Turtle_1") is None
+        _bbx_quiet(m.printer)
+
+    @staticmethod
+    def _named(master: afcBridgeBox) -> List[Optional[str]]:
+        """
+        :param master: the chain of _p6_named
+        :return list: the unit of Alpha, Bravo, Charlie and Hot, read with no log line or popup
+        """
+        _p6_quiet(master)
+        uids = [master.bay_uid(bay) for bay in ("Alpha", "Bravo", "Charlie", "Hot")]
+        assert _p6_log(master) == []
+        assert _p6_console(master) == []
+        return uids
+
+    def test_a_claim_and_a_release_are_followed(self, tmp_path, monkeypatch):
+        # AAAA is recorded on Alpha and away, and CCCC is new on the chain.
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        assert self._named(m) == ["AAAA", None, None, None]
+        assert m._claim_pool_unit(C, "boxed", "callback") is not None
+        assert self._named(m) == ["AAAA", "CCCC", None, None]
+        m._release_pool_unit(C, "callback")
+        assert self._named(m) == ["AAAA", None, None, None]
+
+
+class TestAfcBridgeBoxOffer:
+    """Another module's popup, queued behind the chain's own."""
+
+    #: A filament switch asking which inlet Bravo feeds.
+    LINES = ["Switch_1 does not know which inlet Bravo feeds, so its lanes do not load yet.",
+             "Put a spool in the unit and pick it."]
+    BUTTONS = [("Bravo", "AFC_BRIDGEBOX_SWITCH_IDENTIFY SWITCH=Switch_1 UNIT=Bravo", "primary")]
+
+    def test_the_popup_is_queued_as_an_offer_and_not_shown(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        _p6_quiet(m)
+        m.offer("Switch_1", "Switch_1 new AMS", self.LINES, self.BUTTONS)
+        assert m._popup_queue == [
+            ("offer", "Switch_1", "Switch_1 new AMS", self.LINES, self.BUTTONS)]
+        assert _p6_console(m) == []
+        assert _p6_log(m) == []
+
+    def test_a_newer_offer_with_the_same_key_takes_its_place(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        _p6_quiet(m)
+        m.offer("Switch_1", "Switch_1 new AMS", self.LINES, self.BUTTONS)
+        m.offer("Switch_1", "Switch_1 new AMS again", ["Charlie too."], [])
+        assert m._popup_queue == [
+            ("offer", "Switch_1", "Switch_1 new AMS again", ["Charlie too."], [])]
+        assert _p6_console(m) == []
+        assert _p6_log(m) == []
+
+    def test_an_offer_with_another_key_is_kept_beside_it(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        _p6_quiet(m)
+        m.offer("Switch_1", "Switch_1 new AMS", self.LINES, self.BUTTONS)
+        m.offer("Switch_2", "Switch_2 new AMS", ["Hot is new."], [])
+        assert m._popup_queue == [
+            ("offer", "Switch_1", "Switch_1 new AMS", self.LINES, self.BUTTONS),
+            ("offer", "Switch_2", "Switch_2 new AMS", ["Hot is new."], [])]
+        assert _p6_console(m) == []
+        assert _p6_log(m) == []
+
+    def test_an_offer_takes_the_place_of_no_popup_of_the_chains_own(self, tmp_path,
+                                                                    monkeypatch):
+        # Keyed like the uid of a queued popup, it is still another popup.
+        m = _p6_named(tmp_path, monkeypatch, ready=False)
+        _p6_quiet(m)
+        m._queue_popup(("new", C))
+        m.offer(C, "Switch_1 new AMS", self.LINES, self.BUTTONS)
+        assert m._popup_queue == [
+            ("new", C), ("offer", C, "Switch_1 new AMS", self.LINES, self.BUTTONS)]
+        assert _p6_console(m) == []
+        assert _p6_log(m) == []
 
 
 class TestAfcBridgeBoxUnitsArriving:

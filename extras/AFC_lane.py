@@ -2056,6 +2056,27 @@ class AFCLane:
         self.afc_extruder_name = extruder_obj.name
         return True
 
+    def set_buffer(self, buffer_obj: AFCBuffer) -> bool:
+        """
+        Moves this lane to another buffer, for a lane whose unit can be plumbed behind more than
+        one buffer.
+
+        :param buffer_obj: buffer this lane's filament goes through from now on
+        :return bool: False when the lane is loaded in its toolhead and so stays where it is
+        """
+        if buffer_obj is self.buffer_obj:
+            return True
+        if self.tool_loaded:
+            return False
+        if self.buffer_obj is not None:
+            self.buffer_obj.lanes.pop(self.name, None)
+        # A pooled lane is in no buffer's lanes until it is claimed.
+        if self.name in self.afc.lanes:
+            buffer_obj.lanes[self.name] = self
+        self.buffer_obj = buffer_obj
+        self.buffer_name = buffer_obj.name
+        return True
+
 
     def _mapped_keys(self) -> list:
         """

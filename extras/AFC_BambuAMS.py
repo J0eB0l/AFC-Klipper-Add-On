@@ -801,6 +801,15 @@ class _BambuBufferChip:
         if unit not in self._units:
             self._units.append(unit)
 
+    def drop_unit(self, unit: Any) -> None:
+        """
+        Take a unit out from behind this chip's buffer, so its reading no longer feeds it.
+
+        :param unit: the AFC_BambuAMS unit
+        """
+        if unit in self._units:
+            self._units.remove(unit)
+
     def _reading(self) -> Optional[float]:
         """
         The buffer value to publish. Every unit behind the buffer reports it, and the one a motion
@@ -8563,6 +8572,36 @@ class afcBambuAMS(afcUnit):
         v = b / 100.0  # compressed (100) -> 1.0, empty (0) -> 0.0
         return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
 
+    def use_buffer(self, buffer: str, chip: str) -> None:
+        """
+        Put this unit behind another buffer of its bridge: that buffer's chip takes the unit's
+        reading, and the unit's lanes take the buffer.
+
+        :param buffer: name of the [AFC_buffer] the unit is plumbed behind
+        :param chip: name of the pin chip that reads that buffer
+        """
+        if (buffer == self.buffer_name
+            and chip == self.buffer_chip_name):
+            return
+        chips = self.printer._bambu_buffer_chips
+        # Both are looked up first, so a name that is not there leaves the unit where it was.
+        taking = chips[chip]
+        buffer_obj = self.printer.lookup_object(f"AFC_buffer {buffer}")
+        for held in chips.values():
+            held.drop_unit(self)
+        taking.add_unit(self)
+        was = self.buffer_obj
+        self.buffer_chip_name = chip
+        self.buffer_name = buffer
+        self.buffer_obj = buffer_obj
+        for _name, lane in self.printer.lookup_objects("AFC_lane"):
+            if getattr(lane, "unit_obj", None) is self:
+                lane.set_buffer(self.buffer_obj)
+        # Each buffer looks again for the units whose odometer gates it.
+        for changed in (was, self.buffer_obj):
+            if hasattr(changed, "rebind"):
+                changed.rebind()
+
     def _in_idle_toolhead(self, lane: Any) -> bool:
         """
         Whether a lane's toolhead is known not to be the active one.
@@ -12075,6 +12114,59 @@ class afcBambuAMS(afcUnit):
         if self._is_virtual_hub(lane):
             lane._load_state = False
         return done
+
+    def feed_to(self, lane: Any, seen: Callable[[], bool], gcmd: AFCGcmd,
+                timeout: Optional[float] = None) -> bool:
+        """
+        Feed a lane out of its bay until a check sees its filament, then reel it back to the bay.
+
+        :param lane: a lane with filament in its bay
+        :param seen: called while the lane feeds, True once its filament was seen
+        :param gcmd: command context the lane select and the reel-back run through
+        :param timeout: seconds to feed for at the most, None for the time the bowden length
+        takes plus `load_retry_timeout`
+        :return bool: True when the check saw the filament
+        """
+        if self._bridge is None:
+            self.logger.warning(f"{self.name}: bridge not connected, cannot feed {lane.name}")
+            return False
+        ok, slot = self.select_lane(lane, gcmd=gcmd)
+        if not ok:
+            self.logger.warning(f"{self.name}: lane {lane.name} is not mapped to an AMS slot")
+            return False
+        if timeout is None:
+            timeout = min(self.afc_bowden_length / DEADLINE_MMPS + self.load_retry_timeout,
+                          LOAD_SENSOR_MAX_S)
+        reactor = self.afc.reactor
+        found = False
+        self._load_in_progress = True
+        try:
+            # As a load does: a busy unit skips its preload.
+            if not (self._is_ht()
+                    or self._is_lite()
+                    or self._heating_now()):
+                self._bridge.send({"cmd": "prime", "unit": self.ams_index, "slot": slot})
+            deadline = reactor.monotonic() + timeout
+            kicked: Optional[float] = None
+            while reactor.monotonic() < deadline:
+                now = reactor.monotonic()
+                # A feed is one frame the bridge repeats, so it is asked for again as a load does.
+                if (kicked is None
+                    or now - kicked >= self.load_retry_interval):
+                    self.feed(lane, self.load_retry_pulse)
+                    kicked = now
+                reactor.pause(now + 0.1)
+                if seen():
+                    found = True
+                    break
+        finally:
+            try:
+                # Also when the feed was cut short, or the bridge goes on repeating it.
+                self.stop()
+            finally:
+                self._load_in_progress = False
+        self.eject_lane(lane, gcmd)
+        return found
 
 
 def load_config_prefix(config: Any) -> afcBambuAMS:

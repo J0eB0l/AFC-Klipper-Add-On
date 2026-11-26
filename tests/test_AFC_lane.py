@@ -748,6 +748,109 @@ class TestSetExtruder:
         old.check_lanes.assert_not_called()
 
 
+class TestSetBuffer:
+    def _lane_on(self, registered=True, buffered=True):
+        lane = _make_real_afc_lane(name="lane7")
+        old = MagicMock()
+        old.name = "buffer4"
+        old.lanes = {"lane6": object()}
+        new = MagicMock()
+        new.name = "buffer5"
+        new.lanes = {"lane8": object()}
+        if buffered:
+            lane.buffer_obj = old
+            lane.buffer_name = "buffer4"
+        if registered:
+            lane.afc.lanes["lane7"] = lane
+            if buffered:
+                old.lanes["lane7"] = lane
+        return lane, old, new
+
+    def test_moves_a_registered_lane_to_the_other_buffer(self):
+        lane, old, new = self._lane_on()
+
+        assert lane.set_buffer(new) is True
+
+        assert lane.buffer_obj is new
+        assert lane.buffer_name == "buffer5"
+        assert list(old.lanes) == ["lane6"]
+        assert list(new.lanes) == ["lane8", "lane7"]
+        assert new.lanes["lane7"] is lane
+        assert lane.logger.messages == []
+
+    def test_pooled_lane_joins_no_buffers_lanes(self):
+        # A pooled lane is in neither afc.lanes nor its buffer's lanes.
+        lane, old, new = self._lane_on(registered=False)
+        assert "lane7" not in lane.afc.lanes
+
+        assert lane.set_buffer(new) is True
+
+        assert lane.buffer_obj is new
+        assert lane.buffer_name == "buffer5"
+        assert list(old.lanes) == ["lane6"]
+        assert list(new.lanes) == ["lane8"]
+        assert lane.logger.messages == []
+
+    def test_registered_lane_with_no_buffer_before_takes_the_new_one(self):
+        lane, old, new = self._lane_on(buffered=False)
+        assert lane.buffer_obj is None
+        assert lane.buffer_name is None
+
+        assert lane.set_buffer(new) is True
+
+        assert lane.buffer_obj is new
+        assert lane.buffer_name == "buffer5"
+        assert list(old.lanes) == ["lane6"]
+        assert list(new.lanes) == ["lane8", "lane7"]
+        assert new.lanes["lane7"] is lane
+        assert lane.logger.messages == []
+
+    def test_pooled_lane_with_no_buffer_before_joins_no_buffers_lanes(self):
+        lane, _, new = self._lane_on(registered=False, buffered=False)
+
+        assert lane.set_buffer(new) is True
+
+        assert lane.buffer_obj is new
+        assert lane.buffer_name == "buffer5"
+        assert list(new.lanes) == ["lane8"]
+        assert lane.logger.messages == []
+
+    def test_loaded_lane_stays_where_it_is(self):
+        lane, old, new = self._lane_on()
+        lane.tool_loaded = True
+
+        assert lane.set_buffer(new) is False
+
+        assert lane.buffer_obj is old
+        assert lane.buffer_name == "buffer4"
+        assert list(old.lanes) == ["lane6", "lane7"]
+        assert list(new.lanes) == ["lane8"]
+        assert lane.logger.messages == []
+
+    def test_same_buffer_changes_nothing_even_when_loaded(self):
+        lane, old, _ = self._lane_on()
+        lane.tool_loaded = True
+
+        assert lane.set_buffer(old) is True
+
+        assert lane.buffer_obj is old
+        assert lane.buffer_name == "buffer4"
+        assert list(old.lanes) == ["lane6", "lane7"]
+        assert lane.logger.messages == []
+
+    def test_same_buffer_keeps_the_lanes_place_in_its_lanes(self):
+        # Leaving and taking the buffer again would put the lane last.
+        lane, old, _ = self._lane_on()
+        old.lanes = {"lane7": lane, "lane6": old.lanes["lane6"]}
+
+        assert lane.set_buffer(old) is True
+
+        assert lane.buffer_obj is old
+        assert lane.buffer_name == "buffer4"
+        assert list(old.lanes) == ["lane7", "lane6"]
+        assert lane.logger.messages == []
+
+
 # ── _attach_tool_start_endstop_to_stepper ─────────────────────────────────────
 # Lanes with no extruder of their own (e.g. Vivid) never set a TOOL endstop in
 # __init__; handle_unit_connect attaches the extruder's U1 endstop instead.
