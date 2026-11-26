@@ -753,6 +753,9 @@ class _BambuBufferChip:
         """
         self.printer = unit.printer
         self._unit = unit
+        # The units behind this buffer, which a scout stub is not.
+        self._units: List[Any] = []
+        self.add_unit(unit)
         self._name = name
         self._report_time = report_time
         self._pins: List[_BambuBufferADC] = []
@@ -785,14 +788,41 @@ class _BambuBufferChip:
             reactor = self.printer.get_reactor()
             self._timer = reactor.register_timer(self._update, reactor.NOW)
 
+    def add_unit(self, unit: Any) -> None:
+        """
+        Add a unit behind this chip's buffer. The first real unit takes a scout stub's place.
+
+        :param unit: the AFC_BambuAMS unit, or a scout stub
+        """
+        if getattr(unit, "scout_stub", False):
+            return
+        if getattr(self._unit, "scout_stub", False):
+            self._unit = unit
+        if unit not in self._units:
+            self._units.append(unit)
+
+    def _reading(self) -> Optional[float]:
+        """
+        The buffer value to publish. Every unit behind the buffer reports it, and the one a motion
+        report names has the newest reading.
+
+        :return Optional[float]: 0.0..1.0, or None while no unit on this chip has a reading
+        """
+        units = sorted(self._units, key=lambda u: not u.buffer_reading_live())
+        for unit in units:
+            v = unit.fps_buffer_value()
+            if v is not None:
+                return v
+        return None
+
     def _update(self, eventtime: float) -> float:
         """
-        Timer callback: push the master's live buffer value to every pin.
+        Timer callback: push the buffer's live value to every pin.
 
         :param eventtime: reactor time of this firing
         :return float: the next firing time
         """
-        v = self._unit.fps_buffer_value()
+        v = self._reading()
         if v is not None:
             for adc in self._pins:
                 adc.push(v)
@@ -813,9 +843,7 @@ def _register_bambu_buffer_chip(unit: Any) -> None:
     name = getattr(unit, "buffer_chip_name", _BUFFER_CHIP_NAME)
     chip = chips.get(name)
     if chip is not None:
-        if (getattr(getattr(chip, "_unit", None), "scout_stub", False)
-            and not getattr(unit, "scout_stub", False)):
-            chip._unit = unit
+        chip.add_unit(unit)
         return
     chips[name] = _BambuBufferChip(unit, name)
 
@@ -2175,9 +2203,15 @@ class afcBambuAMS(afcUnit):
         latest = self._bridge.latest_status() or {}
         with self._bridge._lock:
             frame = self._bridge._last_raw_reply
+        own = afcBambuAMS._buffer_frame(self, latest)
+        if own is latest:
+            own = None
         gcmd.respond_info(
             f"{self.name}: buff={latest.get('buff')} raw={latest.get('buffraw')} "
             f"replylen={latest.get('bufflen')} reads={latest.get('buffn')} "
+            # This unit's own; buff above is the last unit heard.
+            f"unit_buff={own.get('buff') if own else None} "
+            f"unit_raw={own.get('buffraw') if own else None} "
             f"fstate={latest.get('fstate')} fstate_reads={latest.get('fstaten')} "
             # Per-unit; fstate above is bus-wide, so the two can disagree.
             f"arm_acked={self._follow_arm_acked(latest)} "
@@ -8036,7 +8070,8 @@ class afcBambuAMS(afcUnit):
         # Like an FPS buffer (buff 0..100, 100 = compressed).
         mine = (self._following_lane is not None) or _unit_tool_loaded(self)
         latest_own = latest if mine else None
-        buff = latest_own.get("buff") if latest_own else None
+        buff_src = afcBambuAMS._buffer_frame(self, latest_own) if latest_own else None
+        buff = buff_src.get("buff") if buff_src else None
         # From the 0x03 motion reply.
         odom = None
         try:
@@ -8056,7 +8091,7 @@ class afcBambuAMS(afcUnit):
         # A length <= 26 carries no buffer.
         status["follow_buff_replylen"] = latest_own.get("bufflen") if latest_own else None
         # follow_buff's mapping is wrong on an AMS HT.
-        status["follow_buff_raw"] = latest_own.get("buffraw") if latest_own else None
+        status["follow_buff_raw"] = buff_src.get("buffraw") if buff_src else None
         status["follow_state"] = latest_own.get("fstate") if latest_own else None
         # 0 means follow_state is the firmware's seed (4), not a confirmation.
         status["follow_state_reads"] = latest_own.get("fstaten") if latest_own else None
@@ -8467,6 +8502,46 @@ class afcBambuAMS(afcUnit):
         return (getattr(self, "_slot_map", None)
                 or {}).get(getattr(lane, "name", None))
 
+    def _buffer_frame(self, latest: dict) -> Optional[dict]:
+        """
+        Where a status frame holds this unit's buffer reading (`buff`, `buffraw`). A unit reports
+        the buffer on its own cable, so a bridge that sends a reading per unit puts it in the
+        unit's entry. Otherwise it is the frame's own, the last unit heard.
+
+        :param latest: a bridge status frame
+        :return Optional[dict]: the dict to read, or None when the bridge sends a reading per unit
+        and has none for this one
+        """
+        own = None
+        per_unit = False
+        for u in latest.get("units") or []:
+            if (not isinstance(u, dict)
+                or "buff" not in u):
+                continue
+            per_unit = True
+            if u.get("n") == self.ams_index:
+                own = u
+        if not per_unit:
+            return latest
+        # An idle spare or an unresolved UID sits at an index that is another unit's.
+        if (self.pool
+            or (self.unit_uid
+                and not self._id_resolved)):
+            return None
+        return own
+
+    def buffer_reading_live(self) -> bool:
+        """
+        Whether the bridge's last motion report was for this unit, which makes its buffer reading
+        the newest of the units behind that buffer.
+
+        :return bool: True while this unit is the one reported moving
+        """
+        if (self._bridge is None
+            or self.pool):
+            return False
+        return self._bridge_call("motion_unit") == self.ams_index
+
     def fps_buffer_value(self) -> Optional[float]:
         """
         AMS buffer as a 0.0..1.0 FPS/PSF reading for the virtual ADC pin.
@@ -8476,7 +8551,10 @@ class afcBambuAMS(afcUnit):
         latest = self._bridge.latest_status() if self._bridge else None
         if not latest:
             return None
-        b = latest.get("buff")
+        src = afcBambuAMS._buffer_frame(self, latest)
+        if src is None:
+            return None
+        b = src.get("buff")
         if b is None:
             return None
         # The firmware seeds the field at 100.

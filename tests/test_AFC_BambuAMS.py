@@ -1554,6 +1554,117 @@ class TestBambuBufferChipSetupPin:
         assert chip._pins == [pin]
 
 
+#: A status frame from a bridge that sends a buffer reading per unit: unit 0 at 20, unit 1 at 80.
+def _two_buffer_frame(**top: Any) -> dict:
+    """
+    :param top: frame-level fields
+    :return dict: the frame, its own ``buff`` the last unit heard (unit 1)
+    """
+    frame = {"buff": 80, "buffraw": 16420, "buffn": 9,
+             "units": [{"n": 0, "online": True, "buff": 20, "buffraw": 280},
+                       {"n": 1, "online": True, "buff": 80, "buffraw": 16420}]}
+    frame.update(top)
+    return frame
+
+
+def _two_units_one_chip(status: Optional[dict]
+                        ) -> Tuple[afcBambuAMS, afcBambuAMS, FakeBridge]:
+    """
+    :param status: the bridge's latest status frame
+    :return tuple: the units at chain index 0 and 1 of one bridge, and the bridge
+    """
+    printer = make_printer()
+    bridge = FakeBridge(status=status)
+    first = make_bambu_unit("Bambu_AMS_1", printer=printer, bridge=bridge)
+    second = make_bambu_unit("Bambu_AMS_2", printer=printer, ams_index=1,
+                             bridge=bridge)
+    return first, second, bridge
+
+
+class TestBambuBufferChipAddUnit:
+    @staticmethod
+    def _stub(printer: BambuPrinter) -> Any:
+        """
+        :param printer: the printer
+        :return Any: what a scout chain registers its chip with
+        """
+        return TestRegisterBambuBufferChip._ScoutStub(printer, "bambu_buffer")
+
+    def test_the_unit_that_made_the_chip_is_on_it(self):
+        unit = make_bambu_unit()
+        chip = _bambu_chip_of(unit)
+        assert (chip._unit, chip._units) == (unit, [unit])
+
+    def test_a_second_unit_is_added_behind_the_first(self):
+        first, second, _bridge = _two_units_one_chip(None)
+        chip = _bambu_chip_of(first)
+        assert (chip._unit, chip._units) == (first, [first, second])
+
+    def test_a_unit_already_on_it_is_not_added_twice(self):
+        first, second, _bridge = _two_units_one_chip(None)
+        chip = _bambu_chip_of(first)
+        chip.add_unit(second)
+        chip.add_unit(first)
+        assert (chip._unit, chip._units) == (first, [first, second])
+
+    def test_a_scout_stub_is_no_unit(self):
+        printer = make_printer()
+        stub = self._stub(printer)
+        chip = _BambuBufferChip(stub, "bambu_buffer")
+        assert (chip._unit, chip._units) == (stub, [])
+        unit = make_bambu_unit(printer=printer,
+                               values={"buffer_chip_name": "other"})
+        other = _bambu_chip_of(unit)
+        other.add_unit(stub)
+        assert (other._unit, other._units) == (unit, [unit])
+
+    def test_the_first_real_unit_takes_a_scout_stubs_place(self):
+        printer = make_printer()
+        chip = _BambuBufferChip(self._stub(printer), "bambu_buffer")
+        printer._bambu_buffer_chips = {"bambu_buffer": chip}
+        first = make_bambu_unit("Bambu_AMS_1", printer=printer)
+        assert (chip._unit, chip._units) == (first, [first])
+        second = make_bambu_unit("Bambu_AMS_2", printer=printer, ams_index=1)
+        assert (chip._unit, chip._units) == (first, [first, second])
+
+
+class TestBambuBufferChipReading:
+    def test_a_chip_with_no_unit_has_no_reading(self):
+        printer = make_printer()
+        chip = _BambuBufferChip(
+            TestRegisterBambuBufferChip._ScoutStub(printer, "bambu_buffer"),
+            "bambu_buffer")
+        assert chip._reading() is None
+
+    def test_the_first_unit_with_a_reading_is_read(self):
+        first, _second, _bridge = _two_units_one_chip(_two_buffer_frame())
+        assert _bambu_chip_of(first)._reading() == 0.2
+
+    def test_a_unit_with_no_reading_is_passed_over(self):
+        frame = _two_buffer_frame()
+        del frame["units"][0]["buff"]
+        first, _second, _bridge = _two_units_one_chip(frame)
+        assert _bambu_chip_of(first)._reading() == 0.8
+
+    def test_no_unit_with_a_reading_is_none(self):
+        first, _second, _bridge = _two_units_one_chip(None)
+        assert _bambu_chip_of(first)._reading() is None
+
+    def test_the_unit_reported_moving_is_read_first(self):
+        first, _second, bridge = _two_units_one_chip(_two_buffer_frame())
+        bridge.mot_unit = 1
+        assert _bambu_chip_of(first)._reading() == 0.8
+        bridge.mot_unit = 0
+        assert _bambu_chip_of(first)._reading() == 0.2
+
+    def test_a_moving_unit_with_no_reading_falls_back_to_the_next(self):
+        frame = _two_buffer_frame()
+        del frame["units"][1]["buff"]
+        first, _second, bridge = _two_units_one_chip(frame)
+        bridge.mot_unit = 1
+        assert _bambu_chip_of(first)._reading() == 0.2
+
+
 class TestBambuBufferChipUpdate:
     def test_update_streams_unit_value(self):
         unit = make_bambu_unit(bridge=FakeBridge(status={"buff": 70,
@@ -1633,9 +1744,10 @@ class TestRegisterBambuBufferChip:
         chip = printer._bambu_buffer_chips["bambu_buffer"]
         assert list(printer._bambu_buffer_chips) == ["bambu_buffer"]
         assert pins.chips == [("bambu_buffer", chip)]
-        assert chip._unit is a
+        assert (chip._unit, chip._units) == (a, [a, b])
         _register_bambu_buffer_chip(b)
-        assert pins.chips == [("bambu_buffer", chip)] and chip._unit is a
+        assert pins.chips == [("bambu_buffer", chip)]
+        assert (chip._unit, chip._units) == (a, [a, b])
 
     def test_a_second_master_gets_its_own_chip(self):
         printer, pins = self._printer()
@@ -1660,6 +1772,8 @@ class TestRegisterBambuBufferChip:
         chips = printer._bambu_buffer_chips
         assert (chips["bambu_buffer"]._unit, chips["bambu_buffer_2"]._unit) == (
             a, b)
+        assert (chips["bambu_buffer"]._units, chips["bambu_buffer_2"]._units) == (
+            [a], [b])
         assert chips["bambu_buffer"]._unit.fps_buffer_value() == 0.2
         assert chips["bambu_buffer_2"]._unit.fps_buffer_value() == 0.8
 
@@ -1668,15 +1782,15 @@ class TestRegisterBambuBufferChip:
         stub = self._scout_stub(printer, "bambu_buffer")
         _register_bambu_buffer_chip(stub)
         chip = printer._bambu_buffer_chips["bambu_buffer"]
-        assert chip._unit is stub
+        assert (chip._unit, chip._units) == (stub, [])
         # A second scout stub does not take it from the first.
         _register_bambu_buffer_chip(self._scout_stub(printer, "bambu_buffer"))
-        assert chip._unit is stub
+        assert (chip._unit, chip._units) == (stub, [])
         unit = make_bambu_unit("Bambu_AMS_1", printer=printer)
-        make_bambu_unit("Bambu_AMS_2", printer=printer, ams_index=1)
+        second = make_bambu_unit("Bambu_AMS_2", printer=printer, ams_index=1)
         assert printer._bambu_buffer_chips == {"bambu_buffer": chip}
         assert pins.chips == [("bambu_buffer", chip)]
-        assert chip._unit is unit
+        assert (chip._unit, chip._units) == (unit, [unit, second])
 
 
 class TestGcmdInt:
@@ -4243,6 +4357,71 @@ def _fw_answer(dev: bytes, version: bytes, model: bytes, unit_id: int) -> str:
     """
     return _fw_frame(_FW_HOST + dev + b"\x03\x01" + version + model.ljust(16, b"\0")
                      + bytes((unit_id,)))
+
+
+class TestAfcBambuAMSCmdAFCBambuBufferProbe:
+    """AFC_BAMBU_BUFFER_PROBE: the buffer decode's state and the bridge's last raw reply."""
+
+    @staticmethod
+    def _line(bus: str, unit: str) -> str:
+        """
+        :param bus: the bus-wide ``buff=... reads=...`` part
+        :param unit: the unit's own ``unit_buff=... unit_raw=...`` part
+        :return str: the probe's first line for a unit that has reported nothing else
+        """
+        return (f"Bambu_AMS_1: {bus} {unit} fstate=4 fstate_reads=3 "
+                f"arm_acked=None dbg_polls=None dbg_frames=None dbg_texts=None "
+                f"dbg_cut=None mcack=none tube_len=None dw_len=None bowden=3000 "
+                f"buff_pos=None refill=None")
+
+    def test_no_bridge_is_refused(self):
+        unit = make_bambu_unit(offline=True)
+        with pytest.raises(BambuPrinter.command_error) as exc:
+            unit.gcode.run("AFC_BAMBU_BUFFER_PROBE", UNIT=unit.name)
+        assert str(exc.value) == (
+            "AFC_BAMBU_BUFFER_PROBE: bridge not connected for Bambu_AMS_1")
+        assert unit.logger.messages == []
+
+    def test_a_unit_with_its_own_reading_prints_it_beside_the_bus_value(self):
+        # Unit 0 sits behind another buffer than the last unit heard.
+        bridge = FakeBridge(status=_two_buffer_frame(bufflen=44, fstate=4,
+                                                    fstaten=3))
+        bridge._last_raw_reply = "3dc5"
+        unit = make_bambu_unit(bridge=bridge)
+        gcmd = unit.gcode.run("AFC_BAMBU_BUFFER_PROBE", UNIT=unit.name)
+        assert bridge.sent == [{"cmd": "reply"}]
+        assert gcmd.messages == [
+            ("respond_info", self._line(
+                "buff=80 raw=16420 replylen=44 reads=9",
+                "unit_buff=20 unit_raw=280")),
+            ("respond_info", "Bambu_AMS_1: frame=3dc5")]
+        assert unit.logger.messages == []
+
+    def test_a_bridge_with_one_reading_prints_no_unit_value(self):
+        bridge = FakeBridge(status={"buff": 60, "buffraw": 11000, "buffn": 5,
+                                    "bufflen": 44, "fstate": 4, "fstaten": 3,
+                                    "units": [{"n": 0, "online": True}]})
+        unit = make_bambu_unit(bridge=bridge)
+        gcmd = unit.gcode.run("AFC_BAMBU_BUFFER_PROBE", UNIT=unit.name)
+        assert bridge.sent == [{"cmd": "reply"}]
+        assert gcmd.messages == [
+            ("respond_info", self._line(
+                "buff=60 raw=11000 replylen=44 reads=5",
+                "unit_buff=None unit_raw=None")),
+            ("respond_info", "Bambu_AMS_1: frame=(none)")]
+        assert unit.logger.messages == []
+
+    def test_a_unit_the_bridge_has_no_reading_for_prints_none(self):
+        bridge = FakeBridge(status=_two_buffer_frame(bufflen=44, fstate=4,
+                                                    fstaten=3))
+        unit = make_bambu_unit(bridge=bridge, ams_index=2)
+        gcmd = unit.gcode.run("AFC_BAMBU_BUFFER_PROBE", UNIT=unit.name)
+        assert gcmd.messages == [
+            ("respond_info", self._line(
+                "buff=80 raw=16420 replylen=44 reads=9",
+                "unit_buff=None unit_raw=None")),
+            ("respond_info", "Bambu_AMS_1: frame=(none)")]
+        assert unit.logger.messages == []
 
 
 class TestAfcBambuAMSCmdAFCBambuVersion:
@@ -20300,6 +20479,56 @@ class TestAfcBambuAMSGetStatus:
         """The firmware stamps bay 1 with a measurement."""
         unit._slots[1] = dict(unit._slots[1], meas_seq=seq, meas_pct=pct)
 
+    # The buffer, shown on the unit whose filament is in a toolhead.
+
+    #: The status fields that carry the buffer.
+    BUFFER_KEYS = ("follow_buff", "buffer", "buffer_state",
+                   "follow_buff_reads", "follow_buff_replylen",
+                   "follow_buff_raw")
+
+    @classmethod
+    def _buffer(cls, monkeypatch: pytest.MonkeyPatch, frame: dict,
+                index: int = 0, tool_loaded: bool = True) -> tuple:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param frame: the bridge's latest status frame
+        :param index: the unit's chain index
+        :param tool_loaded: its lane is in a toolhead
+        :return tuple: the unit's BUFFER_KEYS status values, in order
+        """
+        unit = _bambu_p5_unit(
+            monkeypatch, ams_index=index, bridge=FakeBridge(status=frame),
+            lanes=[LaneSpec("lane5", 0, tool_loaded=tool_loaded)])
+        status = unit.get_status()
+        assert unit.logger.messages == []
+        return tuple(status[k] for k in cls.BUFFER_KEYS)
+
+    @pytest.mark.parametrize("index, own", [
+        (0, (20, 20, "expanded", 9, 44, 280)),
+        (1, (80, 80, "compressed", 9, 44, 16420))])
+    def test_a_unit_in_use_shows_the_buffer_on_its_own_cable(
+            self, monkeypatch, index, own):
+        frame = _two_buffer_frame(bufflen=44)
+        assert self._buffer(monkeypatch, frame, index=index) == own
+
+    def test_a_unit_in_use_shows_the_bus_value_from_a_bridge_with_one(
+            self, monkeypatch):
+        frame = {"buff": 50, "buffraw": 8350, "buffn": 5, "bufflen": 44,
+                 "units": [{"n": 0, "online": True}]}
+        assert self._buffer(monkeypatch, frame) == (
+            50, 50, "neutral", 5, 44, 8350)
+
+    def test_a_unit_in_use_with_no_reading_of_its_own_shows_none(
+            self, monkeypatch):
+        frame = _two_buffer_frame(bufflen=44)
+        assert self._buffer(monkeypatch, frame, index=2) == (
+            None, None, None, 9, 44, None)
+
+    def test_a_unit_not_in_use_shows_no_buffer(self, monkeypatch):
+        frame = _two_buffer_frame(bufflen=44)
+        assert self._buffer(monkeypatch, frame, tool_loaded=False) == (
+            None, None, None, None, None, None)
+
     # A restart: what is published is read back out of the lane's grams.
 
     @SECTIONS
@@ -21564,6 +21793,105 @@ class TestAfcBambuAMSSlotOf:
         assert unit.logger.messages == []
 
 
+class TestAfcBambuAMSBufferFrame:
+    def test_a_frame_with_no_units_is_read_itself(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch)
+        frame = {"buff": 60}
+        assert unit._buffer_frame(frame) is frame
+        assert unit.logger.messages == []
+
+    def test_a_frame_with_no_reading_per_unit_is_read_itself(self,
+                                                              monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch)
+        frame = {"buff": 60, "units": [{"n": 0, "online": True}, "torn",
+                                       {"n": 1, "online": True}]}
+        assert unit._buffer_frame(frame) is frame
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("index", [0, 1])
+    def test_a_unit_reads_its_own_entry(self, monkeypatch, index):
+        unit = _bambu_p5_unit(monkeypatch, ams_index=index)
+        frame = _two_buffer_frame()
+        assert unit._buffer_frame(frame) is frame["units"][index]
+        assert unit.logger.messages == []
+
+    def test_a_unit_the_bridge_has_no_reading_for_reads_nothing(self,
+                                                                 monkeypatch):
+        # Offline or not yet heard: the frame's own value is another unit's buffer.
+        unit = _bambu_p5_unit(monkeypatch, ams_index=2)
+        assert unit._buffer_frame(_two_buffer_frame()) is None
+        frame = _two_buffer_frame()
+        frame["units"].append({"n": 2, "online": False})
+        assert unit._buffer_frame(frame) is None
+        assert unit.logger.messages == []
+
+    def test_an_idle_spare_reads_nothing_at_its_index(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, values={"pool": True})
+        assert unit.pool is True
+        assert unit._buffer_frame(_two_buffer_frame()) is None
+        assert unit.logger.messages == []
+
+    def test_an_idle_spare_still_reads_a_frame_with_one_reading(self,
+                                                                 monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, values={"pool": True})
+        frame = {"buff": 60, "units": [{"n": 0, "online": True}]}
+        assert unit._buffer_frame(frame) is frame
+        assert unit.logger.messages == []
+
+    def test_a_unit_whose_uid_has_not_resolved_reads_nothing(self,
+                                                              monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, values={"unit_uid": "AAAA"},
+                              id_resolved=False)
+        assert unit._buffer_frame(_two_buffer_frame()) is None
+        assert unit.logger.messages == []
+
+    def test_a_unit_whose_uid_resolved_reads_its_own(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, values={"unit_uid": "AAAA"},
+                              id_resolved=True)
+        frame = _two_buffer_frame()
+        assert unit._buffer_frame(frame) is frame["units"][0]
+        assert unit.logger.messages == []
+
+    def test_a_unit_with_no_uid_needs_no_resolving(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, id_resolved=False)
+        assert unit.unit_uid is None
+        frame = _two_buffer_frame()
+        assert unit._buffer_frame(frame) is frame["units"][0]
+        assert unit.logger.messages == []
+
+
+class TestAfcBambuAMSBufferReadingLive:
+    def test_no_bridge_is_not_live(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, offline=True)
+        assert unit.buffer_reading_live() is False
+        assert unit.logger.messages == []
+
+    def test_no_motion_report_is_not_live(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch)
+        assert unit._bridge.mot_unit is None
+        assert unit.buffer_reading_live() is False
+        assert unit.logger.messages == []
+
+    def test_a_report_for_this_unit_is_live(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, ams_index=1)
+        unit._bridge.mot_unit = 1
+        assert unit.buffer_reading_live() is True
+        assert unit.logger.messages == []
+
+    def test_a_report_for_another_unit_is_not_live(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, ams_index=1)
+        unit._bridge.mot_unit = 0
+        assert unit.buffer_reading_live() is False
+        assert unit.logger.messages == []
+
+    def test_an_idle_spare_is_not_live_at_its_index(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, values={"pool": True})
+        unit._bridge.mot_unit = 0
+        assert unit.ams_index == 0
+        assert unit.buffer_reading_live() is False
+        assert unit.logger.messages == []
+
+
 class TestAfcBambuAMSFpsBufferValue:
     @staticmethod
     def _unit(monkeypatch: pytest.MonkeyPatch,
@@ -21574,6 +21902,21 @@ class TestAfcBambuAMSFpsBufferValue:
         :return afcBambuAMS: a unit on a bridge holding that frame
         """
         return _bambu_p5_unit(monkeypatch, bridge=FakeBridge(status=status))
+
+    @pytest.mark.parametrize("index, value", [(0, 0.2), (1, 0.8)])
+    def test_a_unit_reads_the_buffer_on_its_own_cable(self, monkeypatch,
+                                                      index, value):
+        # Two buffers on one bus: the frame's own value is only the last unit heard.
+        unit = _bambu_p5_unit(monkeypatch, ams_index=index,
+                              bridge=FakeBridge(status=_two_buffer_frame()))
+        assert unit.fps_buffer_value() == value
+        assert unit.logger.messages == []
+
+    def test_a_unit_with_no_reading_of_its_own_has_none(self, monkeypatch):
+        unit = _bambu_p5_unit(monkeypatch, ams_index=2,
+                              bridge=FakeBridge(status=_two_buffer_frame()))
+        assert unit.fps_buffer_value() is None
+        assert unit.logger.messages == []
 
     def test_no_bridge_is_none(self, monkeypatch):
         unit = _bambu_p5_unit(monkeypatch, offline=True)

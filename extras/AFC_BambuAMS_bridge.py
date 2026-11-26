@@ -981,6 +981,7 @@ class BambuBridge:
         self._buff_pos: Optional[float] = None
         self._buff_refill: Optional[Tuple[float, float, Optional[float]]] = None
         self._buff_refill_seq: int = 0
+        self._mot_unit: Optional[int] = None
         self._reconnect_cbs: List[Callable[[], None]] = []
         self._fw_up_ms: Optional[int] = None
         self._fw_rebooted = False
@@ -1225,6 +1226,15 @@ class BambuBridge:
     def buff_refill_seq(self) -> int:
         with self._lock:
             return self._buff_refill_seq
+
+    def motion_unit(self) -> Optional[int]:
+        """
+        The unit the last motion report was for, whose readings are newer than the status frame's.
+
+        :return Optional[int]: its chain index, or None once a status frame has followed the report
+        """
+        with self._lock:
+            return self._mot_unit
 
     def _note_dry_refusal(self, text: Optional[str], addr: Optional[int],
                           unit: Optional[int] = None) -> None:
@@ -1737,7 +1747,33 @@ class BambuBridge:
         end = self._rfid_stamp(self._rfid_end_t, self._rfid_end_by_addr, addr)
         return end is not None and since is not None and end >= since
 
+    @staticmethod
+    def _motion_entry(unit: Any, obj: dict) -> Any:
+        """
+        A status frame's unit entry with a motion report folded in.
+
+        :param unit: the entry as the status frame listed it
+        :param obj: the motion report
+        :return Any: the entry, updated when the report is for that unit
+        """
+        if (not isinstance(unit, dict)
+            or unit.get("n") != obj.get("u")):
+            return unit
+        out = dict(unit)
+        if "odom" in obj:
+            out["odom"] = obj["odom"]
+        # The report carries the unit's own reading once it has one, which is when its entry does.
+        if ("buff" in obj
+            and "buff" in unit):
+            out["buff"] = obj["buff"]
+        return out
+
     def _merge_motion(self, obj: dict) -> None:
+        """
+        Fold a motion report into the latest status frame.
+
+        :param obj: the motion report
+        """
         with self._lock:
             latest = self._latest
             if not isinstance(latest, dict):
@@ -1747,14 +1783,10 @@ class BambuBridge:
                 if key in obj:
                     merged[key] = obj[key]
             units = latest.get("units")
-            if ("odom" in obj
-                and isinstance(units, list)):
-                merged["units"] = [
-                    dict(u, odom=obj["odom"])
-                    if isinstance(u, dict) and u.get("n") == obj.get("u")
-                    else u
-                    for u in units]
+            if isinstance(units, list):
+                merged["units"] = [self._motion_entry(u, obj) for u in units]
             self._latest = merged
+            self._mot_unit = obj.get("u")
 
     def handle_line(self, line: str) -> None:
         obj = parse_bridge_line(line)
@@ -1766,6 +1798,7 @@ class BambuBridge:
         if obj.get("evt") == "status":
             with self._lock:
                 self._latest = obj
+                self._mot_unit = None
             if (not self._info_asked
                 or (self._info_due is not None
                     and time.monotonic() >= self._info_due)):

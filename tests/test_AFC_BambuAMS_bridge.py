@@ -3211,6 +3211,105 @@ class TestBambuBridgeSaidSince:
         assert bambu_bridge.said_since(0.0) == []
 
 
+class TestBambuBridgeMotionUnit:
+    def test_no_motion_report_yet_is_none(self, bambu_bridge):
+        assert bambu_bridge.motion_unit() is None
+        assert bambu_bridge.logger.messages == []
+
+    def test_a_motion_report_names_its_unit_until_the_next_status_frame(
+            self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge.handle_line('{"evt":"status","units":[{"n":0},{"n":1}]}')
+        assert bridge.motion_unit() is None
+        bridge.handle_line('{"evt":"mot","u":1,"m":1,"ph":1}')
+        assert bridge._mot_unit == 1
+        assert bridge.motion_unit() == 1
+        bridge.handle_line('{"evt":"status","units":[{"n":0},{"n":1}]}')
+        assert bridge._mot_unit is None
+        assert bridge.motion_unit() is None
+        assert bridge.logger.messages == [REQUEST_INFO_LOG]
+
+
+class TestBambuBridgeMotionEntry:
+    def test_an_entry_that_is_no_dict_is_left_alone(self):
+        assert BambuBridge._motion_entry("torn", {"u": 0, "odom": 5}) == "torn"
+
+    def test_another_units_entry_is_left_alone(self):
+        entry = {"n": 0, "odom": 100, "buff": 20}
+        report = {"u": 1, "odom": 1490, "buff": 81}
+        assert BambuBridge._motion_entry(entry, report) is entry
+        assert entry == {"n": 0, "odom": 100, "buff": 20}
+
+    def test_the_units_own_reading_and_odometer_are_folded_in(self):
+        entry = {"n": 1, "odom": 5, "buff": 20}
+        out = BambuBridge._motion_entry(entry, {"u": 1, "odom": 1490,
+                                                "buff": 81})
+        assert out == {"n": 1, "odom": 1490, "buff": 81}
+        assert entry == {"n": 1, "odom": 5, "buff": 20}     # not edited in place
+
+    def test_a_report_with_no_odometer_keeps_the_entrys(self):
+        out = BambuBridge._motion_entry({"n": 1, "odom": 5, "buff": 20},
+                                        {"u": 1, "buff": 81})
+        assert out == {"n": 1, "odom": 5, "buff": 81}
+
+    def test_a_report_with_no_reading_keeps_the_entrys(self):
+        out = BambuBridge._motion_entry({"n": 1, "odom": 5, "buff": 20},
+                                        {"u": 1, "odom": 1490})
+        assert out == {"n": 1, "odom": 1490, "buff": 20}
+
+    def test_an_entry_with_no_reading_of_its_own_is_given_none(self):
+        # The report then carries the bus-wide value, which may be another unit's buffer.
+        out = BambuBridge._motion_entry({"n": 1, "odom": 5},
+                                        {"u": 1, "odom": 1490, "buff": 81})
+        assert out == {"n": 1, "odom": 1490}
+
+
+class TestBambuBridgeMergeMotion:
+    def test_a_report_before_any_status_frame_is_dropped(self, bambu_bridge):
+        bambu_bridge._merge_motion({"evt": "mot", "u": 0, "buff": 81})
+        assert bambu_bridge._latest is None
+        assert bambu_bridge._mot_unit is None
+        assert bambu_bridge.logger.messages == []
+
+    def test_the_report_is_folded_into_the_frame_and_its_unit(self,
+                                                              bambu_bridge):
+        frame = {"evt": "status", "buff": 20, "buffn": 7,
+                 "units": [{"n": 0, "odom": 100, "buff": 20},
+                           {"n": 1, "odom": 5, "buff": 60}]}
+        bambu_bridge._latest = frame
+        bambu_bridge._merge_motion({"evt": "mot", "u": 1, "buff": 81,
+                                    "buffn": 9, "odom": 1490})
+        assert bambu_bridge._latest == {
+            "evt": "status", "buff": 81, "buffn": 9,
+            "units": [{"n": 0, "odom": 100, "buff": 20},
+                      {"n": 1, "odom": 1490, "buff": 81}]}
+        assert bambu_bridge._latest is not frame
+        assert frame["units"][1] == {"n": 1, "odom": 5, "buff": 60}
+        assert bambu_bridge._mot_unit == 1
+        assert bambu_bridge.logger.messages == []
+
+    def test_a_report_with_no_reading_leaves_the_frames_own(self,
+                                                            bambu_bridge):
+        bambu_bridge._latest = {"evt": "status", "buff": 20, "buffn": 7,
+                                "units": [{"n": 0, "odom": 100}]}
+        bambu_bridge._merge_motion({"evt": "mot", "u": 0, "odom": 130})
+        assert bambu_bridge._latest == {
+            "evt": "status", "buff": 20, "buffn": 7,
+            "units": [{"n": 0, "odom": 130}]}
+        assert bambu_bridge._mot_unit == 0
+        assert bambu_bridge.logger.messages == []
+
+    def test_a_frame_with_no_unit_list_takes_the_bus_value_only(self,
+                                                                bambu_bridge):
+        bambu_bridge._latest = {"evt": "status", "buff": 20, "buffn": 7}
+        bambu_bridge._merge_motion({"evt": "mot", "u": 0, "buff": 81,
+                                    "buffn": 9, "odom": 130})
+        assert bambu_bridge._latest == {"evt": "status", "buff": 81,
+                                        "buffn": 9}
+        assert bambu_bridge._mot_unit == 0
+        assert bambu_bridge.logger.messages == []
+
+
 class TestBambuBridgeLatestStatus:
     def test_latest_status_is_a_copy(self, monkeypatch):
         seen: List[dict] = []

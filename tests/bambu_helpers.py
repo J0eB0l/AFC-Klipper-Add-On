@@ -1729,6 +1729,8 @@ class FakeBridge:
         #: buff_refill_seq() and last_buff_refill().
         self.refill_seq = 0
         self.refill: Optional[tuple] = None
+        #: motion_unit().
+        self.mot_unit: Optional[int] = None
         self.fault = fault
         self.fault_by_unit: Dict[int, Tuple[int, str, float]] = {}
         self.tray_release: Dict[Optional[int], Tuple[int, Optional[int]]] = {}
@@ -1984,6 +1986,10 @@ class FakeBridge:
     def last_buff_refill(self) -> Optional[tuple]:
         """:return Optional[tuple]: the last buffer refill"""
         return self.refill
+
+    def motion_unit(self) -> Optional[int]:
+        """:return Optional[int]: the unit the last motion report was for"""
+        return self.mot_unit
 
     def last_tray_release(self, unit: Optional[int] = None
                           ) -> Tuple[int, Optional[int]]:
