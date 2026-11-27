@@ -12097,7 +12097,12 @@ class afcBambuAMS(afcUnit):
             dist = self._eject_distance()
             fault0 = self._ams_fault_seq()
             self.retract(lane, dist)
-            finished = self._wait_move(dist, fault_mark=fault0)
+            # A unit that narrates no end of its reel shows it in its status frame, as an unload
+            # reads it. Pulled on past that end it faults, and the next unit's feed is refused.
+            slot: Optional[int] = None
+            if not self._bridge.narrates_tray(self.ams_index):
+                slot = self._slot_of(lane)
+            finished = self._wait_move(dist, fault_mark=fault0, accept_tray_release=slot)
             self.stop()
             # The follower tick's fault check is muted while _unload_in_progress.
             latched = self._ams_fault_since(fault0)

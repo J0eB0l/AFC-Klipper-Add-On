@@ -30774,6 +30774,63 @@ class TestAfcBambuAMSEjectLane:
                         "the filament may not be fully back in the bay. Check "
                         "the bay before loading it again.")]
 
+    # a unit that narrates no end of its reel
+
+    @staticmethod
+    def _frame(sel: int, state: str, hubv: int) -> dict:
+        """
+        :param sel: the tray the unit says it has selected (255 for none)
+        :param state: bay 0's own motion state
+        :param hubv: bay 0's raw hub reading
+        :return dict: a status frame for the unit at chain index 0
+        """
+        return {"units": [{"n": 0, "seltray": sel}],
+                "slots": [{"unit": 0, "i": 0, "present": True,
+                           "state": state, "hubv": hubv}]}
+
+    def _reeled_home(self, unit: afcBambuAMS) -> None:
+        """
+        Bay 0 holds the filament in its hub, and 1.95 s on its frame shows it home.
+
+        :param unit: the unit whose bridge reports the frames
+        """
+        unit._bridge.status = self._frame(0, "feeding", 0xE1)
+        _p6_at(unit, 101.95, lambda: setattr(
+            unit._bridge, "status", self._frame(255, "idle", 0xB7)))
+
+    def test_a_unit_that_narrates_no_end_is_home_on_its_status_frame(
+            self, monkeypatch):
+        unit, lane, _ = self._rig(monkeypatch, answers=False)
+        self._reeled_home(unit)
+        assert unit.eject_lane(lane, FakeGcmd()) is True
+        assert unit.reactor.now == pytest.approx(102.0)   # not the 35s deadline
+        assert unit._bridge.sent == [self.STOP, self.SELECT, self.RETRACT,
+                                     self.STOP]
+        assert lane.loaded_to_hub is False
+        assert unit._unload_in_progress is False
+        assert unit.logger.messages == [
+            ("debug", "Bambu_AMS_1: move ended on the STATUS FRAME after "
+                      "2.0s -- tray 0 -> none, bay idle, hub clear")]
+
+    def test_a_unit_that_narrates_its_tray_is_waited_for_its_own_report(
+            self, monkeypatch):
+        # Its frame shows it home and it let the tray go, but its own finish is what ends the wait.
+        unit, lane, _ = self._rig(monkeypatch, answers=False)
+        unit._bridge.tray_narrators = {0}
+        self._reeled_home(unit)
+        _p6_at(unit, 101.95, lambda: unit._bridge.tray_release.update(
+            {0: (1, 0)}))
+        assert unit.eject_lane(lane, FakeGcmd()) is False
+        assert 135.0 <= unit.reactor.now < 135.2     # the 35s deadline
+        assert lane.loaded_to_hub is False
+        assert unit.logger.messages == [
+            ("debug", "Bambu_AMS_1: move ended on the DEADLINE "
+                      "(35s) -- no signal arrived"),
+            ("warning", "Bambu_AMS_1: lane20 eject stopped on a "
+                        "timeout, not on the AMS's own completion report -- "
+                        "the filament may not be fully back in the bay. Check "
+                        "the bay before loading it again.")]
+
     # an AMS Lite cannot reel a lane home
 
     LITE_LET_GO = ("info", "Bambu_AMS_1: an AMS Lite cannot reel "
