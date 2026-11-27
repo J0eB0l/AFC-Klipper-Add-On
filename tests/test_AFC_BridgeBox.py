@@ -10,7 +10,7 @@ import pathlib
 import sys
 import tempfile
 import types
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pytest
 
@@ -19,8 +19,11 @@ from extras.AFC_BambuAMS import _BambuBufferChip, afcBambuAMS, DEFAULT_BOWDEN_MM
 from extras.AFC_BambuAMS_bridge import BambuBridge, TcpPort
 from extras.AFC_BridgeBox import (
     _ChildCommand,
+    _is_tool,
+    _needs_pack,
     _norm_model,
-    _pack_tools,
+    _pack_moves,
+    _pack_plan,
     _parse_map,
     _plan_lane_map,
     _SLOTS_BY_MODEL,
@@ -890,6 +893,92 @@ def _p6_consistent(master: afcBridgeBox) -> None:
     assert afc.tool_cmds == owner
 
 
+#: Alpha's and Bravo's lanes.
+ALPHA_p6 = ("lane24", "lane25", "lane26", "lane27")
+BRAVO_p6 = ("lane28", "lane29", "lane30", "lane31")
+
+#: The line a start logs when Alpha's T4-T7 pack down to T1-T4.
+PACKED_p6 = ("info",
+             "chain1: the T#s saved for the Bambu lanes pack down in lane order: "
+             "lane24 T4 -> T1, lane25 T5 -> T2, lane26 T6 -> T3, lane27 T7 -> T4")
+
+
+def _p6_packing(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+                maps: Sequence[str] = ("T4", "T5", "T6", "T7"),
+                **options: Any) -> afcBridgeBox:
+    """
+    A start whose pack has not run: AAAA saved on Alpha's lanes with ``maps`` while lane5 has T0,
+    and no unit claimed.
+    """
+    var = {"Alpha": {ln: _p6_rec(cmd) for ln, cmd in zip(ALPHA_p6, maps)}}
+    options.setdefault("pack", True)
+    m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha", **options)
+    _p6_other(m, "lane5", ["T0"])
+    drain_var_writes(m.printer)
+    _p6_quiet(m)
+    return m
+
+
+def _p6_holed(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+              **options: Any) -> afcBridgeBox:
+    """AAAA claimed on Alpha's T1-T4, with T0 free again since lane5 left."""
+    m = _p6_named(tmp_path, monkeypatch, **options)
+    afc = m.printer.afc
+    _p6_other(m, "lane5", ["T0"])
+    assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
+    afc.lanes.pop("lane5")
+    afc.tool_cmds.pop("T0")
+    afc.gcode.register_command("T0", None)
+    drain_var_writes(m.printer)
+    _p6_quiet(m)
+    return m
+
+
+def _p6_two_chains(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+                   var: Dict[str, Any], **options: Any) -> Tuple[afcBridgeBox, afcBridgeBox]:
+    """
+    chain1 as _p6_named starts it with Alpha saved for AAAA and, below it, chain2 with one AMS bay
+    Bambu_AMS_B_1 (lane40-lane43) saved for BBBB.
+    """
+    m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha", **options)
+    record_chain_state(tmp_path, "chain2", roster=f"boxed:{B}",
+                       bay_owner=f"{B}:Bambu_AMS_B_1")
+    m2 = make_bridgebox(tmp_path, "chain2", printer=m.printer, roster="", pool_ams=1, pool_ht=0,
+                        lane_base=40, unit_prefix="Bambu_AMS_B",
+                        buffer_chip_name="bambu_buffer_chain2", pack=options.get("pack", False))
+    m.printer.connect()
+    _p6_wire(m2, ())
+    m2._scout_ready()
+    drain_var_writes(m.printer)
+    _p6_quiet(m)
+    return m, m2
+
+
+def _p6_saved(master: afcBridgeBox, bay: str = "Alpha") -> Dict[str, Tuple[Any, Any]]:
+    """:return dict: lane -> (map, current_map) of the records held for a bay"""
+    return {ln: (rec["map"], rec["current_map"])
+            for ln, rec in master._held[bay]["lanes"].items()}
+
+
+def _p6_stand_in(master: afcBridgeBox, pending: bool,
+                 maps: Sequence[str] = ("T3",)) -> _P6OtherLane:
+    """
+    e2's stand-in lane, as PREP leaves an extruder whose lanes all come from a pool.
+
+    :param pending: whether a lane not registered yet names the extruder
+    :param maps: the T#s the stand-in holds
+    """
+    stand_in = _p6_other(master, "e2", maps)
+    stand_in.extruder_obj = types.SimpleNamespace(
+        tc_lane=stand_in, no_lanes=True, _lanes_pending=lambda: pending)
+    return stand_in
+
+
+def _p6_tools(taken: Iterable[str]) -> Set[str]:
+    """:return set: the numbered T#s among command names"""
+    return {cmd for cmd in taken if cmd[:1] == "T" and cmd[1:].isdigit()}
+
+
 class TestNormModel:
     """A model tag as written: trimmed and lower-cased, never coerced."""
 
@@ -1082,18 +1171,92 @@ class TestParseMap:
         assert _parse_map(None) == []
 
 
-class TestPackTools:
-    """Where each T# moves when a set of them packs down."""
+class TestIsTool:
+    """Whether a lane's command is a numbered T#."""
 
-    def test_they_pack_down_in_order_past_the_taken_ones(self):
-        assert _pack_tools({"T9", "T2", "T6"}, {"T0", "T1", "T3"}) == {
-            "T6": "T4", "T9": "T5"}
+    def test_a_t_and_a_number_is_one(self):
+        assert _is_tool("T0") is True
+        assert _is_tool("T14") is True
 
-    def test_none_moves_with_no_gap_below_them(self):
-        assert _pack_tools({"T4", "T5"}, {"T0", "T1", "T2", "T3"}) == {}
+    def test_a_number_without_the_t_is_not(self):
+        assert _is_tool("X4") is False
+
+    def test_a_t_without_a_number_is_not(self):
+        assert _is_tool("TX") is False
+        assert _is_tool("T") is False
+
+
+class TestNeedsPack:
+    """Whether saved T#s cannot all come back as they are, or leave one below them free."""
+
+    def test_a_free_number_below_the_highest_needs_one(self):
+        assert _needs_pack(["T2", "T4"], {"T0", "T1"}) is True
+
+    def test_two_lanes_on_one_number_need_one(self):
+        assert _needs_pack(["T0", "T0", "T1"], set()) is True
+
+    def test_a_number_something_else_holds_needs_one(self):
+        assert _needs_pack(["T1", "T2"], {"T0", "T2"}) is True
+
+    def test_numbers_that_fill_up_to_the_highest_need_none(self):
+        assert _needs_pack(["T2", "T4"], {"T0", "T1", "T3"}) is False
+        assert _needs_pack(["T2", "T0", "T1"], set()) is False
+
+    def test_a_free_number_above_the_highest_needs_none(self):
+        assert _needs_pack(["T0", "T1"], {"T3"}) is False
+
+    def test_a_command_that_is_not_a_numbered_t_sets_no_height(self):
+        assert _needs_pack(["TX", "NONE"], set()) is False
+
+    def test_no_tools_need_none(self):
+        assert _needs_pack([], {"T0"}) is False
+
+
+class TestPackPlan:
+    """The T#s each lane has once they pack down in lane order."""
+
+    def test_they_pack_down_in_lane_order_past_the_taken_ones(self):
+        # lane1 was pushed up to T7 and lane16 took T6 before lanes 4 and 5 came.
+        lanes = {"lane16": ["T6"], "lane0": ["T2"], "lane1": ["T7"], "lane4": ["T11"],
+                 "lane5": ["T12"]}
+        assert _pack_plan(lanes, {"T0", "T1"}) == {
+            "lane1": ["T3"], "lane4": ["T4"], "lane5": ["T5"]}
+
+    def test_lanes_go_by_their_number_not_their_spelling(self):
+        assert _pack_plan({"lane10": ["T0"], "lane9": ["T1"]}, set()) == {
+            "lane9": ["T0"], "lane10": ["T1"]}
+
+    def test_none_moves_with_no_hole_below_them(self):
+        assert _pack_plan({"lane0": ["T4"], "lane1": ["T5"]}, {"T0", "T1", "T2", "T3"}) == {}
+
+    def test_a_lane_keeps_every_tool_it_has(self):
+        assert _pack_plan({"lane0": ["T5", "T9"], "lane1": ["T2"]}, set()) == {
+            "lane0": ["T0", "T1"]}
 
     def test_a_command_that_is_not_a_numbered_t_stays(self):
-        assert _pack_tools({"TX", "T8"}, set()) == {"T8": "T0"}
+        assert _pack_plan({"lane0": ["TX", "T8"], "lane1": ["NONE"]}, set()) == {
+            "lane0": ["TX", "T0"]}
+
+    def test_a_name_with_no_number_goes_with_lane_zero(self):
+        assert _pack_plan({"lane1": ["T7"], "spare": ["T8"], "lane0": ["T9"]}, set()) == {
+            "lane0": ["T0"], "spare": ["T1"], "lane1": ["T2"]}
+
+    def test_a_tool_stays_when_no_number_is_free(self):
+        taken = {f"T{n}" for n in range(99)}
+        assert _pack_plan({"lane0": ["T200"]}, taken) == {}
+
+
+class TestPackMoves:
+    """What a pack moves, for the log."""
+
+    def test_each_changed_tool_is_named_with_its_lane_in_the_plans_order(self):
+        lanes = {"lane4": ["T11"], "lane0": ["T2"], "lane1": ["T7", "TX", "T9"]}
+        plan = {"lane1": ["T3", "TX", "T4"], "lane4": ["T5"]}
+        assert _pack_moves(lanes, plan) == [
+            "lane1 T7 -> T3", "lane1 T9 -> T4", "lane4 T11 -> T5"]
+
+    def test_an_empty_plan_names_none(self):
+        assert _pack_moves({"lane0": ["T2"]}, {}) == []
 
 
 class TestPlanLaneMap:
@@ -15871,139 +16034,65 @@ class TestAfcBridgeBoxClaimPoolUnit:
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
-    # ── the T#s packing down at the start after a forget ─────────────────
+    # The T#s packing down at a start
 
-    #: The line the pack logs when Alpha's T4-T7 move to T1-T4.
-    PACKED = ("info",
-              "chain1: a unit was forgotten, so the Bambu T#s "
-              "pack down: T4 -> T1, T5 -> T2, T6 -> T3, T7 -> T4")
-
-    @classmethod
-    def _packing(cls, tmp_path: pathlib.Path,
-                 monkeypatch: pytest.MonkeyPatch,
-                 pack: bool = True) -> afcBridgeBox:
-        """
-        AAAA saved on Alpha with T4-T7 and lane5 on T0, at the start after a unit on T1-T3 was
-        forgotten.
-        """
-        var = {"Alpha": {ln: _p6_rec(f"T{n}")
-                         for n, ln in enumerate(cls.BAY, 4)}}
-        m = _p6_named(tmp_path, monkeypatch, var=var, owners=f"{A}:Alpha",
-                      state={"pack_tools": "1"} if pack else None)
-        _p6_other(m, "lane5", ["T0"])
-        _p6_quiet(m)
-        return m
-
-    def test_a_forget_sets_the_pack_for_the_next_start(self, tmp_path,
-                                                       monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch)
-        assert m._claim_pool_unit(A, "boxed", "callback") is not None
-        m._release_pool_unit(A, "callback")
-        assert m._state_get(SEC, "pack_tools") is None
-        m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
-        assert m._state_get(SEC, "pack_tools") == "1"
-
-    def test_a_forget_of_a_unit_with_no_saved_tools_sets_none(
-            self, tmp_path, monkeypatch):
-        m = _p6_named(tmp_path, monkeypatch)
-        m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
-        assert m._state_get(SEC, "pack_tools") is None
-
-    def test_the_next_start_packs_the_saved_tools_down(self, tmp_path,
-                                                       monkeypatch):
-        m = self._packing(tmp_path, monkeypatch)
+    def test_a_claim_packs_the_saved_tools_down_first(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
         assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T1"], "lane25": ["T2"], "lane26": ["T3"],
             "lane27": ["T4"]}
         assert _p6_lane(m, "lane24").current_map == "T1"
         assert m.printer.afc.lanes["lane5"].map == ["T0"]
-        assert m._state_get(SEC, "pack_tools") is None
-        assert _p6_log(m) == [self.PACKED] + _p6_claim_log(A, "Alpha")
+        assert _p6_log(m) == [PACKED_p6] + _p6_claim_log(A, "Alpha")
         _p6_consistent(m)
 
-    def test_without_a_forget_the_saved_tools_stay(self, tmp_path,
-                                                   monkeypatch):
-        m = self._packing(tmp_path, monkeypatch, pack=False)
-        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+    def test_a_pack_that_fails_does_not_stop_the_claim(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+
+        def _fail() -> None:
+            """A pack that cannot run."""
+            raise RuntimeError("no pack")
+        monkeypatch.setattr(m, "_pack_at_start", _fail)
+        assert m._claim_pool_unit(A, "boxed", "callback") is _p6_unit(m, "Alpha")
         assert self._maps(m, *self.BAY) == {
             "lane24": ["T4"], "lane25": ["T5"], "lane26": ["T6"],
             "lane27": ["T7"]}
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
 
-    def test_a_held_bay_is_saved_and_kept_on_its_new_tools(self, tmp_path,
-                                                           monkeypatch):
-        m = self._packing(tmp_path, monkeypatch)
-        drain_var_writes(m.printer)
-        m._pack_after_forget()
-        assert m._reserved_tools() == {"T1", "T2", "T3", "T4"}
-        saved = drain_var_writes(m.printer)[-1]["Alpha"]
-        assert {ln: (rec["map"], rec["current_map"])
-                for ln, rec in saved.items()} == {
-            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"),
-            "lane26": ("T3", "T3"), "lane27": ("T4", "T4")}
-        assert m._state_get(SEC, "pack_tools") is None
-        assert _p6_log(m) == [self.PACKED]
-
-    def test_tools_held_by_anything_else_stay_put(self, tmp_path,
-                                                  monkeypatch):
-        m = self._packing(tmp_path, monkeypatch)
-        afc = m.printer.afc
-
-        def _macro(gcmd: Any) -> None:
-            """A user macro on T1."""
-        afc.gcode.register_command("T1", _macro)
-        _p6_other(m, "lane6", ["T9"], config_map=["T3"])
-        assert m._claim_pool_unit(A, "boxed", "callback") is not None
-        assert self._maps(m, *self.BAY) == {
-            "lane24": ["T2"], "lane25": ["T4"], "lane26": ["T5"],
-            "lane27": ["T6"]}
-        assert afc.gcode.ready_gcode_handlers["T1"] is _macro
-        assert _p6_log(m) == [(
-            "info",
-            "chain1: a unit was forgotten, so the Bambu T#s "
-            "pack down: T4 -> T2, T5 -> T4, T6 -> T5, T7 -> T6")] + \
-            _p6_claim_log(A, "Alpha")
-        _p6_consistent(m)
-
-    def test_the_chain_watch_packs_with_no_unit_plugged_in(self, tmp_path,
-                                                           monkeypatch):
-        m = self._packing(tmp_path, monkeypatch)
+    def test_the_chain_watch_packs_with_no_unit_plugged_in(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
         _p6_tick(m, 101, 101)
         assert m._reserved_tools() == {"T1", "T2", "T3", "T4"}
-        assert _p6_log(m) == [self.PACKED]
+        assert _p6_log(m) == [PACKED_p6]
 
-    def test_the_pack_waits_for_prep(self, tmp_path, monkeypatch):
-        m = self._packing(tmp_path, monkeypatch)
-        m.printer.afc.prep_done = False
-        m._pack_after_forget()
-        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
-        assert m._state_get(SEC, "pack_tools") == "1"
-        m.printer.afc.prep_done = True
-        m._pack_after_forget()
-        assert m._reserved_tools() == {"T1", "T2", "T3", "T4"}
-        assert _p6_log(m) == [self.PACKED]
+    def test_a_pack_that_fails_does_not_stop_the_chain_watch(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        ticks = m._tick_count if hasattr(m, "_tick_count") else 0
 
-    def test_a_claimed_unit_leaves_the_pack_for_the_next_start(
-            self, tmp_path, monkeypatch):
-        m = self._packing(tmp_path, monkeypatch)
-        _p6_bay(m, "Bravo")["bound"] = C
-        m._pack_after_forget()
-        _p6_bay(m, "Bravo")["bound"] = None
-        m._pack_after_forget()
+        def _fail() -> None:
+            """A pack that cannot run."""
+            raise RuntimeError("no pack")
+        monkeypatch.setattr(m, "_pack_at_start", _fail)
+        _p6_tick(m, 101, 101)
+        assert m._tick_count == ticks + 1
         assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
-        assert m._state_get(SEC, "pack_tools") == "1"
         assert _p6_log(m) == []
 
-    def test_a_forget_later_in_the_start_packs_at_the_next_one(
-            self, tmp_path, monkeypatch):
-        m = self._packing(tmp_path, monkeypatch, pack=False)
-        m._pack_after_forget()
-        m._state_set({SEC: {"pack_tools": 1}})
-        m._pack_after_forget()
-        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
-        assert m._state_get(SEC, "pack_tools") == "1"
-        assert _p6_log(m) == []
+    def test_the_tools_a_forgotten_unit_left_are_packed_into(self, tmp_path, monkeypatch):
+        # AAAA held T0-T3 on Alpha and CCCC T4-T7 on Bravo; AAAA is forgotten.
+        var = {"Bravo": {ln: _p6_rec(f"T{n}") for n, ln in enumerate(BRAVO_p6, 4)}}
+        m = _p6_named(tmp_path, monkeypatch, recorded=f"boxed:{A}, boxed:{C}", var=var,
+                      owners=f"{A}:Alpha, {C}:Bravo", pack=True)
+        m.cmd_AFC_BRIDGEBOX_FORGET(FakeGcmd({"UID": A}))
+        _p6_quiet(m)
+        m._pack_at_start()
+        assert _p6_saved(m, "Bravo") == {
+            "lane28": ("T0", "T0"), "lane29": ("T1", "T1"), "lane30": ("T2", "T2"),
+            "lane31": ("T3", "T3")}
+        assert _p6_log(m) == [(
+            "info", "chain1: the T#s saved for the Bambu lanes pack down in lane order: "
+                    "lane28 T4 -> T0, lane29 T5 -> T1, lane30 T6 -> T2, lane31 T7 -> T3")]
 
     # ── a unit with no free bay of its family ────────────────────────────
 
@@ -16585,21 +16674,13 @@ class TestAfcBridgeBoxClaimPoolUnit:
         ] + claim[2:]
         _p6_consistent(m)
 
-    @staticmethod
-    def _stand_in(m: afcBridgeBox, pending: bool) -> _P6OtherLane:
-        """e2's stand-in lane on T3, as PREP leaves an extruder whose lanes all come from a pool."""
-        stand_in = _p6_other(m, "e2", ["T3"])
-        stand_in.extruder_obj = types.SimpleNamespace(
-            tc_lane=stand_in, no_lanes=True, _lanes_pending=lambda: pending)
-        return stand_in
-
     def test_a_saved_tool_comes_back_from_a_waiting_extruders_stand_in(
             self, tmp_path, monkeypatch):
         # e2 waits for chain3's claim.
         m = _p6_named(tmp_path, monkeypatch,
                       var={"Alpha": {"lane24": _p6_rec("T3")}},
                       owners=f"{A}:Alpha")
-        stand_in = self._stand_in(m, pending=True)
+        stand_in = _p6_stand_in(m, pending=True)
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed", "callback") is not None
         # The stand-in moves to the next T# after the claim's own lanes.
@@ -16620,7 +16701,7 @@ class TestAfcBridgeBoxClaimPoolUnit:
         m = _p6_named(tmp_path, monkeypatch,
                       var={"Alpha": {"lane24": _p6_rec("T3")}},
                       owners=f"{A}:Alpha")
-        stand_in = self._stand_in(m, pending=False)
+        stand_in = _p6_stand_in(m, pending=False)
         _p6_quiet(m)
         assert m._claim_pool_unit(A, "boxed", "callback") is not None
         assert self._maps(m, "lane24") == {"lane24": ["T0"]}
@@ -17136,6 +17217,889 @@ class TestAfcBridgeBoxClaimPoolUnit:
         # The lanes that have it are still pushed.
         assert sent == [["T1"]]
         assert _p6_log(m) == _p6_claim_log(A, "Alpha")
+
+
+class TestAfcBridgeBoxPackAtStart:
+    """The T#s saved for the Bambu lanes packing down, once a start."""
+
+    def test_a_free_tool_below_them_packs_them_down(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._pack_at_start()
+        packed = {"lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+                  "lane27": ("T4", "T4")}
+        assert _p6_saved(m) == packed
+        assert m._pack_checked is True
+        saved = drain_var_writes(m.printer)[-1]["Alpha"]
+        assert {ln: (rec["map"], rec["current_map"]) for ln, rec in saved.items()} == packed
+        assert _p6_log(m) == [PACKED_p6]
+
+    def test_they_pack_in_lane_order_whatever_order_they_were_saved_in(self, tmp_path,
+                                                                       monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch, maps=("T7", "T4", "T5", "T6"))
+        m._pack_at_start()
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert _p6_log(m) == [(
+            "info", "chain1: the T#s saved for the Bambu lanes pack down in lane order: "
+                    "lane24 T7 -> T1, lane25 T4 -> T2, lane26 T5 -> T3, lane27 T6 -> T4")]
+
+    def test_it_runs_once_a_start(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._pack_at_start()
+        m._held["Alpha"]["lanes"]["lane27"].update(map="T9", current_map="T9")
+        _p6_quiet(m)
+        m._pack_at_start()
+        assert _p6_saved(m)["lane27"] == ("T9", "T9")
+        assert _p6_log(m) == []
+
+    def test_without_afc_it_waits(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        afc, m.printer._afc = m.printer._afc, None
+        m._pack_at_start()
+        assert (m._pack_checked, _p6_saved(m)["lane24"]) == (False, ("T4", "T4"))
+        m.printer._afc = afc
+        m._pack_at_start()
+        assert (m._pack_checked, _p6_saved(m)["lane24"]) == (True, ("T1", "T1"))
+        assert _p6_log(m) == [PACKED_p6]
+
+    def test_it_waits_for_prep(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m.printer.afc.prep_done = False
+        m._pack_at_start()
+        assert (m._pack_checked, _p6_saved(m)["lane24"]) == (False, ("T4", "T4"))
+        m.printer.afc.prep_done = True
+        m._pack_at_start()
+        assert (m._pack_checked, _p6_saved(m)["lane24"]) == (True, ("T1", "T1"))
+        assert _p6_log(m) == [PACKED_p6]
+
+    def test_a_claimed_unit_leaves_them_until_the_next_start(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        _p6_bay(m, "Bravo")["bound"] = C
+        m._pack_at_start()
+        assert m._pack_checked is True
+        _p6_bay(m, "Bravo")["bound"] = None
+        m._pack_at_start()
+        assert _p6_saved(m)["lane24"] == ("T4", "T4")
+        assert drain_var_writes(m.printer) == []
+        assert _p6_log(m) == []
+
+    def test_no_free_tool_below_them_leaves_them(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch, maps=("T1", "T2", "T3", "T4"))
+        m._pack_at_start()
+        assert m._pack_checked is True
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert drain_var_writes(m.printer) == []
+        assert _p6_log(m) == []
+
+    def test_two_lanes_saved_on_one_tool_pack_apart(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch, maps=("T1", "T2", "T2", "T3"))
+        m._pack_at_start()
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert _p6_log(m) == [(
+            "info", "chain1: the T#s saved for the Bambu lanes pack down in lane order: "
+                    "lane26 T2 -> T3, lane27 T3 -> T4")]
+
+    def test_a_tool_another_lane_holds_now_is_packed_off(self, tmp_path, monkeypatch):
+        # lane5 is on T0, which lane24 saved.
+        m = _p6_packing(tmp_path, monkeypatch, maps=("T0", "T1", "T2", "T3"))
+        m._pack_at_start()
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert _p6_log(m) == [(
+            "info", "chain1: the T#s saved for the Bambu lanes pack down in lane order: "
+                    "lane24 T0 -> T1, lane25 T1 -> T2, lane26 T2 -> T3, lane27 T3 -> T4")]
+
+    @pytest.mark.parametrize("odd", ["NONE", "T5, T9"])
+    def test_a_lane_with_no_tool_or_several_leaves_them(self, tmp_path, monkeypatch, odd):
+        # A print's own mapping leaves lanes like this; T1-T3 are free below them all the same.
+        maps = ("T4", odd, "T6", "T7")
+        m = _p6_packing(tmp_path, monkeypatch, maps=maps)
+        m._pack_at_start()
+        assert m._pack_checked is True
+        assert {ln: rec["map"] for ln, rec in m._held["Alpha"]["lanes"].items()} == dict(
+            zip(ALPHA_p6, maps))
+        assert drain_var_writes(m.printer) == []
+        assert _p6_log(m) == []
+
+    def test_a_save_that_fails_still_packs(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        tried: List[str] = []
+
+        def _save() -> None:
+            """A save that cannot write."""
+            tried.append("save")
+            raise OSError("disk full")
+        monkeypatch.setattr(m.printer.afc, "save_vars", _save)
+        m._pack_at_start()
+        assert tried == ["save"]
+        assert _p6_saved(m)["lane27"] == ("T4", "T4")
+        assert _p6_log(m) == [PACKED_p6]
+
+    def test_a_waiting_extruders_stand_in_gives_its_tool_to_them(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        _p6_stand_in(m, pending=True)
+        m._pack_at_start()
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert _p6_log(m) == [PACKED_p6]
+
+    def test_a_loaded_stand_in_on_a_saved_tool_does_not_move_them(self, tmp_path, monkeypatch):
+        # T3 is lane26's saved T#, and the stand-in goes once its extruder's lanes join.
+        m = _p6_packing(tmp_path, monkeypatch, maps=("T1", "T2", "T3", "T4"))
+        _p6_stand_in(m, pending=True)
+        monkeypatch.setattr(m.printer.afc.function, "get_current_lane", lambda: "e2")
+        m._pack_at_start()
+        assert m._pack_checked is True
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert drain_var_writes(m.printer) == []
+        assert _p6_log(m) == []
+
+    def test_a_standalone_extruders_tool_stays_with_it(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        _p6_stand_in(m, pending=False)
+        m._pack_at_start()
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T4", "T4"),
+            "lane27": ("T5", "T5")}
+        assert _p6_log(m) == [(
+            "info", "chain1: the T#s saved for the Bambu lanes pack down in lane order: "
+                    "lane24 T4 -> T1, lane25 T5 -> T2, lane26 T6 -> T4, lane27 T7 -> T5")]
+
+    def test_a_record_that_is_not_a_lane_record_is_left(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._held["Alpha"]["lanes"]["lane99"] = "T9"
+        m._pack_at_start()
+        assert m._held["Alpha"]["lanes"]["lane99"] == "T9"
+        assert m._held["Alpha"]["lanes"]["lane27"]["map"] == "T4"
+        assert _p6_log(m) == [PACKED_p6]
+
+    def test_a_chain_with_nothing_saved_packs_nothing(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch, pack=True)
+        _p6_other(m, "lane5", ["T3"])
+        drain_var_writes(m.printer)
+        _p6_quiet(m)
+        m._held = None
+        m._pack_at_start()
+        assert m._pack_checked is True
+        assert drain_var_writes(m.printer) == []
+        assert _p6_log(m) == []
+
+    #: Alpha on T4-T7 for chain1 and two lanes of chain2's bay on T9 and T12.
+    BOTH = {"Alpha": {ln: _p6_rec(f"T{n}") for n, ln in enumerate(ALPHA_p6, 4)},
+            "Bambu_AMS_B_1": {"lane40": _p6_rec("T9"), "lane41": _p6_rec("T12")}}
+
+    def test_every_chain_packs_in_one_go(self, tmp_path, monkeypatch):
+        m, m2 = _p6_two_chains(tmp_path, monkeypatch, self.BOTH, pack=True)
+        _p6_other(m, "lane5", ["T0"])
+        m2._pack_at_start()
+        assert _p6_saved(m) == {
+            "lane24": ("T1", "T1"), "lane25": ("T2", "T2"), "lane26": ("T3", "T3"),
+            "lane27": ("T4", "T4")}
+        assert _p6_saved(m2, "Bambu_AMS_B_1") == {"lane40": ("T5", "T5"),
+                                                  "lane41": ("T6", "T6")}
+        assert (m._pack_checked, m2._pack_checked) == (True, True)
+        assert _p6_log(m) == [(
+            "info", "chain2: the T#s saved for the Bambu lanes pack down in lane order: "
+                    "lane24 T4 -> T1, lane25 T5 -> T2, lane26 T6 -> T3, lane27 T7 -> T4, "
+                    "lane40 T9 -> T5, lane41 T12 -> T6")]
+        _p6_quiet(m)
+        m._pack_at_start()
+        assert _p6_log(m) == []
+
+    def test_a_unit_claimed_on_another_chain_leaves_them(self, tmp_path, monkeypatch):
+        m, m2 = _p6_two_chains(tmp_path, monkeypatch, self.BOTH, pack=True)
+        _p6_other(m, "lane5", ["T0"])
+        m2._pool_units[0]["bound"] = B
+        m._pack_at_start()
+        assert (m._pack_checked, m2._pack_checked) == (True, True)
+        assert _p6_saved(m)["lane24"] == ("T4", "T4")
+        assert _p6_saved(m2, "Bambu_AMS_B_1")["lane40"] == ("T9", "T9")
+        assert _p6_log(m) == []
+
+
+class TestAfcBridgeBoxAllChains:
+    """Every BridgeBox chain on the printer."""
+
+    def test_the_chains_come_in_config_order(self, tmp_path, monkeypatch):
+        m, m2 = _p6_two_chains(tmp_path, monkeypatch, {})
+        assert m._all_chains() == [m, m2]
+        assert m2._all_chains() == [m, m2]
+
+    def test_another_object_under_the_section_is_left_out(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        m.printer.add_object("AFC_BridgeBox ams2", types.SimpleNamespace(name="ams2"))
+        assert m._all_chains() == [m]
+
+    def test_a_chain_klipper_does_not_list_counts_itself(self, tmp_path):
+        printer = make_printer()
+        m = make_bridgebox(tmp_path, printer=printer, register=False)
+        assert printer.lookup_objects("AFC_BridgeBox") == []
+        assert m._all_chains() == [m]
+
+
+def _stand_in_lane(**extruder: Any) -> Any:
+    """A stand-in lane e2 whose extruder's pool lanes have not joined yet, but for ``extruder``."""
+    lane = types.SimpleNamespace(name="e2")
+    fields: Dict[str, Any] = dict(tc_lane=lane, no_lanes=True, _lanes_pending=lambda: True)
+    fields.update(extruder)
+    lane.extruder_obj = types.SimpleNamespace(**fields)
+    return lane
+
+
+class TestAfcBridgeBoxStandInPending:
+    """Whether a lane stands in for an extruder whose own pool lanes have not joined it yet."""
+
+    def test_a_stand_in_whose_extruder_waits(self):
+        assert afcBridgeBox._stand_in_pending(_stand_in_lane()) is True
+
+    def test_a_pending_lane_list_counts(self):
+        lane = _stand_in_lane(_lanes_pending=lambda: ["lane24"])
+        assert afcBridgeBox._stand_in_pending(lane) is True
+
+    def test_a_lane_with_no_extruder(self):
+        assert afcBridgeBox._stand_in_pending(types.SimpleNamespace(name="lane5")) is False
+
+    def test_a_lane_that_is_not_its_extruders_stand_in(self):
+        lane = _stand_in_lane(tc_lane=types.SimpleNamespace(name="other"))
+        assert afcBridgeBox._stand_in_pending(lane) is False
+
+    def test_an_extruder_that_has_lanes(self):
+        assert afcBridgeBox._stand_in_pending(_stand_in_lane(no_lanes=False)) is False
+
+    def test_an_extruder_that_cannot_say_what_it_waits_for(self):
+        assert afcBridgeBox._stand_in_pending(_stand_in_lane(_lanes_pending=None)) is False
+
+    def test_an_extruder_no_lane_is_coming_for(self):
+        lane = _stand_in_lane(_lanes_pending=lambda: False)
+        assert afcBridgeBox._stand_in_pending(lane) is False
+
+
+class TestAfcBridgeBoxStandInWaits:
+    """Whether a claim may take a saved T# back from an extruder's stand-in lane."""
+
+    AFC = types.SimpleNamespace(current=None)
+
+    def test_a_stand_in_whose_extruder_waits(self):
+        assert afcBridgeBox._stand_in_waits(self.AFC, _stand_in_lane()) is True
+
+    def test_the_loaded_lane_keeps_its_tool(self):
+        afc = types.SimpleNamespace(current="e2")
+        assert afcBridgeBox._stand_in_waits(afc, _stand_in_lane()) is False
+
+    def test_another_loaded_lane_does_not_keep_it(self):
+        afc = types.SimpleNamespace(current="lane5")
+        assert afcBridgeBox._stand_in_waits(afc, _stand_in_lane()) is True
+
+    def test_an_extruder_no_lane_is_coming_for(self):
+        lane = _stand_in_lane(_lanes_pending=lambda: False)
+        assert afcBridgeBox._stand_in_waits(self.AFC, lane) is False
+
+    def test_an_afc_that_cannot_say_which_lane_is_loaded(self):
+        assert afcBridgeBox._stand_in_waits(types.SimpleNamespace(), _stand_in_lane()) is True
+
+
+class TestAfcBridgeBoxTakeBackFromStandIns:
+    """The saved T#s a waiting extruder's stand-in lane gives back to a claim."""
+
+    TOOK = ("debug", "chain1: lane24 takes back its saved T3 from e2, which waits for its own "
+                     "pool lanes")
+
+    @staticmethod
+    def _claimed(*names: str) -> List[Any]:
+        """:return list: lanes of those names, as a claim activated them"""
+        return [types.SimpleNamespace(name=name) for name in names]
+
+    def test_a_waiting_stand_in_gives_the_saved_tool_back(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True)
+        _p6_quiet(m)
+        out = m._take_back_from_stand_ins(afc, self._claimed("lane24", "lane25"),
+                                          {"lane24": _p6_rec("T3")})
+        assert out == [stand_in]
+        assert (stand_in.map, stand_in.current_map) == ([], "")
+        assert afc.tool_cmds == {}
+        assert _p6_log(m) == [self.TOOK]
+
+    def test_the_stand_ins_next_tool_becomes_its_current_one(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True, maps=("T3", "T8"))
+        _p6_quiet(m)
+        out = m._take_back_from_stand_ins(afc, self._claimed("lane24"),
+                                          {"lane24": _p6_rec("T3")})
+        assert out == [stand_in]
+        assert (stand_in.map, stand_in.current_map) == (["T8"], "T8")
+        assert afc.tool_cmds == {"T8": "e2"}
+        assert _p6_log(m) == [self.TOOK]
+
+    def test_a_tool_that_is_not_its_current_one_leaves_that(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True, maps=("T3", "T8"))
+        _p6_quiet(m)
+        m._take_back_from_stand_ins(afc, self._claimed("lane24"), {"lane24": _p6_rec("T8")})
+        assert (stand_in.map, stand_in.current_map) == (["T3"], "T3")
+        assert afc.tool_cmds == {"T3": "e2"}
+        assert _p6_log(m) == [(
+            "debug", "chain1: lane24 takes back its saved T8 from e2, which waits for its own "
+                     "pool lanes")]
+
+    def test_a_stand_in_that_gives_two_tools_is_listed_once(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True, maps=("T3", "T8"))
+        _p6_quiet(m)
+        out = m._take_back_from_stand_ins(
+            afc, self._claimed("lane24", "lane25"),
+            {"lane24": _p6_rec("T3"), "lane25": _p6_rec("T8")})
+        assert out == [stand_in]
+        assert (stand_in.map, stand_in.current_map) == ([], "")
+        assert _p6_log(m) == [self.TOOK, (
+            "debug", "chain1: lane25 takes back its saved T8 from e2, which waits for its own "
+                     "pool lanes")]
+
+    def test_a_tool_no_lane_holds_is_left(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        stand_in = _p6_stand_in(m, pending=True)
+        _p6_quiet(m)
+        out = m._take_back_from_stand_ins(m.printer.afc, self._claimed("lane24"),
+                                          {"lane24": _p6_rec("T5")})
+        assert out == []
+        assert stand_in.map == ["T3"]
+        assert _p6_log(m) == []
+
+    def test_a_standalone_extruders_tool_stays_with_it(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=False)
+        _p6_quiet(m)
+        out = m._take_back_from_stand_ins(afc, self._claimed("lane24"),
+                                          {"lane24": _p6_rec("T3")})
+        assert out == []
+        assert (stand_in.map, afc.tool_cmds) == (["T3"], {"T3": "e2"})
+        assert _p6_log(m) == []
+
+    def test_a_loaded_stand_ins_tool_stays_with_it(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True)
+        monkeypatch.setattr(afc.function, "get_current_lane", lambda: "e2")
+        _p6_quiet(m)
+        out = m._take_back_from_stand_ins(afc, self._claimed("lane24"),
+                                          {"lane24": _p6_rec("T3")})
+        assert out == []
+        assert (stand_in.map, afc.tool_cmds) == (["T3"], {"T3": "e2"})
+        assert _p6_log(m) == []
+
+
+class TestAfcBridgeBoxHeldRecords:
+    """The lane records a chain saves for its known units that are not claimed now."""
+
+    def test_an_unplugged_known_units_records(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        recs = m._held_records()
+        assert sorted(recs) == list(ALPHA_p6)
+        assert all(recs[ln] is m._held["Alpha"]["lanes"][ln] for ln in ALPHA_p6)
+
+    def test_a_claimed_units_records_are_its_lanes_now(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        _p6_bay(m, "Alpha")["bound"] = A
+        assert m._held_records() == {}
+
+    def test_a_bay_that_is_not_saved_for_its_unit(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        assert m._bay_held(_p6_bay(m, "Alpha")) is True
+        m._name_map = {}
+        assert m._bay_held(_p6_bay(m, "Alpha")) is False
+        assert m._held_records() == {}
+
+    def test_records_another_unit_left_on_the_bay(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._held["Alpha"]["uid"] = C
+        assert m._held_records() == {}
+
+    def test_a_record_that_is_not_a_lane_record_is_left_out(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._held["Alpha"]["lanes"]["lane99"] = "T9"
+        assert sorted(m._held_records()) == list(ALPHA_p6)
+
+    def test_a_chain_holding_nothing(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._held = None
+        assert m._held_records() == {}
+
+
+class TestAfcBridgeBoxReservedTools:
+    """The T#s saved for known units that are not claimed now."""
+
+    def test_the_saved_tools_of_an_unplugged_known_unit(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch, maps=("T4", "T5, T9", "NONE", "T7"))
+        assert m._reserved_tools() == {"T4", "T5", "T9", "T7"}
+
+    def test_a_saved_record_that_is_not_a_lane_keeps_no_tool(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        m._held["Alpha"]["lanes"]["lane99"] = "T9"
+        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
+
+    def test_a_claimed_unit_keeps_none(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        _p6_bay(m, "Alpha")["bound"] = A
+        assert m._reserved_tools() == set()
+
+    def test_every_chains_saved_tools_count(self, tmp_path, monkeypatch):
+        var = {"Alpha": {"lane24": _p6_rec("T4")}, "Bambu_AMS_B_1": {"lane40": _p6_rec("T9")}}
+        m, m2 = _p6_two_chains(tmp_path, monkeypatch, var)
+        assert m._reserved_tools() == {"T4", "T9"}
+        assert m2._reserved_tools() == {"T4", "T9"}
+
+
+class TestAfcBridgeBoxOthersTools:
+    """The T#s a pack leaves where they are."""
+
+    @staticmethod
+    def _tools(m: afcBridgeBox, ours: Sequence[str] = (), stand_ins: bool = True) -> Set[str]:
+        """:return set: the numbered T#s among what a pack of ``ours`` leaves"""
+        return _p6_tools(m._others_tools(m.printer.afc, set(ours), stand_ins))
+
+    def test_a_macros_tool_stays_and_a_command_of_ours_with_no_lane_does_not(self, tmp_path,
+                                                                             monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+
+        def _macro(gcmd: Any) -> None:
+            """A user macro on T1."""
+        afc.gcode.register_command("T1", _macro)
+        afc.gcode.register_command("T2", afc.cmd_CHANGE_TOOL)
+        assert self._tools(m) == {"T1"}
+
+    def test_another_lanes_tools_and_config_map_stay(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        _p6_other(m, "lane5", ["T0"], config_map=["T3"])
+        assert self._tools(m) == {"T0", "T3"}
+
+    def test_a_lane_being_packed_is_left_out(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        _p6_other(m, "lane5", ["T0"], config_map=["T3"])
+        _p6_other(m, "lane6", ["T1"])
+        assert self._tools(m, ours=["lane5"]) == {"T1"}
+
+    def test_a_waiting_extruders_stand_in_gives_its_tool_up_at_a_start(self, tmp_path,
+                                                                       monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        _p6_stand_in(m, pending=True)
+        assert self._tools(m, stand_ins=False) == set()
+        assert self._tools(m, stand_ins=True) == {"T3"}
+
+    def test_a_loaded_stand_in_gives_its_tool_up_at_a_start_too(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        _p6_stand_in(m, pending=True)
+        monkeypatch.setattr(m.printer.afc.function, "get_current_lane", lambda: "e2")
+        assert m.printer.afc.current == "e2"
+        assert self._tools(m, stand_ins=False) == set()
+        assert self._tools(m, stand_ins=True) == {"T3"}
+
+    def test_a_standalone_extruders_lane_keeps_its_tool_at_a_start(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        _p6_stand_in(m, pending=False)
+        assert self._tools(m, stand_ins=False) == {"T3"}
+
+    def test_a_chains_own_saved_tools_are_not_counted(self, tmp_path, monkeypatch):
+        m = _p6_packing(tmp_path, monkeypatch)
+        assert m._reserved_tools() == {"T4", "T5", "T6", "T7"}
+        assert self._tools(m) == {"T0"}
+
+    def test_a_lane_with_no_map(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        lane = _p6_other(m, "lane5", ["T0"])
+        lane.map, lane._map = None, None
+        assert self._tools(m) == set()
+
+
+class TestAfcBridgeBoxPackRecords:
+    """Saved lane records moving onto their packed T#s."""
+
+    def test_a_record_takes_its_new_tool_and_the_rest_stay(self):
+        recs = {"lane24": {"map": "T4", "current_map": "T4", "spool_id": 7},
+                "lane25": {"map": "T5", "current_map": "T5"}}
+        afcBridgeBox._pack_records(recs, {"lane24": ["T1"]})
+        assert recs == {"lane24": {"map": "T1", "current_map": "T1", "spool_id": 7},
+                        "lane25": {"map": "T5", "current_map": "T5"}}
+
+    def test_a_map_saved_as_text_stays_text_and_its_current_tool_follows(self):
+        recs = {"lane24": {"map": "T4, T9", "current_map": "T9"}}
+        afcBridgeBox._pack_records(recs, {"lane24": ["T1", "T2"]})
+        assert recs == {"lane24": {"map": "T1, T2", "current_map": "T2"}}
+
+    def test_a_map_saved_as_a_list_stays_a_list(self):
+        recs = {"lane24": {"map": ["T4", "T9"], "current_map": "T4"}}
+        afcBridgeBox._pack_records(recs, {"lane24": ["T1", "T2"]})
+        assert recs == {"lane24": {"map": ["T1", "T2"], "current_map": "T1"}}
+
+    def test_a_current_tool_the_record_does_not_have_becomes_its_first(self):
+        recs = {"lane24": {"map": "T4, T9", "current_map": "T77"},
+                "lane25": {"map": "T5"}}
+        afcBridgeBox._pack_records(recs, {"lane24": ["T1", "T2"], "lane25": ["T3"]})
+        assert recs == {"lane24": {"map": "T1, T2", "current_map": "T1"},
+                        "lane25": {"map": "T3", "current_map": "T3"}}
+
+    def test_an_empty_plan_changes_nothing(self):
+        recs = {"lane24": {"map": "T4", "current_map": "T4"}}
+        afcBridgeBox._pack_records(recs, {})
+        assert recs == {"lane24": {"map": "T4", "current_map": "T4"}}
+
+
+class TestAfcBridgeBoxPackLanes:
+    """Claimed lanes moving onto their packed T#s."""
+
+    @staticmethod
+    def _lanes(m: afcBridgeBox, **maps: List[str]) -> Dict[str, _P6OtherLane]:
+        """:return dict: lanes holding ``maps``, registered in AFC with their T# commands"""
+        return {name: _p6_other(m, name, cmds) for name, cmds in maps.items()}
+
+    def test_a_lane_moves_onto_its_new_tool(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        lanes = self._lanes(m, lane5=["T0"], lane6=["T4"])
+        m._pack_lanes(afc, lanes, {"lane6": ["T1"]})
+        assert (lanes["lane6"].map, lanes["lane6"].current_map) == (["T1"], "T1")
+        assert afc.tool_cmds == {"T0": "lane5", "T1": "lane6"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T0", "T1"}
+        assert (lanes["lane5"].sent, lanes["lane6"].sent) == ([], [["T1"]])
+        _p6_consistent(m)
+
+    def test_a_tool_that_goes_to_another_lane_stays_a_command(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        lanes = self._lanes(m, lane6=["T3"], lane7=["T2"], lane8=["T1"])
+        m._pack_lanes(afc, lanes, {"lane6": ["T0"], "lane7": ["T1"], "lane8": ["T2"]})
+        assert afc.tool_cmds == {"T0": "lane6", "T1": "lane7", "T2": "lane8"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T0", "T1", "T2"}
+        assert [lanes[ln].sent for ln in ("lane6", "lane7", "lane8")] == [
+            [["T0"]], [["T1"]], [["T2"]]]
+        _p6_consistent(m)
+
+    def test_the_current_tool_moves_with_its_number(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        lanes = self._lanes(m, lane6=["T4", "T9"])
+        lanes["lane6"].current_map = "T9"
+        m._pack_lanes(afc, lanes, {"lane6": ["T0", "T1"]})
+        assert (lanes["lane6"].map, lanes["lane6"].current_map) == (["T0", "T1"], "T1")
+        assert afc.tool_cmds == {"T0": "lane6", "T1": "lane6"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T0", "T1"}
+
+    def test_a_current_tool_the_lane_does_not_have_becomes_its_first(self, tmp_path,
+                                                                     monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        lanes = self._lanes(m, lane6=["T4"])
+        lanes["lane6"].current_map = "T77"
+        m._pack_lanes(m.printer.afc, lanes, {"lane6": ["T0"]})
+        assert (lanes["lane6"].map, lanes["lane6"].current_map) == (["T0"], "T0")
+
+    def test_an_empty_plan_changes_nothing(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        lanes = self._lanes(m, lane6=["T4"])
+        m._pack_lanes(afc, lanes, {})
+        assert (lanes["lane6"].map, lanes["lane6"].sent) == (["T4"], [])
+        assert afc.tool_cmds == {"T4": "lane6"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T4"}
+
+
+class TestAfcBridgeBoxPackLive:
+    """Every chain's Bambu T#s packing down with no restart."""
+
+    #: CCCC's saved T8-T11 on Bravo.
+    BRAVO = dict(recorded=f"boxed:{A}, boxed:{C}", owners=f"{A}:Alpha, {C}:Bravo",
+                 var={"Bravo": {ln: _p6_rec(f"T{n}") for n, ln in enumerate(BRAVO_p6, 8)}})
+
+    def test_claimed_lanes_and_saved_ones_pack_together_in_lane_order(self, tmp_path,
+                                                                      monkeypatch):
+        m = _p6_holed(tmp_path, monkeypatch, **self.BRAVO)
+        afc = m.printer.afc
+        assert m._pack_live(afc) == [
+            "lane24 T1 -> T0", "lane25 T2 -> T1", "lane26 T3 -> T2", "lane27 T4 -> T3",
+            "lane28 T8 -> T4", "lane29 T9 -> T5", "lane30 T10 -> T6", "lane31 T11 -> T7"]
+        assert afc.tool_cmds == {"T0": "lane24", "T1": "lane25", "T2": "lane26",
+                                 "T3": "lane27"}
+        assert [_p6_lane(m, ln).current_map for ln in ALPHA_p6] == ["T0", "T1", "T2", "T3"]
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T0", "T1", "T2", "T3"}
+        assert _p6_saved(m, "Bravo") == {
+            "lane28": ("T4", "T4"), "lane29": ("T5", "T5"), "lane30": ("T6", "T6"),
+            "lane31": ("T7", "T7")}
+        _p6_consistent(m)
+
+    def test_a_tool_another_lane_has_stays_where_it_is(self, tmp_path, monkeypatch):
+        m = _p6_holed(tmp_path, monkeypatch, **self.BRAVO)
+        afc = m.printer.afc
+        lane5 = _p6_other(m, "lane5", ["T0"])
+        sent = TestAfcBridgeBoxClaimPoolUnit._pushes(monkeypatch, _p6_lane(m, "lane24"))
+        assert m._pack_live(afc) == [
+            "lane28 T8 -> T5", "lane29 T9 -> T6", "lane30 T10 -> T7", "lane31 T11 -> T8"]
+        assert afc.tool_cmds == {"T0": "lane5", "T1": "lane24", "T2": "lane25",
+                                 "T3": "lane26", "T4": "lane27"}
+        assert (lane5.map, lane5.sent, sent) == (["T0"], [], [])
+        assert _p6_saved(m, "Bravo")["lane28"] == ("T5", "T5")
+        _p6_consistent(m)
+
+    def test_tools_packed_already_move_nothing(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        afc = m.printer.afc
+        before = dict(afc.tool_cmds)
+        assert m._pack_live(afc) == []
+        assert afc.tool_cmds == before == {"T0": "lane24", "T1": "lane25", "T2": "lane26",
+                                           "T3": "lane27"}
+
+    def test_another_chains_lanes_pack_with_them(self, tmp_path, monkeypatch):
+        # Alpha is unplugged on its saved T4-T7; chain2's unit came in on T0-T3.
+        var = {"Alpha": {ln: _p6_rec(f"T{n}") for n, ln in enumerate(ALPHA_p6, 4)}}
+        m, m2 = _p6_two_chains(tmp_path, monkeypatch, var)
+        afc = m.printer.afc
+        assert m2._claim_pool_unit(B, "boxed", "callback") is not None
+        assert afc.tool_cmds == {"T0": "lane40", "T1": "lane41", "T2": "lane42",
+                                 "T3": "lane43"}
+        assert m._pack_live(afc) == [
+            "lane24 T4 -> T0", "lane25 T5 -> T1", "lane26 T6 -> T2", "lane27 T7 -> T3",
+            "lane40 T0 -> T4", "lane41 T1 -> T5", "lane42 T2 -> T6", "lane43 T3 -> T7"]
+        assert _p6_saved(m) == {
+            "lane24": ("T0", "T0"), "lane25": ("T1", "T1"), "lane26": ("T2", "T2"),
+            "lane27": ("T3", "T3")}
+        assert afc.tool_cmds == {"T4": "lane40", "T5": "lane41", "T6": "lane42",
+                                 "T7": "lane43"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T4", "T5", "T6", "T7"}
+        _p6_consistent(m)
+
+
+class TestAfcBridgeBoxClaimedLanes:
+    """The lanes of a chain's claimed units."""
+
+    def test_no_unit_claimed(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claimed_lanes() == {}
+
+    def test_a_claimed_units_lanes(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        assert m._claimed_lanes() == {ln: _p6_lane(m, ln) for ln in ALPHA_p6}
+
+    def test_a_lane_that_is_not_built_is_left_out(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        bay = _p6_bay(m, "Alpha")
+        bay["lanes"] = bay["lanes"] + ["lane99"]
+        assert sorted(m._claimed_lanes()) == list(ALPHA_p6)
+
+    def test_a_lane_back_in_the_pool_is_left_out(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        _p6_lane(m, "lane25").unassigned = True
+        assert sorted(m._claimed_lanes()) == ["lane24", "lane26", "lane27"]
+
+    def test_a_chain_with_no_bays(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        m._pool_units = None
+        assert m._claimed_lanes() == {}
+
+
+class TestAfcBridgeBoxCmdAFCBridgeboxPack:
+    """AFC_BRIDGEBOX_PACK packs every chain's T#s down with no restart."""
+
+    def test_it_packs_the_tools_down_and_says_what_moved(self, tmp_path, monkeypatch):
+        m = _p6_holed(tmp_path, monkeypatch)
+        cmd = FakeGcmd()
+        m.cmd_AFC_BRIDGEBOX_PACK(cmd)
+        assert cmd.messages == [(
+            "respond_info", "BridgeBox: the T#s packed down: lane24 T1 -> T0, lane25 T2 -> T1, "
+                            "lane26 T3 -> T2, lane27 T4 -> T3")]
+        assert m.printer.afc.tool_cmds == {"T0": "lane24", "T1": "lane25", "T2": "lane26",
+                                           "T3": "lane27"}
+        saved = drain_var_writes(m.printer)[-1]["Alpha"]
+        assert {ln: rec["map"] for ln, rec in saved.items()} == {
+            "lane24": "T0", "lane25": "T1", "lane26": "T2", "lane27": "T3"}
+        assert _p6_log(m) == []
+        _p6_consistent(m)
+
+    def test_saved_tools_that_move_are_saved_once(self, tmp_path, monkeypatch):
+        # Only the T#s saved for CCCC move, so no lane's T# command is registered again.
+        m = _p6_holed(tmp_path, monkeypatch, **TestAfcBridgeBoxPackLive.BRAVO)
+        _p6_other(m, "lane5", ["T0"])
+        cmd = FakeGcmd()
+        m.cmd_AFC_BRIDGEBOX_PACK(cmd)
+        assert cmd.messages == [(
+            "respond_info", "BridgeBox: the T#s packed down: lane28 T8 -> T5, lane29 T9 -> T6, "
+                            "lane30 T10 -> T7, lane31 T11 -> T8")]
+        writes = drain_var_writes(m.printer)
+        assert len(writes) == 1
+        assert {ln: rec["map"] for ln, rec in writes[0]["Bravo"].items()} == {
+            "lane28": "T5", "lane29": "T6", "lane30": "T7", "lane31": "T8"}
+
+    def test_tools_packed_already_are_left_and_nothing_is_saved(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        assert m._claim_pool_unit(A, "boxed", "callback") is not None
+        drain_var_writes(m.printer)
+        cmd = FakeGcmd()
+        m.cmd_AFC_BRIDGEBOX_PACK(cmd)
+        assert cmd.messages == [("respond_info", "BridgeBox: the T#s are packed already.")]
+        assert drain_var_writes(m.printer) == []
+        assert m.printer.afc.tool_cmds == {"T0": "lane24", "T1": "lane25", "T2": "lane26",
+                                           "T3": "lane27"}
+
+    def test_it_is_refused_during_a_print(self, tmp_path, monkeypatch):
+        m = _p6_holed(tmp_path, monkeypatch)
+        m.printer.set_print_state("printing")
+        cmd = FakeGcmd()
+        with pytest.raises(m.printer.command_error) as refused:
+            m.cmd_AFC_BRIDGEBOX_PACK(cmd)
+        assert str(refused.value) == ("BridgeBox: the T#s cannot pack during a print. Run it "
+                                      "once the print ends.")
+        assert m.printer.afc.tool_cmds == {"T1": "lane24", "T2": "lane25", "T3": "lane26",
+                                           "T4": "lane27"}
+        assert cmd.messages == []
+        assert drain_var_writes(m.printer) == []
+
+    def test_one_command_serves_every_chain(self, tmp_path, monkeypatch):
+        m, m2 = _p6_two_chains(tmp_path, monkeypatch, {})
+        gcode = m.printer.gcode
+        assert gcode.ready_gcode_handlers["AFC_BRIDGEBOX_PACK"] == m.cmd_AFC_BRIDGEBOX_PACK
+        assert "AFC_BRIDGEBOX_PACK" not in gcode.mux_commands
+        assert m2._claim_pool_unit(B, "boxed", "callback") is not None
+        ran = gcode.run("AFC_BRIDGEBOX_PACK")
+        assert ran.messages == [("respond_info", "BridgeBox: the T#s are packed already.")]
+
+
+class TestAfcBridgeBoxFreeStandIn:
+    """The T#s an extruder's stand-in lane still has once the extruder's own lanes replaced it."""
+
+    def test_its_tools_stop_being_commands(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True, maps=("T3", "T8"))
+        _p6_other(m, "lane5", ["T0"])
+        m._free_stand_in(stand_in)
+        assert afc.tool_cmds == {"T0": "lane5"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T0"}
+
+    def test_a_tool_another_lane_took_stays_a_command(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True, maps=("T3", "T8"))
+        afc.tool_cmds["T3"] = "lane24"
+        m._free_stand_in(stand_in)
+        assert afc.tool_cmds == {"T3": "lane24"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T3"}
+
+    def test_an_extruder_that_made_no_stand_in(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        _p6_other(m, "lane5", ["T0"])
+        m._free_stand_in(None)
+        assert afc.tool_cmds == {"T0": "lane5"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T0"}
+
+    def test_without_afc_nothing_is_freed(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True)
+        m.printer._afc = None
+        m._free_stand_in(stand_in)
+        assert afc.tool_cmds == {"T3": "e2"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T3"}
+
+    def test_a_stand_in_with_no_map(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        stand_in = _p6_stand_in(m, pending=True)
+        stand_in.map = None
+        m._free_stand_in(stand_in)
+        assert afc.tool_cmds == {"T3": "e2"}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == {"T3"}
+
+
+class TestAfcBridgeBoxClearStandalone:
+    """An extruder leaving standalone mode once a live claim gives it lanes."""
+
+    LEFT = ("debug", "chain1: extruder2 left standalone mode (claimed lanes attached)")
+
+    @staticmethod
+    def _extruder(stand_in: Optional[Any], no_lanes: bool = True,
+                  lanes: Sequence[str] = ("lane24",)) -> Any:
+        """:return object: extruder2 with its stand-in lane and the lanes that feed it"""
+        return types.SimpleNamespace(name="extruder2", no_lanes=no_lanes, tc_lane=stand_in,
+                                     lanes={name: object() for name in lanes})
+
+    @staticmethod
+    def _claimed(*extruders: Any) -> List[Any]:
+        """:return list: one claimed lane for each extruder given"""
+        return [types.SimpleNamespace(name=f"lane{24 + n}", extruder_obj=ext)
+                for n, ext in enumerate(extruders)]
+
+    def test_the_extruder_leaves_standalone_mode_and_its_stand_ins_tool_goes(self, tmp_path,
+                                                                             monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        ext = self._extruder(_p6_stand_in(m, pending=True))
+        _p6_quiet(m)
+        m._clear_standalone(self._claimed(ext))
+        assert ext.no_lanes is False
+        assert afc.tool_cmds == {}
+        assert _p6_tools(afc.gcode.ready_gcode_handlers) == set()
+        assert _p6_log(m) == [self.LEFT]
+
+    def test_an_extruder_is_handled_once_for_all_its_lanes(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        ext = self._extruder(_p6_stand_in(m, pending=True))
+        _p6_quiet(m)
+        m._clear_standalone(self._claimed(ext, ext))
+        assert ext.no_lanes is False
+        assert _p6_log(m) == [self.LEFT]
+
+    def test_a_lane_with_no_extruder_is_skipped(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        ext = self._extruder(_p6_stand_in(m, pending=True))
+        _p6_quiet(m)
+        m._clear_standalone(self._claimed(None, ext))
+        assert ext.no_lanes is False
+        assert _p6_log(m) == [self.LEFT]
+
+    def test_an_extruder_that_had_lanes_keeps_everything(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        ext = self._extruder(_p6_stand_in(m, pending=True), no_lanes=False)
+        _p6_quiet(m)
+        m._clear_standalone(self._claimed(ext))
+        assert ext.no_lanes is False
+        assert afc.tool_cmds == {"T3": "e2"}
+        assert _p6_log(m) == []
+
+    def test_an_extruder_still_on_its_stand_in_stays_standalone(self, tmp_path, monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        afc = m.printer.afc
+        ext = self._extruder(_p6_stand_in(m, pending=True), lanes=("e2",))
+        _p6_quiet(m)
+        m._clear_standalone(self._claimed(ext))
+        assert ext.no_lanes is True
+        assert afc.tool_cmds == {"T3": "e2"}
+        assert _p6_log(m) == []
+
+    def test_an_extruder_that_made_no_stand_in_leaves_standalone_mode(self, tmp_path,
+                                                                      monkeypatch):
+        m = _p6_named(tmp_path, monkeypatch)
+        ext = self._extruder(None, lanes=("e2",))
+        _p6_quiet(m)
+        m._clear_standalone(self._claimed(ext))
+        assert ext.no_lanes is False
+        assert _p6_log(m) == [self.LEFT]
 
 
 class TestAfcBridgeBoxNoBayMessage:

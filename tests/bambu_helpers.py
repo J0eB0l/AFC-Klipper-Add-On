@@ -2431,8 +2431,13 @@ def make_bridgebox(tmp_path: pathlib.Path, name: str = "chain1", *,
                    printer: Optional[BambuPrinter] = None,
                    fabricate: Optional[bool] = None,
                    ready: bool = False, register: bool = True,
-                   **options: Any) -> afcBridgeBox:
-    """A chain master through ``afcBridgeBox.__init__``."""
+                   pack: bool = False, **options: Any) -> afcBridgeBox:
+    """
+    A chain master through ``afcBridgeBox.__init__``.
+
+    :param pack: False for a start whose T# pack already ran (see ``_pack_at_start``), so saved
+        T#s with a free one below them stay as a test wrote them
+    """
     printer = printer or make_printer()
     if fabricate is not None:
         printer.fabricate = fabricate
@@ -2443,6 +2448,7 @@ def make_bridgebox(tmp_path: pathlib.Path, name: str = "chain1", *,
     printer.add_section(section, {k: v for k, v in opts.items()
                                   if v is not None})
     master = afcBridgeBox(BambuConfig(section, printer, opts))
+    master._pack_checked = not pack
     if register:
         printer.add_object(section, master)
     if ready:
