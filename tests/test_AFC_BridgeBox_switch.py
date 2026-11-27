@@ -194,6 +194,15 @@ class FakePathUnit(FakeUnit):
         self.forgot += 1
 
 
+class FakeFeedUnit(FakeUnit):
+    """A unit that feeds a lane to a sensor itself and counts how far it went."""
+
+    def __init__(self, name: str, length: Optional[float] = 1500.0) -> None:
+        super().__init__(name)
+        self.feed_to = MagicMock(return_value=False)
+        self.measure_to = MagicMock(return_value=length)
+
+
 class FakeHub:
     """A hub with only the tube lengths the switch changes and whether it reads filament."""
 
@@ -358,6 +367,28 @@ def give_sensor(switch: afcBridgeBoxSwitch, name: str, reads: bool = False) -> F
     extruder.fila_tool_start = FakePinSensor()
     extruder.tool_start_state = reads
     return extruder
+
+
+def take_sensor(switch: afcBridgeBoxSwitch, name: str) -> FakeExtruder:
+    """:return FakeExtruder: one of the printer's extruders, left with no toolhead sensor"""
+    extruder = extruder_of(switch, name)
+    extruder.tool_start = None
+    extruder.fila_tool_start = None
+    return extruder
+
+
+def add_extruder(switch: afcBridgeBoxSwitch, name: str) -> FakeExtruder:
+    """:return FakeExtruder: one more extruder on the printer, with no toolhead sensor"""
+    switch.printer._objects[f"AFC_extruder {name}"] = FakeExtruder(name)
+    return extruder_of(switch, name)
+
+
+# How the switch Chain_1 made says the toolhead of an outlet is set by hand, the command that
+# does it and the button that opens its prompt.
+BY_HAND = ("Set by hand, or AFC_BRIDGEBOX_SWITCH_OUTLET SWITCH=Chain_1, picks the toolhead of "
+           "an outlet.")
+OUTLET = "AFC_BRIDGEBOX_SWITCH_OUTLET SWITCH=Chain_1"
+SET_BY_HAND = ("raw", f"// action:prompt_button Set by hand|{OUTLET}|default")
 
 
 def made(chain: Optional[FakeChain] = None, connect: bool = True,
@@ -811,7 +842,7 @@ class TestAfcBridgeBoxSwitchInit:
             "afc:calibration_buttons": [switch.handle_calibration_buttons]}
         route, assign = "AFC_BRIDGEBOX_SWITCH_ROUTE", "AFC_BRIDGEBOX_SWITCH_ASSIGN"
         calibration, identify = "AFC_BRIDGEBOX_SWITCH_CALIBRATION", "AFC_BRIDGEBOX_SWITCH_IDENTIFY"
-        setup = "AFC_BRIDGEBOX_SWITCH_SETUP"
+        setup, outlet = "AFC_BRIDGEBOX_SWITCH_SETUP", "AFC_BRIDGEBOX_SWITCH_OUTLET"
         assert printer._gcode.register_mux_command.call_args_list == [
             call(route, "SWITCH", "Switch_1", switch.cmd_AFC_BRIDGEBOX_SWITCH_ROUTE,
                  desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_ROUTE_help),
@@ -832,7 +863,11 @@ class TestAfcBridgeBoxSwitchInit:
             call(setup, "SWITCH", "Switch_1", switch.cmd_AFC_BRIDGEBOX_SWITCH_SETUP,
                  desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_SETUP_help),
             call(setup, "SWITCH", None, switch.cmd_AFC_BRIDGEBOX_SWITCH_SETUP,
-                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_SETUP_help)]
+                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_SETUP_help),
+            call(outlet, "SWITCH", "Switch_1", switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET,
+                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET_help),
+            call(outlet, "SWITCH", None, switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET,
+                 desc=switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET_help)]
 
     def test_a_bad_section_is_refused(self):
         with pytest.raises(Exception) as err:
@@ -2549,7 +2584,11 @@ class TestAfcBridgeBoxSwitchOfferSetup:
              [("Set up", self.COMMAND, "primary")])]
         assert switch._setup_offered is True
 
-    def test_with_buffer_ramming_it_says_to_set_the_outlets_and_offers_the_inlets(self):
+    INLETS = ("The inlets can be found now. Put a spool in each unit, then pick Find the "
+              "inlets: one lane of each unit is fed to the switch and reeled back.")
+    BUTTONS = [("Find the inlets", COMMAND, "primary"), ("Set by hand", OUTLET, "default")]
+
+    def test_with_buffer_ramming_it_offers_the_inlets_and_to_set_the_outlets_by_hand(self):
         switch = made()
         extruder_of(switch, "extruder").tool_start = "buffer"
         switch._offer_setup()
@@ -2557,13 +2596,38 @@ class TestAfcBridgeBoxSwitchOfferSetup:
             ("Chain_1", "Chain_1 filament switch",
              [self.NOT_SET,
               "Chain_1: the toolhead each outlet feeds cannot be found by feeding a lane. With "
-              "buffer ramming on extruder there is no toolhead sensor to read. Set "
-              "switch_outlet_a and switch_outlet_b in [AFC_BridgeBox Chain_1] by hand, then "
-              "RESTART.",
-              "The inlets can be found now. Put a spool in each unit, then pick Find the "
-              "inlets: one lane of each unit is fed to the switch and reeled back."],
-             [("Find the inlets", self.COMMAND, "primary")])]
+              f"buffer ramming on extruder there is no toolhead sensor to read. {BY_HAND}",
+              self.INLETS],
+             self.BUTTONS)]
         assert switch._setup_offered is True
+
+    def test_so_it_does_when_no_toolhead_has_a_sensor(self):
+        switch = made()
+        for name in ("extruder", "extruder1"):
+            take_sensor(switch, name)
+        switch._offer_setup()
+        assert chain_of(switch).offers == [
+            ("Chain_1", "Chain_1 filament switch",
+             [self.NOT_SET,
+              "Chain_1: the toolhead each outlet feeds cannot be found by feeding a lane. No "
+              f"toolhead the switch can feed has a sensor of its own. {BY_HAND}",
+              self.INLETS],
+             self.BUTTONS)]
+
+    def test_a_toolhead_with_no_sensor_among_others_is_named_and_the_rest_are_found(self):
+        switch = made()
+        take_sensor(switch, "extruder1")
+        switch._offer_setup()
+        assert chain_of(switch).offers == [
+            ("Chain_1", "Chain_1 filament switch",
+             [self.NOT_SET,
+              "Put a spool in each unit and unload the toolheads the switch feeds, then pick "
+              "Set up. One lane of each unit is fed to the switch to find its inlet, then a "
+              "lane is fed through each outlet until a toolhead sensor reads it. Each lane is "
+              "reeled back.",
+              "Toolheads with no sensor of their own: extruder1. An outlet that feeds one of "
+              "them is not found, and is set by hand."],
+             [("Set up", self.COMMAND, "primary")])]
 
     def test_it_is_offered_once(self):
         switch = made()
@@ -3051,6 +3115,22 @@ class TestAfcBridgeBoxSwitchByLoad:
     def test_any_other_unit_measures_with_its_calibration(self):
         switch = plumbed()
         assert switch._by_load(lane_of(switch, "Turtle_1")) is False
+
+
+class TestAfcBridgeBoxSwitchByFeed:
+    def test_a_unit_that_counts_the_way_of_its_own_feed(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        lane.unit_obj = FakeFeedUnit("Turtle_1")
+        assert switch._by_feed(lane) is True
+
+    def test_a_unit_that_only_feeds_a_lane_to_a_sensor_does_not(self):
+        switch = finding()
+        assert switch._by_feed(lane_of(switch, "Bambu_AMS_1")) is False
+
+    def test_any_other_unit_measures_with_its_calibration(self):
+        switch = plumbed()
+        assert switch._by_feed(lane_of(switch, "Turtle_1")) is False
 
 
 class TestAfcBridgeBoxSwitchSetLength:
@@ -4897,7 +4977,7 @@ class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchCalibration:
             ("raw", "// action:prompt_text Measuring the tube from each outlet to its toolhead "
                     "with lane_Bambu_AMS_1. The lane goes to each toolhead in turn and back."),
             SHOW, menu.MADE_BEGIN, ("raw", f"// action:prompt_text {said}"), menu.MADE_NO_LANE,
-            menu.FIND] + TO_MADE
+            menu.FIND, SET_BY_HAND] + TO_MADE
 
 
 class TestAfcBridgeBoxSwitchOpenMenu:
@@ -4954,7 +5034,8 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
     NO_TOOLHEAD = ("raw", "// action:prompt_text The toolhead each outlet feeds is not known "
                           "yet. Find the toolheads feeds a lane through each outlet until a "
                           "toolhead sensor reads it, and reels it back. Unload the toolheads "
-                          "first.")
+                          "first. Set by hand picks the toolhead of an outlet that feeds one "
+                          "with no sensor.")
     FIND = ("raw", "// action:prompt_button Find the toolheads|AFC_BRIDGEBOX_SWITCH_SETUP "
                    "SWITCH=Chain_1 OUTLETS=1|default")
 
@@ -5043,20 +5124,39 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
         add_hub(lane_of(switch, "Bambu_AMS_1"))
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [
-            self.MADE_BEGIN, self.NO_TOOLHEAD, self.FIND] + TO_MADE
+            self.MADE_BEGIN, self.NO_TOOLHEAD, self.FIND, SET_BY_HAND] + TO_MADE
 
     def test_the_outcome_is_shown_above_that_too(self):
         switch = known()
         switch._calibration_menu(MockGCodeCommand(), "Chain_1: it did not work")
         assert switch.logger.messages == [
             self.MADE_BEGIN, ("raw", "// action:prompt_text Chain_1: it did not work"),
-            self.NO_TOOLHEAD, self.FIND] + TO_MADE
+            self.NO_TOOLHEAD, self.FIND, SET_BY_HAND] + TO_MADE
+
+    def test_with_no_sensor_to_find_a_toolhead_with_it_says_why_and_offers_by_hand_alone(self):
+        switch = known()
+        extruder_of(switch, "extruder").tool_start = "buffer"
+        switch._calibration_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.MADE_BEGIN,
+            ("raw", "// action:prompt_text Chain_1: the toolhead each outlet feeds cannot be "
+                    "found by feeding a lane. With buffer ramming on extruder there is no "
+                    f"toolhead sensor to read. {BY_HAND}"),
+            SET_BY_HAND] + TO_MADE
+
+    def test_toolheads_that_were_set_by_hand_are_not_offered_to_be_found_either(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder")
+        for name in ("extruder", "extruder1"):
+            take_sensor(switch, name)
+        switch._calibration_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.MADE_BEGIN, self.MADE_NO_LANE, SET_BY_HAND] + TO_MADE
 
     def test_a_switch_its_chain_made_names_the_lengths_as_its_chain_writes_them(self):
         switch = known(outlet_a="extruder1", outlet_b="extruder")
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [
-            self.MADE_BEGIN, self.MADE_NO_LANE, self.FIND] + TO_MADE
+            self.MADE_BEGIN, self.MADE_NO_LANE, self.FIND, SET_BY_HAND] + TO_MADE
 
     def test_the_toolheads_can_be_found_again_once_they_are_known(self):
         switch = known(outlet_a="extruder1", outlet_b="extruder")
@@ -5067,11 +5167,19 @@ class TestAfcBridgeBoxSwitchCalibrationMenu:
             self.MADE_BEGIN, self.PICK,
             ("raw", "// action:prompt_button Bambu_AMS_1|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
                     "SWITCH=Chain_1 UNIT=Bambu_AMS_1|primary"),
-            self.FIND] + TO_MADE
+            self.FIND, SET_BY_HAND] + TO_MADE
 
-    def test_outlets_the_chains_section_sets_are_not_offered_to_be_found(self):
+    def test_outlets_the_chains_section_sets_are_not_offered_to_be_found_or_set(self):
         switch = known(outlet_a="extruder1", outlet_b="extruder",
                        by_hand=["outlet_a", "outlet_b"])
+        switch._calibration_menu(MockGCodeCommand())
+        assert switch.logger.messages == [self.MADE_BEGIN, self.MADE_NO_LANE] + TO_MADE
+
+    def test_nor_are_they_with_no_sensor_to_find_a_toolhead_with(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder",
+                       by_hand=["outlet_a", "outlet_b"])
+        for name in ("extruder", "extruder1"):
+            take_sensor(switch, name)
         switch._calibration_menu(MockGCodeCommand())
         assert switch.logger.messages == [self.MADE_BEGIN, self.MADE_NO_LANE] + TO_MADE
 
@@ -5116,11 +5224,39 @@ class TestAfcBridgeBoxSwitchMenu:
             ("raw", "// action:prompt_begin Chain_1 Calibration"),
             ("raw", self.PICK[1] + " Inlet not known yet: Bambu_AMS_1, Bambu_AMS_2. The "
                                    "toolhead each outlet feeds is not known yet: Outlets finds "
-                                   "them."),
-            ("raw", "// action:prompt_button Inlets|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
-                    "SWITCH=Chain_1|primary"),
-            ("raw", "// action:prompt_button Outlets|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
-                    "SWITCH=Chain_1 OUTLETS=1|secondary")] + TO_AFC
+                                   "them. Set outlets by hand picks the toolhead of outlet A "
+                                   "and B, for a toolhead that has no sensor to find it with."),
+            self.MADE_INLETS, self.MADE_OUTLETS, self.MADE_BY_HAND] + TO_AFC
+
+    MADE_INLETS = ("raw", "// action:prompt_button Inlets|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
+                          "SWITCH=Chain_1|primary")
+    MADE_OUTLETS = ("raw", "// action:prompt_button Outlets|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                           "SWITCH=Chain_1 OUTLETS=1|secondary")
+    MADE_BY_HAND = ("raw", f"// action:prompt_button Set outlets by hand|{OUTLET}|default")
+
+    def test_an_outlet_that_was_not_found_beside_one_that_was_is_offered_by_hand(self):
+        switch = known(outlet_a="extruder1")
+        switch._menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            ("raw", "// action:prompt_begin Chain_1 Calibration"),
+            # With one toolhead there is no tube length to measure.
+            ("raw", self.PICK[1] + " Set outlets by hand picks the toolhead of outlet B, for a "
+                                   "toolhead that has no sensor to find it with."),
+            self.MADE_INLETS, self.MADE_OUTLETS, self.MADE_BY_HAND] + TO_AFC
+
+    def test_with_a_toolhead_on_each_outlet_it_is_not(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder", **LENGTHS)
+        switch._menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            ("raw", "// action:prompt_begin Chain_1 Calibration"), self.PICK, self.MADE_INLETS,
+            self.MADE_OUTLETS] + TO_AFC
+
+    def test_an_outlet_the_chains_section_leaves_out_of_a_set_pair_is_not_offered(self):
+        switch = known(outlet_a="extruder1", by_hand=["outlet_a", "outlet_b"], **LENGTHS)
+        switch._menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            ("raw", "// action:prompt_begin Chain_1 Calibration"), self.PICK, self.MADE_INLETS,
+            self.MADE_OUTLETS] + TO_AFC
 
     def test_the_outcome_of_the_last_run_is_shown_above_the_offer_line_by_line(self):
         switch = finding(**LENGTHS)
@@ -5727,6 +5863,44 @@ class TestAfcBridgeBoxSwitchMeasureOutlet:
             "Switch_1: lane_Turtle_1 did not measure the tube to extruder1 through outlet B. "
             "Reset lane_Turtle_1 before the next try.")
 
+    @staticmethod
+    def _fed(switch: afcBridgeBoxSwitch, lane: FakeLane,
+             answer: Tuple[bool, str, float]) -> MagicMock:
+        """
+        Make the lane's unit one that counts the way of its own feed, and script that feed:
+        the lane shows at inlet A on its way and the feed gives ``answer``.
+
+        :return MagicMock: put in place of the switch's feed to measure
+        """
+        lane.unit_obj = FakeFeedUnit(lane.unit)
+
+        def feed(cur_lane: FakeLane, inlet: str, gcmd: Any) -> Tuple[bool, str, float]:
+            switch._seen["A"] = True
+            return answer
+
+        switch._feed_to_measure = MagicMock(side_effect=feed)
+        return switch._feed_to_measure
+
+    def test_a_unit_that_counts_the_way_of_its_own_feed_is_fed_to_measure(self):
+        switch, lane = self._switch()
+        feed = self._fed(switch, lane, (True, "", 1262.0))
+        gcmd = MockGCodeCommand()
+        assert switch._measure_outlet(lane, "A", "B", gcmd) == 1262.0
+        feed.assert_called_once_with(lane, "A", gcmd)
+        lane.unit_obj.calibrate_bowden.assert_not_called()
+        assert lane.extruder_obj is extruder_of(switch, "extruder1")
+        assert chain_of(switch).routes == [0]
+
+    def test_a_feed_that_fails_has_pulled_the_lane_back_so_no_reset_is_asked_for(self):
+        switch, lane = self._switch()
+        self._fed(switch, lane, (False, "Turtle_1 did not get it to the toolhead, and pulled "
+                                        "it back", 0.0))
+        with pytest.raises(SwitchError) as err:
+            switch._measure_outlet(lane, "A", "B", MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: lane_Turtle_1 did not measure the tube to extruder1 through outlet B. "
+            "Turtle_1 did not get it to the toolhead, and pulled it back.")
+
     @pytest.mark.parametrize("moved", [300.0, -300.0])
     def test_a_run_that_fails_past_the_hub_offers_the_lane_reset(self, moved):
         switch, lane = self._switch()
@@ -5936,6 +6110,69 @@ class TestAfcBridgeBoxSwitchLoadToMeasure:
         loading(switch, lane, Load(2104.0, lingers=True))
         assert switch._load_to_measure(lane, "A", MockGCodeCommand()) == (True, "", 2104.0)
         assert switch.reactor.pause.call_count == switch_mod._CLEAR_POLLS
+
+
+class TestAfcBridgeBoxSwitchFeedToMeasure:
+    @staticmethod
+    def _switch(length: Optional[float] = 1262.0
+                ) -> Tuple[afcBridgeBoxSwitch, FakeLane, FakeFeedUnit]:
+        """
+        :return tuple: a switch at rest, Turtle_1's lane, on `extruder`, and its unit, whose
+        feed counts ``length``
+        """
+        switch = plumbed(SimChain(route=2))
+        lane = lane_of(switch, "Turtle_1")
+        lane.unit_obj = FakeFeedUnit("Turtle_1", length)
+        return switch, lane, lane.unit_obj
+
+    def test_the_lane_is_fed_to_its_toolhead_sensor_and_the_units_count_is_the_length(self):
+        switch, lane, unit = self._switch()
+        extruder = give_sensor(switch, "extruder")
+        # What was watched and read before does not count.
+        switch._watched = {"extruder1": extruder_of(switch, "extruder1")}
+        switch._read = ["extruder1"]
+        gcmd = MockGCodeCommand()
+        answer = switch._feed_to_measure(lane, "A", gcmd)
+        assert answer == (True, "", 1262.0)
+        assert type(answer[2]) is float
+        unit.measure_to.assert_called_once_with(lane, switch._saw_toolhead, gcmd)
+        assert switch._watched == {"extruder": extruder}
+        assert switch._read == []
+        assert switch.logger.messages == []
+
+    def test_a_count_in_whole_mm_is_a_length_too(self):
+        switch, lane, _unit = self._switch(1262)
+        answer = switch._feed_to_measure(lane, "A", MockGCodeCommand())
+        assert answer == (True, "", 1262.0)
+        assert type(answer[2]) is float
+
+    def test_a_toolhead_with_no_sensor_of_its_own_is_not_watched(self):
+        switch, lane, unit = self._switch()
+        switch._watched = {"extruder1": extruder_of(switch, "extruder1")}
+        # The unit finds the lane at the extruder itself.
+        assert switch._feed_to_measure(lane, "A", MockGCodeCommand()) == (True, "", 1262.0)
+        assert switch._watched == {}
+        unit.measure_to.assert_called_once()
+
+    def test_nor_is_a_toolhead_sensor_that_reads_filament_already(self):
+        switch, lane, _unit = self._switch()
+        give_sensor(switch, "extruder", reads=True)
+        switch._feed_to_measure(lane, "A", MockGCodeCommand())
+        assert switch._watched == {}
+
+    def test_a_lane_that_did_not_get_to_the_toolhead_measured_nothing(self):
+        switch, lane, _unit = self._switch(None)
+        assert switch._feed_to_measure(lane, "A", MockGCodeCommand()) == (
+            False, "Turtle_1 did not get it to the toolhead, and pulled it back", 0.0)
+
+    def test_the_inlet_is_given_time_to_read_empty_once_the_lane_was_fed(self):
+        switch, lane, unit = self._switch()
+        fed = []
+        switch._wait_clear = MagicMock(side_effect=lambda inlet: fed.append(
+            unit.measure_to.call_count))
+        switch._feed_to_measure(lane, "A", MockGCodeCommand())
+        switch._wait_clear.assert_called_once_with("A")
+        assert fed == [1]
 
 
 class TestAfcBridgeBoxSwitchRestoreTube:
@@ -7726,9 +7963,8 @@ class TestAfcBridgeBoxSwitchRamming:
     def _said(names: str) -> str:
         """:return str: what is said about the extruders that load by buffer ramming"""
         return ("Chain_1: the toolhead each outlet feeds cannot be found by feeding a lane. "
-                f"With buffer ramming on {names} there is no toolhead sensor to read. Set "
-                "switch_outlet_a and switch_outlet_b in [AFC_BridgeBox Chain_1] by hand, then "
-                "RESTART.")
+                f"With buffer ramming on {names} there is no toolhead sensor to read. "
+                f"{BY_HAND}")
 
     def test_with_a_toolhead_sensor_on_every_extruder_there_is_nothing_to_say(self):
         assert made()._ramming() == ""
@@ -7756,8 +7992,120 @@ class TestAfcBridgeBoxSwitchRamming:
         extruder_of(switch, "extruder").tool_start = "buffer"
         assert switch._ramming() == (
             "Switch_1: the toolhead each outlet feeds cannot be found by feeding a lane. With "
-            "buffer ramming on extruder there is no toolhead sensor to read. Set outlet_a and "
-            "outlet_b in [AFC_BridgeBox_switch Switch_1] by hand, then RESTART.")
+            "buffer ramming on extruder there is no toolhead sensor to read. outlet_a and "
+            "outlet_b in [AFC_BridgeBox_switch Switch_1] set the toolhead of each outlet, with "
+            "a RESTART.")
+
+
+class TestAfcBridgeBoxSwitchNoSensor:
+    NONE = ("Chain_1: the toolhead each outlet feeds cannot be found by feeding a lane. No "
+            f"toolhead the switch can feed has a sensor of its own. {BY_HAND}")
+
+    def test_with_a_toolhead_sensor_on_every_extruder_a_toolhead_can_be_found(self):
+        assert made()._no_sensor() == ""
+
+    def test_one_toolhead_with_a_sensor_is_enough(self):
+        switch = made()
+        take_sensor(switch, "extruder")
+        assert switch._no_sensor() == ""
+
+    def test_no_toolhead_with_a_sensor_of_its_own(self):
+        switch = made()
+        for name in ("extruder", "extruder1"):
+            take_sensor(switch, name)
+        assert switch._no_sensor() == self.NONE
+
+    def test_a_sensor_on_a_toolhead_another_switch_feeds_does_not_count(self):
+        first, _second, _lane = two_switches()
+        give_sensor(first, "extruder2")
+        assert first._no_sensor() == (
+            "Switch_1: the toolhead each outlet feeds cannot be found by feeding a lane. No "
+            "toolhead the switch can feed has a sensor of its own. outlet_a and outlet_b in "
+            "[AFC_BridgeBox_switch Switch_1] set the toolhead of each outlet, with a RESTART.")
+
+    def test_buffer_ramming_on_an_extruder_of_its_lanes_is_what_is_said_of_it(self):
+        switch = made()
+        for name in ("extruder", "extruder1"):
+            take_sensor(switch, name)
+        extruder_of(switch, "extruder").tool_start = "buffer"
+        assert switch._no_sensor() == TestAfcBridgeBoxSwitchRamming._said("extruder")
+
+    def test_and_keeps_a_toolhead_from_being_found_with_a_sensor_on_another(self):
+        switch = made()
+        take_sensor(switch, "extruder").tool_start = "buffer"
+        assert switch._no_sensor() == TestAfcBridgeBoxSwitchRamming._said("extruder")
+
+
+class TestAfcBridgeBoxSwitchByHand:
+    def test_a_switch_whose_outlets_are_found_has_them_picked_from_a_prompt(self):
+        assert made()._by_hand() == BY_HAND
+
+    def test_one_outlet_that_is_found_is_enough(self):
+        switch = made(outlet_a="extruder", by_hand=["outlet_a"])
+        assert switch._by_hand() == BY_HAND
+
+    def test_a_switch_with_a_section_of_its_own_has_them_set_there(self):
+        assert finding()._by_hand() == (
+            "outlet_a and outlet_b in [AFC_BridgeBox_switch Switch_1] set the toolhead of each "
+            "outlet, with a RESTART.")
+
+    def test_so_has_a_switch_its_chain_made_whose_section_sets_both(self):
+        switch = made(outlet_a="extruder1", outlet_b="extruder",
+                      by_hand=["outlet_a", "outlet_b"])
+        assert switch._by_hand() == (
+            "switch_outlet_a and switch_outlet_b in [AFC_BridgeBox Chain_1] set the toolhead "
+            "of each outlet, with a RESTART.")
+
+
+class TestAfcBridgeBoxSwitchSensorless:
+    def test_with_a_toolhead_sensor_on_every_extruder_there_is_none(self):
+        assert made()._sensorless() == []
+
+    def test_the_extruders_with_no_sensor_of_their_own_in_number_order(self):
+        switch = made()
+        for name in ("extruder10", "extruder2"):
+            add_extruder(switch, name)
+        assert switch._sensorless() == ["extruder2", "extruder10"]
+
+    def test_a_sensor_that_reads_filament_is_a_sensor(self):
+        switch = made()
+        extruder_of(switch, "extruder").tool_start_state = True
+        assert switch._sensorless() == []
+
+    def test_a_sensor_that_stands_in_for_one_is_none(self):
+        switch = made()
+        extruder_of(switch, "extruder1").tool_start = "virtual"
+        assert switch._sensorless() == ["extruder1"]
+
+    def test_the_extruders_another_switch_feeds_are_left_out(self):
+        first, second, _lane = two_switches()
+        assert first._sensorless() == ["extruder", "extruder1"]
+        assert second._sensorless() == ["extruder2"]
+
+
+class TestAfcBridgeBoxSwitchSensorlessNote:
+    def test_with_a_toolhead_sensor_on_every_extruder_there_is_nothing_to_say(self):
+        assert made()._sensorless_note() == ""
+
+    def test_the_toolheads_with_no_sensor_are_named(self):
+        switch = made()
+        take_sensor(switch, "extruder1")
+        add_extruder(switch, "extruder2")
+        assert switch._sensorless_note() == (
+            "Toolheads with no sensor of their own: extruder1, extruder2. An outlet that feeds "
+            "one of them is not found, and is set by hand.")
+
+
+class TestAfcBridgeBoxSwitchMissed:
+    def test_with_toolheads_that_have_no_sensor_it_names_them(self):
+        switch = made()
+        take_sensor(switch, "extruder1")
+        assert switch._missed() == (
+            "Toolheads with no sensor of their own: extruder1. An outlet that feeds one of "
+            f"them is not found, and is set by hand. {BY_HAND}")
+
+    def test_with_a_sensor_on_every_toolhead_it_says_what_to_check(self):
+        assert made()._missed() == TestAfcBridgeBoxSwitchFindOutlets.CHECK
 
 
 class TestAfcBridgeBoxSwitchSensor:
@@ -7811,6 +8159,21 @@ class TestAfcBridgeBoxSwitchToolheads:
         # Its own extruders are among them: an outlet may be found again.
         assert list(first._toolheads()) == ["extruder", "extruder1"]
         assert list(second._toolheads()) == ["extruder2"]
+
+
+class TestAfcBridgeBoxSwitchReachable:
+    def test_every_extruder_whatever_its_toolhead_sensor_reads(self):
+        switch = made()
+        extruder_of(switch, "extruder").tool_start_state = True
+        take_sensor(switch, "extruder1")
+        assert switch._reachable() == {"extruder": extruder_of(switch, "extruder"),
+                                       "extruder1": extruder_of(switch, "extruder1")}
+
+    def test_the_ones_another_switch_feeds_are_left_out(self):
+        first, second, _lane = two_switches()
+        # Its own extruders are among them.
+        assert list(first._reachable()) == ["extruder", "extruder1"]
+        assert list(second._reachable()) == ["extruder2"]
 
 
 class TestAfcBridgeBoxSwitchSawToolhead:
@@ -7908,8 +8271,6 @@ class TestAfcBridgeBoxSwitchOutletLane:
         self._refused(known(), "lane_Bambu_AMS_2",
                       "lane_Bambu_AMS_2 holds no filament. Put a spool in it first.")
 
-    BY_HAND = "set switch_outlet_a and switch_outlet_b by hand."
-
     @staticmethod
     def _whole_loads(switch: afcBridgeBoxSwitch, unit: str) -> FakeLane:
         """:return FakeLane: a unit's lane, which holds filament and only whole loads move"""
@@ -7928,20 +8289,29 @@ class TestAfcBridgeBoxSwitchOutletLane:
         switch = known()
         self._whole_loads(switch, "Bambu_AMS_1")
         self._refused(switch, None, "no lane that holds filament can be fed to a toolhead "
-                                    "sensor and reeled back. Their units only run whole loads, "
-                                    f"so {self.BY_HAND}")
+                                    "sensor and reeled back. Their units only run whole "
+                                    f"loads. {BY_HAND}")
 
     def test_a_named_lane_that_cannot_be_fed(self):
         switch = known()
         self._whole_loads(switch, "Bambu_AMS_1")
         self._refused(switch, "lane_Bambu_AMS_1",
                       "Bambu_AMS_1 only runs whole loads, so lane_Bambu_AMS_1 cannot be fed to "
-                      f"a sensor and reeled back. Use a lane of another unit, or {self.BY_HAND}")
+                      f"a sensor and reeled back. Use a lane of another unit. {BY_HAND}")
 
 
 class TestAfcBridgeBoxSwitchFindOutlets:
     SAVED = {"outlet_a": "extruder1", "outlet_a_length": "", "outlet_b": "extruder",
              "outlet_b_length": ""}
+    # What ends the lines of a find that left an outlet out, with a sensor on every toolhead.
+    CHECK = ("Check the tube from the outlet to its toolhead, and that the toolhead is "
+             f"unloaded. {BY_HAND}")
+
+    @staticmethod
+    def _unread(letter: str) -> str:
+        """:return str: the line of an outlet the lane was fed through and no sensor read"""
+        return (f"Chain_1: no toolhead sensor read lane_Bambu_AMS_1 through outlet {letter}, "
+                "which stays as it was.")
 
     @staticmethod
     def _switch(toolheads: Optional[Dict[str, List[str]]] = None, unit: str = "Bambu_AMS_1",
@@ -8031,6 +8401,15 @@ class TestAfcBridgeBoxSwitchFindOutlets:
         self._refused(switch, lane, TestAfcBridgeBoxSwitchRamming._said("extruder"))
         feed.assert_not_called()
 
+    def test_with_no_sensor_on_a_toolhead_nothing_is_fed_either(self):
+        switch, lane, feed = self._switch()
+        switch._clear = MagicMock()
+        for name in ("extruder", "extruder1"):
+            take_sensor(switch, name)
+        self._refused(switch, lane, TestAfcBridgeBoxSwitchNoSensor.NONE)
+        switch._clear.assert_not_called()
+        feed.assert_not_called()
+
     def test_a_toolhead_that_reads_filament_keeps_the_lane_from_being_fed(self):
         switch, lane, feed = self._switch()
         extruder_of(switch, "extruder").tool_start_state = True
@@ -8041,23 +8420,57 @@ class TestAfcBridgeBoxSwitchFindOutlets:
     def test_an_outlet_through_which_no_sensor_read_the_lane_stays_as_it_was(self):
         switch, lane, feed = self._switch({"A": ["extruder1"]})
         assert switch._find_outlets(lane, MockGCodeCommand()) == [
-            "Chain_1: outlet A feeds extruder1.",
-            "Chain_1: no toolhead sensor read lane_Bambu_AMS_1 through outlet B, which stays as "
-            "it was. An outlet that feeds a toolhead with no sensor is set with "
-            "switch_outlet_b."]
+            "Chain_1: outlet A feeds extruder1.", self._unread("B"), self.CHECK]
         assert feed.call_count == 2
+        # The extruder outlet A feeds was not watched through outlet B.
+        assert list(switch._watched) == ["extruder"]
         assert switch.outlets == {"A": "extruder1", "B": None}
         assert chain_of(switch).saved == [dict(self.SAVED, outlet_b="")]
 
     def test_a_lane_no_sensor_read_through_either_outlet_finds_nothing(self):
         switch, lane, feed = self._switch({})
         self._refused(switch, lane,
-                      "Chain_1: no toolhead sensor read lane_Bambu_AMS_1 through an outlet. "
-                      "Check the tubes from the switch to the toolheads, or set switch_outlet_a "
-                      "and switch_outlet_b by hand.")
+                      "\n".join([self._unread("A"), self._unread("B"), self.CHECK]))
         # It was fed through both.
         assert feed.call_count == 2
         assert chain_of(switch).routes == [2, 0]
+
+    def test_an_outlet_with_no_sensor_left_to_find_it_with_is_not_fed(self):
+        switch, lane, feed = self._switch()
+        # Outlet B feeds the one toolhead that has no sensor.
+        take_sensor(switch, "extruder")
+        assert switch._find_outlets(lane, MockGCodeCommand()) == [
+            "Chain_1: outlet A feeds extruder1.",
+            "Chain_1: lane_Bambu_AMS_1 was not fed through outlet B, which stays as it was. No "
+            "toolhead sensor that reads empty is left to find its toolhead with.",
+            "Toolheads with no sensor of their own: extruder. An outlet that feeds one of them "
+            f"is not found, and is set by hand. {BY_HAND}"]
+        # Only outlet A was fed through.
+        assert feed.call_count == 1
+        assert chain_of(switch).routes == [2]
+        assert switch.outlets == {"A": "extruder1", "B": None}
+        assert chain_of(switch).saved == [dict(self.SAVED, outlet_b="")]
+
+    def test_a_lane_fed_towards_the_toolhead_with_no_sensor_first_is_not_read_there(self):
+        # Outlet A feeds the toolhead with no sensor, so the lane is fed through it unread.
+        switch, lane, feed = self._switch({"A": ["extruder"], "B": ["extruder1"]})
+        take_sensor(switch, "extruder")
+        assert switch._find_outlets(lane, MockGCodeCommand()) == [
+            self._unread("A"), "Chain_1: outlet B feeds extruder1.",
+            "Toolheads with no sensor of their own: extruder. An outlet that feeds one of them "
+            f"is not found, and is set by hand. {BY_HAND}"]
+        assert feed.call_count == 2
+        assert switch.outlets == {"A": None, "B": "extruder1"}
+
+    def test_with_no_sensor_that_reads_empty_for_either_outlet_nothing_is_found(self):
+        switch, lane, feed = self._switch()
+        switch._toolheads = MagicMock(return_value={})
+        not_fed = ("Chain_1: lane_Bambu_AMS_1 was not fed through outlet {}, which stays as it "
+                   "was. No toolhead sensor that reads empty is left to find its toolhead with.")
+        self._refused(switch, lane,
+                      "\n".join([not_fed.format("A"), not_fed.format("B"), self.CHECK]))
+        feed.assert_not_called()
+        assert chain_of(switch).routes == []
 
     def test_a_lane_that_is_not_reeled_back_ends_it_and_what_was_found_is_kept(self):
         switch, lane, feed = self._switch(lingers=True)
@@ -8087,10 +8500,7 @@ class TestAfcBridgeBoxSwitchFindOutlets:
 
     def test_an_outlet_that_is_not_found_beside_one_that_is_set_is_no_error(self):
         switch, lane, _feed = self._switch({}, outlet_b="extruder", by_hand=["outlet_b"])
-        assert switch._find_outlets(lane, MockGCodeCommand()) == [
-            "Chain_1: no toolhead sensor read lane_Bambu_AMS_1 through outlet A, which stays as "
-            "it was. An outlet that feeds a toolhead with no sensor is set with "
-            "switch_outlet_a."]
+        assert switch._find_outlets(lane, MockGCodeCommand()) == [self._unread("A"), self.CHECK]
         assert switch.outlets == {"A": None, "B": "extruder"}
         assert chain_of(switch).saved == []
 
@@ -8144,15 +8554,19 @@ class TestAfcBridgeBoxSwitchFindOutlet:
     def test_the_inlet_is_pointed_at_the_outlet_and_the_sensor_that_read_the_lane_is_it(self):
         switch, lane, feed = self._switch()
         gcmd = MockGCodeCommand()
-        assert switch._find_outlet(lane, "A", "A", [], gcmd) == "extruder1"
+        watch = switch._toolheads()
+        assert switch._find_outlet(lane, "A", "A", watch, gcmd) == "extruder1"
         assert chain_of(switch).routes == [2]
         feed.assert_called_once_with(lane, switch._saw_toolhead, gcmd)
-        assert list(switch._watched) == ["extruder", "extruder1"]
+        # The watch has a list of its own.
+        assert switch._watched == watch
+        assert switch._watched is not watch
         assert switch._read == ["extruder1"]
 
     def test_an_inlet_that_is_at_the_outlet_is_fed_as_it_is(self):
         switch, lane, feed = self._switch()
-        assert switch._find_outlet(lane, "A", "B", [], MockGCodeCommand()) == "extruder"
+        assert switch._find_outlet(lane, "A", "B", switch._toolheads(),
+                                   MockGCodeCommand()) == "extruder"
         assert chain_of(switch).routes == []
         assert feed.call_count == 1
 
@@ -8160,30 +8574,23 @@ class TestAfcBridgeBoxSwitchFindOutlet:
         switch, lane, feed = self._switch({})
         # What was read through the outlet before does not count.
         switch._read = ["extruder"]
-        assert switch._find_outlet(lane, "A", "A", [], MockGCodeCommand()) is None
+        assert switch._find_outlet(lane, "A", "A", switch._toolheads(),
+                                   MockGCodeCommand()) is None
         assert feed.call_count == 1
         assert switch._read == []
 
-    @pytest.mark.parametrize("taken", [["extruder1"], [None, "extruder1"]])
-    def test_the_extruders_the_other_outlet_feeds_are_not_watched(self, taken):
+    def test_only_the_toolhead_sensors_it_is_given_are_watched(self):
         switch, lane, feed = self._switch()
-        assert switch._find_outlet(lane, "A", "A", taken, MockGCodeCommand()) is None
+        # Outlet A feeds extruder1, which is left out.
+        watch = {"extruder": extruder_of(switch, "extruder")}
+        assert switch._find_outlet(lane, "A", "A", watch, MockGCodeCommand()) is None
         assert feed.call_count == 1
         assert list(switch._watched) == ["extruder"]
-
-    def test_with_no_sensor_left_to_watch_the_lane_is_not_fed(self):
-        switch, lane, feed = self._switch()
-        with pytest.raises(SwitchError) as err:
-            switch._find_outlet(lane, "A", "A", ["extruder", "extruder1"], MockGCodeCommand())
-        assert str(err.value) == ("Chain_1: no toolhead sensor that reads empty is left to find "
-                                  "outlet A with")
-        assert chain_of(switch).routes == []
-        feed.assert_not_called()
 
     def test_two_sensors_that_read_the_lane_leave_the_outlet_unknown(self):
         switch, lane, _feed = self._switch({"A": ["extruder", "extruder1"]})
         with pytest.raises(SwitchError) as err:
-            switch._find_outlet(lane, "A", "A", [], MockGCodeCommand())
+            switch._find_outlet(lane, "A", "A", switch._toolheads(), MockGCodeCommand())
         assert str(err.value) == (
             "Chain_1: the toolhead sensors of extruder and extruder1 read filament while "
             "lane_Bambu_AMS_1 was fed through outlet A, so its toolhead is not known.")
@@ -8192,7 +8599,7 @@ class TestAfcBridgeBoxSwitchFindOutlet:
         switch, lane, feed = self._switch()
         fed = []
         switch._wait_clear = MagicMock(side_effect=lambda inlet: fed.append(feed.call_count))
-        switch._find_outlet(lane, "A", "A", [], MockGCodeCommand())
+        switch._find_outlet(lane, "A", "A", switch._toolheads(), MockGCodeCommand())
         switch._wait_clear.assert_called_once_with("A")
         assert fed == [1]
 
@@ -8202,7 +8609,7 @@ class TestAfcBridgeBoxSwitchFindOutlet:
         lane.unit_obj = FakeUnit("Bambu_AMS_1")
         moves = stepping(switch, stepped(lane), toolhead="extruder1", after=2)
         gcmd = MockGCodeCommand()
-        assert switch._find_outlet(lane, "A", "A", [], gcmd) == "extruder1"
+        assert switch._find_outlet(lane, "A", "A", switch._toolheads(), gcmd) == "extruder1"
         step = call(25.0, SpeedMode.CALIBRATION, AssistActive.NO, gcmd=gcmd)
         assert moves.call_args_list == [step, step,
                                         call(-50.0, SpeedMode.LONG, AssistActive.YES, gcmd=gcmd)]
@@ -8303,6 +8710,250 @@ class TestAfcBridgeBoxSwitchSetOutlets:
         switch._start_unit = MagicMock()
         switch._set_outlets({"A": "extruder1", "B": "extruder"})
         assert switch._start_unit.call_args_list == [call(first)]
+
+
+class TestAfcBridgeBoxSwitchCmdAFCBridgeboxSwitchOutlet:
+    @staticmethod
+    def _stubbed(switch: afcBridgeBoxSwitch) -> afcBridgeBoxSwitch:
+        """:return afcBridgeBoxSwitch: ``switch`` with both of the prompts stubbed"""
+        switch._outlet_menu = MagicMock()
+        switch._extruder_menu = MagicMock()
+        return switch
+
+    def test_without_an_outlet_it_opens_the_prompt_for_the_outlets(self):
+        switch = self._stubbed(known())
+        gcmd = MockGCodeCommand()
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET(gcmd)
+        switch._outlet_menu.assert_called_once_with(gcmd)
+        switch._extruder_menu.assert_not_called()
+        assert switch.outlets == {"A": None, "B": None}
+
+    def test_with_an_outlet_it_opens_the_prompt_for_the_extruders_it_can_feed(self):
+        switch = self._stubbed(known())
+        gcmd = MockGCodeCommand({"OUTLET": "b"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET(gcmd)
+        switch._extruder_menu.assert_called_once_with("B", ["extruder", "extruder1"], gcmd)
+        switch._outlet_menu.assert_not_called()
+        assert switch.outlets == {"A": None, "B": None}
+
+    def test_with_an_extruder_it_is_put_on_the_outlet_and_the_prompt_says_so(self):
+        switch = self._stubbed(known())
+        gcmd = MockGCodeCommand({"OUTLET": "B", "EXTRUDER": "extruder1"})
+        switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET(gcmd)
+        said = "Chain_1: outlet B feeds extruder1, set by hand."
+        assert switch.outlets == {"A": None, "B": "extruder1"}
+        assert chain_of(switch).saved == [{"outlet_a": "", "outlet_a_length": "",
+                                           "outlet_b": "extruder1", "outlet_b_length": ""}]
+        gcmd.respond_info.assert_called_once_with(said)
+        switch._outlet_menu.assert_called_once_with(gcmd, said)
+        switch._extruder_menu.assert_not_called()
+
+    def test_a_pick_that_is_refused_opens_the_prompt_with_why_and_is_an_error(self):
+        switch = self._stubbed(known())
+        gcmd = MockGCodeCommand({"OUTLET": "B", "EXTRUDER": "extruder7"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET(gcmd)
+        said = "Chain_1: EXTRUDER takes extruder or extruder1"
+        assert str(err.value) == said
+        gcmd.error.assert_called_once_with(said)
+        switch._outlet_menu.assert_called_once_with(gcmd, said)
+        gcmd.respond_info.assert_not_called()
+        assert switch.outlets == {"A": None, "B": None}
+        assert chain_of(switch).saved == []
+
+    def test_so_does_an_outlet_that_is_not_one(self):
+        switch = self._stubbed(known())
+        gcmd = MockGCodeCommand({"OUTLET": "C"})
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET(gcmd)
+        assert str(err.value) == "Chain_1: OUTLET takes A or B"
+        switch._outlet_menu.assert_called_once_with(gcmd, "Chain_1: OUTLET takes A or B")
+        switch._extruder_menu.assert_not_called()
+
+    @pytest.mark.parametrize("params", [{}, {"OUTLET": "A", "EXTRUDER": "extruder"}])
+    def test_a_switch_whose_section_sets_its_outlets_has_none_to_set_here(self, params):
+        switch = self._stubbed(finding())
+        gcmd = MockGCodeCommand(params)
+        with pytest.raises(CommandError) as err:
+            switch.cmd_AFC_BRIDGEBOX_SWITCH_OUTLET(gcmd)
+        said = ("Switch_1: its outlets are set in [AFC_BridgeBox_switch Switch_1], and are "
+                "changed there")
+        assert str(err.value) == said
+        gcmd.error.assert_called_once_with(said)
+        switch._outlet_menu.assert_not_called()
+        switch._extruder_menu.assert_not_called()
+        assert switch.outlets == {"A": "extruder", "B": "extruder1"}
+
+
+class TestAfcBridgeBoxSwitchOutletMenu:
+    BEGIN = ("raw", "// action:prompt_begin Chain_1 Outlets by hand")
+    # Back to the prompt for the outlets, where a calibration goes on from.
+    FOOT = [("raw", "// action:prompt_footer_button Back|AFC_BRIDGEBOX_SWITCH_CALIBRATION "
+                    "SWITCH=Chain_1 OUTLETS=1|info")] + CANCEL
+
+    @staticmethod
+    def _text(feeds: str) -> Tuple[str, str]:
+        """:return tuple: the line that says what the prompt is for and what each outlet feeds"""
+        return ("raw", "// action:prompt_text Sets the toolhead an outlet feeds by hand, for a "
+                       f"toolhead that has no sensor to find it with. Now {feeds}. Pick the "
+                       "outlet to set.")
+
+    @staticmethod
+    def _button(letter: str, style: str) -> Tuple[str, str]:
+        """:return tuple: the line of the button that opens an outlet's extruders"""
+        return ("raw", f"// action:prompt_button Outlet {letter}|{OUTLET} OUTLET={letter}|"
+                       f"{style}")
+
+    def test_a_button_for_each_outlet_and_what_each_feeds_now(self):
+        switch = known(outlet_a="extruder1")
+        switch._outlet_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN,
+            self._text("outlet A feeds extruder1 and outlet B feeds no toolhead yet"),
+            self._button("A", "primary"), self._button("B", "secondary")] + self.FOOT
+
+    def test_an_outlet_the_chains_section_sets_is_said_and_has_no_button(self):
+        switch = known(outlet_a="extruder1", by_hand=["outlet_a"])
+        switch._outlet_menu(MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN,
+            self._text("outlet A feeds extruder1 and outlet B feeds no toolhead yet"),
+            self._button("B", "primary")] + self.FOOT
+
+    def test_the_outcome_of_the_last_pick_is_shown_above_the_offer(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder")
+        switch._outlet_menu(MockGCodeCommand(), "Chain_1: outlet B feeds extruder, set by hand.")
+        assert switch.logger.messages == [
+            self.BEGIN,
+            ("raw", "// action:prompt_text Chain_1: outlet B feeds extruder, set by hand."),
+            self._text("outlet A feeds extruder1 and outlet B feeds extruder"),
+            self._button("A", "primary"), self._button("B", "secondary")] + self.FOOT
+
+
+class TestAfcBridgeBoxSwitchExtruderMenu:
+    BEGIN = ("raw", "// action:prompt_begin Chain_1 Outlet B")
+    ROW = ("raw", "// action:prompt_button_group_start")
+    ROW_END = ("raw", "// action:prompt_button_group_end")
+    FOOT = [("raw", f"// action:prompt_footer_button Back|{OUTLET}|info")] + CANCEL
+
+    @staticmethod
+    def _button(name: str, style: str) -> Tuple[str, str]:
+        """:return tuple: the line of the button that puts an extruder on outlet B"""
+        return ("raw", f"// action:prompt_button {name}|{OUTLET} OUTLET=B EXTRUDER={name}|"
+                       f"{style}")
+
+    def test_every_extruder_it_is_given_two_to_a_row_primary_then_secondary(self):
+        switch = known()
+        switch._extruder_menu("B", ["extruder", "extruder1", "extruder2"], MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN, ("raw", "// action:prompt_text Pick the toolhead outlet B feeds."),
+            self.ROW, self._button("extruder", "primary"),
+            self._button("extruder1", "secondary"), self.ROW_END,
+            self.ROW, self._button("extruder2", "primary"), self.ROW_END] + self.FOOT
+
+    def test_the_extruder_the_outlet_feeds_now_is_said(self):
+        switch = known(outlet_b="extruder")
+        switch._extruder_menu("B", ["extruder"], MockGCodeCommand())
+        assert switch.logger.messages == [
+            self.BEGIN,
+            ("raw", "// action:prompt_text Pick the toolhead outlet B feeds. It feeds extruder "
+                    "now."),
+            self.ROW, self._button("extruder", "primary"), self.ROW_END] + self.FOOT
+
+
+class TestAfcBridgeBoxSwitchPickable:
+    @staticmethod
+    def _refused(switch: afcBridgeBoxSwitch, outlet: str, said: str) -> None:
+        """Check an outlet can be given no extruder, with ``said``."""
+        with pytest.raises(SwitchError) as err:
+            switch._pickable(outlet)
+        assert str(err.value) == f"Chain_1: {said}"
+
+    def test_every_extruder_the_switch_can_feed_in_number_order(self):
+        switch = made()
+        for name in ("extruder10", "extruder2"):
+            add_extruder(switch, name)
+        # With a toolhead sensor or with none, and also the one the other outlet feeds.
+        switch.outlets["A"] = "extruder1"
+        assert switch._pickable("B") == ["extruder", "extruder1", "extruder2", "extruder10"]
+
+    def test_the_extruder_of_an_outlet_the_chains_section_sets_is_left_out(self):
+        switch = made(outlet_a="extruder1", by_hand=["outlet_a"])
+        assert switch._pickable("B") == ["extruder"]
+
+    def test_an_outlet_that_is_not_one(self):
+        self._refused(made(), "C", "OUTLET takes A or B")
+
+    def test_an_outlet_the_chains_section_sets(self):
+        switch = made(outlet_a="extruder1", by_hand=["outlet_a"])
+        self._refused(switch, "A", "outlet A is set in [AFC_BridgeBox Chain_1], and is changed "
+                                   "there")
+
+    def test_an_outlet_with_no_extruder_left_for_it(self):
+        switch = made(outlet_a="extruder1", by_hand=["outlet_a"])
+        del switch.printer._objects["AFC_extruder extruder"]
+        self._refused(switch, "B", "no extruder is left for outlet B. Another outlet or "
+                                   "filament switch feeds each one.")
+
+
+class TestAfcBridgeBoxSwitchPick:
+    NAMES = ["extruder", "extruder1"]
+
+    @staticmethod
+    def _refused(switch: afcBridgeBoxSwitch, name: str, said: str) -> None:
+        """Check an extruder is not put on outlet B, with ``said``, and nothing is saved."""
+        was = dict(switch.outlets)
+        with pytest.raises(SwitchError) as err:
+            switch._pick("B", name, TestAfcBridgeBoxSwitchPick.NAMES)
+        assert str(err.value) == f"Chain_1: {said}"
+        assert switch.outlets == was
+        assert chain_of(switch).saved == []
+        switch.afc.save_vars.assert_not_called()
+
+    def test_the_extruder_is_put_on_the_outlet_and_kept_as_one_that_was_found_is(self):
+        switch = known()
+        assert switch._pick("B", "extruder1", self.NAMES) == (
+            "Chain_1: outlet B feeds extruder1, set by hand.")
+        assert switch.outlets == {"A": None, "B": "extruder1"}
+        assert chain_of(switch).saved == [{"outlet_a": "", "outlet_a_length": "",
+                                           "outlet_b": "extruder1", "outlet_b_length": ""}]
+        # Every unit's lanes go to the one toolhead there is.
+        for unit in BAYS:
+            assert lane_of(switch, unit).extruder_obj.name == "extruder1"
+        switch.afc.save_vars.assert_called_once_with()
+
+    def test_an_extruder_the_other_outlet_fed_leaves_that_outlet_with_none(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder")
+        assert switch._pick("B", "extruder1", self.NAMES) == (
+            "Chain_1: outlet B feeds extruder1, set by hand. Outlet A has no toolhead now.")
+        assert switch.outlets == {"A": None, "B": "extruder1"}
+        assert chain_of(switch).saved == [{"outlet_a": "", "outlet_a_length": "",
+                                           "outlet_b": "extruder1", "outlet_b_length": ""}]
+
+    def test_the_extruder_the_outlet_feeds_already_changes_nothing(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder", **LENGTHS)
+        assert switch._pick("B", "extruder", self.NAMES) == (
+            "Chain_1: outlet B already feeds extruder.")
+        assert switch.outlets == {"A": "extruder1", "B": "extruder"}
+        # The tube lengths that were measured stay.
+        assert switch.lengths == {"A": 850.0, "B": 1010.0}
+        assert chain_of(switch).saved == []
+        switch.afc.save_vars.assert_not_called()
+
+    def test_while_a_print_runs_no_outlet_is_set(self):
+        switch = known()
+        switch.afc.function.in_print.return_value = True
+        self._refused(switch, "extruder1", "an outlet is not set while a print runs")
+
+    def test_an_extruder_the_outlet_cannot_be_given(self):
+        self._refused(known(), "extruder7", "EXTRUDER takes extruder or extruder1")
+
+    def test_a_lane_that_is_loaded_in_a_toolhead_keeps_the_outlets_as_they_are(self):
+        switch = known(outlet_a="extruder1", outlet_b="extruder")
+        lane_of(switch, "Bambu_AMS_2").tool_loaded = True
+        self._refused(switch, "extruder1",
+                      "lane_Bambu_AMS_2 is loaded in extruder. Unload it first, then set the "
+                      "outlet.")
 
 
 class TestAfcBridgeBoxSwitchForget:

@@ -175,9 +175,10 @@ auto_drop: True
 # outlets by feeding a lane of each unit. What it finds is saved with the
 # chain's state. The chain's lanes do not load until the switch is set up.
 #
-# The outlets are found with each extruder's toolhead sensor. With
-# pin_tool_start: buffer there is no sensor to find them with: set
-# switch_outlet_a and switch_outlet_b here and RESTART.
+# The outlets are found with each extruder's toolhead sensor. A toolhead
+# with no sensor of its own, as with pin_tool_start: buffer, cannot be
+# found: the prompt's Set by hand button picks the extruder its outlet
+# feeds, or set switch_outlet_a and switch_outlet_b here and RESTART.
 #
 # An option set here is used as written and is not looked for. The letters
 # are the ones printed on the switch. An inlet takes unit names, an outlet

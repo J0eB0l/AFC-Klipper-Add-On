@@ -1,7 +1,8 @@
 """
 Tests for the feed an OpenAMS unit runs for a caller that looks for a lane's filament at a
-sensor of its own (afcAMS.feed_to and its helpers): the lane is fed out of its bay until the
-caller's check sees it, and is then unloaded back.
+sensor of its own (afcAMS.feed_to, afcAMS.measure_to and their helpers): the lane is fed out of
+its bay until the caller's check sees it, and is then unloaded back. A feed that is measured
+gives the way the lane went by the encoder.
 """
 
 import sys
@@ -68,6 +69,9 @@ class FakeOams:
         # reports for it.
         self.ends = False
         self.ends_code: Optional[int] = None
+        # The encoder count, and the clicks a load turns it by as soon as it is sent.
+        self.encoder_clicks = 5000
+        self.turns = 0
 
     def is_bay_ready(self, bay: int) -> bool:
         self.sent.append(("ready", bay))
@@ -80,6 +84,7 @@ class FakeOams:
         self.sent.append(("load", args[0]))
         if self.send_error is not None:
             raise self.send_error
+        self.encoder_clicks += self.turns
         if self.ends:
             self.action_status = None
             self.action_status_code = self.ends_code
@@ -171,16 +176,66 @@ class TestAfcAMSFeedToBlocked:
 class TestAfcAMSFeedTo:
     GCMD = MockGCodeCommand()
 
+    @pytest.mark.parametrize("found", [True, False])
+    def test_it_says_whether_the_feed_was_seen_and_measures_nothing(self, found):
+        ams, _oams, lane = make_unit()
+        ams._feed_out = MagicMock(return_value=(found, None))
+        seen = MagicMock()
+        assert ams.feed_to(lane, seen, self.GCMD) is found
+        ams._feed_out.assert_called_once_with(lane, seen, False)
+
+
+class TestAfcAMSMeasureTo:
+    GCMD = MockGCodeCommand()
+
+    def test_the_clicks_the_feed_turned_are_given_in_mm(self):
+        ams, _oams, lane = make_unit()
+        ams._feed_out = MagicMock(return_value=(True, 1400))
+        seen = MagicMock()
+        # 1.75 clicks to the mm: 1400 clicks are 800 mm.
+        assert ams.measure_to(lane, seen, self.GCMD) == 800.0
+        ams._feed_out.assert_called_once_with(lane, seen, True)
+        assert ams.logger.messages == [
+            ("info", "ams1: lane1 went 1400 encoder clicks, 800 mm")]
+
+    def test_a_lane_nothing_saw_that_got_to_an_extruder_has_a_length_too(self):
+        ams, _oams, lane = make_unit()
+        ams._feed_out = MagicMock(return_value=(False, 350))
+        assert ams.measure_to(lane, MagicMock(), self.GCMD) == 200.0
+        assert ams.logger.messages == [
+            ("info", "ams1: lane1 went 350 encoder clicks, 200 mm")]
+
+    def test_a_feed_that_gave_no_clicks_gives_no_length(self):
+        ams, _oams, lane = make_unit()
+        ams._feed_out = MagicMock(return_value=(True, None))
+        assert ams.measure_to(lane, MagicMock(), self.GCMD) is None
+        assert ams.logger.messages == []
+
+
+class TestAfcAMSFeedOut:
+    # What the unit is sent for a feed whose clicks were read before it was unloaded.
+    READ = [("follower", 0, 0), ("cancel",), ("clicks",), ("unload",), ("clear",)]
+
+    @staticmethod
+    def reads(ams: afcAMS, oams: FakeOams, clicks: Optional[int] = 1200) -> MagicMock:
+        """:return MagicMock: put in place of the read of the encoder, which it records"""
+        ams._fed_clicks = MagicMock(
+            side_effect=lambda lane, start: oams.sent.append(("clicks",)) or clicks)
+        return ams._fed_clicks
+
     def test_the_lane_is_fed_until_it_is_seen_and_unloaded_back(self):
         ams, oams, lane = make_unit()
+        read = self.reads(ams, oams)
         seen = MagicMock(side_effect=[False, False, True])
-        assert ams.feed_to(lane, seen, self.GCMD) is True
+        assert ams._feed_out(lane, seen, False) == (True, None)
         assert seen.call_count == 3
         # The follower runs forward before the load, as for a load to the toolhead, and the
         # load is canceled where it stands.
         assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + STOPPED
         assert ams.logger.messages == [
             ("debug", "ams1: feed of lane1 stopped: its filament was seen")]
+        # A feed that is not measured does not wait for the encoder.
+        read.assert_not_called()
         left_idle(ams)
 
     def test_the_load_is_marked_as_going_before_it_is_sent(self):
@@ -193,15 +248,17 @@ class TestAfcAMSFeedTo:
             send(args)
 
         oams.send = record
-        ams.feed_to(lane, MagicMock(return_value=True), self.GCMD)
+        ams._feed_out(lane, MagicMock(return_value=True), False)
         assert going == [(OAMSStatus.LOADING, None, True)]
 
     def test_a_lane_that_may_not_be_fed_is_left_alone(self):
         ams, oams, lane = make_unit()
+        read = self.reads(ams, oams)
         oams.ready[1] = False
         seen = MagicMock(return_value=True)
-        assert ams.feed_to(lane, seen, self.GCMD) is False
+        assert ams._feed_out(lane, seen, True) == (False, None)
         seen.assert_not_called()
+        read.assert_not_called()
         assert oams.sent == [("ready", 1)]
         assert ams.logger.messages == [
             ("warning", "ams1: lane1 is not fed: its bay holds no filament")]
@@ -211,7 +268,7 @@ class TestAfcAMSFeedTo:
     def test_a_unit_that_is_busy_stays_busy(self):
         ams, _oams, lane = make_unit()
         ams._operation_active = True
-        assert ams.feed_to(lane, MagicMock(return_value=True), self.GCMD) is False
+        assert ams._feed_out(lane, MagicMock(return_value=True), False) == (False, None)
         assert ams.logger.messages == [("warning", "ams1: lane1 is not fed: the unit is busy")]
         assert ams._operation_active is True
 
@@ -219,7 +276,7 @@ class TestAfcAMSFeedTo:
         ams, oams, lane = make_unit()
         oams.fps_value = 0.45
         seen = MagicMock(return_value=False)
-        assert ams.feed_to(lane, seen, self.GCMD) is False
+        assert ams._feed_out(lane, seen, False) == (False, None)
         assert seen.call_count == 1
         assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + STOPPED
         assert ams.logger.messages == [
@@ -230,7 +287,7 @@ class TestAfcAMSFeedTo:
     def test_a_check_that_sees_the_lane_wins_over_the_fps(self):
         ams, oams, lane = make_unit()
         oams.fps_value = 0.9
-        assert ams.feed_to(lane, MagicMock(return_value=True), self.GCMD) is True
+        assert ams._feed_out(lane, MagicMock(return_value=True), False) == (True, None)
         assert ams.logger.messages == [
             ("debug", "ams1: feed of lane1 stopped: its filament was seen")]
 
@@ -239,7 +296,7 @@ class TestAfcAMSFeedTo:
         ams, oams, lane = make_unit()
         oams.fps_value = fps
         seen = MagicMock(side_effect=[False, False, True])
-        assert ams.feed_to(lane, seen, self.GCMD) is True
+        assert ams._feed_out(lane, seen, False) == (True, None)
         assert seen.call_count == 3
 
     @pytest.mark.parametrize("code, name", [(0, "success"), (4, "no spool in bay"),
@@ -249,7 +306,7 @@ class TestAfcAMSFeedTo:
         # The load ran to its end, or was refused, before anything saw the lane.
         oams.ends, oams.ends_code = True, code
         seen = MagicMock(return_value=False)
-        assert ams.feed_to(lane, seen, self.GCMD) is False
+        assert ams._feed_out(lane, seen, False) == (False, None)
         assert seen.call_count == 1
         assert oams.sent == [("ready", 1)] + FOLLOWER + [
             ("load", 1), ("follower", 0, 0), ("unload",), ("clear",)]
@@ -261,7 +318,7 @@ class TestAfcAMSFeedTo:
         ams, oams, lane = make_unit()
         ams.FEED_TO_TIMEOUT = 2.05
         seen = MagicMock(return_value=False)
-        assert ams.feed_to(lane, seen, self.GCMD) is False
+        assert ams._feed_out(lane, seen, False) == (False, None)
         # It is looked for every tenth of a second, the last time 2.0 s into the load.
         assert seen.call_count == 21
         assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + STOPPED
@@ -271,26 +328,118 @@ class TestAfcAMSFeedTo:
 
     def test_a_check_that_fails_still_has_the_lane_unloaded(self):
         ams, oams, lane = make_unit()
+        read = self.reads(ams, oams)
         seen = MagicMock(side_effect=RuntimeError("the switch is gone"))
         with pytest.raises(RuntimeError) as err:
-            ams.feed_to(lane, seen, self.GCMD)
+            ams._feed_out(lane, seen, True)
         assert str(err.value) == "the switch is gone"
+        # The lane got nowhere that is known, so its clicks are not read.
+        read.assert_not_called()
         assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + STOPPED
         assert ams.logger.messages == []
         left_idle(ams)
 
     def test_a_load_that_could_not_be_sent_leaves_nothing_to_unload(self):
         ams, oams, lane = make_unit()
+        read = self.reads(ams, oams)
         oams.send_error = RuntimeError("the unit is gone")
         seen = MagicMock(return_value=True)
         with pytest.raises(RuntimeError) as err:
-            ams.feed_to(lane, seen, self.GCMD)
+            ams._feed_out(lane, seen, True)
         assert str(err.value) == "the unit is gone"
         seen.assert_not_called()
+        read.assert_not_called()
         # The load it was marked for is canceled, and nothing was fed.
         assert oams.sent == [("ready", 1)] + FOLLOWER + [
             ("load", 1), ("follower", 0, 0), ("cancel",)]
         left_idle(ams)
+
+    def test_a_measured_feed_that_was_seen_reads_its_clicks_before_it_is_unloaded(self):
+        ams, oams, lane = make_unit()
+        read = self.reads(ams, oams, 1200)
+        # The encoder stood at 5000 before the load, which the load itself moves on.
+        oams.turns = 900
+        assert ams._feed_out(lane, MagicMock(return_value=True), True) == (True, 1200)
+        read.assert_called_once_with(lane, 5000)
+        assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + self.READ
+        left_idle(ams)
+
+    def test_a_measured_feed_that_got_to_an_extruder_unseen_reads_its_clicks(self):
+        ams, oams, lane = make_unit()
+        read = self.reads(ams, oams, 640)
+        oams.fps_value = 0.45
+        assert ams._feed_out(lane, MagicMock(return_value=False), True) == (False, 640)
+        read.assert_called_once_with(lane, 5000)
+        assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + self.READ
+
+    def test_a_measured_feed_nothing_saw_in_time_reads_no_clicks(self):
+        ams, oams, lane = make_unit()
+        read = self.reads(ams, oams)
+        ams.FEED_TO_TIMEOUT = 0.35
+        assert ams._feed_out(lane, MagicMock(return_value=False), True) == (False, None)
+        read.assert_not_called()
+        assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + STOPPED
+
+    def test_a_measured_load_the_unit_ended_well_is_at_an_extruder(self):
+        ams, oams, lane = make_unit()
+        read = self.reads(ams, oams, 1810)
+        oams.ends, oams.ends_code = True, 0
+        assert ams._feed_out(lane, MagicMock(return_value=False), True) == (False, 1810)
+        read.assert_called_once_with(lane, 5000)
+        assert oams.sent == [("ready", 1)] + FOLLOWER + [
+            ("load", 1), ("follower", 0, 0), ("clicks",), ("unload",), ("clear",)]
+
+    @pytest.mark.parametrize("code", [4, None])
+    def test_a_measured_load_the_unit_ended_any_other_way_reads_no_clicks(self, code):
+        ams, oams, lane = make_unit()
+        read = self.reads(ams, oams)
+        oams.ends, oams.ends_code = True, code
+        assert ams._feed_out(lane, MagicMock(return_value=False), True) == (False, None)
+        read.assert_not_called()
+
+    def test_a_feed_whose_encoder_did_not_come_to_rest_is_still_unloaded(self):
+        ams, oams, lane = make_unit()
+        self.reads(ams, oams, None)
+        assert ams._feed_out(lane, MagicMock(return_value=True), True) == (True, None)
+        assert oams.sent == [("ready", 1)] + FOLLOWER + [("load", 1)] + self.READ
+        left_idle(ams)
+
+    def test_the_clicks_are_the_ones_the_encoder_turned_since_before_the_load(self):
+        ams, oams, lane = make_unit()
+        oams.turns = 1470
+        assert ams._feed_out(lane, MagicMock(return_value=True), True) == (True, 1470)
+        # The encoder is asked whether it is at rest three times before it is read.
+        probes = [("follower", 0, 0)] * 3
+        assert oams.sent == [("ready", 1)] + FOLLOWER + [
+            ("load", 1), ("follower", 0, 0), ("cancel",)] + probes + [("unload",), ("clear",)]
+        assert ams.logger.messages == [
+            ("debug", "ams1: feed of lane1 stopped: its filament was seen")]
+
+
+class TestAfcAMSFedClicks:
+    def test_the_clicks_are_read_once_the_encoder_is_at_rest(self):
+        ams, oams, lane = make_unit()
+        ams._rfid_wait_for_unit_ready = MagicMock(return_value=True)
+        oams.encoder_clicks = 6200
+        assert ams._fed_clicks(lane, 5000) == 1200
+        # It is given 8 s to come to rest, for the second a scan feed is given to settle.
+        ams._rfid_wait_for_unit_ready.assert_called_once_with(8.0, quiet_time=1.0)
+        assert ams.logger.messages == []
+
+    def test_an_encoder_that_counts_down_gives_the_same_clicks(self):
+        ams, oams, lane = make_unit()
+        ams._rfid_wait_for_unit_ready = MagicMock(return_value=True)
+        oams.encoder_clicks = 3800
+        assert ams._fed_clicks(lane, 5000) == 1200
+
+    def test_an_encoder_that_does_not_come_to_rest_gives_no_clicks(self):
+        ams, oams, lane = make_unit()
+        ams._rfid_wait_for_unit_ready = MagicMock(return_value=False)
+        oams.encoder_clicks = 6200
+        assert ams._fed_clicks(lane, 5000) is None
+        assert ams.logger.messages == [
+            ("warning", "ams1: the encoder did not come to rest after the feed of lane1, so it "
+                        "gives no length")]
 
 
 class TestAfcAMSUnloadAfterFeed:

@@ -1611,6 +1611,10 @@ class afcAMS(afcUnit):
     #: FPS reading that tells its filament is at an extruder.
     FEED_TO_TIMEOUT = 120.0
     FEED_TO_FPS_STOP = 0.45
+    #: The encoder clicks a mm of filament turns, and the seconds the encoder is given to come
+    #: to rest before a feed that is measured is read.
+    ENCODER_CLICKS_PER_MM = 1.75
+    FEED_TO_REST_TIMEOUT = 8.0
 
     def _feed_to_blocked(self, lane: AFCLane) -> Optional[str]:
         """
@@ -1640,16 +1644,52 @@ class afcAMS(afcUnit):
         :param gcmd: command context, unused here but accepted for interface parity
         :return bool: True when the check saw the filament
         """
+        return self._feed_out(lane, seen, False)[0]
+
+    def measure_to(self, lane: AFCLane, seen: Callable[[], bool],
+                   gcmd: AFCGcmd) -> Optional[float]:
+        """
+        Feed a lane out of its bay until a check sees its filament or it is at an extruder,
+        unload it back to the bay, and give the way it went by the encoder.
+
+        :param lane: a lane with filament in its bay
+        :param seen: called while the lane feeds, True once its filament was seen
+        :param gcmd: command context, unused here but accepted for interface parity
+        :return float: the mm the lane went, None when it did not get there
+        """
+        clicks = self._feed_out(lane, seen, True)[1]
+        if clicks is None:
+            return None
+        length = clicks / self.ENCODER_CLICKS_PER_MM
+        self.logger.info(f"{self.name}: {lane.name} went {clicks} encoder clicks, "
+                         f"{length:.0f} mm")
+        return length
+
+    def _feed_out(self, lane: AFCLane, seen: Callable[[], bool],
+                  measure: bool) -> Tuple[bool, Optional[int]]:
+        """
+        Feed a lane out of its bay until a check sees its filament, it is at an extruder, or
+        its time is up, then unload it back to the bay.
+
+        :param lane: a lane with filament in its bay
+        :param seen: called while the lane feeds, True once its filament was seen
+        :param measure: whether the way the lane went is read from the encoder
+        :return tuple: whether the check saw the filament, and the encoder clicks to where a
+        lane that was seen or got to an extruder stopped, None when they were not read
+        """
         reason = self._feed_to_blocked(lane)
         if reason is not None:
             self.logger.warning(f"{self.name}: {lane.name} is not fed: {reason}")
-            return False
+            return False, None
         # Deferred: AFC_OAMS imports from this module at module load time.
         from extras.AFC_OAMS import OAMSOpCode, _oams_enum_name
         slot = self._spool_map[lane.name]
         reactor = self.afc.reactor
         found = False
+        arrived = False
         sent = False
+        start = 0
+        clicks: Optional[int] = None
         self._operation_active = True
         try:
             # The follower sequence a load starts with.
@@ -1659,6 +1699,7 @@ class afcAMS(afcUnit):
             self._rfid_set_follower(1, 1, "forward before feed")
             reactor.pause(reactor.monotonic() + 0.3)
             self._wait_for_idle()
+            start = self.oams.encoder_clicks
             self.oams.action_status = OAMSStatus.LOADING
             self.oams.action_status_code = None
             self.oams.oams_load_spool_cmd.send([slot])
@@ -1670,14 +1711,18 @@ class afcAMS(afcUnit):
                 fps = self._oams_fps_value()
                 if seen():
                     found = True
+                    arrived = True
                     stopped = "its filament was seen"
                     break
                 if (fps is not None
                     and fps >= self.FEED_TO_FPS_STOP):
+                    arrived = True
                     stopped = f"the FPS reads {fps:.2f}, filament at an extruder"
                     break
                 if self.oams.action_status is None:
                     code = _oams_enum_name(OAMSOpCode, self.oams.action_status_code, "code")
+                    # A load the unit ends well ends with its filament at an extruder.
+                    arrived = self.oams.action_status_code == OAMSOpCode.SUCCESS
                     stopped = f"the unit ended its load ({code})"
                     break
             self.logger.debug(f"{self.name}: feed of {lane.name} stopped: {stopped}")
@@ -1687,11 +1732,29 @@ class afcAMS(afcUnit):
             if self.oams.action_status is not None:
                 self._rfid_scan_stop_load()
             if sent:
+                if (measure
+                    and arrived):
+                    clicks = self._fed_clicks(lane, start)
                 self._unload_after_feed(lane)
             self.oams.current_spool = None
             self._operation_active = False
             self._prev_states_stale = True
-        return found
+        return found, clicks
+
+    def _fed_clicks(self, lane: AFCLane, start: int) -> Optional[int]:
+        """
+        The encoder clicks a feed that was stopped turned, read once the encoder is at rest.
+
+        :param lane: the lane that was fed
+        :param start: the encoder count before the feed
+        :return int: the clicks, None when the encoder did not come to rest
+        """
+        if not self._rfid_wait_for_unit_ready(self.FEED_TO_REST_TIMEOUT,
+                                              quiet_time=self.rfid_scan_settle):
+            self.logger.warning(f"{self.name}: the encoder did not come to rest after the feed "
+                                f"of {lane.name}, so it gives no length")
+            return None
+        return abs(self._enc_delta(self.oams.encoder_clicks, start))
 
     def _unload_after_feed(self, lane: AFCLane) -> None:
         """
