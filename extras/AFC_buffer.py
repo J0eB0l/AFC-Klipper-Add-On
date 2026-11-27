@@ -332,16 +332,28 @@ class AFCBuffer:
             # (Snapmaker U1), and from this timer that shuts Klipper down
             self.afc.error.AFC_error( msg, self.afc.function.in_print(), gcmd=gcmd)
 
-    def enable_buffer(self, lane: AFCLane):
+    def enable_buffer(self, lane: AFCLane) -> None:
         """
-        Enable the buffer and set appropriate multiplier based on current state.
+        Enable the buffer and set the multiplier from the switch states.
+
+        A pressed switch decides the direction, since no callback will fire for a switch that
+        is already pressed. Only with neither pressed is the last applied direction kept: the
+        buffer is then free to reach a switch, and that callback corrects it.
+
+        :param lane: Lane to enable the buffer for
         """
         self.current_lane = lane
         if self.led:
             self.afc.function.afc_led(self.led_buffer_disabled, self.led_index)
         self.enable = True
         multiplier = 1.0
-        if self.last_state == TRAILING_STATE_NAME:
+        if self.advance_state:
+            slow_down = True
+        elif self.trailing_state:
+            slow_down = False
+        else:
+            slow_down = self.last_state == TRAILING_STATE_NAME
+        if slow_down:
             multiplier = self.multiplier_low
             if self.fault_detection_enabled():
                 multiplier = (multiplier * 2) / 5
