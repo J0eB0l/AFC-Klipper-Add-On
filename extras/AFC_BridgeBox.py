@@ -29,7 +29,7 @@ from extras.AFC_BambuAMS_bridge import routine_info
 _MASTER_OPTIONS = frozenset({
     "serial_port", "tcp_key", "extruder", "unit_prefix", "removal_grace",
     "buffer_chip_name", "buffer", "buffer_type", "lane_base", "pool_ams",
-    "pool_ht",
+    "pool_ht", "pool_switch",
     "ams_names", "ht_names", "auto_drop", "release_grace", "release_settle",
     "enroll_grace", "claim_grace", "flap_claim_grace", "flap_window",
     "afc_bowden_length", "td1_bowden_length", "dry_max_temp", "auto_vars_file",
@@ -719,6 +719,8 @@ class afcBridgeBox:
                 self.buffer = f"{self.unit_prefix}_Buffer"
         # False keeps the chain from making a filament switch of its own, and from offering one.
         self._switch_wanted: Optional[bool] = config.getboolean("filament_switch", None)
+        # A place kept for a filament switch that is plugged in and taken out while Klipper runs.
+        self.pool_switch = bool(config.getint("pool_switch", 0, minval=0, maxval=1))
         # What the chain gives a filament switch of its own, None with none.
         self._switch_keys = self._read_switch_keys(config)
         # Whether a switch that answers on the bus was looked at since this start.
@@ -1216,8 +1218,9 @@ class afcBridgeBox:
         """
         What this chain gives a filament switch of its own: the switch_ options of its section,
         and what was saved for the ones the section leaves out. The chain has a switch when
-        `filament_switch` is on, a switch_ option is set, or one was added with
-        AFC_BRIDGEBOX_SWITCH_ADD, and it has none with `filament_switch: False`.
+        `filament_switch` is on, `pool_switch` keeps a place for one, a switch_ option is set,
+        or one was added with AFC_BRIDGEBOX_SWITCH_ADD, and it has none with
+        `filament_switch: False`.
 
         :param config: this section's wrapper
         :return dict: the switch's options, with `by_hand` naming the ones the section sets, or
@@ -1234,6 +1237,7 @@ class afcBridgeBox:
         sec = f"{self._BASE_SECTION} {self.name}"
         saved = dict(cp.items(sec)) if cp.has_section(sec) else {}
         if not (self._switch_wanted
+                or self.pool_switch
                 or hand
                 or saved.get("switch")):
             return None
@@ -1250,11 +1254,14 @@ class afcBridgeBox:
 
     def _switch_section(self) -> Tuple[str, Dict[str, Any]]:
         """
-        The section of the chain's own filament switch, which has the chain's name.
+        The section of the chain's own filament switch, which has the chain's name. A chain
+        that keeps a place for a switch makes one that is plugged in and taken out live.
 
         :return tuple: (section name, its options)
         """
         keys: Dict[str, Any] = {"chain": self.name, "chain_made": True}
+        if self.pool_switch:
+            keys["pool"] = True
         keys.update(self._switch_keys or {})
         return f"AFC_BridgeBox_switch {self.name}", keys
 
@@ -2615,6 +2622,20 @@ class afcBridgeBox:
                 "inlets": [bool(flag & 4), bool(flag & 8)],
                 "values": list(fs.get("val") or [])}
 
+    def switch_answers(self) -> Optional[bool]:
+        """
+        Whether a filament switch answers on this chain's bus now.
+
+        :return bool: None while there is no link to the bridge to tell by
+        """
+        bridge = self._chain_bridge()
+        if (bridge is None
+            or not bridge.is_connected()):
+            return None
+        st = self.switch_state()
+        return (st is not None
+                and st["on"])
+
     def switch_set_route(self, route: int) -> bool:
         """
         Send the filament switch a route. The bridge repeats it with every poll.
@@ -2805,6 +2826,10 @@ class afcBridgeBox:
         they give the chain its switch back. Refused in a print, and on a chain that has no
         switch of its own.
 
+        A chain with `pool_switch` keeps its place for a switch and needs no restart: a switch
+        that answers on its bus is set up again. There it is also refused while a lane is loaded
+        through the switch.
+
         Usage
         -------
         `AFC_BRIDGEBOX_SWITCH_FORGET [CHAIN=<chain>]`
@@ -2815,6 +2840,8 @@ class afcBridgeBox:
         AFC_BRIDGEBOX_SWITCH_FORGET CHAIN=chain1
         ```
         """
+        switch = self.printer.lookup_object(self._switch_section()[0], None)
+        held = [lane.name for lane in getattr(switch, "lanes", []) if lane.tool_loaded]
         error_str = ""
         if self._is_printing():
             error_str = (f"AFC_BRIDGEBOX_SWITCH_FORGET: not during a print, {self.name} "
@@ -2822,14 +2849,21 @@ class afcBridgeBox:
         elif self._switch_keys is None:
             error_str = (f"AFC_BRIDGEBOX_SWITCH_FORGET: {self.name} has no filament switch of "
                          f"its own")
+        elif (self.pool_switch
+              and held):
+            error_str = (f"AFC_BRIDGEBOX_SWITCH_FORGET: {held[0]} is loaded through the "
+                         f"filament switch of {self.name}. Unload it first.")
         if error_str:
             raise gcmd.error(error_str)
         keys = {"switch": ""}
         keys.update({f"switch_{key}": "" for key in _SWITCH_KEYS})
         self._state_set({f"{self._BASE_SECTION} {self.name}": keys})
-        switch = self.printer.lookup_object(self._switch_section()[0], None)
         if switch is not None:
             switch.forget()
+        if self.pool_switch:
+            gcmd.respond_info(f"{self.name}: its filament switch is forgotten, with what was "
+                              f"found for it. One that answers on its bus is set up again.")
+            return
         gcmd.respond_info(f"{self.name}: its filament switch is forgotten. RESTART to go on "
                           f"without it.")
         self._prompt(f"{self.name} filament switch",

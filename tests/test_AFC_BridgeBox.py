@@ -2914,6 +2914,20 @@ class TestAfcBridgeBoxInit:
         assert "AFC_BridgeBox_switch chain1" not in _bbx_loaded(m)
         _bbx_quiet(m.printer)
 
+    def test_a_chain_keeps_no_place_for_a_filament_switch_unless_told_to(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER)
+        assert m.pool_switch is False
+        _bbx_quiet(m.printer)
+
+    def test_pool_switch_keeps_a_place_for_a_filament_switch(self, tmp_path):
+        m = _bbx_boot(tmp_path, roster=_SWITCH_ROSTER, pool_switch=1)
+        assert m.pool_switch is True
+        assert (m._switch_wanted, m._switch_keys, m._switch_seen) == (None, {}, False)
+        assert _bbx_loaded(m)[-1] == "AFC_BridgeBox_switch chain1"
+        assert _bbx_keys(m, "AFC_BridgeBox_switch chain1") == {
+            "chain": "chain1", "chain_made": "True", "pool": "True"}
+        _bbx_quiet(m.printer)
+
     def test_the_chain_is_asked_before_a_lane_loads(self, tmp_path):
         m = _bbx_boot(tmp_path)
         assert m.printer._event_handlers["afc:tool_load_prepare"] == [
@@ -5648,6 +5662,16 @@ class TestAfcBridgeBoxReadSwitchKeys:
         assert m._switch_keys == {}
         _bbx_quiet(m.printer)
 
+    def test_a_place_kept_for_a_switch_alone_gives_it_one_with_nothing_set(self, tmp_path):
+        m = _bbx_boot(tmp_path, pool_switch=1)
+        assert m._switch_keys == {}
+        _bbx_quiet(m.printer)
+
+    def test_filament_switch_false_gives_it_none_with_a_place_kept_for_one(self, tmp_path):
+        m = _bbx_boot(tmp_path, filament_switch=False, pool_switch=1)
+        assert m._switch_keys is None
+        _bbx_quiet(m.printer)
+
     def test_an_option_of_the_switch_alone_gives_it_one(self, tmp_path):
         m = _bbx_boot(tmp_path, switch_outlet_a="extruder")
         assert m._switch_keys == {"outlet_a": "extruder", "by_hand": "outlet_a"}
@@ -5728,6 +5752,14 @@ class TestAfcBridgeBoxSwitchSection:
             "AFC_BridgeBox_switch chain2",
             {"chain": "chain2", "chain_made": True, "outlet_b": "extruder1",
              "by_hand": "outlet_b"})
+        _bbx_quiet(m.printer)
+
+    def test_a_chain_that_keeps_a_place_for_a_switch_makes_one_taken_out_live(self, tmp_path):
+        m = _bbx_boot(tmp_path, pool_switch=1, switch_outlet_a="extruder")
+        assert m._switch_section() == (
+            "AFC_BridgeBox_switch chain1",
+            {"chain": "chain1", "chain_made": True, "pool": True, "outlet_a": "extruder",
+             "by_hand": "outlet_a"})
         _bbx_quiet(m.printer)
 
     def test_a_chain_with_no_switch_of_its_own_still_has_the_name(self, tmp_path):
@@ -19847,6 +19879,38 @@ class TestAfcBridgeBoxUnitsArriving:
         assert m.units_arriving() is True
 
 
+class TestAfcBridgeBoxSwitchAnswers:
+    FS = TestAfcBridgeBoxCmdAFCBridgeboxSwitch.FS
+
+    def test_no_bridge_leaves_nothing_to_tell_by(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {})
+        assert m.switch_answers() is None
+
+    def test_a_bridge_that_is_not_connected_leaves_nothing_to_tell_by(self, tmp_path,
+                                                                     monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status={"fs": self.FS},
+                                                       connected=False)})
+        assert m.switch_answers() is None
+
+    def test_a_status_without_a_switch_is_one_that_does_not_answer(self, tmp_path,
+                                                                   monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status={"units": []})})
+        assert m.switch_answers() is False
+
+    def test_a_switch_the_bridge_reports_as_off_does_not_answer(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status={"fs": dict(self.FS, on=False)})})
+        assert m.switch_answers() is False
+
+    def test_a_switch_the_bridge_reports_as_on_answers(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch)
+        use_bridges(monkeypatch, {WIFI_USB: FakeBridge(status={"fs": self.FS})})
+        assert m.switch_answers() is True
+
+
 class TestAfcBridgeBoxSwitchSetRoute:
     def test_the_route_goes_to_the_bridge(self, tmp_path, monkeypatch):
         m = _wifi_master(tmp_path, monkeypatch)
@@ -20174,6 +20238,57 @@ class TestAfcBridgeBoxCmdAFCBridgeboxSwitchForget:
         assert again._switch_keys is None
         assert "AFC_BridgeBox_switch chain1" not in _bbx_loaded(again)
 
+    @staticmethod
+    def _switch(m: afcBridgeBox, forgot: List[int], *loaded: bool) -> None:
+        """
+        Give ``m`` a switch of its own that notes each forget() in ``forgot``, with one lane
+        for each of ``loaded``, named lane1 on.
+        """
+        lanes = [types.SimpleNamespace(name=f"lane{n}", tool_loaded=flag)
+                 for n, flag in enumerate(loaded, 1)]
+        m.printer.add_object("AFC_BridgeBox_switch chain1", types.SimpleNamespace(
+            chain=m, lanes=lanes, forget=lambda: forgot.append(1)))
+
+    def test_a_chain_that_keeps_a_place_for_a_switch_forgets_it_without_a_restart(
+            self, tmp_path, monkeypatch):
+        record_chain_state(tmp_path, roster="", **self.KEPT)
+        m = _fs_chain(tmp_path, monkeypatch, pool_switch=1)
+        forgot: List[int] = []
+        self._switch(m, forgot, False, False)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(cmd)
+        saved = dict(m._read_state().items(SEC))
+        assert {key: saved[key] for key in self._blank()} == self._blank()
+        assert forgot == [1]
+        assert cmd.messages == [
+            ("respond_info", "chain1: its filament switch is forgotten, with what was found "
+                             "for it. One that answers on its bus is set up again.")]
+        assert _p6_console(m) == []
+        assert _p6_log(m) == []
+
+    def test_a_place_kept_for_a_switch_that_was_never_made_is_forgotten_too(
+            self, tmp_path, monkeypatch):
+        m = _fs_chain(tmp_path, monkeypatch, pool_switch=1)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(cmd)
+        assert cmd.messages == [
+            ("respond_info", "chain1: its filament switch is forgotten, with what was found "
+                             "for it. One that answers on its bus is set up again.")]
+        assert _p6_console(m) == []
+
+    def test_a_lane_loaded_through_the_switch_of_a_chain_that_restarts_is_not_in_the_way(
+            self, tmp_path, monkeypatch):
+        m = self._set_up(tmp_path, monkeypatch)
+        forgot: List[int] = []
+        self._switch(m, forgot, True)
+        cmd = _p3_cmd()
+        m.cmd_AFC_BRIDGEBOX_SWITCH_FORGET(cmd)
+        assert forgot == [1]
+        assert cmd.messages == [
+            ("respond_info", "chain1: its filament switch is forgotten. RESTART to go on "
+                             "without it.")]
+        assert _p6_console(m) == _fs_restart(self.GONE)
+
     def _refused(self, m: afcBridgeBox, said: str) -> None:
         """Check nothing is forgotten, with ``said``."""
         was = dict(m._read_state().items(SEC)) if m._read_state().has_section(SEC) else {}
@@ -20195,6 +20310,16 @@ class TestAfcBridgeBoxCmdAFCBridgeboxSwitchForget:
     def test_a_chain_with_no_switch_of_its_own_is_refused(self, tmp_path, monkeypatch):
         m = _fs_chain(tmp_path, monkeypatch)
         self._refused(m, "chain1 has no filament switch of its own")
+
+    def test_a_lane_loaded_through_a_switch_that_is_forgotten_live_is_refused(
+            self, tmp_path, monkeypatch):
+        record_chain_state(tmp_path, roster="", **self.KEPT)
+        m = _fs_chain(tmp_path, monkeypatch, pool_switch=1)
+        forgot: List[int] = []
+        self._switch(m, forgot, False, True, True)
+        self._refused(m, "lane2 is loaded through the filament switch of chain1. Unload it "
+                         "first.")
+        assert forgot == []
 
 
 class TestAfcBridgeBoxCmdAFCBridgeboxResetWifi:
