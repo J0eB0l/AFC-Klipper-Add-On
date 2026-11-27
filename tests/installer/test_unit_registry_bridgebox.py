@@ -365,8 +365,8 @@ class TestConnectionOption:
             "OTHER",
             "3. WiFi only: join the bb-bridge hotspot from a phone, choose your network, and "
             "note the address the page shows. A BridgeBox that another printer set up keeps "
-            "that printer's link key: choose 2 for it, or run AFC_BRIDGEBOX_RESET_WIFI on that "
-            "printer first.",
+            "that printer's link key: plug it into this printer's USB once and Klipper gives "
+            "it this printer's key, or run AFC_BRIDGEBOX_RESET_WIFI on that printer first.",
         )
 
     @pytest.mark.parametrize("address", ["", "192.168.1.50 extra", "http://x", "a:b"])

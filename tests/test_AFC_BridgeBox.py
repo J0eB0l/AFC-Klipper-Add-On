@@ -19587,6 +19587,8 @@ class TestAfcBridgeBoxRegisterWifi:
             WIFI_NEW_KEY, "chain1", WIFI_USB, None)
         assert (link.ssid, link._password) == ("Shop", "hunter22")
         assert link._save == m._save_wifi_addr
+        # Its own cable gives the board the key.
+        assert link._give_key is None
         assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
 
     def test_a_saved_key_and_address_are_used(self, tmp_path, monkeypatch):
@@ -19621,6 +19623,7 @@ class TestAfcBridgeBoxRegisterWifi:
         link = bridge_mod._WIFI_LINKS[WIFI_TCP]
         assert (link.key, link.usb_path, link.addr) == (
             WIFI_NEW_KEY, None, WIFI_TCP)
+        assert link._give_key == m._key_over_usb
         assert _wifi_state(m) == {"wifi_key": WIFI_NEW_KEY, "wifi_addr": None}
 
 
@@ -20656,6 +20659,141 @@ class TestAfcBridgeBoxFindBoard:
         assert m._find_board(True) is None
         assert m._auto_said is True
         assert m.logger.messages == [AUTO_NONE]
+
+
+class TestAfcBridgeBoxKeyOverUsb:
+    HOST = "192.168.4.80"
+    ON_WIFI = {"evt": "info", "proto": "bambubus-1", "ip": "192.168.4.80"}
+    ELSEWHERE = {"evt": "info", "proto": "bambubus-1", "ip": "192.168.4.73"}
+
+    @staticmethod
+    def _usb(monkeypatch: pytest.MonkeyPatch, master: afcBridgeBox,
+             boards: Dict[str, Optional[dict]], stored: bool = True,
+             ports: Sequence[str] = (),
+             names: Optional[Dict[str, str]] = None
+             ) -> Tuple[List[str], List[Tuple[str, str]]]:
+        """
+        Put ``boards`` on USB, answer a stored key with ``stored`` and look hosts up in ``names``.
+
+        :return tuple: the ports probed, and the (port, key) pairs a key was sent to
+        """
+        probed = _auto_usb(monkeypatch, master, boards, ports=ports)
+        given: List[Tuple[str, str]] = []
+        known = {"192.168.4.80": "192.168.4.80"} if names is None else names
+
+        def _store(path: str, key: str) -> bool:
+            """:return bool: ``stored``"""
+            given.append((path, key))
+            return stored
+
+        def _lookup(host: str) -> str:
+            """:return str: the host's address, as socket.gethostbyname gives it"""
+            if host not in known:
+                raise OSError("Name or service not known")
+            return known[host]
+
+        monkeypatch.setattr(bridge_mod, "store_link_key", _store)
+        monkeypatch.setattr(bb_module.socket, "gethostbyname", _lookup)
+        return probed, given
+
+    def test_the_board_at_the_chains_address_is_given_the_key(self, tmp_path,
+                                                              monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m, {AUTO_PICO: None,
+                                                   AUTO_BOARD: self.ON_WIFI})
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is True
+        assert probed == [AUTO_PICO, AUTO_BOARD]
+        assert given == [(AUTO_BOARD, WIFI_NEW_KEY)]
+        due = m.printer.reactor.now + 10.0
+        assert m._auto_probed == {AUTO_PICO: due, AUTO_BOARD: due}
+        assert m.logger.messages == []
+
+    def test_a_board_at_another_address_is_left_alone(self, tmp_path,
+                                                      monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m,
+                                  {AUTO_BOARD: self.ELSEWHERE})
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        assert (probed, given) == ([AUTO_BOARD], [])
+
+    def test_a_port_that_does_not_answer_is_left_alone(self, tmp_path,
+                                                       monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m, {AUTO_BOARD: None})
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        assert (probed, given) == ([AUTO_BOARD], [])
+
+    def test_no_board_on_usb_is_false(self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m, {})
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        assert (probed, given, m._auto_probed) == ([], [], {})
+
+    def test_ports_in_use_are_never_opened(self, tmp_path, monkeypatch):
+        # One named as written, one by the tty its link resolves to.
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m,
+                                  {AUTO_PICO: self.ON_WIFI,
+                                   AUTO_BOARD: self.ON_WIFI},
+                                  ports=[AUTO_PICO, "/dev/ttyACM3"])
+        monkeypatch.setattr(bb_module.os.path, "realpath",
+                            {AUTO_PICO: "/dev/ttyACM2",
+                             AUTO_BOARD: "/dev/ttyACM3"}.__getitem__)
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        assert (probed, given, m._auto_probed) == ([], [], {})
+
+    def test_a_port_is_looked_at_again_after_10_s(self, tmp_path,
+                                                  monkeypatch):
+        # A board just plugged in has not joined its network yet.
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        boards: Dict[str, Optional[dict]] = {AUTO_BOARD: dict(AUTO_INFO)}
+        probed, given = self._usb(monkeypatch, m, boards)
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        boards[AUTO_BOARD] = self.ON_WIFI
+        m.printer.reactor.advance(9.0)
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        assert (probed, given) == ([AUTO_BOARD], [])
+        m.printer.reactor.advance(1.0)
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is True
+        assert probed == [AUTO_BOARD] * 2
+        assert given == [(AUTO_BOARD, WIFI_NEW_KEY)]
+
+    def test_a_board_that_did_not_store_the_key_is_false(self, tmp_path,
+                                                         monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m, {AUTO_BOARD: self.ON_WIFI},
+                                  stored=False)
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        # It is not asked again before its 10 s are up.
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is False
+        assert probed == [AUTO_BOARD]
+        assert given == [(AUTO_BOARD, WIFI_NEW_KEY)]
+
+    def test_a_named_host_is_matched_by_its_address(self, tmp_path,
+                                                    monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch,
+                         serial_port="tcp://bridgebox.lan:8888")
+        probed, given = self._usb(monkeypatch, m, {AUTO_BOARD: self.ON_WIFI},
+                                  names={"bridgebox.lan": "192.168.4.80"})
+        assert m._key_over_usb("bridgebox.lan", WIFI_NEW_KEY) is True
+        assert given == [(AUTO_BOARD, WIFI_NEW_KEY)]
+
+    def test_a_name_that_is_not_found_matches_no_board(self, tmp_path,
+                                                       monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch,
+                         serial_port="tcp://bridgebox.lan:8888")
+        probed, given = self._usb(monkeypatch, m, {AUTO_BOARD: self.ON_WIFI},
+                                  names={})
+        assert m._key_over_usb("bridgebox.lan", WIFI_NEW_KEY) is False
+        assert (probed, given) == ([AUTO_BOARD], [])
+
+    def test_an_address_that_cannot_be_looked_up_matches_as_written(
+            self, tmp_path, monkeypatch):
+        m = _wifi_master(tmp_path, monkeypatch, serial_port=WIFI_TCP)
+        probed, given = self._usb(monkeypatch, m, {AUTO_BOARD: self.ON_WIFI},
+                                  names={})
+        assert m._key_over_usb(self.HOST, WIFI_NEW_KEY) is True
+        assert given == [(AUTO_BOARD, WIFI_NEW_KEY)]
 
 
 class TestAfcBridgeBoxClaimBoard:

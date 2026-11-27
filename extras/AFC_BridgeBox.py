@@ -15,6 +15,7 @@ import json
 import math
 import os
 import secrets
+import socket
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
@@ -4703,7 +4704,38 @@ class afcBridgeBox:
         _bridge_mod._WIFI_LINKS[str(self.serial_port)] = _bridge_mod.WifiLink(
             key, self._save_wifi_addr, f"{self.name}",
             usb_path=None if is_tcp else self.serial_port, addr=addr, ssid=self.wifi_ssid,
-            password=self._wifi_password)
+            password=self._wifi_password, give_key=self._key_over_usb if is_tcp else None)
+
+    def _key_over_usb(self, host: str, key: str) -> bool:
+        """
+        Give this chain's board a link key over USB. A chain on a tcp:// port never opens USB for
+        its link, so the board is looked for here: it is the BridgeBox on this printer's USB that
+        nothing else uses and that reports the chain's own address.
+
+        :param host: the host of the chain's address
+        :param key: the link key
+        :return bool: whether the board stored it
+        """
+        from extras import AFC_BambuAMS_bridge as _bridge_mod
+        addresses = {host}
+        try:
+            addresses.add(socket.gethostbyname(host))
+        except OSError:
+            pass
+        with _AUTO_LOCK:
+            ports, _hosts = self._ports_in_use()
+            now = time.monotonic()
+            for path in _bridge_mod.bridge_candidates():
+                if (path in ports
+                    or os.path.realpath(path) in ports
+                    or now < self._auto_probed.get(path, 0.0)):
+                    continue
+                self._auto_probed[path] = now + self.AUTO_REPROBE_S
+                info = _bridge_mod.probe_bridge(path)
+                if (info is not None
+                    and info.get("ip") in addresses):
+                    return _bridge_mod.store_link_key(path, key)
+        return False
 
     def _wifi_text(self, config: Any, option: str, low: int, high: int) -> Optional[str]:
         """
