@@ -1090,6 +1090,23 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert [lane.extruder_obj.name for lane in lanes] == ["extruder1", "extruder"]
         assert (switch._by_print, switch._due_back) == (["lane1"], ["lane9"])
 
+    def test_a_lane_saved_as_loaded_starts_on_that_toolhead_with_no_outlet_set_up(
+            self, tmp_path):
+        switch = made(connect=False)
+        switch.afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {
+            "extruders": {"extruder": {"lane_loaded": None},
+                          "extruder1": {"lane_loaded": "lane_Bambu_AMS_2"}},
+            "switches": {"Chain_1": {"lanes": {"lane_Bambu_AMS_1": "extruder1"},
+                                     "confirmed": []}}}}))
+        switch.handle_connect()
+        assert switch.extruders() == []
+        # What was saved for the switch was for outlets it does not have now.
+        assert switch._saved_lanes == {}
+        # The lane that is in a toolhead is on it, and the other one stays where it was.
+        assert lane_of(switch, "Bambu_AMS_2").extruder_obj.name == "extruder1"
+        assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
+
     def test_the_saved_units_of_this_switch_are_confirmed_again(self, tmp_path):
         printer = make_printer()
         printer._afc.VarFile = str(tmp_path / "AFC.var")
@@ -1378,6 +1395,16 @@ class TestAfcBridgeBoxSwitchSavedLoaded:
         assert self._switch(tmp_path, json.dumps(saved))._saved_loaded() == {
             "lane9": "extruder", "lane1": "extruder1"}
 
+    def test_the_lanes_loaded_in_the_toolheads_that_are_named(self, tmp_path):
+        saved = {"system": {"extruders": {
+            "extruder": {"lane_loaded": "lane9"}, "extruder1": {"lane_loaded": "lane1"},
+            "extruder2": {"lane_loaded": "lane20"}}}}
+        switch = self._switch(tmp_path, json.dumps(saved))
+        # extruder3 was not saved.
+        assert switch._saved_loaded(["extruder1", "extruder2", "extruder3"]) == {
+            "lane1": "extruder1", "lane20": "extruder2"}
+        assert switch._saved_loaded([]) == {}
+
     def test_an_empty_toolhead_and_one_that_was_not_saved_name_no_lane(self, tmp_path):
         saved = {"system": {"extruders": {"extruder": {"lane_loaded": None}}}}
         assert self._switch(tmp_path, json.dumps(saved))._saved_loaded() == {}
@@ -1539,6 +1566,60 @@ class TestAfcBridgeBoxSwitchStartUnit:
         switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
         assert lane.extruder_obj.name == "extruder1"
         assert switch.chain.joined == [["lane9"]]
+
+    @staticmethod
+    def _loaded(switch: afcBridgeBoxSwitch, tmp_path, **extruders: Optional[str]) -> None:
+        """Have AFC save the lane each of ``extruders`` holds, None for an empty one."""
+        switch.afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {"extruders": {
+            name: {"lane_loaded": lane} for name, lane in extruders.items()}}}))
+
+    def test_a_lane_afc_saved_as_loaded_goes_on_the_extruder_it_is_in(self, tmp_path):
+        printer = make_printer(extruders=["extruder", "extruder1", "extruder2"])
+        lane = add_lane(printer, "lane9", "Ace2_1")
+        switch = make_switch(printer, connect=False)
+        switch.chain = FakeChain()
+        switch.lanes = [lane]
+        # The switch has extruder2 on no outlet, and what it kept for the lane says extruder.
+        switch._saved_lanes = {"lane9": "extruder"}
+        self._loaded(switch, tmp_path, extruder=None, extruder2="lane9")
+        switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
+        assert lane.extruder_obj.name == "extruder2"
+        assert switch.chain.joined == [["lane9"]]
+
+    def test_a_lane_saved_as_loaded_in_an_extruder_that_is_gone_starts_as_any_other(
+            self, tmp_path):
+        printer = make_printer()
+        lane = add_lane(printer, "lane9", "Ace2_1")
+        switch = make_switch(printer, connect=False)
+        switch.chain = FakeChain()
+        switch.lanes = [lane]
+        self._loaded(switch, tmp_path, extruder2="lane9")
+        switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
+        assert lane.extruder_obj.name == "extruder1"
+
+    def test_a_lane_of_another_unit_that_is_saved_as_loaded_is_left_alone(self, tmp_path):
+        printer = make_printer()
+        mine = add_lane(printer, "lane9", "Ace2_1")
+        another = add_lane(printer, "lane1", "Turtle_1")
+        switch = make_switch(printer, connect=False)
+        switch.chain = FakeChain()
+        switch.lanes = [mine, another]
+        self._loaded(switch, tmp_path, extruder1="lane1")
+        switch._start_unit(printer._objects["AFC_Unit Ace2_1"])
+        assert another.extruder_obj.name == "extruder"
+        assert switch.chain.joined == [["lane9"]]
+
+    def test_a_loaded_lane_of_a_unit_whose_inlet_is_not_known_goes_on_its_toolhead(
+            self, tmp_path):
+        switch = finding()
+        unit = ams_of(switch, "Bambu_AMS_1")
+        lane = lane_of(switch, "Bambu_AMS_1")
+        self._loaded(switch, tmp_path, extruder1="lane_Bambu_AMS_1")
+        switch.chain.joined.clear()
+        switch._start_unit(unit)
+        assert lane.extruder_obj.name == "extruder1"
+        assert switch.chain.joined == [["lane_Bambu_AMS_1"]]
 
     def test_a_unit_that_is_named_on_an_inlet_keeps_its_buffer(self):
         switch = finding(inlet_b=["Chain_1", "Bambu_AMS_2"])
@@ -4393,6 +4474,28 @@ class TestAfcBridgeBoxSwitchUnload:
         lane.tool_swap.assert_called_once_with(gcmd=gcmd)
         switch.afc.TOOL_UNLOAD.assert_called_once_with(lane, set_start_time=False,
                                                        force_unload=True, gcmd=gcmd)
+
+    def test_a_lane_afc_left_in_its_toolhead_was_not_unloaded(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Ace2_1")
+        lane.tool_loaded = True
+        switch.afc.function.get_current_extruder.return_value = "th_extruder1"
+        # AFC says yes when the active toolhead holds no lane, and unloads nothing.
+        switch.afc.TOOL_UNLOAD = MagicMock(return_value=True)
+        assert switch._unload(lane, MagicMock()) is False
+
+    def test_a_lane_that_left_its_toolhead_was_unloaded(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Ace2_1")
+        lane.tool_loaded = True
+        switch.afc.function.get_current_extruder.return_value = "th_extruder1"
+
+        def tool_unload(held: FakeLane, **_kwargs: Any) -> bool:
+            held.tool_loaded = False
+            return True
+
+        switch.afc.TOOL_UNLOAD = MagicMock(side_effect=tool_unload)
+        assert switch._unload(lane, MagicMock()) is True
 
     def test_no_swap_when_its_toolhead_is_the_active_one(self):
         switch = plumbed()

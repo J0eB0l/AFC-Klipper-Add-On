@@ -472,16 +472,19 @@ class afcBridgeBoxSwitch:
             return {"lanes": {}, "confirmed": [], "by_print": [], "due_back": [], "found": {},
                     "present": False}
 
-    def _saved_loaded(self) -> Dict[str, str]:
+    def _saved_loaded(self, names: Optional[List[str]] = None) -> Dict[str, str]:
         """
-        The lanes AFC saved as loaded in one of the switch's toolheads.
+        The lanes AFC saved as loaded in a toolhead.
 
+        :param names: the extruders to look at, None for the switch's own
         :return dict: lane name -> extruder name, empty when nothing usable is saved
         """
+        if names is None:
+            names = self.extruders()
         try:
             with open(f"{self.afc.VarFile}.unit") as file:
                 extruders = json.load(file)["system"]["extruders"]
-            return {extruders[name]["lane_loaded"]: name for name in self.extruders()
+            return {extruders[name]["lane_loaded"]: name for name in names
                     if (name in extruders
                         and extruders[name]["lane_loaded"])}
         except (OSError, ValueError, KeyError, TypeError):
@@ -530,7 +533,9 @@ class afcBridgeBoxSwitch:
         Put a unit's lanes on the extruder they were saved on, else on the unit's starting
         extruder, whatever extruder the unit itself names. A chain's unit that is found by
         loading goes behind its inlet's buffer, and while a unit's inlet is not known its lanes
-        stay where they are, but for one saved on an extruder of the switch.
+        stay where they are, but for one saved on an extruder of the switch. A lane AFC saved
+        as loaded goes on the extruder it is in, also when the switch has that extruder on no
+        outlet, so it is unloaded from there.
 
         :param unit_obj: a unit of this switch that has connected
         """
@@ -540,6 +545,8 @@ class afcBridgeBoxSwitch:
             # Until its inlet is found, the buffer it reports may be the other one.
             unit_obj.use_buffer(*chain.inlet_buffer(inlet), assumed=inlet is None)
         start = self.start_extruder(unit_obj.name) if inlet is not None else None
+        held = self._saved_loaded([extruder.name for _name, extruder
+                                   in self.printer.lookup_objects("AFC_extruder")])
         moved: List[AFCLane] = []
         for lane in self.lanes:
             if lane.unit != unit_obj.name:
@@ -547,6 +554,7 @@ class afcBridgeBoxSwitch:
             saved = self._saved_lanes.get(lane.name, start)
             if saved not in self.extruders():
                 saved = start
+            saved = held.get(lane.name, saved)
             if saved is not None:
                 lane.set_extruder(self._extruder(saved))
                 moved.append(lane)
@@ -1454,7 +1462,10 @@ class afcBridgeBoxSwitch:
         """
         if self.afc.function.get_current_extruder() != lane.extruder_obj.th_extruder_name:
             lane.tool_swap(gcmd=gcmd)
-        return self.afc.TOOL_UNLOAD(lane, set_start_time=False, force_unload=True, gcmd=gcmd)
+        done = self.afc.TOOL_UNLOAD(lane, set_start_time=False, force_unload=True, gcmd=gcmd)
+        # AFC also says yes when it found no lane to unload in that toolhead.
+        return (done
+                and not lane.tool_loaded)
 
     def _wait_clear(self, inlet: str) -> None:
         """
