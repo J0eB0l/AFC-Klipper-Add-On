@@ -1670,6 +1670,41 @@ class TestTurtleDriveUpdateRotationDistance:
         assert lane.drive_stepper.multiplier == 1.0
 
 
+class TestTurtleDriveGetCurrentRotationDistance:
+    def test_the_multiplier_is_applied(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        lane.drive_stepper.multiplier = 1.25
+        assert lane.drive_stepper.get_current_rotation_distance() == pytest.approx(3.72)
+
+
+class TestTurtleDriveSetCurrentRotationDistance:
+    def test_a_saved_distance_brings_its_multiplier_back(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        drive = lane.drive_stepper
+        drive.multiplier = 1.25
+        # As a calibration does: save, go to the base distance, put it back.
+        saved = drive.get_current_rotation_distance()
+        drive.update_rotation_distance(1)
+        drive.set_current_rotation_distance(saved)
+        assert drive.multiplier == pytest.approx(1.25)
+
+    def test_no_multiplier_counts_as_one(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        lane.drive_stepper.multiplier = 0
+        lane.drive_stepper.set_current_rotation_distance(4.65)
+        assert lane.drive_stepper.multiplier == pytest.approx(1.0)
+
+    def test_no_distance_is_no_multiplier(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        lane.drive_stepper.multiplier = 1.25
+        lane.drive_stepper.set_current_rotation_distance(0)
+        assert lane.drive_stepper.multiplier == 1.0
+
+
 # ── afcBoxTurtleUSB construction ──────────────────────────────────────────────
 
 class TestInit:

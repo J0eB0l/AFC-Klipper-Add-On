@@ -1086,6 +1086,24 @@ class TurtleDrive:
         """
         self.multiplier = float(multiplier) if multiplier else 1.0
 
+    def get_current_rotation_distance(self) -> float:
+        """
+        The rotation distance in use, with an external buffer's multiplier applied.
+
+        :return float: rotation distance / multiplier
+        """
+        return self.rotation.get_rotation_distance()[0]
+
+    def set_current_rotation_distance(self, rotation_distance: float) -> None:
+        """
+        Put back a rotation distance `get_current_rotation_distance` returned, as the
+        multiplier that gives it.
+
+        :param rotation_distance: the rotation distance to restore
+        """
+        base = self.get_current_rotation_distance() * (self.multiplier or 1.0)
+        self.multiplier = base / rotation_distance if rotation_distance else 1.0
+
 
 class afcBoxTurtleUSB(afcBoxTurtle):
     """
