@@ -22,7 +22,7 @@ from extras.AFC_BridgeBox_switch import (
     outlet_at,
     route_with,
 )
-from extras.AFC_lane import AFCLane
+from extras.AFC_lane import AFCLane, AFCMoveWarning, AssistActive, SpeedMode
 from extras.AFC_respond import AFCprompt
 from extras.AFC_unit import afcUnit
 from tests.conftest import CommandError, MockAFC, MockConfig, MockGCodeCommand, MockPrinter
@@ -145,6 +145,7 @@ class FakeUnit(afcUnit):
     def __init__(self, name: str) -> None:
         self.name = name
         self.calibrate_bowden = MagicMock()
+        self.return_to_home = MagicMock()
 
 
 class FakeAms(FakeUnit):
@@ -228,6 +229,13 @@ class FakeMotionSensor:
         self.runout_buttun_state = reads
 
 
+class FakeStepper:
+    """A stepper AFC homes a lane with, which records the endstops it is given."""
+
+    def __init__(self) -> None:
+        self.add_polled_endstop = MagicMock()
+
+
 class FakeLane(AFCLane):
     """A lane with only what the switch reads. Its set_extruder is the real one."""
 
@@ -245,6 +253,13 @@ class FakeLane(AFCLane):
         self.extruder_obj = extruder
         self.afc_extruder_name = extruder.name
         extruder.lanes[name] = self
+        # No stepper moves it until a test gives it one.
+        self.drive_stepper: Optional[Any] = None
+        self.dist_hub = 60.0
+        self.set_load_current = MagicMock()
+        self.do_enable = MagicMock()
+        self.move_advanced = MagicMock()
+        self.move_to = MagicMock(return_value=(True, 0.0, AFCMoveWarning.NONE))
 
 
 def make_printer(chains: Optional[List[FakeChain]] = None,
@@ -312,6 +327,8 @@ def plumbed(chain: Optional[FakeChain] = None, **values: Any) -> afcBridgeBoxSwi
 # The bays of a chain that is on both inlets, and the AMS each one holds.
 BAYS = {"Bambu_AMS_1": "AAAA", "Bambu_AMS_2": "BBBB"}
 BOTH = {"inlet_a": ["Chain_1"], "inlet_b": ["Chain_1"]}
+# The inlets of a switch that has the unit Turtle_1, which is on no chain, on both.
+SHARED = {"inlet_a": ["Bambu_AMS_1", "Turtle_1"], "inlet_b": ["Ace2_1", "Turtle_1"]}
 
 # How a prompt with a cancel button ends, and how one with no button does.
 CANCEL = [("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
@@ -430,6 +447,60 @@ def found(switch: afcBridgeBoxSwitch, **inlets: str) -> None:
         switch._found[chain_of(switch).uids[unit]] = inlet
     switch._follow()
     switch.afc.save_vars.reset_mock()
+
+
+def sharing(chain: Optional[FakeChain] = None, connect: bool = True,
+            **values: Any) -> afcBridgeBoxSwitch:
+    """
+    :return afcBridgeBoxSwitch: a switch as ``plumbed`` makes it, but with Turtle_1 on both
+    inlets, so that unit is found by loading. Both extruders have a toolhead sensor that reads
+    empty
+    """
+    printer = make_printer([chain or SimChain(route=2)])
+    for unit in VALUES["inlet_a"] + VALUES["inlet_b"]:
+        add_lane(printer, f"lane_{unit}", unit)
+    switch = make_switch(printer, connect=connect, **dict(SHARED, **values))
+    for name in ("extruder", "extruder1"):
+        give_sensor(switch, name)
+    return switch
+
+
+def stepped(lane: FakeLane) -> FakeLane:
+    """:return FakeLane: the lane, of a unit with no stepper that AFC moves by distance"""
+    lane.unit_obj.stepperless_drive = True
+    lane.unit_obj.lane_move = MagicMock()
+    return lane
+
+
+def homed(lane: FakeLane) -> FakeStepper:
+    """:return FakeStepper: the stepper given to a lane, which AFC homes it with"""
+    lane.drive_stepper = FakeStepper()
+    return lane.drive_stepper
+
+
+def stepping(switch: afcBridgeBoxSwitch, lane: FakeLane, inlet: Optional[str] = None,
+             toolhead: Optional[str] = None, after: int = 3) -> MagicMock:
+    """
+    Script the moves of a lane AFC moves by distance: once it was fed ``after`` steps its
+    filament shows at ``inlet`` and at the toolhead sensor of ``toolhead``, None for neither,
+    and it is gone from both when the lane is pulled back.
+
+    :return MagicMock: the lane's move_advanced
+    """
+    chain = chain_of(switch)
+    steps: List[float] = []
+
+    def move_advanced(distance: float, speed_mode: Any, assist_active: Any, gcmd: Any) -> None:
+        if distance > 0:
+            steps.append(distance)
+        shows = distance > 0 and len(steps) >= after
+        if inlet is not None:
+            chain.fill(**{inlet.lower(): shows})
+        if toolhead is not None:
+            extruder_of(switch, toolhead).tool_start_state = shows
+
+    lane.move_advanced = MagicMock(side_effect=move_advanced)
+    return lane.move_advanced
 
 
 def ams_of(switch: afcBridgeBoxSwitch, unit: str) -> FakeAms:
@@ -658,6 +729,7 @@ class TestAfcBridgeBoxSwitchInit:
         assert switch.outlets == {"A": "extruder", "B": "extruder1"}
         assert (switch._report_by, switch._reported) == (None, [])
         assert switch.finding == []
+        assert (switch._check, switch._homing) == (None, [])
 
     def test_a_name_on_both_inlets_is_kept_apart_to_be_found_by_loading(self):
         switch = make_switch(connect=False, inlet_a=["Chain_1", "Turtle_1", "Chain_2"],
@@ -1115,6 +1187,27 @@ class TestAfcBridgeBoxSwitchHandleConnect:
         assert switch._held == {"Bambu_AMS_1": "AAAA", "Bambu_AMS_2": None}
         assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": []}
 
+    def test_a_unit_on_both_inlets_waits_to_be_found(self):
+        switch = sharing()
+        assert switch._floating == {"Turtle_1": None}
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": ["Ace2_1"]}
+        # It is on no chain, so what is found for it is kept for its own name.
+        assert (switch._found, switch._held) == ({}, {"Turtle_1": "Turtle_1"})
+        # Its lane is the switch's all the same, and stays on the extruder it is on.
+        assert lane_of(switch, "Turtle_1") in switch.lanes
+        assert lane_of(switch, "Turtle_1").extruder_obj.name == "extruder"
+
+    def test_such_a_unit_enters_the_inlet_saved_for_its_name(self, tmp_path):
+        switch = sharing(connect=False)
+        switch.afc.VarFile = str(tmp_path / "AFC.var")
+        (tmp_path / "AFC.var.unit").write_text(json.dumps({"system": {"switches": {"Switch_1": {
+            "lanes": {}, "confirmed": ["Turtle_1"], "found": {"Turtle_1": "B"}}}}}))
+        switch.handle_connect()
+        assert switch._found == {"Turtle_1": "B"}
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": ["Ace2_1", "Turtle_1"]}
+        assert lane_of(switch, "Turtle_1").extruder_obj.name == "extruder1"
+        assert switch.confirmed == ["Turtle_1"]
+
     def test_with_no_toolhead_on_an_outlet_the_saved_lanes_are_dropped(self, tmp_path):
         switch = made(connect=False)
         switch.afc.VarFile = str(tmp_path / "AFC.var")
@@ -1430,6 +1523,15 @@ class TestAfcBridgeBoxSwitchStartUnit:
         switch._start_unit(ams_of(switch, "Bambu_AMS_1"))
         assert lane_of(switch, "Bambu_AMS_1").extruder_obj.name == "extruder"
 
+    def test_a_unit_on_no_chain_that_was_found_goes_behind_no_buffer(self):
+        switch = sharing()
+        unit = switch.afc.units["Turtle_1"]
+        # Only a chain's unit has a buffer to go behind.
+        assert not hasattr(unit, "use_buffer")
+        switch.inlets["B"].append("Turtle_1")
+        switch._start_unit(unit)
+        assert lane_of(switch, "Turtle_1").extruder_obj.name == "extruder1"
+
 
 class TestAfcBridgeBoxSwitchChains:
     def test_every_chain_by_its_name(self):
@@ -1552,13 +1654,30 @@ class TestAfcBridgeBoxSwitchPlaceChains:
         assert switch._floating == {"Bay_0": chain, "Bay_2": chain}
         assert switch.inlets == {"A": [], "B": ["Ace2_1"]}
 
-    def test_a_unit_on_both_inlets_is_refused(self):
+    def test_units_on_both_inlets_are_found_by_loading(self):
         switch = self._switch([FakeChain(bays=["Bay_0"])],
                               inlet_b=["Turtle_1", "Ace2_1", "Bambu_AMS_1"])
+        switch._place_chains()
+        # They are on no chain.
+        assert switch._floating == {"Bambu_AMS_1": None, "Turtle_1": None}
+        assert switch.inlets == {"A": [], "B": ["Ace2_1"]}
+
+    def test_a_unit_and_a_chain_can_both_be_on_both_inlets(self):
+        chain = FakeChain(bays=["Bay_0", "Bay_1"])
+        switch = self._switch([chain], inlet_a=["Chain_1", "Turtle_1"],
+                              inlet_b=["Chain_1", "Turtle_1"])
+        switch._place_chains()
+        assert switch._floating == {"Turtle_1": None, "Bay_0": chain, "Bay_1": chain}
+        assert switch.inlets == {"A": [], "B": []}
+
+    def test_a_chains_unit_on_both_inlets_is_refused(self):
+        switch = self._switch([FakeChain(bays=["Bay_0", "Bambu_AMS_1"])],
+                              inlet_b=["Ace2_1", "Bambu_AMS_1"])
         with pytest.raises(error) as err:
             switch._place_chains()
-        assert str(err.value) == (f"[{SECTION}] has Bambu_AMS_1, Turtle_1 on both inlets. A unit "
-                                  "enters one inlet.")
+        assert str(err.value) == (f"[{SECTION}] has Bambu_AMS_1 on both inlets. A chain's unit "
+                                  "enters one inlet. Put its chain on both inlets to have the "
+                                  "chain's units found by loading.")
         assert switch._floating == {}
 
     def test_so_is_a_name_that_is_neither_a_chain_nor_a_unit(self):
@@ -1566,17 +1685,30 @@ class TestAfcBridgeBoxSwitchPlaceChains:
                               inlet_b=["Nothing_1"])
         with pytest.raises(error) as err:
             switch._place_chains()
-        assert str(err.value) == (f"[{SECTION}] has Nothing_1 on both inlets. A unit enters one "
-                                  "inlet.")
+        assert str(err.value) == (f"[{SECTION}] names unit Nothing_1, and there is no AFC unit "
+                                  "of that name.")
+        assert switch._floating == {}
 
-    def test_so_is_a_chain_whose_name_is_also_a_units(self):
+    def test_a_chain_whose_name_is_also_a_units_is_left_as_the_unit(self):
         chains = [FakeChain(), FakeChain("Turtle_1", bays=["Bay_1", "Bay_2"])]
         switch = self._switch(chains, inlet_a=["Turtle_1"], inlet_b=["Turtle_1"])
-        with pytest.raises(error) as err:
-            switch._place_chains()
-        assert str(err.value) == (f"[{SECTION}] has Turtle_1 on both inlets. A unit enters one "
-                                  "inlet.")
-        assert switch._floating == {}
+        switch._place_chains()
+        # The unit is found by loading, and the chain's bays are not.
+        assert switch._floating == {"Turtle_1": None}
+        assert switch.inlets == {"A": [], "B": []}
+
+
+class TestAfcBridgeBoxSwitchId:
+    def test_a_chains_bay_is_kept_for_the_ams_it_holds(self):
+        assert finding()._id("Bambu_AMS_2") == "BBBB"
+
+    def test_a_bay_that_holds_no_ams_is_kept_for_none(self):
+        switch = finding()
+        chain_of(switch).uids["Bambu_AMS_2"] = None
+        assert switch._id("Bambu_AMS_2") is None
+
+    def test_a_unit_on_no_chain_is_kept_for_its_name(self):
+        assert sharing()._id("Turtle_1") == "Turtle_1"
 
 
 class TestAfcBridgeBoxSwitchFindChain:
@@ -2183,7 +2315,7 @@ class TestAfcBridgeBoxSwitchWatch:
         switch._watch(56.0)
         assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": []}
         assert switch._found == {"AAAA": "A"}
-        assert [offer[:2] for offer in chain.offers] == [("Switch_1", "Switch_1 new AMS")]
+        assert [offer[:2] for offer in chain.offers] == [("Switch_1", "Switch_1 new unit")]
         assert switch._offered == ["AAAA", "BBBB", "CCCC"]
 
 
@@ -2253,6 +2385,16 @@ class TestAfcBridgeBoxSwitchFollow:
         assert switch._found == {"BBBB": "B"}
         assert switch._held == {"Bambu_AMS_1": None, "Bambu_AMS_2": "BBBB"}
         assert switch.inlets == {"A": [], "B": ["Bambu_AMS_2"]}
+        switch.afc.save_vars.assert_not_called()
+
+    def test_a_unit_on_no_chain_enters_the_inlet_found_for_its_name(self):
+        switch = sharing()
+        switch._found = {"Turtle_1": "B"}
+        switch._follow()
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": ["Ace2_1", "Turtle_1"]}
+        assert lane_of(switch, "Turtle_1").extruder_obj.name == "extruder1"
+        # A unit holds its own name for good, so what was found for it is never forgotten.
+        assert (switch._found, switch._held) == ({"Turtle_1": "B"}, {"Turtle_1": "Turtle_1"})
         switch.afc.save_vars.assert_not_called()
 
 
@@ -2325,7 +2467,7 @@ class TestAfcBridgeBoxSwitchOffer:
         switch = finding()
         switch._offer()
         assert chain_of(switch).offers == [
-            ("Switch_1", "Switch_1 new AMS",
+            ("Switch_1", "Switch_1 new unit",
              ["Switch_1: the inlet of Bambu_AMS_1, Bambu_AMS_2 is not known yet. The lanes of a "
               "unit do not load until its inlet is found.", self.HOW],
              [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2"), self.ALL])]
@@ -2349,7 +2491,7 @@ class TestAfcBridgeBoxSwitchOffer:
         switch._follow()
         switch._offer()
         assert chain.offers[1] == (
-            "Switch_1", "Switch_1 new AMS",
+            "Switch_1", "Switch_1 new unit",
             ["Switch_1: the inlet of Bambu_AMS_1, Bambu_AMS_2 is not known yet. The lanes of a "
              "unit do not load until its inlet is found.", self.HOW],
             [self._button("Bambu_AMS_1"), self._button("Bambu_AMS_2"), self.ALL])
@@ -2376,6 +2518,17 @@ class TestAfcBridgeBoxSwitchOffer:
         # No unit is offered by itself until the outlets have their toolheads.
         assert switch._offered == []
         assert switch._setup_offered is True
+
+    def test_a_unit_on_no_chain_is_offered_once_by_its_name(self):
+        switch = sharing()
+        switch._offer()
+        switch._offer()
+        assert chain_of(switch).offers == [
+            ("Switch_1", "Switch_1 new unit",
+             ["Switch_1: the inlet of Turtle_1 is not known yet. The lanes of a unit do not "
+              "load until its inlet is found.", self.HOW],
+             [self._button("Turtle_1")])]
+        assert switch._offered == ["Turtle_1"]
 
 
 class TestAfcBridgeBoxSwitchOfferSetup:
@@ -6206,7 +6359,8 @@ class TestAfcBridgeBoxSwitchIdentifyMenu:
                    "back, to find the inlet the unit is plumbed into. A lane that is loaded "
                    "through the switch is unloaded first. Put a spool in the unit, then pick it.")
     NO_UNIT = ("raw", "// action:prompt_text No unit's inlet is found by loading. That is for "
-                      "the units of a chain that is on both inlets in the switch's section.")
+                      "a unit or a chain that is on both inlet_a and inlet_b in "
+                      f"[{SECTION}].")
     FOOT = TO_SWITCH
     ALL_NEW = ("raw", "// action:prompt_button All new units|AFC_BRIDGEBOX_SWITCH_IDENTIFY "
                       "SWITCH=Switch_1 UNIT=all|default")
@@ -6312,8 +6466,8 @@ class TestAfcBridgeBoxSwitchAll:
 
 
 class TestAfcBridgeBoxSwitchIdentifyLane:
-    NOT_FOUND_BY_LOADING = ("is not found by loading. That is for the units of a chain that is "
-                            "on both inlets in the switch's section.")
+    NOT_FOUND_BY_LOADING = ("is not found by loading. That is for a unit or a chain that is "
+                            f"on both inlet_a and inlet_b in [{SECTION}].")
 
     @staticmethod
     def _switch(**values: Any) -> Tuple[afcBridgeBoxSwitch, List[FakeLane]]:
@@ -6385,6 +6539,471 @@ class TestAfcBridgeBoxSwitchIdentifyLane:
     def test_a_named_lane_that_holds_no_filament(self):
         switch, _lanes = self._switch()
         self._refused(switch, None, "lane1", "lane1 holds no filament. Put a spool in it first.")
+
+    def test_a_unit_on_no_chain_is_in_use_as_it_is(self):
+        switch = sharing()
+        lane = stepped(lane_of(switch, "Turtle_1"))
+        lane.load_state = True
+        assert switch._identify_lane("Turtle_1", None) is lane
+
+    def test_a_lane_that_only_whole_loads_move(self):
+        switch = sharing()
+        lane_of(switch, "Turtle_1").load_state = True
+        said = ("Turtle_1 only runs whole loads, so lane_Turtle_1 cannot be fed to a sensor and "
+                f"reeled back. Name Turtle_1 on one inlet in [{SECTION}]: inlet_a or inlet_b.")
+        self._refused(switch, "Turtle_1", None, said)
+        self._refused(switch, None, "lane_Turtle_1", said)
+
+
+class TestAfcBridgeBoxSwitchByLoading:
+    def test_a_switch_with_a_section_of_its_own(self):
+        assert plumbed()._by_loading() == (
+            f"That is for a unit or a chain that is on both inlet_a and inlet_b in [{SECTION}].")
+
+    def test_a_switch_its_chain_made(self):
+        assert made()._by_loading() == (
+            "That is for a unit or a chain that is on both switch_inlet_a and switch_inlet_b in "
+            "[AFC_BridgeBox Chain_1].")
+
+
+class TestAfcBridgeBoxSwitchFeeds:
+    @staticmethod
+    def _lane() -> Tuple[afcBridgeBoxSwitch, FakeLane]:
+        """:return tuple: a switch and the lane of Turtle_1, which only whole loads move"""
+        switch = plumbed()
+        return switch, lane_of(switch, "Turtle_1")
+
+    def test_a_lane_that_only_whole_loads_move_cannot_be_fed(self):
+        switch, lane = self._lane()
+        assert switch._feeds(lane) is False
+        # Nor can a lane that has the place for a stepper and none in it.
+        lane.extruder_stepper = None
+        assert switch._feeds(lane) is False
+
+    def test_a_unit_with_a_feed_of_its_own(self):
+        switch, lane = self._lane()
+        lane.unit_obj.feed_to = MagicMock()
+        assert switch._feeds(lane) is True
+
+    def test_a_lane_with_a_drive_stepper(self):
+        switch, lane = self._lane()
+        homed(lane)
+        assert switch._feeds(lane) is True
+
+    def test_a_lane_that_is_a_stepper_itself(self):
+        switch, lane = self._lane()
+        lane.extruder_stepper = MagicMock()
+        assert switch._feeds(lane) is True
+
+    def test_a_unit_with_no_stepper_that_moves_its_lanes_by_distance(self):
+        switch, lane = self._lane()
+        assert switch._feeds(stepped(lane)) is True
+
+    def test_a_unit_with_no_stepper_and_no_move_of_its_own_cannot(self):
+        switch, lane = self._lane()
+        lane.unit_obj.stepperless_drive = True
+        assert switch._feeds(lane) is False
+
+    def test_a_move_of_its_own_does_not_count_on_a_unit_that_is_not_without_steppers(self):
+        switch, lane = self._lane()
+        lane.unit_obj.lane_move = MagicMock()
+        assert switch._feeds(lane) is False
+
+
+class TestAfcBridgeBoxSwitchWholeLoads:
+    def test_it_names_the_unit_and_the_lane(self):
+        switch = plumbed()
+        assert switch._whole_loads(lane_of(switch, "Turtle_1")) == (
+            "Switch_1: Turtle_1 only runs whole loads, so lane_Turtle_1 cannot be fed to a "
+            "sensor and reeled back.")
+
+
+class TestAfcBridgeBoxSwitchFeed:
+    @staticmethod
+    def _switch() -> Tuple[afcBridgeBoxSwitch, FakeLane, List[Any]]:
+        """
+        :return tuple: a switch whose two feeds with AFC's moves are stand-ins, the lane of
+        Turtle_1, and a list that is filled with the check each stand-in ran under
+        """
+        switch = plumbed()
+        under: List[Any] = []
+
+        def home_to(lane: FakeLane, stepper: Any, gcmd: Any) -> float:
+            under.append(switch._check)
+            return 310.0
+
+        def step_to(lane: FakeLane, gcmd: Any) -> float:
+            under.append(switch._check)
+            return 75.0
+
+        switch._home_to = MagicMock(side_effect=home_to)
+        switch._step_to = MagicMock(side_effect=step_to)
+        return switch, lane_of(switch, "Turtle_1"), under
+
+    def test_a_unit_with_a_feed_of_its_own_feeds_the_lane_itself(self):
+        switch, lane, under = self._switch()
+        # Its own feed comes before a stepper AFC could home the lane with.
+        homed(lane)
+        lane.unit_obj.feed_to = MagicMock(return_value=True)
+        seen, gcmd = MagicMock(), MockGCodeCommand()
+        assert switch._feed(lane, seen, gcmd) is None
+        lane.unit_obj.feed_to.assert_called_once_with(lane, seen, gcmd)
+        switch._home_to.assert_not_called()
+        switch._step_to.assert_not_called()
+        assert (under, switch._check) == ([], None)
+
+    def test_a_lane_whose_stepper_can_home_to_the_check_is_fed_in_one_move(self):
+        switch, lane, under = self._switch()
+        stepper = homed(lane)
+        seen, gcmd = MagicMock(), MockGCodeCommand()
+        assert switch._feed(lane, seen, gcmd) == 310.0
+        switch._home_to.assert_called_once_with(lane, stepper, gcmd)
+        switch._step_to.assert_not_called()
+        # The check is the feed's own while it runs, and none is left behind.
+        assert (under, switch._check) == ([seen], None)
+
+    def test_any_other_lane_is_fed_a_step_at_a_time(self):
+        switch, lane, under = self._switch()
+        seen, gcmd = MagicMock(), MockGCodeCommand()
+        assert switch._feed(lane, seen, gcmd) == 75.0
+        switch._step_to.assert_called_once_with(lane, gcmd)
+        switch._home_to.assert_not_called()
+        assert (under, switch._check) == ([seen], None)
+
+    @pytest.mark.parametrize("with_stepper", [True, False])
+    def test_a_feed_that_fails_leaves_no_check_behind(self, with_stepper):
+        switch, lane, _under = self._switch()
+        if with_stepper:
+            homed(lane)
+        switch._home_to.side_effect = SwitchError("Switch_1: it did not home")
+        switch._step_to.side_effect = SwitchError("Switch_1: it did not step")
+        with pytest.raises(SwitchError) as err:
+            switch._feed(lane, MagicMock(), MockGCodeCommand())
+        assert str(err.value) == ("Switch_1: it did not home" if with_stepper
+                                  else "Switch_1: it did not step")
+        assert switch._check is None
+
+
+class TestAfcBridgeBoxSwitchStepper:
+    @staticmethod
+    def _lane() -> Tuple[afcBridgeBoxSwitch, FakeLane]:
+        """:return tuple: a switch and the lane of Turtle_1, which has no stepper"""
+        switch = plumbed()
+        return switch, lane_of(switch, "Turtle_1")
+
+    def test_the_drive_stepper_of_the_lane(self):
+        switch, lane = self._lane()
+        stepper = homed(lane)
+        assert switch._stepper(lane) is stepper
+
+    def test_a_lane_that_is_a_stepper_itself(self):
+        switch, lane = self._lane()
+        lane.add_polled_endstop = MagicMock()
+        assert switch._stepper(lane) is lane
+
+    def test_a_lane_with_no_stepper_has_none(self):
+        switch, lane = self._lane()
+        assert switch._stepper(lane) is None
+
+    def test_a_stepper_that_takes_no_polled_endstop_does_not_count(self):
+        switch, lane = self._lane()
+        lane.drive_stepper = object()
+        assert switch._stepper(lane) is None
+
+    def test_while_afc_does_not_home_there_is_none(self):
+        switch, lane = self._lane()
+        homed(lane)
+        switch.afc.homing_enabled = False
+        assert switch._stepper(lane) is None
+
+
+class TestAfcBridgeBoxSwitchChecked:
+    @staticmethod
+    def _watching(reads: bool) -> afcBridgeBoxSwitch:
+        """
+        :return afcBridgeBoxSwitch: a switch that watches the toolhead sensor of `extruder1`,
+        which ``reads`` filament or does not
+        """
+        switch = sharing()
+        switch._watched = {"extruder1": extruder_of(switch, "extruder1")}
+        extruder_of(switch, "extruder1").tool_start_state = reads
+        return switch
+
+    def test_while_no_feed_runs_nothing_ends_one_whatever_a_sensor_reads(self):
+        switch = self._watching(reads=True)
+        assert switch._checked() is False
+        assert switch._read == []
+
+    def test_the_check_of_the_feed_saw_the_lane(self):
+        switch = self._watching(reads=False)
+        switch._check = MagicMock(return_value=True)
+        assert switch._checked() is True
+        assert switch._read == []
+
+    def test_a_watched_toolhead_sensor_reads_the_lane(self):
+        switch = self._watching(reads=True)
+        switch._check = MagicMock(return_value=False)
+        assert switch._checked() is True
+        assert switch._read == ["extruder1"]
+
+    def test_neither_saw_the_lane(self):
+        switch = self._watching(reads=False)
+        switch._check = MagicMock(return_value=False)
+        assert switch._checked() is False
+        switch._check.assert_called_once_with()
+        assert switch._read == []
+
+
+class TestAfcBridgeBoxSwitchLimit:
+    def test_a_lane_with_no_tube_is_fed_past_its_way_to_the_hub(self):
+        switch = plumbed()
+        assert switch._limit(lane_of(switch, "Turtle_1")) == 60.0 + 500.0
+
+    def test_the_tube_of_the_lane_is_added(self):
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        add_hub(lane, length=900.0)
+        assert switch._limit(lane) == 60.0 + 900.0 + 500.0
+
+    def test_but_not_what_the_outlet_the_lane_goes_through_added_to_the_tube(self):
+        switch = plumbed(**LENGTHS)
+        lane = lane_of(switch, "Turtle_1")
+        hub = add_hub(lane, length=900.0)
+        lane.set_extruder(extruder_of(switch, "extruder1"))
+        switch._set_length(lane)
+        # The other outlet's tube is 160 mm longer.
+        assert tube_of(hub)[0] == 1060.0
+        assert switch._limit(lane) == 60.0 + 900.0 + 500.0
+
+
+class TestAfcBridgeBoxSwitchHomeTo:
+    # The mm the lane is fed at the most: to its hub, through its tube and 500 mm past it.
+    LIMIT = 60.0 + 900.0 + 500.0
+
+    @staticmethod
+    def _switch(moved: float = 310.0, warn: AFCMoveWarning = AFCMoveWarning.NONE
+                ) -> Tuple[afcBridgeBoxSwitch, FakeLane, FakeStepper]:
+        """
+        :return tuple: a switch, the lane of Turtle_1, whose homing move ends after ``moved``
+        mm with ``warn``, and the stepper the lane homes with
+        """
+        switch = plumbed()
+        lane = lane_of(switch, "Turtle_1")
+        add_hub(lane, length=900.0)
+        lane.move_to.return_value = (moved > 0, moved, warn)
+        return switch, lane, homed(lane)
+
+    @staticmethod
+    def _left_off(lane: FakeLane, gcmd: Any) -> None:
+        """Check the lane's stepper was turned off and its unit sent home."""
+        lane.do_enable.assert_called_once_with(False)
+        lane.unit_obj.return_to_home.assert_called_once_with(gcmd=gcmd)
+
+    def test_the_lane_is_fed_in_one_homing_move_and_pulled_back_as_far(self):
+        switch, lane, stepper = self._switch()
+        gcmd = MockGCodeCommand()
+        assert switch._home_to(lane, stepper, gcmd) == 310.0
+        lane.set_load_current.assert_called_once_with(gcmd=gcmd)
+        lane.move_to.assert_called_once_with(self.LIMIT, SpeedMode.CALIBRATION,
+                                             endstop="filament_switch", use_homing=True,
+                                             gcmd=gcmd)
+        lane.move_advanced.assert_called_once_with(-310.0, SpeedMode.LONG, AssistActive.YES,
+                                                   gcmd=gcmd)
+        self._left_off(lane, gcmd)
+
+    def test_the_stepper_has_its_endstop_and_current_before_the_lane_moves(self):
+        switch, lane, stepper = self._switch()
+        before: List[Tuple[int, int, int]] = []
+
+        def move_to(*args: Any, **kwargs: Any) -> Tuple[bool, float, AFCMoveWarning]:
+            before.append((stepper.add_polled_endstop.call_count,
+                           lane.set_load_current.call_count, lane.do_enable.call_count))
+            return True, 310.0, AFCMoveWarning.NONE
+
+        lane.move_to = MagicMock(side_effect=move_to)
+        switch._home_to(lane, stepper, MockGCodeCommand())
+        assert before == [(1, 1, 0)]
+
+    def test_a_stepper_is_given_the_endstop_that_reads_the_check_once(self):
+        switch, lane, stepper = self._switch()
+        switch._home_to(lane, stepper, MockGCodeCommand())
+        switch._home_to(lane, stepper, MockGCodeCommand())
+        stepper.add_polled_endstop.assert_called_once_with("filament_switch", switch._checked)
+        assert switch._homing == [stepper]
+        assert lane.move_to.call_count == 2
+
+    def test_each_stepper_is_given_its_own(self):
+        switch, lane, stepper = self._switch()
+        other_lane = lane_of(switch, "Ace2_1")
+        other_stepper = homed(other_lane)
+        other_lane.move_to.return_value = (True, 280.0, AFCMoveWarning.NONE)
+        switch._home_to(lane, stepper, MockGCodeCommand())
+        switch._home_to(other_lane, other_stepper, MockGCodeCommand())
+        stepper.add_polled_endstop.assert_called_once_with("filament_switch", switch._checked)
+        other_stepper.add_polled_endstop.assert_called_once_with("filament_switch",
+                                                                 switch._checked)
+        assert switch._homing == [stepper, other_stepper]
+
+    def test_a_move_that_the_check_ended_short_of_its_limit_is_no_error(self):
+        # AFC warns of a homing move that ends well before its distance, which is how one that
+        # found its sensor ends here.
+        switch, lane, stepper = self._switch(warn=AFCMoveWarning.WARN)
+        assert switch._home_to(lane, stepper, MockGCodeCommand()) == 310.0
+
+    def test_a_lane_that_did_not_move_is_not_pulled_back(self):
+        switch, lane, stepper = self._switch(moved=0.0)
+        gcmd = MockGCodeCommand()
+        assert switch._home_to(lane, stepper, gcmd) == 0.0
+        lane.move_advanced.assert_not_called()
+        self._left_off(lane, gcmd)
+
+    def test_a_move_that_failed_before_it_is_known_to_have_gone_is_an_error(self):
+        switch, lane, stepper = self._switch(moved=0.0, warn=AFCMoveWarning.ERROR)
+        gcmd = MockGCodeCommand()
+        with pytest.raises(SwitchError) as err:
+            switch._home_to(lane, stepper, gcmd)
+        assert str(err.value) == (
+            "Switch_1: the move that feeds lane_Turtle_1 to a sensor failed, and the lane was "
+            "not pulled back. Run LANE_UNLOAD LANE=lane_Turtle_1 if its filament is out of its "
+            "unit, then try again.")
+        lane.move_advanced.assert_not_called()
+        self._left_off(lane, gcmd)
+
+    def test_a_move_that_failed_part_way_is_pulled_back_and_is_an_error(self):
+        switch, lane, stepper = self._switch(moved=212.4, warn=AFCMoveWarning.ERROR)
+        gcmd = MockGCodeCommand()
+        with pytest.raises(SwitchError) as err:
+            switch._home_to(lane, stepper, gcmd)
+        assert str(err.value) == (
+            "Switch_1: the move that feeds lane_Turtle_1 to a sensor failed, and the lane was "
+            "pulled back the 212 mm it went. Run LANE_UNLOAD LANE=lane_Turtle_1 if its filament "
+            "is out of its unit, then try again.")
+        lane.move_advanced.assert_called_once_with(-212.4, SpeedMode.LONG, AssistActive.YES,
+                                                   gcmd=gcmd)
+        self._left_off(lane, gcmd)
+
+    def test_a_move_that_raises_leaves_the_stepper_off_all_the_same(self):
+        switch, lane, stepper = self._switch()
+        lane.move_to.side_effect = CommandError("the stepper is lost")
+        gcmd = MockGCodeCommand()
+        with pytest.raises(CommandError) as err:
+            switch._home_to(lane, stepper, gcmd)
+        assert str(err.value) == "the stepper is lost"
+        # Nothing is known to be fed, so nothing is pulled back.
+        lane.move_advanced.assert_not_called()
+        self._left_off(lane, gcmd)
+
+
+class TestAfcBridgeBoxSwitchStepTo:
+    @staticmethod
+    def _switch(*checks: bool) -> Tuple[afcBridgeBoxSwitch, FakeLane]:
+        """
+        :return tuple: a switch whose running feed is checked with ``checks`` in turn and
+        sees nothing after them, and the lane of Turtle_1
+        """
+        switch = plumbed()
+        script = list(checks)
+        switch._check = MagicMock(side_effect=lambda: script.pop(0) if script else False)
+        return switch, lane_of(switch, "Turtle_1")
+
+    @staticmethod
+    def _step(mm: float, gcmd: Any) -> Any:
+        """:return call: one step of a feed"""
+        return call(mm, SpeedMode.CALIBRATION, AssistActive.NO, gcmd=gcmd)
+
+    @staticmethod
+    def _back(mm: float, gcmd: Any) -> Any:
+        """:return call: the move that pulls a lane back"""
+        return call(-mm, SpeedMode.LONG, AssistActive.YES, gcmd=gcmd)
+
+    @staticmethod
+    def _left_off(lane: FakeLane, gcmd: Any) -> None:
+        """Check the lane's drive was turned off and its unit sent home."""
+        lane.do_enable.assert_called_once_with(False)
+        lane.unit_obj.return_to_home.assert_called_once_with(gcmd=gcmd)
+
+    def test_the_lane_is_fed_a_step_at_a_time_until_the_check_saw_it_and_pulled_back(self):
+        switch, lane = self._switch(False, False, True)
+        gcmd = MockGCodeCommand()
+        assert switch._step_to(lane, gcmd) == 75.0
+        lane.set_load_current.assert_called_once_with(gcmd=gcmd)
+        assert lane.move_advanced.call_args_list == [self._step(25.0, gcmd)] * 3 + [
+            self._back(75.0, gcmd)]
+        # A sensor is given a moment after each step.
+        assert switch.reactor.pause.call_args_list == [call(100.0 + 0.2)] * 3
+        self._left_off(lane, gcmd)
+
+    def test_the_step_is_the_one_the_units_own_calibration_feeds_by(self):
+        switch, lane = self._switch(False, True)
+        lane.unit_obj.calibration_step = 40.0
+        gcmd = MockGCodeCommand()
+        assert switch._step_to(lane, gcmd) == 80.0
+        assert lane.move_advanced.call_args_list == [self._step(40.0, gcmd)] * 2 + [
+            self._back(80.0, gcmd)]
+
+    def test_a_lane_no_check_saw_is_fed_to_its_limit_and_pulled_back(self):
+        switch, lane = self._switch()
+        # It is fed 560 mm at the most, which is three steps of 200 mm.
+        lane.unit_obj.calibration_step = 200.0
+        gcmd = MockGCodeCommand()
+        assert switch._step_to(lane, gcmd) == 600.0
+        assert lane.move_advanced.call_args_list == [self._step(200.0, gcmd)] * 3 + [
+            self._back(600.0, gcmd)]
+        assert switch._check.call_count == 3
+
+    def test_a_first_step_that_fails_leaves_nothing_to_pull_back(self):
+        switch, lane = self._switch()
+        lane.move_advanced.side_effect = CommandError("the unit is gone")
+        gcmd = MockGCodeCommand()
+        with pytest.raises(CommandError) as err:
+            switch._step_to(lane, gcmd)
+        assert str(err.value) == "the unit is gone"
+        assert lane.move_advanced.call_args_list == [self._step(25.0, gcmd)]
+        self._left_off(lane, gcmd)
+
+    def test_a_later_step_that_fails_has_what_was_fed_pulled_back(self):
+        switch, lane = self._switch()
+        lane.move_advanced.side_effect = [None, CommandError("the unit is gone"), None]
+        gcmd = MockGCodeCommand()
+        with pytest.raises(CommandError):
+            switch._step_to(lane, gcmd)
+        assert lane.move_advanced.call_args_list == [self._step(25.0, gcmd)] * 2 + [
+            self._back(25.0, gcmd)]
+        self._left_off(lane, gcmd)
+
+
+class TestAfcBridgeBoxSwitchUnseen:
+    @staticmethod
+    def _unseen(fed: Optional[float], read: Optional[List[str]] = None) -> str:
+        """:return str: why the lane of Turtle_1 was not read, after a feed of ``fed`` mm"""
+        switch = plumbed()
+        switch._read = list(read or [])
+        return switch._unseen(lane_of(switch, "Turtle_1"), fed)
+
+    # What is said of a lane its unit fed itself.
+    BY_UNIT = ("Switch_1: lane_Turtle_1 was fed and neither inlet read filament. Put the spool "
+               "of Turtle_1 in again so its feeder takes the filament, and check that the unit "
+               "is plumbed into the switch.")
+
+    def test_a_lane_its_unit_fed_itself(self):
+        assert self._unseen(None) == self.BY_UNIT
+
+    def test_what_a_toolhead_read_is_not_said_of_such_a_lane(self):
+        assert self._unseen(None, ["extruder1"]) == self.BY_UNIT
+
+    @pytest.mark.parametrize("read, names", [
+        (["extruder1"], "extruder1"), (["extruder", "extruder1"], "extruder and extruder1")])
+    def test_a_lane_afc_fed_as_far_as_a_toolhead(self, read, names):
+        assert self._unseen(430.0, read) == (
+            f"Switch_1: lane_Turtle_1 reached the toolhead sensor of {names} and neither inlet "
+            "read filament. Check that Turtle_1 is plumbed into the switch.")
+
+    @pytest.mark.parametrize("fed, said", [(1460.0, "1460"), (0.0, "0")])
+    def test_a_lane_afc_fed_that_nothing_read(self, fed, said):
+        assert self._unseen(fed) == (
+            f"Switch_1: lane_Turtle_1 was fed {said} mm and neither inlet read filament. Check "
+            "that Turtle_1 is plumbed into the switch, and the tube length of Turtle_1: a lane "
+            "is fed 500 mm past it at the most.")
 
 
 class TestAfcBridgeBoxSwitchIdentify:
@@ -6535,6 +7154,91 @@ class TestAfcBridgeBoxSwitchIdentify:
         switch._clear = MagicMock(side_effect=SwitchError("Switch_1: it is full"))
         self._not_found(switch, lane, "it is full")
         feed.assert_not_called()
+
+    @staticmethod
+    def _shared() -> Tuple[afcBridgeBoxSwitch, FakeLane]:
+        """
+        :return tuple: a switch at rest with Turtle_1 on both inlets, and that unit's lane,
+        which holds filament and which AFC moves by distance
+        """
+        switch = sharing()
+        lane = stepped(lane_of(switch, "Turtle_1"))
+        lane.load_state = True
+        return switch, lane
+
+    def test_a_unit_on_no_chain_is_fed_with_afcs_moves_and_kept_for_its_name(self):
+        switch, lane = self._shared()
+        moves = stepping(switch, lane, inlet="B")
+        gcmd = MockGCodeCommand()
+        assert switch._identify(lane, gcmd) == "B"
+        step = call(25.0, SpeedMode.CALIBRATION, AssistActive.NO, gcmd=gcmd)
+        assert moves.call_args_list == [step, step, step,
+                                        call(-75.0, SpeedMode.LONG, AssistActive.YES, gcmd=gcmd)]
+        assert switch._found == {"Turtle_1": "B"}
+        assert switch._held == {"Turtle_1": "Turtle_1"}
+        assert switch.inlets == {"A": ["Bambu_AMS_1"], "B": ["Ace2_1", "Turtle_1"]}
+        assert lane.extruder_obj.name == "extruder1"
+        assert switch.confirmed == ["Turtle_1"]
+        switch.afc.save_vars.assert_called_once_with()
+        assert (switch._moving, switch._check) == (False, None)
+
+    def test_a_lane_a_stepper_homes_is_fed_in_one_move_that_its_inlet_ends(self):
+        switch, lane = self._shared()
+        stepper = homed(lane)
+        chain = chain_of(switch)
+        triggered: List[bool] = []
+
+        def move_to(*args: Any, **kwargs: Any) -> Tuple[bool, float, AFCMoveWarning]:
+            # The endstop the stepper homes to, read before and once the filament is there.
+            trigger = stepper.add_polled_endstop.call_args.args[1]
+            triggered.append(trigger())
+            chain.fill(b=True)
+            triggered.append(trigger())
+            return True, 640.0, AFCMoveWarning.WARN
+
+        lane.move_to = MagicMock(side_effect=move_to)
+        lane.move_advanced = MagicMock(side_effect=lambda *args, **kwargs: chain.fill(b=False))
+        gcmd = MockGCodeCommand()
+        assert switch._identify(lane, gcmd) == "B"
+        assert triggered == [False, True]
+        lane.move_advanced.assert_called_once_with(-640.0, SpeedMode.LONG, AssistActive.YES,
+                                                   gcmd=gcmd)
+        assert switch._found == {"Turtle_1": "B"}
+        # Once the feed is over the endstop reads nothing, whatever is in an inlet.
+        chain.fill(b=True)
+        assert stepper.add_polled_endstop.call_args.args[1]() is False
+
+    def test_a_lane_afcs_moves_fed_as_far_as_a_toolhead_is_said_to_have_reached_it(self):
+        switch, lane = self._shared()
+        moves = stepping(switch, lane, toolhead="extruder", after=2)
+        with pytest.raises(SwitchError) as err:
+            switch._identify(lane, MockGCodeCommand())
+        assert str(err.value) == (
+            "Switch_1: lane_Turtle_1 reached the toolhead sensor of extruder and neither inlet "
+            "read filament. Check that Turtle_1 is plumbed into the switch.")
+        # It was fed no further than the toolhead, and pulled back.
+        assert [move.args[0] for move in moves.call_args_list] == [25.0, 25.0, -50.0]
+        assert switch._found == {}
+
+    def test_the_toolhead_sensors_are_watched_afresh_while_the_lane_is_fed(self):
+        switch, lane = self._shared()
+        switch._read = ["extruder1"]
+        during: List[Tuple[List[str], List[str]]] = []
+
+        def feed(lane: FakeLane, seen: Any, gcmd: Any) -> float:
+            during.append((list(switch._watched), list(switch._read)))
+            return 560.0
+
+        switch._feed = MagicMock(side_effect=feed)
+        gcmd = MockGCodeCommand()
+        with pytest.raises(SwitchError) as err:
+            switch._identify(lane, gcmd)
+        switch._feed.assert_called_once_with(lane, switch._saw, gcmd)
+        assert during == [(["extruder", "extruder1"], [])]
+        assert str(err.value) == (
+            "Switch_1: lane_Turtle_1 was fed 560 mm and neither inlet read filament. Check "
+            "that Turtle_1 is plumbed into the switch, and the tube length of Turtle_1: a lane "
+            "is fed 500 mm past it at the most.")
 
 
 class TestAfcBridgeBoxSwitchClear:
@@ -7204,6 +7908,36 @@ class TestAfcBridgeBoxSwitchOutletLane:
         self._refused(known(), "lane_Bambu_AMS_2",
                       "lane_Bambu_AMS_2 holds no filament. Put a spool in it first.")
 
+    BY_HAND = "set switch_outlet_a and switch_outlet_b by hand."
+
+    @staticmethod
+    def _whole_loads(switch: afcBridgeBoxSwitch, unit: str) -> FakeLane:
+        """:return FakeLane: a unit's lane, which holds filament and only whole loads move"""
+        lane = lane_of(switch, unit)
+        lane.load_state = True
+        lane.unit_obj = FakeUnit(unit)
+        return lane
+
+    def test_a_lane_that_cannot_be_fed_is_passed_over(self):
+        switch = known()
+        self._whole_loads(switch, "Bambu_AMS_1")
+        lane_of(switch, "Bambu_AMS_2").load_state = True
+        assert switch._outlet_lane(None) is lane_of(switch, "Bambu_AMS_2")
+
+    def test_only_lanes_that_cannot_be_fed_hold_filament(self):
+        switch = known()
+        self._whole_loads(switch, "Bambu_AMS_1")
+        self._refused(switch, None, "no lane that holds filament can be fed to a toolhead "
+                                    "sensor and reeled back. Their units only run whole loads, "
+                                    f"so {self.BY_HAND}")
+
+    def test_a_named_lane_that_cannot_be_fed(self):
+        switch = known()
+        self._whole_loads(switch, "Bambu_AMS_1")
+        self._refused(switch, "lane_Bambu_AMS_1",
+                      "Bambu_AMS_1 only runs whole loads, so lane_Bambu_AMS_1 cannot be fed to "
+                      f"a sensor and reeled back. Use a lane of another unit, or {self.BY_HAND}")
+
 
 class TestAfcBridgeBoxSwitchFindOutlets:
     SAVED = {"outlet_a": "extruder1", "outlet_a_length": "", "outlet_b": "extruder",
@@ -7461,6 +8195,19 @@ class TestAfcBridgeBoxSwitchFindOutlet:
         switch._find_outlet(lane, "A", "A", [], MockGCodeCommand())
         switch._wait_clear.assert_called_once_with("A")
         assert fed == [1]
+
+    def test_a_lane_afc_moves_is_fed_until_a_toolhead_sensor_reads_it(self):
+        switch = known()
+        lane = lane_of(switch, "Bambu_AMS_1")
+        lane.unit_obj = FakeUnit("Bambu_AMS_1")
+        moves = stepping(switch, stepped(lane), toolhead="extruder1", after=2)
+        gcmd = MockGCodeCommand()
+        assert switch._find_outlet(lane, "A", "A", [], gcmd) == "extruder1"
+        step = call(25.0, SpeedMode.CALIBRATION, AssistActive.NO, gcmd=gcmd)
+        assert moves.call_args_list == [step, step,
+                                        call(-50.0, SpeedMode.LONG, AssistActive.YES, gcmd=gcmd)]
+        assert switch._read == ["extruder1"]
+        assert switch._check is None
 
 
 class TestAfcBridgeBoxSwitchSetOutlets:

@@ -32,7 +32,7 @@ import os
 import struct
 import time
 
-from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 from extras.AFC_ACE import (
     afcACE, ACEConnection, ACESerialError, ACETimeoutError, REQUEST_TIMEOUT,
@@ -42,6 +42,7 @@ from extras.AFC_ACE import (
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
     from extras.AFC_lane import AFCLane
+    from extras.AFC_utils import AFCGcmd
     from gcode import GCodeCommand
     from reactor import SelectReactor as Reactor
 
@@ -76,6 +77,9 @@ CALIBRATE_PRESS = 35.0
 # often (s) while a move runs.
 HUB_SWITCH_SPEED = 25.0
 HUB_SWITCH_POLL = 0.1
+# A feed that looks for a lane's filament at a sensor runs this far (mm) past
+# the lane's own way to its toolhead before it is given up.
+FEED_TO_PAST = 500.0
 HEADER_LEN = 7
 TRAILER_LEN = 3
 MIN_FRAME_LEN = HEADER_LEN + TRAILER_LEN
@@ -1781,7 +1785,8 @@ class afcACE2(afcACE):
         return (True, f"afc_bowden_length calibration: {bowden}mm (was {old_bowden}mm), "
                       f"afc_unload_bowden_length: {unload}mm (was {old_unload}mm)", bowden)
 
-    def _feed_to_gears(self, slot: int, buf: Any, max_distance: float) -> Tuple[float, float, str]:
+    def _feed_to_gears(self, slot: int, buf: Any, max_distance: float,
+                       seen: Optional[Callable[[], bool]] = None) -> Tuple[float, float, str]:
         """
         Feed until the extruder gears stop the filament, then stop the feed.
         The filament has arrived when the slot's buffer is pressed forward
@@ -1792,6 +1797,8 @@ class afcACE2(afcACE):
         :param slot: 0-based ACE slot index.
         :param buf: the lane's ACE buffer, for its poll and stillness settings
         :param max_distance: the longest feed to try, in mm
+        :param seen: a check that also ends the feed once it is True, None
+            to feed up to the gears
         :return tuple: (mm the unit had fed, by its own count, when the
             filament last moved freely, mm the encoder counted in all, '' or
             why the filament did not arrive)
@@ -1818,6 +1825,9 @@ class afcACE2(afcACE):
             now = reactor.monotonic()
             if now > deadline:
                 reason = f"no arrival after {length:.0f}mm, the unit's buffer could not be read"
+                break
+            if (seen is not None
+                and seen()):
                 break
             sample = read_slot(self, slot)
             if sample is not None:
@@ -1953,6 +1963,21 @@ class afcACE2(afcACE):
         :return Optional[float]: mm the unit counted for the move, or None when
             the move was refused or the unit could not say.
         """
+        return self._run_until(slot, distance, speed, lambda: bool(hub.state) is until)
+
+    def _run_until(self, slot: int, distance: float, speed: float,
+                   stop: Callable[[], bool]) -> Optional[float]:
+        """
+        Run one feed or unwind and stop it once a check says so. The unit's
+        own count of the move is how far the lane went.
+
+        :param slot: 0-based ACE slot index.
+        :param distance: Signed distance in mm; positive feeds, negative unwinds.
+        :param speed: Speed of the move in mm/s.
+        :param stop: Called while the move runs, True to stop it.
+        :return Optional[float]: mm the unit counted for the move, or None when
+            the move was refused or the unit could not say.
+        """
         reactor = self.afc.reactor
         length = abs(distance)
         try:
@@ -1962,13 +1987,13 @@ class afcACE2(afcACE):
             else:
                 self._ace.unwind_filament(slot, length, speed)
         except Exception as e:
-            self.logger.error(f"ACE hub calibrate: move failed: {e}")
+            self.logger.error(f"ACE {self.name}: move on slot {slot} failed: {e}")
             return None
         last_moving = reactor.monotonic()
         deadline = last_moving + 1.5 * length / min(max(speed, 1.0), FEED_SPEED_CEILING) + 15.0
         # A move that ran out, or never started, shows no motion for the
         # unit's departure timeout.
-        while bool(hub.state) is not until:
+        while not stop():
             now = reactor.monotonic()
             try:
                 moving = self._slot_is_moving(self._ace.get_status(timeout=2.0), slot)
@@ -1982,6 +2007,80 @@ class afcACE2(afcACE):
             reactor.pause(now + HUB_SWITCH_POLL)
         self._stop_feed_at_sensor(slot)
         return self._last_feed_length(slot)
+
+    def feed_to(self, lane: AFCLane, seen: Callable[[], bool], gcmd: AFCGcmd) -> bool:
+        """
+        Feed a lane in one move until a check sees its filament, stop it
+        there, and unwind what the encoder counted, so the tip is back where
+        it started. The feed also ends where a load's would: at the lane's
+        toolhead sensor, or at the extruder gears for a lane whose toolhead
+        sensor is the unit's buffer.
+
+        :param lane: a lane with filament in its slot that is not loaded
+        :param seen: called while the lane feeds, True once its filament was seen
+        :param gcmd: command context, unused here but accepted for interface parity
+        :return bool: True when the check saw the filament
+        """
+        if (not self._ace
+            or not self._ace.connected):
+            self.logger.warning(f"ACE {self.name}: not connected, {lane.name} is not fed")
+            return False
+        slot = self._get_slot(lane.name)
+        distance = lane.dist_hub + FEED_TO_PAST
+        if lane.hub_obj is not None:
+            distance += lane.hub_obj.afc_bowden_length
+        buf = self._ram_buffer(lane)
+        with self._operation():
+            # The unit drives one slot at a time: a feed is not answered while
+            # another slot runs feed assist.
+            for other_slot in list(self._feed_assist_active):
+                if other_slot != slot:
+                    self._stop_feed_assist(other_slot)
+            if buf is not None:
+                _contact, fed, reason = self._feed_to_gears(slot, buf, distance, seen)
+            else:
+                fed, reason = self._feed_to_sensor(slot, lane, distance, seen)
+            found = bool(seen())
+            if reason:
+                self.logger.warning(f"ACE {self.name}: feed of {lane.name} to a sensor: {reason}")
+            ratio = self._unwind_measured(slot, fed)
+            # The unit unwinds a little less than it is told: cover what that
+            # left, so the tip is back where the feed started.
+            self._unwind_measured(slot, fed * (ratio - 1.0))
+        return found
+
+    def _feed_to_sensor(self, slot: int, lane: AFCLane, max_distance: float,
+                        seen: Callable[[], bool]) -> Tuple[float, str]:
+        """
+        Feed until a check sees the filament or the lane's toolhead sensor
+        reads it, then stop the feed.
+
+        :param slot: 0-based ACE slot index.
+        :param lane: the lane that is fed, which has a toolhead sensor
+        :param max_distance: the longest feed to try, in mm
+        :param seen: called while the lane feeds, True once its filament was seen
+        :return tuple: (mm the encoder counted, '' or why nothing is unwound)
+        """
+        from extras.AFC_ACE2_buffer import read_slot
+        moved = self._run_until(slot, max_distance, self.feed_speed,
+                                lambda: self._fed_far_enough(lane, seen))
+        if moved is None:
+            return 0.0, "the unit did not report its feed, so nothing is unwound"
+        sample = read_slot(self, slot)
+        return (float(sample["decoder"]) if sample is not None else moved), ""
+
+    @staticmethod
+    def _fed_far_enough(lane: AFCLane, seen: Callable[[], bool]) -> bool:
+        """
+        Whether a feed that looks for a lane's filament can stop: a check saw
+        it, or the lane's toolhead sensor reads it, where a load stops too.
+
+        :param lane: the lane that is fed
+        :param seen: the check, True once the lane's filament was seen
+        :return bool: True to stop the feed
+        """
+        return (bool(seen())
+                or bool(lane.get_toolhead_pre_sensor_state()))
 
     cmd_AFC_ACE_IDENTIFY_help = "Blink an ACE 2's lane LEDs to show which unit it is"
     def cmd_AFC_ACE_IDENTIFY(self, gcmd: GCodeCommand) -> None:

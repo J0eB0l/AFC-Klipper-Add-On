@@ -13,12 +13,15 @@ from configfile import error
 from extras.force_move import calc_move_time
 from functools import cached_property
 
-from typing import Optional, TYPE_CHECKING, Dict
+from typing import Callable, Optional, TYPE_CHECKING, Dict
 
 try: from extras.AFC_utils import ERROR_STR
 except:
     raise_string = "Error when trying to import AFC_utils.ERROR_STR\n{trace}".format(trace=traceback.format_exc())
     raise error(raise_string)
+
+try: from extras.AFC_utils import PollingEndstopWrapper
+except: raise error(ERROR_STR.format(import_lib="AFC_utils", trace=traceback.format_exc()))
 
 try: from extras.AFC_lane import AFCLane, AFCHomingPoints, VALID_DIRECT_HUB
 except: raise error(ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc()))
@@ -742,6 +745,18 @@ class AFCExtruderStepper(AFCLane):
             pass
         self.logger.debug(f"{self.name} adding endstop {key}:{name}:{pin}") # TODO:remove once fully tested on toolchanger
         self._endstops[key] = (mcu_endstop, name)
+
+    def add_polled_endstop(self, key: str, trigger_func: Callable[[], bool]) -> None:
+        """
+        Register a software endstop that reports triggered while `trigger_func` returns True,
+        so `home_to` can end a move on a sensor that has no MCU pin of its own.
+
+        :param key: Endstop key to pass to `home_to`
+        :param trigger_func: Callable returning True when the endstop should report triggered
+        """
+        mcu_endstop = PollingEndstopWrapper(self.reactor,
+                                            self.extruder_stepper.stepper.get_mcu, trigger_func)
+        self._add_endstop(key, None, key, mcu_endstop=mcu_endstop)
 
     def do_homing_move(self, movepos: float, speed: float, accel: float, endstop_spec:str,
                        triggered=True, check_trigger=True, assist_active=True) -> tuple[bool, float]:

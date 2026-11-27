@@ -1581,6 +1581,7 @@ class TestTurtleDriveInit:
         assert drive.name == "lane8"
         assert drive.extruder_stepper is None
         assert drive._endstops == {"tool_start": None}
+        assert drive.polled == {}
         assert drive.assist_move is lane.assist_move
         assert drive.multiplier == 1.0
         assert drive.rotation.drive is drive
@@ -1602,6 +1603,24 @@ class TestTurtleDriveHomeTo:
         with patch.object(unit, "fw_home", return_value=(True, 5.0, False)) as fw_home:
             assert lane.drive_stepper.home_to("hub", 100, 50, 400, False, True, False, gcmd=GCMD) == (True, 5.0, False)
         fw_home.assert_called_once_with(lane, "hub", 100, 50, 400, False, True, False, gcmd=GCMD)
+
+
+class TestTurtleDriveAddPolledEndstop:
+    def test_keeps_each_check_under_its_key(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        first, second = MagicMock(), MagicMock()
+        lane.drive_stepper.add_polled_endstop("filament_switch", first)
+        lane.drive_stepper.add_polled_endstop("other", second)
+        assert lane.drive_stepper.polled == {"filament_switch": first, "other": second}
+
+    def test_a_key_that_is_given_again_takes_the_new_check(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        first, second = MagicMock(), MagicMock()
+        lane.drive_stepper.add_polled_endstop("filament_switch", first)
+        lane.drive_stepper.add_polled_endstop("filament_switch", second)
+        assert lane.drive_stepper.polled == {"filament_switch": second}
 
 
 class TestTurtleDriveDoEnable:
@@ -3140,6 +3159,30 @@ class TestSensorPredicate:
         lane = make_lane(unit)
         assert unit._sensor_predicate(lane, spec) is None
 
+    def test_polled(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        reads = {"triggered": False}
+        lane.drive_stepper.add_polled_endstop("filament_switch", lambda: reads["triggered"])
+        predicate = unit._sensor_predicate(lane, "filament_switch")
+        assert predicate() is False
+        reads["triggered"] = True
+        assert predicate() is True
+
+    def test_polled_key_comes_before_a_sensor_of_that_name(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        check = MagicMock()
+        lane.drive_stepper.add_polled_endstop("tool_start", check)
+        assert unit._sensor_predicate(lane, "tool_start") is check
+
+    def test_polled_key_of_another_lane_is_unknown(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        other = make_lane(unit, "lane9")
+        other.drive_stepper.add_polled_endstop("filament_switch", MagicMock())
+        assert unit._sensor_predicate(lane, "filament_switch") is None
+
 
 class TestFwHome:
     def test_board_switch(self):
@@ -3165,6 +3208,16 @@ class TestFwHome:
         assert poll.call_args[0][:5] == (lane, 100, 50, 400, True)
         assert poll.call_args[0][5] == lane.get_toolhead_pre_sensor_state
         assert poll.call_args[0][6] is True
+
+    def test_polled_endstop(self):
+        unit = make_unit()
+        lane = make_lane(unit)
+        check = MagicMock(return_value=False)
+        lane.drive_stepper.add_polled_endstop("filament_switch", check)
+        with patch.object(unit, "_fw_move_poll", return_value=("triggered", 240.0)) as poll:
+            assert lane.drive_stepper.home_to("filament_switch", 1500, 50, 400, True, True,
+                                              False, gcmd=GCMD) == (True, 240.0, False)
+        poll.assert_called_once_with(lane, 1500, 50, 400, False, check, True, gcmd=GCMD)
 
     def test_unknown_endstop(self):
         unit = make_unit()

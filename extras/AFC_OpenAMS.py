@@ -1607,6 +1607,112 @@ class afcAMS(afcUnit):
             self.logger.error(f"OpenAMS lane_unload failed: {e}")
         return True
 
+    #: The seconds a lane is fed for at the most while a check looks for its filament, and the
+    #: FPS reading that tells its filament is at an extruder.
+    FEED_TO_TIMEOUT = 120.0
+    FEED_TO_FPS_STOP = 0.45
+
+    def _feed_to_blocked(self, lane: AFCLane) -> Optional[str]:
+        """
+        Why a lane may not be fed out of its bay and unloaded back now.
+
+        :param lane: the lane a feed is asked for
+        :return str: the reason, None when the lane may be fed
+        """
+        if self.oams is None:
+            return "its OAMS hardware is not available"
+        if self._operation_active:
+            return "the unit is busy"
+        slot = self._spool_map.get(lane.name)
+        if slot is None:
+            return "it is not mapped to a bay"
+        if not self.oams.is_bay_ready(slot):
+            return "its bay holds no filament"
+        return self._rfid_scan_blocked_reason(lane)
+
+    def feed_to(self, lane: AFCLane, seen: Callable[[], bool], gcmd: AFCGcmd) -> bool:
+        """
+        Feed a lane out of its bay until a check sees its filament, then unload it back to the
+        bay. The load is canceled where it stands, so the lane never has to reach a toolhead.
+
+        :param lane: a lane with filament in its bay
+        :param seen: called while the lane feeds, True once its filament was seen
+        :param gcmd: command context, unused here but accepted for interface parity
+        :return bool: True when the check saw the filament
+        """
+        reason = self._feed_to_blocked(lane)
+        if reason is not None:
+            self.logger.warning(f"{self.name}: {lane.name} is not fed: {reason}")
+            return False
+        # Deferred: AFC_OAMS imports from this module at module load time.
+        from extras.AFC_OAMS import OAMSOpCode, _oams_enum_name
+        slot = self._spool_map[lane.name]
+        reactor = self.afc.reactor
+        found = False
+        sent = False
+        self._operation_active = True
+        try:
+            # The follower sequence a load starts with.
+            self._wait_for_idle()
+            self._rfid_set_follower(0, 0, "stop before feed")
+            reactor.pause(reactor.monotonic() + 0.3)
+            self._rfid_set_follower(1, 1, "forward before feed")
+            reactor.pause(reactor.monotonic() + 0.3)
+            self._wait_for_idle()
+            self.oams.action_status = OAMSStatus.LOADING
+            self.oams.action_status_code = None
+            self.oams.oams_load_spool_cmd.send([slot])
+            sent = True
+            stopped = f"nothing saw it within {self.FEED_TO_TIMEOUT:.0f}s"
+            deadline = reactor.monotonic() + self.FEED_TO_TIMEOUT
+            while reactor.monotonic() < deadline:
+                reactor.pause(reactor.monotonic() + 0.1)
+                fps = self._oams_fps_value()
+                if seen():
+                    found = True
+                    stopped = "its filament was seen"
+                    break
+                if (fps is not None
+                    and fps >= self.FEED_TO_FPS_STOP):
+                    stopped = f"the FPS reads {fps:.2f}, filament at an extruder"
+                    break
+                if self.oams.action_status is None:
+                    code = _oams_enum_name(OAMSOpCode, self.oams.action_status_code, "code")
+                    stopped = f"the unit ended its load ({code})"
+                    break
+            self.logger.debug(f"{self.name}: feed of {lane.name} stopped: {stopped}")
+        finally:
+            # Also when the feed was cut short: what was fed comes back.
+            self._rfid_set_follower(0, 0, "feed stop")
+            if self.oams.action_status is not None:
+                self._rfid_scan_stop_load()
+            if sent:
+                self._unload_after_feed(lane)
+            self.oams.current_spool = None
+            self._operation_active = False
+            self._prev_states_stale = True
+        return found
+
+    def _unload_after_feed(self, lane: AFCLane) -> None:
+        """
+        Unload a lane whose load was stopped part way back to its bay.
+
+        :param lane: the lane that was fed
+        """
+        self._wait_for_idle()
+        try:
+            success, message = self.oams.unload_spool()
+        except Exception as e:
+            success, message = False, str(e)
+        if not success:
+            self.logger.warning(f"{self.name}: {lane.name} did not unload after its feed: "
+                                f"{message}")
+        try:
+            self.oams.clear_errors()
+        except Exception as e:
+            self.logger.debug(f"{self.name}: errors not cleared after the feed of {lane.name}: "
+                              f"{e}")
+
     def get_lane_reset_command(self, lane: AFCLane, dis: float) -> None:
         """
         OpenAMS lanes don't support distance-based reset.

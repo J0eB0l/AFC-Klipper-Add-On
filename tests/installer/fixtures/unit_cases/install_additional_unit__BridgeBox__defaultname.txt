@@ -167,6 +167,44 @@ auto_drop: True
 #auto_error_recovery: True
 #auto_error_recovery_limit: 1
 
+# ---- Filament switch ----
+# A filament switch on the chain's bus sends each of its two inlets to one
+# of two extruders, so a lane can be loaded into either. There is nothing
+# to write for one: when the BridgeBox finds a switch, a prompt offers to
+# set it up, and after a restart a second prompt finds its inlets and
+# outlets by feeding a lane of each unit. What it finds is saved with the
+# chain's state. The chain's lanes do not load until the switch is set up.
+#
+# The outlets are found with each extruder's toolhead sensor. With
+# pin_tool_start: buffer there is no sensor to find them with: set
+# switch_outlet_a and switch_outlet_b here and RESTART.
+#
+# An option set here is used as written and is not looked for. The letters
+# are the ones printed on the switch. An inlet takes unit names, an outlet
+# the [AFC_extruder] it feeds, and a length is the tube from that outlet to
+# its toolhead in mm (AFC_CALIBRATION measures the lengths from its
+# filament switch entry).
+#
+# A unit of another kind, such as a BoxTurtle, shares the switch by its
+# name. Name it on one inlet when you know the one it enters, or on both
+# (switch_inlet_a: Turtle_1 and switch_inlet_b: Turtle_1) to have its inlet
+# found by feeding one of its lanes to the switch. A unit that only runs
+# whole loads cannot be fed to the switch and reeled back: name it on one
+# inlet.
+#switch_inlet_a: Bambu_AMS_1
+#switch_inlet_b: Bambu_AMS_HT_1
+#switch_outlet_a: extruder
+#switch_outlet_b: extruder1
+#switch_outlet_a_length: 850
+#switch_outlet_b_length: 1010
+#
+# filament_switch: True gives the chain its switch without waiting for the
+# prompt, and False stops the chain from offering or using one.
+#   AFC_BRIDGEBOX_SWITCH_ADD     give the chain the switch on its bus
+#   AFC_BRIDGEBOX_SWITCH_SETUP   find the inlets and outlets
+#   AFC_BRIDGEBOX_SWITCH_FORGET  drop the switch and what was found for it
+#filament_switch: True
+
 
 # Settings for one model. Name the section after the model: ams1 (AMS),
 # ams2 (AMS 2 Pro) or ht (AMS HT). A bay name, as in
@@ -197,11 +235,12 @@ auto_drop: True
 #[AFC_BambuAMS_rfid]
 
 
-# ---- Filament switch ----
-# A filament switch on the chain's bus sends each of its two inlets to one
-# of two extruders, so a lane can be loaded into either. Name what is
-# plumbed into each inlet and the extruder each outlet feeds. The letters
-# are the ones printed on the switch.
+# ---- Filament switch with a section of its own ----
+# The chain sets up a filament switch on its bus by itself (see Filament
+# switch in the chain section). Write this section only for a switch that
+# another kind of unit shares, such as a BoxTurtle on one inlet: name what
+# is plumbed into each inlet and the extruder each outlet feeds. The
+# letters are the ones printed on the switch.
 # A chain's units share its buffer, which feeds one inlet: name the chain
 # there, and an AMS plugged into it later enters that inlet too. Any other
 # unit goes by its own name.
@@ -210,6 +249,10 @@ auto_drop: True
 # chain makes them a buffer of their own. Or name the chain on both inlets
 # and name no unit: each AMS is then fed to the switch once to find its
 # inlet, and an AMS that is new on the chain does not load until it was.
+# A unit of another kind on both inlets (inlet_a: Chain_1, Turtle_1 and
+# inlet_b: Chain_1, Turtle_1) is found the same way: one of its lanes is
+# fed to the switch and pulled back. A unit that only runs whole loads
+# cannot be fed to the switch and reeled back: name it on one inlet.
 # An inlet's units start on the extruder of the outlet with the same
 # letter. A lane a print sends to the other extruder goes back once that
 # print is over and the lane is out of its toolhead; one sent there at any

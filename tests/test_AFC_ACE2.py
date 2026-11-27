@@ -4831,6 +4831,27 @@ class TestAfcACE2FeedToGears:
         assert ("stop_feed_filament", {"index": 3}) in unit._ace.commands
         assert unit.logger.messages == [self.STOPPED]
 
+    def test_a_check_that_sees_the_filament_ends_the_feed(self):
+        unit, buf, wire = self._unit(
+            [self.REST], [(0, 0), (100, 96), (200, 192), (300, 288)], after_stop=(215, 205))
+        looks = iter([False, False, True])
+
+        # Seen on the third look, after two reads of filament that moves freely.
+        assert unit._feed_to_gears(3, buf, 6000, lambda: next(looks)) == (200.0, 205.0, "")
+
+        assert wire.moves() == [self.FEED]
+        assert ("stop_feed_filament", {"index": 3}) in unit._ace.commands
+        assert unit.logger.messages == [self.STOPPED]
+
+    def test_a_check_that_sees_nothing_leaves_the_feed_to_end_at_the_gears(self):
+        unit, buf, wire = self._unit(
+            [self.REST, self.REST, self.REST, self.FORWARD],
+            [(0, 0), (100, 96), (200, 192), (300, 288), (310, 290), (320, 291), (330, 291),
+             (340, 291), (350, 291), (360, 291)],
+            after_stop=(365, 292))
+
+        assert unit._feed_to_gears(3, buf, 6000, lambda: False) == (300.0, 292.0, "")
+
     def test_buffer_not_at_rest_before_the_feed_bails(self):
         unit, buf, wire = self._unit([self.FORWARD], [(0, 0)])
 
@@ -5485,7 +5506,8 @@ class TestAfcACE2RunToHubSwitch:
         assert run.tip == 50.0
         assert run.sent("stop_feed_filament") == 0
         assert run.sent("get_feed_info") == 0
-        assert unit.logger.messages == [("error", "ACE hub calibrate: move failed: FORBIDDEN")]
+        assert unit.logger.messages == [
+            ("error", "ACE Ace2_1: move on slot 3 failed: FORBIDDEN")]
 
     def test_count_the_unit_can_not_give_is_none(self):
         unit, hub, run = self._unit(95.0)
@@ -5496,3 +5518,263 @@ class TestAfcACE2RunToHubSwitch:
         assert run.tip == 100.0
         assert run.sent("stop_feed_filament") == 1
         assert unit.logger.messages == [self.STOPPED]
+
+
+class TestAfcACE2RunUntil:
+    STOPPED = ("debug", "ACE Ace2_1: feed on slot 3 stopped at the toolhead sensor")
+
+    @staticmethod
+    def _unit(**kwargs: Any) -> Tuple[afcACE2, Ace2HubRun]:
+        """
+        :param kwargs: Ace2HubRun keywords
+        :return tuple: the unit and its moves, with no switch on the way
+        """
+        unit, lane = ace2_real_hub_unit()
+        return unit, Ace2HubRun(unit, lane.hub_obj, 5000.0, **kwargs)
+
+    def test_feed_is_stopped_once_the_check_says_so(self):
+        unit, run = self._unit()
+
+        # 10mm a poll: the fifth poll is the first with the tip past 45mm.
+        assert unit._run_until(3, 4000.0, 100.0, lambda: run.tip >= 45.0) == 50.0
+
+        assert run.moves() == [("feed_filament", {"index": 3, "length": 4000.0, "speed": 100.0})]
+        assert run.sent("stop_feed_filament") == 1
+        assert unit.logger.messages == [self.STOPPED]
+
+    def test_unwind_is_stopped_the_same_way(self):
+        unit, run = self._unit(tip=110.0)
+
+        # 100mm and 90mm are not yet back to 85mm, 80mm is.
+        assert unit._run_until(3, -300.0, 25.0, lambda: run.tip <= 85.0) == 30.0
+
+        assert run.tip == 80.0
+        assert run.moves() == [("unwind_filament", {"index": 3, "length": 300.0, "speed": 25.0,
+                                                    "mode": "normal"})]
+        assert run.sent("stop_feed_filament") == 1
+
+    def test_check_that_is_true_at_once_stops_the_move_before_a_poll(self):
+        unit, run = self._unit()
+
+        assert unit._run_until(3, 4000.0, 100.0, lambda: True) == 0.0
+
+        assert run.tip == 0.0
+        assert run.sent("stop_feed_filament") == 1
+        assert unit.logger.messages == [self.STOPPED]
+
+    def test_refused_move_is_logged_and_not_counted(self):
+        unit, run = self._unit()
+        unit._ace.set_reply("feed_filament", RuntimeError("FORBIDDEN"))
+
+        assert unit._run_until(3, 4000.0, 100.0, lambda: False) is None
+
+        assert run.sent("stop_feed_filament") == 0
+        assert unit.logger.messages == [
+            ("error", "ACE Ace2_1: move on slot 3 failed: FORBIDDEN")]
+
+
+class TestAfcACE2FeedTo:
+    def _unit(self, ram: bool = True, reason: str = ""
+              ) -> Tuple[afcACE2, Any, RamStubBuffer, List[Any]]:
+        """
+        A unit whose feeds and measured unwind are stand-ins: a feed towards
+        the gears has the encoder count 640mm, one towards the toolhead sensor
+        512mm, and an unwind covers 1mm for every 1.02 it is told.
+
+        :param ram: lane3's toolhead sensor is the unit's buffer
+        :param reason: why a feed ended early, '' for one that did not; such
+            a feed counted nothing
+        :return tuple: the unit, lane3 (dist_hub 60, a 900mm tube), its buffer
+            and the stand-ins' calls
+        """
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        if not ram:
+            lane.extruder_obj.tool_start = "tool_start_pin"
+        calls: List[Any] = []
+
+        def feed_to_gears(slot: int, buffer: Any, max_distance: float,
+                          seen: Any) -> Tuple[float, float, str]:
+            calls.append(("gears", slot, buffer, max_distance, seen, unit._operation_active))
+            return (0.0, 0.0, reason) if reason else (600.0, 640.0, "")
+
+        def feed_to_sensor(slot: int, cur_lane: Any, max_distance: float,
+                           seen: Any) -> Tuple[float, str]:
+            calls.append(("sensor", slot, cur_lane, max_distance, seen,
+                          unit._operation_active))
+            return (0.0, reason) if reason else (512.0, "")
+
+        def unwind_measured(slot: int, distance: float) -> float:
+            calls.append(("unwind", slot, distance))
+            return 1.02
+        unit._feed_to_gears = feed_to_gears
+        unit._feed_to_sensor = feed_to_sensor
+        unit._unwind_measured = unwind_measured
+        return unit, lane, buf, calls
+
+    @staticmethod
+    def _seen(found: bool = True) -> Any:
+        """
+        :param found: what the check answers
+        :return Callable: a check that counts its looks in `looks`
+        """
+        def seen() -> bool:
+            seen.looks += 1
+            return found
+        seen.looks = 0
+        return seen
+
+    def test_lane_on_the_units_buffer_is_fed_towards_the_gears_and_unwound(self):
+        unit, lane, buf, calls = self._unit()
+        seen = self._seen()
+
+        assert unit.feed_to(lane, seen, make_gcmd()) is True
+
+        # At the most dist_hub 60 + the 900mm tube + 500mm past it, inside an
+        # operation. All the encoder counted is unwound, then the 2% that
+        # unwind fell short.
+        assert calls == [("gears", 3, buf, 1460.0, seen, True), ("unwind", 3, 640.0),
+                         ("unwind", 3, pytest.approx(12.8))]
+        # The stand-in feed never looked: the one look is the answer.
+        assert seen.looks == 1
+        assert unit.logger.messages == []
+        assert unit._operation_active is False
+        assert unit._prev_states_stale is True
+
+    def test_lane_with_a_toolhead_sensor_is_fed_towards_it(self):
+        unit, lane, buf, calls = self._unit(ram=False)
+        seen = self._seen()
+
+        assert unit.feed_to(lane, seen, make_gcmd()) is True
+
+        assert calls == [("sensor", 3, lane, 1460.0, seen, True), ("unwind", 3, 512.0),
+                         ("unwind", 3, pytest.approx(10.24))]
+
+    def test_lane_without_a_hub_is_fed_500mm_past_its_dist_hub(self):
+        unit, lane, buf, calls = self._unit()
+        lane.hub_obj = None
+
+        unit.feed_to(lane, self._seen(), make_gcmd())
+
+        assert calls[0][3] == 560.0
+
+    def test_lane_nothing_saw_is_unwound_all_the_same(self):
+        unit, lane, buf, calls = self._unit()
+
+        assert unit.feed_to(lane, self._seen(False), make_gcmd()) is False
+
+        assert calls[1:] == [("unwind", 3, 640.0), ("unwind", 3, pytest.approx(12.8))]
+        assert unit.logger.messages == []
+
+    @pytest.mark.parametrize("ram", [True, False])
+    def test_why_a_feed_ended_early_is_warned_of(self, ram):
+        unit, lane, buf, calls = self._unit(ram=ram, reason="the feed did not start: FORBIDDEN")
+
+        assert unit.feed_to(lane, self._seen(False), make_gcmd()) is False
+
+        # Nothing was counted, so there is nothing to unwind or to cover.
+        assert calls[1:] == [("unwind", 3, 0.0), ("unwind", 3, 0.0)]
+        assert unit.logger.messages == [
+            ("warning", "ACE Ace2_1: feed of lane3 to a sensor: the feed did not start: "
+                        "FORBIDDEN")]
+
+    def test_stops_feed_assist_on_the_other_slots_only(self):
+        unit, lane, buf, calls = self._unit()
+        unit._feed_assist_active.update({1, 3})
+
+        unit.feed_to(lane, self._seen(), make_gcmd())
+
+        assert [c for c in unit._ace.commands if c[0] == "stop_feed_assist"] == [
+            ("stop_feed_assist", {"index": 1})]
+        assert unit._feed_assist_active == {3}
+
+    def test_unit_with_no_link_feeds_nothing(self):
+        unit, lane, buf, calls = self._unit()
+        unit._ace = None
+        seen = self._seen()
+
+        assert unit.feed_to(lane, seen, make_gcmd()) is False
+
+        assert (calls, seen.looks) == ([], 0)
+        assert unit.logger.messages == [
+            ("warning", "ACE Ace2_1: not connected, lane3 is not fed")]
+
+    def test_unit_whose_link_is_down_feeds_nothing(self):
+        unit, lane, buf, calls = self._unit()
+        unit._ace.connected = False
+        seen = self._seen()
+
+        assert unit.feed_to(lane, seen, make_gcmd()) is False
+
+        assert (calls, seen.looks) == ([], 0)
+        assert unit.logger.messages == [
+            ("warning", "ACE Ace2_1: not connected, lane3 is not fed")]
+
+
+class TestAfcACE2FeedToSensor:
+    @staticmethod
+    def _unit(moved: Optional[float] = 530.0) -> Tuple[afcACE2, Any, List[Any]]:
+        """
+        A unit whose move is a stand-in, and whose encoder reads 512mm once
+        the move is over.
+
+        :param moved: mm the unit counts for the move, None for one it does
+            not report
+        :return tuple: the unit, lane3 and the stand-in's calls
+        """
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        unit._ace.set_reply("get_sensor_state", TestAfcACE2ClearTipSnag.REST)
+        unit._ace.set_reply("get_feed_info", {"feed_info": [{}, {}, {}, {"decoder": 512}]})
+        calls: List[Any] = []
+
+        def run_until(slot: int, distance: float, speed: float, stop: Any) -> Optional[float]:
+            calls.append((slot, distance, speed, stop))
+            return moved
+        unit._run_until = run_until
+        return unit, lane, calls
+
+    def test_the_encoders_count_of_the_feed_is_what_was_fed(self):
+        unit, lane, calls = self._unit()
+
+        # The unit's own count of 530mm runs ahead of the encoder's.
+        assert unit._feed_to_sensor(3, lane, 1460.0, lambda: False) == (512.0, "")
+
+        # One feed of the whole distance at the default feed_speed.
+        assert [call[:3] for call in calls] == [(3, 1460.0, 100.0)]
+
+    def test_the_feed_is_stopped_by_the_check_and_by_the_lanes_toolhead_sensor(self):
+        unit, lane, calls = self._unit()
+        reads = {"check": False, "toolhead": False}
+        lane.get_toolhead_pre_sensor_state = lambda: reads["toolhead"]
+
+        unit._feed_to_sensor(3, lane, 1460.0, lambda: reads["check"])
+
+        stop = calls[0][3]
+        assert stop() is False
+        reads["check"] = True
+        assert stop() is True
+        reads.update(check=False, toolhead=True)
+        assert stop() is True
+
+    def test_feed_the_unit_did_not_report_leaves_nothing_to_unwind(self):
+        unit, lane, calls = self._unit(moved=None)
+
+        assert unit._feed_to_sensor(3, lane, 1460.0, lambda: False) == (
+            0.0, "the unit did not report its feed, so nothing is unwound")
+
+        assert [c for c in unit._ace.commands if c[0] == "get_feed_info"] == []
+
+    def test_encoder_that_cannot_be_read_leaves_the_units_own_count(self):
+        unit, lane, calls = self._unit()
+        unit._ace.set_reply("get_feed_info", RuntimeError("no answer"))
+
+        assert unit._feed_to_sensor(3, lane, 1460.0, lambda: False) == (530.0, "")
+
+
+class TestAfcACE2FedFarEnough:
+    @pytest.mark.parametrize("seen, toolhead, enough", [
+        (False, False, False), (True, False, True), (False, True, True), (0, 0, False),
+        (1, 0, True), (0, 1, True)])
+    def test_the_check_or_the_lanes_toolhead_sensor_ends_a_feed(self, seen, toolhead, enough):
+        lane = types.SimpleNamespace(get_toolhead_pre_sensor_state=lambda: toolhead)
+
+        assert afcACE2._fed_far_enough(lane, lambda: seen) is enough

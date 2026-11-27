@@ -1261,6 +1261,59 @@ class TestAddEndstopMcuEndstopParam:
         ]
 
 
+class TestAddPolledEndstop:
+    """Exercises add_polled_endstop, which registers a software endstop that
+    reads a caller's function, so home_to can end a move on a sensor that has
+    no MCU pin of its own."""
+
+    def _make_polled_stepper(self):
+        s = TestAddEndstopMcuEndstopParam()._make_add_endstop_stepper()
+        s.reactor = MagicMock()
+        return s
+
+    def test_registers_a_polling_endstop_under_the_key(self):
+        from extras.AFC_utils import PollingEndstopWrapper
+        s = self._make_polled_stepper()
+
+        s.add_polled_endstop("filament_switch", lambda: False)
+
+        endstop, name = s._endstops["filament_switch"]
+        assert isinstance(endstop, PollingEndstopWrapper)
+        # Named for the stepper, as any endstop that is not a shared alias.
+        assert name == "lane1_filament_switch"
+        s._qes.register_endstop.assert_called_once_with(endstop, "lane1_filament_switch")
+        assert endstop.get_steppers() == [s.extruder_stepper.stepper]
+        # No pin is parsed or set up for it.
+        s._ppins.parse_pin.assert_not_called()
+        s._ppins.setup_pin.assert_not_called()
+        assert s.logger.messages == [
+            ("debug", "lane1 adding endstop filament_switch:lane1_filament_switch:None"),
+        ]
+
+    def test_the_endstop_reports_what_the_trigger_function_returns(self):
+        s = self._make_polled_stepper()
+        reads = {"triggered": False}
+
+        s.add_polled_endstop("filament_switch", lambda: reads["triggered"])
+
+        endstop = s._endstops["filament_switch"][0]
+        assert endstop.query_endstop(0.0) == 0
+        reads["triggered"] = True
+        assert endstop.query_endstop(0.0) == 1
+
+    def test_the_endstop_polls_on_the_steppers_reactor_and_mcu(self):
+        s = self._make_polled_stepper()
+
+        s.add_polled_endstop("filament_switch", lambda: False)
+
+        endstop = s._endstops["filament_switch"][0]
+        assert endstop.get_mcu() is s.extruder_stepper.stepper.get_mcu.return_value
+        # A homing move that is not triggered yet starts the poll timer there.
+        completion = endstop.home_start(0.0, 0.0, 1, 0.0)
+        assert completion is s.reactor.completion.return_value
+        s.reactor.register_timer.assert_called_once_with(endstop._poll_sensor, s.reactor.NOW)
+
+
 class TestDoHomingMove:
     """Covers do_homing_move's manual_home kwargs construction: the
     probe_pos/gcmd feature-detection flags set on self.afc by

@@ -995,6 +995,8 @@ class TurtleDrive:
         self.extruder_stepper = None
         # AFC's software tool_start endstop has no stepper to attach to.
         self._endstops: Dict[str, Any] = {"tool_start": None}
+        # The checks a move can home to, by endstop key (see add_polled_endstop).
+        self.polled: Dict[str, Callable[[], bool]] = {}
         self.assist_move = lane.assist_move
         self.multiplier = 1.0
         self.rotation = TurtleRotation(self)
@@ -1030,6 +1032,16 @@ class TurtleDrive:
         """
         return self.unit.fw_home(self.lane, endstop_spec, distance, speed, accel,
                                  triggered, check_trigger, assist_active, gcmd=gcmd)
+
+    def add_polled_endstop(self, key: str, trigger_func: Callable[[], bool]) -> None:
+        """
+        Like AFC_stepper.add_polled_endstop: a move homed to `key` ends once `trigger_func`
+        returns True.
+
+        :param key: Endstop key to pass to `home_to`
+        :param trigger_func: Callable returning True when the move should end
+        """
+        self.polled[key] = trigger_func
 
     def do_enable(self, enable: bool) -> None:
         """
@@ -2367,6 +2379,8 @@ class afcBoxTurtleUSB(afcBoxTurtle):
         """
         name = str(spec) if spec is not None else ""
         extruder = lane.extruder_obj
+        if name in lane.drive_stepper.polled:
+            return lane.drive_stepper.polled[name]
         if name in ("tool", "tool_start", f"{lane.name}_tool_start"):
             return lane.get_toolhead_pre_sensor_state
         if name == "tool_end":
