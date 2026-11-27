@@ -33,6 +33,8 @@ _TEMPLATE = "AFC_BridgeBox_1.cfg"
 _FIRST_CHAIN = "Chain_1"
 _DEFAULT_CHAIN = re.compile(r"Chain_([0-9]+)")
 _ADDRESS = re.compile(r"[A-Za-z0-9.-]+(:[0-9]+)?")
+# What the setup page writes in front of the address in its serial_port line.
+_ADDRESS_LEAD = re.compile(r"^(serial_port\s*:\s*)?(tcp://)?", re.IGNORECASE)
 _DEV_PATH = re.compile(r"/dev/[A-Za-z0-9._:/+-]+")
 _NUMBER = re.compile(r"[0-9]+")
 # An uncommented chain section; its name is the first group.
@@ -200,7 +202,8 @@ class ConnectionOption(UnitOption):
     def activate(self, ctx: Context, console: Console, prompter: Prompter,
                  sel: UnitSelection) -> str:
         """
-        Offer USB, USB then WiFi, and WiFi only; the last one asks for the address.
+        Offer USB, USB then WiFi, and WiFi only; the last one asks for the address, which may
+        be given bare or as the page's ``serial_port: tcp://`` line.
 
         :param ctx: installer context
         :param console: where the choices print
@@ -217,7 +220,9 @@ class ConnectionOption(UnitOption):
         console.print_msg(
             "OTHER",
             "3. WiFi only: join the bb-bridge hotspot from a phone, choose your network, and "
-            "note the address the page shows.",
+            "note the address the page shows. A BridgeBox that another printer set up keeps "
+            "that printer's link key: choose 2 for it, or run AFC_BRIDGEBOX_RESET_WIFI on that "
+            "printer first.",
         )
         choice = _answer(
             prompter,
@@ -228,10 +233,11 @@ class ConnectionOption(UnitOption):
         elif choice == "2":
             sel.bridgebox_connection = "usb_wifi"
         elif choice == "3":
-            address = _answer(
+            typed = _answer(
                 prompter,
                 "The address the BridgeBox's setup page showed (for example 192.168.1.50): ",
             )
+            address = _ADDRESS_LEAD.sub("", typed)
             if _ADDRESS.fullmatch(address) is None:
                 return (f"{RED}Enter the address the way the setup page shows it, like "
                         f"192.168.1.50.{NC}")

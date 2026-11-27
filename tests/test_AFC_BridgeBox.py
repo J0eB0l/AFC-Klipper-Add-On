@@ -12925,8 +12925,9 @@ class TestAfcBridgeBoxScoutTick:
         assert master._replace_offered == set()
         assert self._console(master) == []
         # By design a waiting unit that drops off is told again on return (every offline read resets
-        # the tell), so a flap repeats it.
-        assert self._log(master) == self._first_claims() + [self.TOLD_E] * 30
+        # the tell); a flap repeats it in the log once the console has its two warnings.
+        assert self._log(master) == (self._first_claims() + [self.TOLD_E] * 2
+                                     + [("debug", self.TOLD_E[1])] * 28)
 
     def test_a_phantom_blip_does_not_restart_the_absence_clock(
             self, tmp_path, monkeypatch):
@@ -18100,6 +18101,60 @@ class TestAfcBridgeBoxClearStandalone:
         m._clear_standalone(self._claimed(ext))
         assert ext.no_lanes is False
         assert _p6_log(m) == [self.LEFT]
+
+
+class TestAfcBridgeBoxWarnNoBay:
+    """How often the console is warned that one unit has no free bay."""
+
+    TOLD = ("chain1: AMS EEEE has no bay: all 4 AMS bays belong to other units "
+            "(Bambu_AMS_1 (AAAA), Bambu_AMS_2 (BBBB), Bambu_AMS_3 (CCCC), Bambu_AMS_4 (DDDD)), "
+            "and a Bambu bus addresses at most 4 AMS, so neither pool_ams nor RESTART adds one. "
+            "Bambu_AMS_4 (DDDD) is offline: if this AMS replaces it, AFC_BRIDGEBOX_FORGET "
+            "CHAIN=chain1 UID=DDDD frees that bay and this AMS claims it live. "
+            "AFC_BRIDGEBOX_REPLACE CHAIN=chain1 UID=EEEE OLD=Bambu_AMS_4 does both in one step.")
+
+    @staticmethod
+    def _rig(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> afcBridgeBox:
+        """:return afcBridgeBox: a chain whose four AMS bays are taken, with a quiet log"""
+        m = _p6_stuck(tmp_path, monkeypatch)
+        m._no_bay_warned.clear()
+        _p6_quiet(m)
+        return m
+
+    def _warn_at(self, m: afcBridgeBox, now: float) -> None:
+        """Warn about E with the printer's clock at ``now``."""
+        m.printer.reactor.now = now
+        m._warn_no_bay(E, "ams")
+
+    def test_the_first_two_reach_the_console(self, tmp_path, monkeypatch):
+        m = self._rig(tmp_path, monkeypatch)
+        self._warn_at(m, 100.0)
+        self._warn_at(m, 110.0)
+        assert _p6_log(m) == [("warning", self.TOLD)] * 2
+        assert m._no_bay_warned == {E: [100.0, 110.0]}
+
+    def test_a_third_inside_the_window_goes_to_the_log(self, tmp_path, monkeypatch):
+        m = self._rig(tmp_path, monkeypatch)
+        self._warn_at(m, 100.0)
+        self._warn_at(m, 110.0)
+        self._warn_at(m, 399.0)
+        assert _p6_log(m) == [("warning", self.TOLD)] * 2 + [("debug", self.TOLD)]
+        assert m._no_bay_warned == {E: [100.0, 110.0]}
+
+    def test_one_that_left_the_window_makes_room_for_another(self, tmp_path, monkeypatch):
+        m = self._rig(tmp_path, monkeypatch)
+        self._warn_at(m, 100.0)
+        self._warn_at(m, 110.0)
+        self._warn_at(m, 400.0)
+        assert _p6_log(m) == [("warning", self.TOLD)] * 3
+        assert m._no_bay_warned == {E: [110.0, 400.0]}
+
+    def test_each_unit_has_its_own_count(self, tmp_path, monkeypatch):
+        m = self._rig(tmp_path, monkeypatch)
+        m._no_bay_warned[G] = [90.0, 95.0]
+        self._warn_at(m, 100.0)
+        assert _p6_log(m) == [("warning", self.TOLD)]
+        assert m._no_bay_warned == {G: [90.0, 95.0], E: [100.0]}
 
 
 class TestAfcBridgeBoxNoBayMessage:

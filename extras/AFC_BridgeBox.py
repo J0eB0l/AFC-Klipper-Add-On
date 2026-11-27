@@ -582,6 +582,8 @@ class afcBridgeBox:
         # UIDs forgotten while online.
         self._forget_suppressed: set = set()
         self._no_bay_told: Set[str] = set()
+        # uid -> when the console was warned it has no bay (see _warn_no_bay).
+        self._no_bay_warned: Dict[str, List[float]] = {}
         # Model tag of each on-wire uid with no free bay, and the uids already offered a bay.
         self._no_bay: Dict[str, str] = {}
         self._replace_offered: Set[str] = set()
@@ -5751,7 +5753,7 @@ class afcBridgeBox:
             self._no_bay[uid] = model
             if uid not in self._no_bay_told:
                 self._no_bay_told.add(uid)
-                self.logger.warning(self._no_bay_message(uid, family))
+                self._warn_no_bay(uid, family)
             return None
         unit = self.printer.lookup_object(f"AFC_BambuAMS {chosen['name']}", None)
         if (unit is None
@@ -5900,6 +5902,31 @@ class afcBridgeBox:
                 ranked.append((tier, i, u))
         return [(self._name_map.get(u, ""), u)
                 for _t, _i, u in sorted(ranked)[:_MAX_AMS_BAYS]]
+
+    #: Seconds in which the console warns one unit that it has no bay at most _NO_BAY_WARNINGS
+    #: times.
+    _NO_BAY_WINDOW = 300.0
+    _NO_BAY_WARNINGS = 2
+
+    def _warn_no_bay(self, uid: str, family: str) -> None:
+        """
+        Warn that a unit found no free bay of its family. A unit that drops off the bus and comes
+        back is told again, so one that keeps doing it is told in the log only once the console
+        has its warnings for the window.
+
+        :param uid: the waiting unit's uid
+        :param family: "ams" or "ht"
+        """
+        now = self.printer.get_reactor().monotonic()
+        recent = [t for t in self._no_bay_warned.get(uid, [])
+                  if now - t < self._NO_BAY_WINDOW]
+        message = self._no_bay_message(uid, family)
+        if len(recent) >= self._NO_BAY_WARNINGS:
+            self._no_bay_warned[uid] = recent
+            self.logger.debug(message)
+            return
+        self._no_bay_warned[uid] = recent + [now]
+        self.logger.warning(message)
 
     def _no_bay_message(self, uid: str, family: str) -> str:
         """
