@@ -609,7 +609,15 @@ def bridge_candidates() -> List[str]:
                   for p in glob.glob(pattern))
 
 
-def probe_bridge(path: str) -> Optional[dict]:
+def ask_bridge(path: str, ask: bytes, wanted: Callable[[dict], bool]) -> Optional[dict]:
+    """
+    Open a USB port, send it a line and read its answer.
+
+    :param path: the port
+    :param ask: the line, sent again while no answer comes
+    :param wanted: whether a line the port sent is the answer
+    :return Optional[dict]: the answer, or None
+    """
     try:
         import serial
         port = serial.Serial(path, 115200, timeout=0.1, write_timeout=0.5)
@@ -620,14 +628,13 @@ def probe_bridge(path: str) -> Optional[dict]:
         buf = b""
         for i in range(PROBE_READS):
             if i % PROBE_ASK_EVERY == 0:
-                port.write(b'\n{"cmd":"info"}\n')
+                port.write(ask)
             buf += port.read(4096)
             *lines, buf = buf.split(b"\n")
             for raw in lines:
                 obj = parse_bridge_line(raw.decode("utf-8", "replace"))
                 if (obj is not None
-                    and obj.get("evt") == "info"
-                    and obj.get("proto") == "bambubus-1"):
+                    and wanted(obj)):
                     return obj
         return None
     except Exception:
@@ -639,13 +646,49 @@ def probe_bridge(path: str) -> Optional[dict]:
             pass
 
 
+def probe_bridge(path: str) -> Optional[dict]:
+    return ask_bridge(path, b'\n{"cmd":"info"}\n',
+                      lambda obj: (obj.get("evt") == "info"
+                                   and obj.get("proto") == "bambubus-1"))
+
+
+def store_link_key(path: str, key: str) -> bool:
+    """
+    Give the BridgeBox on a USB port a link key. It checks its next WiFi connection against it.
+
+    :param path: the board's port
+    :param key: the link key
+    :return bool: whether the board stored it
+    """
+    ask = ("\n" + json.dumps({"cmd": "linkkey", "key": key}) + "\n").encode()
+    reply = ask_bridge(path, ask, lambda obj: obj.get("evt") == "linkkey")
+    return (reply is not None
+            and reply.get("saved") in (0, 1))
+
+
 class WifiLink:
     RETRY_S = 60.0
 
     def __init__(self, key: str, save: Callable[[str], None], label: str,
                  usb_path: Optional[str] = None, addr: Optional[str] = None,
-                 ssid: Optional[str] = None, password: str = "") -> None:
+                 ssid: Optional[str] = None, password: str = "",
+                 give_key: Optional[Callable[[str, str], bool]] = None) -> None:
+        """
+        A chain's link to a BridgeBox that Klipper keys itself.
+
+        :param key: the link key
+        :param save: saves the address the board reported
+        :param label: the chain's name, for messages
+        :param usb_path: the board's USB port, or None for a chain on a tcp:// port
+        :param addr: the board's `tcp://host:port`, when known
+        :param ssid: a network to give the board over USB
+        :param password: that network's password
+        :param give_key: gives the board at a host a link key over USB, for a chain on a tcp://
+                         port; returns whether the board stored it
+        """
         self.key = key
+        self._give_key = give_key
+        self._key_given = False
         self._save = save
         self.label = label
         self.usb_path = usb_path
@@ -674,6 +717,7 @@ class WifiLink:
         self._pending = None
         self._said = None
         self._creds_sent = False
+        self._key_given = False
 
     def _say(self, state: str, message: str, warning: bool = False, console: bool = True,
              routine: bool = False) -> None:
@@ -705,6 +749,7 @@ class WifiLink:
             else:
                 self.on_wifi = True
                 self._failed_addr = None
+                self._key_given = False
                 self._say("wifi", f"BridgeBox connected over WiFi at {self.addr}", routine=True)
                 return link
         elif (not self.addr
@@ -723,21 +768,8 @@ class WifiLink:
             self._say("key", f"the BridgeBox at {self.addr} holds another "
                       f"printer's link key; staying on USB, which "
                       f"gives it this printer's key", warning=True)
-        elif (isinstance(error, LinkKeyError)
-              and self.usb_path):
-            self._say("key", f"the BridgeBox at {self.addr} holds another "
-                      f"printer's link key. Plug it into this "
-                      f"printer's USB to give it this printer's key, "
-                      f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer "
-                      f"that set it up.", warning=True)
         elif isinstance(error, LinkKeyError):
-            # A chain on a tcp:// port never opens USB, so the cable alone changes nothing.
-            self._say("key", f"the BridgeBox at {self.addr} holds another "
-                      f"printer's link key, and a chain on serial_port: tcp:// cannot "
-                      f"replace it. Plug it into this printer's USB, set serial_port: auto "
-                      f"with connection: wifi and RESTART to give it this printer's key, "
-                      f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer that set it up.",
-                      warning=True)
+            self._key_refused()
         elif usb_in:
             self._say("usb", f"can't reach the BridgeBox on WiFi at "
                       f"{self.addr} ({error}); staying on USB", warning=True)
@@ -745,6 +777,30 @@ class WifiLink:
             self._say("down", f"can't reach the BridgeBox at {self.addr} "
                       f"({error}). If it is new, finish its WiFi "
                       f"setup from its bb-bridge hotspot; Klipper keeps trying.", warning=True)
+
+    def _key_refused(self) -> None:
+        """
+        The board refused this printer's link key and its cable is not in. A chain on a tcp://
+        port never opens USB for its link, so its board is given the key over USB here when it is
+        on this printer's USB, once until a connection succeeds. Ports are opened off the main
+        thread only.
+        """
+        if (self.usb_path is None
+            and self._give_key is not None):
+            if threading.current_thread() is threading.main_thread():
+                return
+            if (not self._key_given
+                and self._give_key(TcpPort.parse(str(self.addr))[0], self.key)):
+                self._key_given = True
+                self._say("rekeyed", f"the BridgeBox at {self.addr} held another printer's "
+                          f"link key. It is on this printer's USB, so it now has this "
+                          f"printer's key.")
+                return
+        self._say("key", f"the BridgeBox at {self.addr} holds another "
+                  f"printer's link key. Plug it into this "
+                  f"printer's USB to give it this printer's key, "
+                  f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer "
+                  f"that set it up.", warning=True)
 
     def on_connect(self, port: Any) -> None:
         self._pending = None

@@ -29,12 +29,14 @@ from extras.AFC_BambuAMS_bridge import (
     _SerialTimeout,
     _STATE_SWITCH_DONE_RE,
     _STEP,
+    ask_bridge,
     attach_wifi,
     BambuBridge,
     bridge_candidates,
     LinkKeyError,
     parse_bridge_line,
     probe_bridge,
+    store_link_key,
     TcpPort,
     split_tcp_key,
     usb_port,
@@ -6216,11 +6218,21 @@ class TestWifiLinkInit:
         assert (link._failed_addr, link._retry_at) == (None, 0.0)
         assert (link._pending, link._said, link._creds_sent) == (
             None, None, False)
+        assert (link._give_key, link._key_given) == (None, False)
 
     def test_the_network_defaults_to_none(self):
         link = WifiLink(WIFI_KEY, lambda a: None, WIFI_LABEL)
         assert (link.usb_path, link.addr, link.ssid, link._password) == (
             None, None, None, "")
+
+    def test_a_tcp_link_keeps_what_gives_its_board_a_key(self):
+        def give(host: str, key: str) -> bool:
+            """:return bool: never called"""
+            return False
+
+        link = WifiLink(WIFI_KEY, lambda a: None, WIFI_LABEL, addr=WIFI_ADDR,
+                        give_key=give)
+        assert (link._give_key, link._key_given) == (give, False)
 
 
 class TestWifiLinkAttach:
@@ -6240,6 +6252,7 @@ class TestWifiLinkForget:
         link._pending = ("move", WIFI_ADDR)
         link._said = "usb"
         link._creds_sent = True
+        link._key_given = True
 
     def test_a_usb_link_forgets_its_address_and_starts_over(self, monkeypatch,
                                                             tmp_path):
@@ -6252,6 +6265,7 @@ class TestWifiLinkForget:
         assert (link._failed_addr, link._retry_at) == (None, 0.0)
         assert (link._pending, link._said, link._creds_sent) == (
             None, None, False)
+        assert link._key_given is False
 
     def test_a_tcp_link_keeps_its_address(self, monkeypatch, tmp_path):
         # Its address is its serial_port: there is nothing to learn it from.
@@ -6310,6 +6324,57 @@ class TestWifiLinkOpen:
         connects = wifi_tcp(monkeypatch)
         assert isinstance(link.open(), TcpPort)
         assert connects == [("192.168.4.80", 8888)]
+
+    def test_a_connection_lets_the_key_be_given_over_usb_again(
+            self, monkeypatch, tmp_path):
+        link, _bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                            addr=WIFI_ADDR)
+        wifi_tcp(monkeypatch)
+        link._key_given = True
+        assert isinstance(link.open(), TcpPort)
+        assert link._key_given is False
+
+    def test_a_refused_key_is_given_over_usb_and_the_next_open_connects(
+            self, monkeypatch, tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        given: List[Tuple[str, str]] = []
+        link._give_key = lambda host, key: given.append((host, key)) or True
+        wifi_tcp(monkeypatch, WIFI_REFUSED)
+        refused: List[BaseException] = []
+
+        def _open() -> None:
+            """Open as the reader thread does, keeping what it raised."""
+            try:
+                link.open()
+            except LinkKeyError as err:
+                refused.append(err)
+
+        worker = threading.Thread(target=_open)
+        worker.start()
+        worker.join()
+        assert len(refused) == 1
+        assert given == [("192.168.4.80", WIFI_KEY)]
+        assert link._key_given is True
+        # The board checks the next connection against the key it was given.
+        wifi_tcp(monkeypatch)
+        assert isinstance(link.open(), TcpPort)
+        assert link._key_given is False
+        assert bridge.logger.messages == wifi_said(
+            ("info", f"the BridgeBox at {WIFI_ADDR} held another printer's "
+                     f"link key. It is on this printer's USB, so it now has "
+                     f"this printer's key."),
+            self.WIFI_UP)
+
+    def test_a_failed_connect_keeps_the_key_as_given(self, monkeypatch,
+                                                     tmp_path):
+        link, _bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                            addr=WIFI_ADDR)
+        wifi_tcp(monkeypatch, error=OSError("timed out"))
+        link._key_given = True
+        with pytest.raises(OSError):
+            link.open()
+        assert link._key_given is True
 
     def test_with_the_cable_in_tcp_is_tried_once_the_retry_is_due(
             self, monkeypatch, tmp_path):
@@ -6420,18 +6485,16 @@ class TestWifiLinkTcpFailed:
                         f"AFC_BRIDGEBOX_RESET_WIFI on the printer that set "
                         f"it up."))
 
-    def test_a_key_mismatch_on_a_tcp_port_says_the_cable_alone_is_not_enough(
+    def test_a_key_mismatch_on_a_tcp_port_is_given_to_the_usb_handover(
             self, monkeypatch, tmp_path):
         link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
                                            addr=WIFI_ADDR)
+        refused: List[bool] = []
+        monkeypatch.setattr(link, "_key_refused", lambda: refused.append(True))
         link._tcp_failed(LinkKeyError("rejected"), False)
         assert (link._failed_addr, link._retry_at) == (WIFI_ADDR, 160.0)
-        assert bridge.logger.messages == wifi_said(
-            ("warning", f"the BridgeBox at {WIFI_ADDR} holds another "
-                        f"printer's link key, and a chain on serial_port: tcp:// cannot "
-                        f"replace it. Plug it into this printer's USB, set serial_port: auto "
-                        f"with connection: wifi and RESTART to give it this printer's key, "
-                        f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer that set it up."))
+        assert refused == [True]
+        assert bridge.logger.messages == []
 
     def test_with_the_cable_in_it_stays_on_usb(self, monkeypatch, tmp_path):
         link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path,
@@ -6462,6 +6525,97 @@ class TestWifiLinkTcpFailed:
         with pytest.raises(LinkKeyError):
             link.open()
         assert link._said == "key"
+
+
+class TestWifiLinkKeyRefused:
+    PLUG_IN = ("warning", f"the BridgeBox at {WIFI_ADDR} holds another "
+                          f"printer's link key. Plug it into this printer's "
+                          f"USB to give it this printer's key, or run "
+                          f"AFC_BRIDGEBOX_RESET_WIFI on the printer that set "
+                          f"it up.")
+    GIVEN = ("info", f"the BridgeBox at {WIFI_ADDR} held another printer's "
+                     f"link key. It is on this printer's USB, so it now has "
+                     f"this printer's key.")
+
+    @staticmethod
+    def _giver(link: WifiLink, stored: bool) -> List[Tuple[str, str]]:
+        """Give ``link`` a USB handover that answers ``stored``."""
+        asked: List[Tuple[str, str]] = []
+
+        def give(host: str, key: str) -> bool:
+            """:return bool: ``stored``"""
+            asked.append((host, key))
+            return stored
+
+        link._give_key = give
+        return asked
+
+    @staticmethod
+    def _off_the_main_thread(link: WifiLink) -> None:
+        """Run _key_refused as the bridge's reader thread does."""
+        worker = threading.Thread(target=link._key_refused)
+        worker.start()
+        worker.join()
+
+    def test_a_board_on_this_printers_usb_is_given_the_key(self, monkeypatch,
+                                                           tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        asked = self._giver(link, True)
+        self._off_the_main_thread(link)
+        assert asked == [("192.168.4.80", WIFI_KEY)]
+        assert link._key_given is True
+        assert bridge.logger.messages == wifi_said(self.GIVEN)
+
+    def test_a_board_not_found_on_usb_says_to_plug_it_in(self, monkeypatch,
+                                                         tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        asked = self._giver(link, False)
+        self._off_the_main_thread(link)
+        assert asked == [("192.168.4.80", WIFI_KEY)]
+        assert link._key_given is False
+        assert bridge.logger.messages == wifi_said(self.PLUG_IN)
+
+    def test_a_key_already_given_is_not_given_again(self, monkeypatch,
+                                                    tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        asked = self._giver(link, True)
+        link._key_given = True
+        self._off_the_main_thread(link)
+        assert asked == []
+        assert link._key_given is True
+        assert bridge.logger.messages == wifi_said(self.PLUG_IN)
+
+    def test_the_main_thread_opens_no_port_and_says_nothing(self, monkeypatch,
+                                                            tmp_path):
+        # Tests run on the main thread, as Klipper's reactor does; the reader thread follows.
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        asked = self._giver(link, True)
+        link._key_refused()
+        assert asked == []
+        assert (link._key_given, link._said) == (False, None)
+        assert bridge.logger.messages == []
+
+    def test_a_tcp_link_with_no_handover_says_to_plug_it_in(self, monkeypatch,
+                                                            tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        link._key_refused()
+        assert link._key_given is False
+        assert bridge.logger.messages == wifi_said(self.PLUG_IN)
+
+    def test_a_usb_link_never_asks_the_handover(self, monkeypatch, tmp_path):
+        # Its cable gives it the key once it is back in.
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=False,
+                                           addr=WIFI_ADDR)
+        asked = self._giver(link, True)
+        self._off_the_main_thread(link)
+        assert asked == []
+        assert link._key_given is False
+        assert bridge.logger.messages == wifi_said(self.PLUG_IN)
 
 
 class TestWifiLinkOnConnect:
@@ -7117,6 +7271,62 @@ class TestProbeBridge:
         port.close = lambda: (_ for _ in ()).throw(OSError("gone"))
         self._serial(monkeypatch, port)
         assert probe_bridge("/dev/ttyACM3") == self.INFO
+
+
+class TestAskBridge:
+    ASK = b'\n{"cmd":"ping"}\n'
+
+    def test_the_first_wanted_line_is_the_answer(self, monkeypatch):
+        port = FakeSerial([b'{"evt":"status"}\nnot json\n{"evt":"pong","n":1}\n'
+                           b'{"evt":"pong","n":2}\n'])
+        opened = TestProbeBridge._serial(monkeypatch, port)
+        assert ask_bridge("/dev/ttyACM3", self.ASK,
+                          lambda obj: obj.get("evt") == "pong") == {
+                              "evt": "pong", "n": 1}
+        assert opened == [(("/dev/ttyACM3", 115200),
+                           {"timeout": 0.1, "write_timeout": 0.5})]
+        assert port.written == [self.ASK]
+        assert port.closed is True
+
+    def test_no_wanted_line_is_none_after_its_reads(self, monkeypatch):
+        port = FakeSerial([b'{"evt":"status"}\n'])
+        TestProbeBridge._serial(monkeypatch, port)
+        assert ask_bridge("/dev/ttyACM3", self.ASK,
+                          lambda obj: obj.get("evt") == "pong") is None
+        assert port.written == [self.ASK] * 3
+        assert port.closed is True
+
+    def test_a_port_that_will_not_open_is_none(self, monkeypatch):
+        TestProbeBridge._serial(monkeypatch, error=OSError("busy"))
+        assert ask_bridge("/dev/ttyACM3", self.ASK, lambda obj: True) is None
+
+
+class TestStoreLinkKey:
+    ASK = (b'\n{"cmd": "linkkey", "key": "' + WIFI_KEY.encode() + b'"}\n')
+
+    @pytest.mark.parametrize("saved", [0, 1])
+    def test_a_board_that_stored_the_key_is_true(self, monkeypatch, saved):
+        # 0 is a key the board already held.
+        reply = f'{{"evt":"linkkey","saved":{saved},"len":32}}\n'.encode()
+        port = FakeSerial([b'{"evt":"status","units":0}\n' + reply])
+        opened = TestProbeBridge._serial(monkeypatch, port)
+        assert store_link_key("/dev/ttyACM3", WIFI_KEY) is True
+        assert opened == [(("/dev/ttyACM3", 115200),
+                           {"timeout": 0.1, "write_timeout": 0.5})]
+        assert port.written == [self.ASK]
+        assert port.closed is True
+
+    def test_a_board_that_could_not_store_it_is_false(self, monkeypatch):
+        port = FakeSerial([b'{"evt":"linkkey","saved":-1,"len":32}\n'])
+        TestProbeBridge._serial(monkeypatch, port)
+        assert store_link_key("/dev/ttyACM3", WIFI_KEY) is False
+
+    def test_a_board_that_does_not_answer_is_false(self, monkeypatch):
+        port = FakeSerial([b'{"evt":"error","msg":"linkkey: no network '
+                           b'stored yet -- set one first"}\n'])
+        TestProbeBridge._serial(monkeypatch, port)
+        assert store_link_key("/dev/ttyACM3", WIFI_KEY) is False
+        assert port.written == [self.ASK] * 3
 
 
 class TestAttachWifi:
