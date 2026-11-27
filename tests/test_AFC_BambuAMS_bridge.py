@@ -3775,6 +3775,12 @@ class TestBambuBridgeTraySwitches:
         assert bambu_bridge.logger.messages == [ams_echo(self.LINE)]
 
 
+# What the console says once when the BridgeBox answers "unknown command".
+UNKNOWN_COMMAND = ("BridgeBox: the BridgeBox does not know a command this AFC sent, as one on "
+                   "older firmware answers. Update it with AFC_BAMBU_FLASH: see "
+                   "BRIDGE_FLASH_HOWTO.md.")
+
+
 class TestBambuBridgeHandleLine:
     # The bridge firmware's own diagnostics, as they appear on the narration channel.
     HT_MEAS = ("[HT-MEAS] fire0 capu1 tun1 dst1 act1 arm0 htm0000 on0 off306 "
@@ -4046,14 +4052,12 @@ class TestBambuBridgeHandleLine:
         bridge = make_bambu_bridge(monkeypatch)
         bridge.reactor.now += BambuBridge.STALE_ERROR_S
         bridge.handle_line('{"evt":"error","msg":"unknown command"}')
-        assert bridge.logger.messages == [
-            ("warning", "BridgeBox: bridge error: unknown command")]
+        assert bridge.logger.messages == [("warning", UNKNOWN_COMMAND)]
 
     def test_unknown_command_never_connected_warns(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch, connected=False)
         bridge.handle_line('{"evt":"error","msg":"unknown command"}')
-        assert bridge.logger.messages == [
-            ("warning", "BridgeBox: bridge error: unknown command")]
+        assert bridge.logger.messages == [("warning", UNKNOWN_COMMAND)]
 
     def test_uartdiag_is_read(self, monkeypatch):
         bridge = make_bambu_bridge(monkeypatch)
@@ -6642,6 +6646,19 @@ class TestWifiLinkTcpFailed:
                         f"AFC_BRIDGEBOX_RESET_WIFI on the printer that set "
                         f"it up."))
 
+    def test_a_key_mismatch_on_a_tcp_port_says_the_cable_alone_is_not_enough(
+            self, monkeypatch, tmp_path):
+        link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path, usb=None,
+                                           addr=WIFI_ADDR)
+        link._tcp_failed(LinkKeyError("rejected"), False)
+        assert (link._failed_addr, link._retry_at) == (WIFI_ADDR, 160.0)
+        assert bridge.logger.messages == wifi_said(
+            ("warning", f"the BridgeBox at {WIFI_ADDR} holds another "
+                        f"printer's link key, and a chain on serial_port: tcp:// cannot "
+                        f"replace it. Plug it into this printer's USB, set serial_port: auto "
+                        f"with connection: wifi and RESTART to give it this printer's key, "
+                        f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer that set it up."))
+
     def test_with_the_cable_in_it_stays_on_usb(self, monkeypatch, tmp_path):
         link, bridge, _saved = wifi_bridge(monkeypatch, tmp_path,
                                            addr=WIFI_ADDR)
@@ -7406,6 +7423,33 @@ class TestBambuBridgeMarkConnectedWifi:
         monkeypatch.setattr(link, "on_connect", seen.append)
         bridge._mark_connected()
         assert seen == [bridge._serial]
+
+
+class TestBambuBridgeNoteUnknownCommand:
+    """A command the BridgeBox's firmware does not know."""
+
+    def test_it_names_the_firmware_the_bridge_reported(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge._info = {"evt": "info", "fw": "AFC-2.90"}
+        bridge._note_unknown_command()
+        assert bridge._unknown_cmd_said is True
+        assert bridge.logger.messages == [
+            ("warning", "BridgeBox: the BridgeBox (firmware AFC-2.90) does not know a "
+                        "command this AFC sent, as one on older firmware answers. Update it "
+                        "with AFC_BAMBU_FLASH: see BRIDGE_FLASH_HOWTO.md.")]
+
+    def test_before_the_bridge_said_its_firmware_it_names_none(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge._note_unknown_command()
+        assert bridge.logger.messages == [("warning", UNKNOWN_COMMAND)]
+
+    def test_a_repeat_stays_in_the_file(self, monkeypatch):
+        bridge = make_bambu_bridge(monkeypatch)
+        bridge._note_unknown_command()
+        bridge._note_unknown_command()
+        line = "BridgeBox: bridge error: unknown command"
+        assert bridge.logger.messages == [("warning", UNKNOWN_COMMAND), ("debug", line)]
+        assert bridge.logger.file_only == [line]
 
 
 class TestBambuBridgeHandleLineInfo:

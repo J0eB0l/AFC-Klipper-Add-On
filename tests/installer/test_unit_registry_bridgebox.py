@@ -343,6 +343,32 @@ class TestConnectionOption:
         assert message == "Connection: WiFi at 192.168.1.50"
         assert (sel.bridgebox_connection, sel.bridgebox_address) == ("wifi", "192.168.1.50")
 
+    @pytest.mark.parametrize("typed, address", [
+        ("tcp://192.168.1.50:8888", "192.168.1.50:8888"),
+        ("serial_port: tcp://192.168.1.50:8888", "192.168.1.50:8888"),
+        ("serial_port:tcp://192.168.1.50", "192.168.1.50"),
+        ("TCP://bridge.local", "bridge.local"),
+    ])
+    def test_three_takes_the_address_as_the_page_writes_it(
+        self, printer_tree: PrinterTree, typed: str, address: str
+    ) -> None:
+        sel = selection()
+        message, _, _ = activate(ConnectionOption(), printer_tree, sel, ["3", typed])
+        assert message == f"Connection: WiFi at {address}"
+        assert (sel.bridgebox_connection, sel.bridgebox_address) == ("wifi", address)
+
+    def test_wifi_only_says_what_a_bridgebox_from_another_printer_needs(
+        self, printer_tree: PrinterTree
+    ) -> None:
+        _, console, _ = activate(ConnectionOption(), printer_tree, selection(), ["1"])
+        assert console.messages[2] == (
+            "OTHER",
+            "3. WiFi only: join the bb-bridge hotspot from a phone, choose your network, and "
+            "note the address the page shows. A BridgeBox that another printer set up keeps "
+            "that printer's link key: choose 2 for it, or run AFC_BRIDGEBOX_RESET_WIFI on that "
+            "printer first.",
+        )
+
     @pytest.mark.parametrize("address", ["", "192.168.1.50 extra", "http://x", "a:b"])
     def test_a_bad_address_changes_nothing(self, printer_tree: PrinterTree, address: str) -> None:
         sel = selection()

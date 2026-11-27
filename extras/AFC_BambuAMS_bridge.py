@@ -727,12 +727,21 @@ class WifiLink:
             self._say("key", f"the BridgeBox at {self.addr} holds another "
                       f"printer's link key; staying on USB, which "
                       f"gives it this printer's key", warning=True)
-        elif isinstance(error, LinkKeyError):
+        elif (isinstance(error, LinkKeyError)
+              and self.usb_path):
             self._say("key", f"the BridgeBox at {self.addr} holds another "
                       f"printer's link key. Plug it into this "
                       f"printer's USB to give it this printer's key, "
                       f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer "
                       f"that set it up.", warning=True)
+        elif isinstance(error, LinkKeyError):
+            # A chain on a tcp:// port never opens USB, so the cable alone changes nothing.
+            self._say("key", f"the BridgeBox at {self.addr} holds another "
+                      f"printer's link key, and a chain on serial_port: tcp:// cannot "
+                      f"replace it. Plug it into this printer's USB, set serial_port: auto "
+                      f"with connection: wifi and RESTART to give it this printer's key, "
+                      f"or run AFC_BRIDGEBOX_RESET_WIFI on the printer that set it up.",
+                      warning=True)
         elif usb_in:
             self._say("usb", f"can't reach the BridgeBox on WiFi at "
                       f"{self.addr} ({error}); staying on USB", warning=True)
@@ -965,6 +974,7 @@ class BambuBridge:
         self._wq: "queue.Queue" = queue.Queue(maxsize=512)
         self._wthread: Optional[threading.Thread] = None
         self._info: Optional[dict] = None
+        self._unknown_cmd_said: bool = False
         self._sniff_sq: Optional[int] = None
         self._sniff_lost: int = 0
         self._sniff_ovr: int = 0
@@ -1822,6 +1832,8 @@ class BambuBridge:
                 self.logger.debug(f"BridgeBox: bridge error {since:.2f}s after connect, "
                                   f"from a line sent before it (ignored): {obj.get('msg')}",
                                   only_debug=True)
+            elif obj.get("msg") == "unknown command":
+                self._note_unknown_command()
             else:
                 self.logger.warning(f"BridgeBox: bridge error: {obj.get('msg')}")
         elif obj.get("evt") == "uartdiag":
@@ -2335,6 +2347,21 @@ class BambuBridge:
         self._silence_logged_t = now
         self.logger.warning(f"BridgeBox: bridge has been {what} for {quiet_for:.0f}s"
                             f"{'; commands are being dropped' if self._serial is None else ''}")
+
+    def _note_unknown_command(self) -> None:
+        """
+        Say that the BridgeBox did not know a command, and how to update it. Said once; a repeat
+        goes to the log only.
+        """
+        if self._unknown_cmd_said:
+            self.logger.debug("BridgeBox: bridge error: unknown command", only_debug=True)
+            return
+        self._unknown_cmd_said = True
+        fw = str((self._info or {}).get("fw") or "")
+        runs = f" (firmware {fw})" if fw else ""
+        self.logger.warning(f"BridgeBox: the BridgeBox{runs} does not know a command this AFC "
+                            f"sent, as one on older firmware answers. Update it with "
+                            f"AFC_BAMBU_FLASH: see BRIDGE_FLASH_HOWTO.md.")
 
     def _note_uartdiag(self, obj: dict) -> None:
         self.logger.debug(f"BridgeBox: bridge uartdiag {obj}", only_debug=True)
