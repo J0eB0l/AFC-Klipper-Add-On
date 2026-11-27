@@ -4121,6 +4121,31 @@ class TestAfcACE2ConfirmEngaged:
         failures = unit.afc.error.handle_lane_failure.calls
         assert failures[-1][0][1] == "lane3 did not take the filament: stayed full"
 
+    @pytest.mark.parametrize("load_to_gears, pulled", [(False, 36.0), (True, 0)])
+    def test_load_confirms_over_what_the_extruder_pulled(self, load_to_gears, pulled):
+        from tests.test_AFC_ACE import AceP1Wire
+        unit, lane, buf = TestAfcACE2RamToBuffer()._unit()
+        lane.hub_obj.afc_bowden_length = 1800.0
+        lane.extruder_obj.tool_stn = 36.0
+        confirmed: List[float] = []
+
+        def ram(slot: int, cur_lane: Any, approach: float) -> str:
+            buf.advance_state = True
+            return ""
+
+        def confirm(slot: int, cur_lane: Any, distance: float, speed: float) -> str:
+            confirmed.append(distance)
+            return ""
+        unit._ram_to_buffer = ram
+        unit._confirm_engaged = confirm
+        AceP1Wire(unit)
+
+        assert unit._ace_load_inner(lane, lane.extruder_obj, load_to_gears,
+                                    gcmd=make_gcmd()) is True
+
+        # A gear-only load makes no tool_stn move, so it has no pull to confirm.
+        assert confirmed == [pulled]
+
 
 class Ace2GearsRun:
     """

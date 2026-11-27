@@ -744,16 +744,18 @@ class TestAmsFirmwareHandleReady:
     def test_no_updater_reads_nothing(self):
         printer = make_printer()
         mgr = AmsFirmware(printer)
+        before = list(printer.reactor.timers)
         mgr._handle_ready()
         assert mgr._timer is None
-        assert printer.reactor.timers == []
+        assert printer.reactor.timers == before
 
     def test_the_updater_starts_the_reads_at_once(self, tmp_path):
         printer = make_printer()
         mgr = AmsFirmware(printer)
         add_updater(printer, tmp_path)
+        before = list(printer.reactor.timers)
         mgr._handle_ready()
-        assert printer.reactor.timers == [mgr._timer]
+        assert printer.reactor.timers == before + [mgr._timer]
         assert mgr._timer.callback == mgr._tick
         assert mgr._timer.waketime == FakeReactor.NOW
 
