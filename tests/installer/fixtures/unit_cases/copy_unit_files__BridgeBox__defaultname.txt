@@ -108,7 +108,9 @@ ht_names: Bambu_AMS_HT_1, Bambu_AMS_HT_2, Bambu_AMS_HT_3, Bambu_AMS_HT_4, Bambu_
 # Bambu_AMS_HT_1 is lane16.
 #
 # T#s do not follow lane numbers: each lane takes the next unused T#. SET_MAP
-# changes them like any lane's.
+# changes them like any lane's. A start packs them down in lane order when a
+# lower T# is free or two lanes saved the same one, and AFC_BRIDGEBOX_PACK
+# does it with no restart.
 #
 # lane_base 0 (the default) starts the Bambu lanes one past your other
 # lanes. Set it before the first start: changing it later moves every Bambu
@@ -285,6 +287,7 @@ auto_drop: True
 #
 #   AFC_BRIDGEBOX_ASSIGN  move a unit to another bay
 #   AFC_BRIDGEBOX_FORGET  retire a unit and free its bay
+#   AFC_BRIDGEBOX_PACK    pack the T#s down in lane order
 --- end AFC_BridgeBox_1.cfg ---
 --- AFC_Hardware.cfg ---
 [force_move]

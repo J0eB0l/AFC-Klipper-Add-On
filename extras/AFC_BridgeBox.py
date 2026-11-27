@@ -260,18 +260,62 @@ def _lane_number(lname: Optional[str]) -> Optional[int]:
     return int(ds) if ds else None
 
 
-def _pack_tools(tools: Set[str], taken: Set[str]) -> Dict[str, str]:
+def _is_tool(cmd: str) -> bool:
     """
-    Where each T# moves when a set of them packs down.
+    Whether a lane's command is a numbered T#.
 
-    :param tools: the T#s to pack, none of them taken
-    :param taken: the T#s that stay where they are
-    :return dict: old T# -> new T#, for the ones that move
+    :param cmd: a command from a lane's map
+    :return bool: True for T0, T1 and so on
     """
-    nums = sorted(int(t[1:]) for t in tools
-                  if t[:1] == "T" and t[1:].isdigit())
+    return (cmd[:1] == "T"
+            and cmd[1:].isdigit())
+
+
+def _needs_pack(tools: List[str], taken: Set[str]) -> bool:
+    """
+    Whether saved T#s cannot all come back as they are, or leave one below them free.
+
+    :param tools: the saved T# of each lane
+    :param taken: the T#s something else holds
+    :return bool: True when two lanes saved one T#, something else holds one of them, or a T# below
+    the highest of them is free
+    """
+    mine = set(tools)
+    top = max((int(cmd[1:]) for cmd in mine if _is_tool(cmd)), default=0)
+    return (len(mine) < len(tools)
+            or bool(mine & taken)
+            or any(f"T{n}" not in mine
+                   and f"T{n}" not in taken
+                   for n in range(top)))
+
+
+def _pack_plan(lanes: Dict[str, List[str]], taken: Set[str]) -> Dict[str, List[str]]:
+    """
+    The T#s each lane has once they pack down into the lowest free ones, in lane order.
+
+    :param lanes: lane name -> its T#s
+    :param taken: the T#s that stay where they are
+    :return dict: lane name -> its T#s after the pack, for the lanes whose T#s change
+    """
     free = (f"T{n}" for n in range(99) if f"T{n}" not in taken)
-    return {f"T{n}": new for n, new in zip(nums, free) if f"T{n}" != new}
+    plan: Dict[str, List[str]] = {}
+    for name in sorted(lanes, key=lambda ln: (_lane_number(ln) or 0, ln)):
+        maps = [next(free, cmd) if _is_tool(cmd) else cmd for cmd in lanes[name]]
+        if maps != lanes[name]:
+            plan[name] = maps
+    return plan
+
+
+def _pack_moves(lanes: Dict[str, List[str]], plan: Dict[str, List[str]]) -> List[str]:
+    """
+    What a pack moves, for the log.
+
+    :param lanes: lane name -> its T#s before the pack
+    :param plan: lane name -> its T#s after it (see _pack_plan)
+    :return list: one `lane T# -> T#` for each T# that changes, in lane order
+    """
+    return [f"{name} {was} -> {now}" for name, maps in plan.items()
+            for was, now in zip(lanes[name], maps) if was != now]
 
 
 def _plan_lane_map(afc: Any, lname: str, rec: Dict[str, Any], warn: Callable[[str], None],
@@ -2422,6 +2466,10 @@ class afcBridgeBox:
                     desc="Show every BridgeBox chain in one list: its board, "
                          "link, extruder, and each unit with its lanes, T#s "
                          "and spools: AFC_BRIDGEBOX_STATUS")
+                gcode.register_command(
+                    "AFC_BRIDGEBOX_PACK", self.cmd_AFC_BRIDGEBOX_PACK,
+                    desc="Pack the T#s of every BridgeBox lane down into the lowest free "
+                         "ones, in lane order, with no restart: AFC_BRIDGEBOX_PACK")
             except Exception:
                 pass
         self._register_mux("AFC_BRIDGEBOX_SWITCH", self.cmd_AFC_BRIDGEBOX_SWITCH,
@@ -2445,11 +2493,8 @@ class afcBridgeBox:
         List every BridgeBox chain on the printer, in config order: its board, how it is linked, its
         extruder, and each unit on a bay with its lanes, their T#s and spools.
         """
-        chains = [obj for _name, obj
-                  in self.printer.lookup_objects(self._BASE_SECTION)
-                  if isinstance(obj, afcBridgeBox)] or [self]
         lines: List[str] = []
-        for chain in chains:
+        for chain in self._all_chains():
             lines += chain._status_lines()
         gcmd.respond_info("BridgeBox chains:\n" + "\n".join(lines))
 
@@ -3018,11 +3063,6 @@ class afcBridgeBox:
                            if u != uid}
         self._held = {b: e for b, e in held.items()
                       if _norm_uid(e.get("uid")) != uid}
-        if any(_parse_map(rec.get("map"))
-               for entry in dropped
-               for rec in (entry.get("lanes") or {}).values()
-               if isinstance(rec, dict)):
-            self._state_set({sec: {self._PACK_KEY: 1}})
         # Saved now, so AFC.var.unit does not keep them until some later save.
         if had_records:
             afc = self.printer.lookup_object("AFC", None)
@@ -4818,7 +4858,7 @@ class afcBridgeBox:
             except Exception:
                 pass
         try:
-            self._pack_after_forget()
+            self._pack_at_start()
         except Exception:
             pass
         # A fault in this warning must not stop the claims and releases below.
@@ -6163,7 +6203,7 @@ class afcBridgeBox:
         if not self._prep_settled():
             return None
         try:
-            self._pack_after_forget()
+            self._pack_at_start()
         except Exception:
             pass
         pools = getattr(self, "_pool_units", [])
@@ -6555,14 +6595,8 @@ class afcBridgeBox:
             rec = held.get(lane.name) or {}
             for cmd in _parse_map(rec.get("map")):
                 holder = (getattr(afc, "lanes", None) or {}).get(_tcmd_holder(afc, cmd) or "")
-                ext = getattr(holder, "extruder_obj", None)
-                pending = getattr(ext, "_lanes_pending", None)
                 if (holder is None
-                    or getattr(ext, "tc_lane", None) is not holder
-                    or not getattr(ext, "no_lanes", False)
-                    or holder.name == getattr(afc, "current", None)
-                    or not callable(pending)
-                    or not pending()):
+                    or not self._stand_in_waits(afc, holder)):
                     continue
                 holder.map = [m for m in holder.map if m != cmd]
                 if holder.current_map == cmd:
@@ -6574,13 +6608,42 @@ class afcBridgeBox:
                     out.append(holder)
         return out
 
-    def hotswap_held_tools(self) -> Set[str]:
+    @staticmethod
+    def _stand_in_pending(lane: Any) -> bool:
         """
-        The T#s this chain saves for its known units that are not claimed now (see held_tools).
+        Whether a lane stands in for an extruder whose own pool lanes have not joined it yet.
 
-        :return set: the T# names
+        :param lane: a registered lane
+        :return bool: True for the lane an extruder with no lane made for itself, while a lane not
+        registered yet names that extruder
         """
-        out: Set[str] = set()
+        ext = getattr(lane, "extruder_obj", None)
+        pending = getattr(ext, "_lanes_pending", None)
+        return (getattr(ext, "tc_lane", None) is lane
+                and bool(getattr(ext, "no_lanes", False))
+                and callable(pending)
+                and bool(pending()))
+
+    @staticmethod
+    def _stand_in_waits(afc: Any, lane: Any) -> bool:
+        """
+        Whether a claim may take a saved T# back from an extruder's stand-in lane.
+
+        :param afc: the AFC object
+        :param lane: a registered lane
+        :return bool: True for a stand-in whose extruder's own pool lanes have not joined yet (see
+        _stand_in_pending), unless it is the loaded lane
+        """
+        return (lane.name != getattr(afc, "current", None)
+                and afcBridgeBox._stand_in_pending(lane))
+
+    def _held_records(self) -> Dict[str, Dict[str, Any]]:
+        """
+        The lane records this chain saves for its known units that are not claimed now.
+
+        :return dict: lane name -> saved record
+        """
+        out: Dict[str, Dict[str, Any]] = {}
         held = getattr(self, "_held", None) or {}
         for pu in getattr(self, "_pool_units", None) or []:
             entry = held.get(pu.get("name")) or {}
@@ -6588,10 +6651,19 @@ class afcBridgeBox:
                 or not self._bay_held(pu)
                 or _norm_uid(entry.get("uid")) != _norm_uid(pu.get("uid"))):
                 continue
-            for rec in (entry.get("lanes") or {}).values():
+            for lname, rec in (entry.get("lanes") or {}).items():
                 if isinstance(rec, dict):
-                    out.update(_parse_map(rec.get("map")))
+                    out[lname] = rec
         return out
+
+    def hotswap_held_tools(self) -> Set[str]:
+        """
+        The T#s this chain saves for its known units that are not claimed now (see held_tools).
+
+        :return set: the T# names
+        """
+        return {cmd for rec in self._held_records().values()
+                for cmd in _parse_map(rec.get("map"))}
 
     def _reserved_tools(self) -> Set[str]:
         """
@@ -6602,11 +6674,84 @@ class afcBridgeBox:
         # A chain Klipper does not list still counts its own.
         return held_tools(self.printer) | self.hotswap_held_tools()
 
-    _PACK_KEY = "pack_tools"
-
-    def _pack_after_forget(self) -> None:
+    def _all_chains(self) -> List["afcBridgeBox"]:
         """
-        Pack the Bambu T#s down into the ones a forget freed, once a start.
+        Every BridgeBox chain on the printer.
+
+        :return list: the chains, in config order; a chain Klipper does not list counts itself
+        """
+        return [obj for _name, obj in self.printer.lookup_objects(self._BASE_SECTION)
+                if isinstance(obj, afcBridgeBox)] or [self]
+
+    def _others_tools(self, afc: Any, ours: Set[str], stand_ins: bool) -> Set[str]:
+        """
+        The T#s a pack leaves where they are: a macro's, those of a lane that is not being packed
+        and the ones another hot swap type keeps for its unplugged units.
+
+        :param afc: the AFC object
+        :param ours: the names of the claimed lanes being packed
+        :param stand_ins: False at a start, where the stand-in lane of an extruder whose pool lanes
+        have not joined yet does not count: it goes, loaded or not, once those lanes join
+        :return set: the T# names
+        """
+        taken = {cmd for cmd, handler in _tcmd_handlers(afc).items()
+                 if not _tcmd_is_ours(afc, handler)}
+        for lane in (getattr(afc, "lanes", None) or {}).values():
+            if (lane.name in ours
+                or (not stand_ins
+                    and self._stand_in_pending(lane))):
+                continue
+            taken.update(getattr(lane, "map", None) or [])
+            taken.update(getattr(lane, "_map", None) or [])
+        taken.update(held_tools(self.printer, skip=afcBridgeBox))
+        return taken
+
+    @staticmethod
+    def _pack_records(recs: Dict[str, Dict[str, Any]], plan: Dict[str, List[str]]) -> None:
+        """
+        Put saved lane records on their packed T#s.
+
+        :param recs: lane name -> saved record
+        :param plan: lane name -> its T#s after the pack, for the records that change
+        """
+        for lname, maps in plan.items():
+            rec = recs[lname]
+            old = _parse_map(rec.get("map"))
+            rec["current_map"] = dict(zip(old, maps)).get(rec.get("current_map"), maps[0])
+            rec["map"] = (maps if isinstance(rec["map"], (list, tuple))
+                          else ", ".join(maps))
+
+    def _pack_lanes(self, afc: Any, lanes: Dict[str, Any], plan: Dict[str, List[str]]) -> None:
+        """
+        Put claimed lanes on their packed T#s, and take away the T# commands no lane has after it.
+
+        :param afc: the AFC object
+        :param lanes: lane name -> claimed lane
+        :param plan: lane name -> its T#s after the pack, for the lanes that change
+        """
+        left: Set[str] = set()
+        for lname, maps in plan.items():
+            lane = lanes[lname]
+            left.update(lane.map)
+            for cmd in lane.map:
+                afc.tool_cmds.pop(cmd, None)
+            lane.current_map = dict(zip(lane.map, maps)).get(lane.current_map, maps[0])
+            lane.map = maps
+        for lname in plan:
+            assign_pool_tcmd(lanes[lname], afc)
+            try:
+                lanes[lname].send_lane_data()
+            except Exception:
+                pass
+        left -= {cmd for lane in afc.lanes.values() for cmd in lane.map}
+        for cmd in sorted(left):
+            afc.gcode.register_command(cmd, None)
+
+    def _pack_at_start(self) -> None:
+        """
+        Pack the saved Bambu T#s down in lane order, once a start, before a unit is claimed, when
+        one below them is free or they cannot all come back (see _needs_pack). They stay as they
+        are while a lane has no T# or several, as a print's own mapping leaves it.
         """
         if getattr(self, "_pack_checked", False):
             return
@@ -6614,59 +6759,94 @@ class afcBridgeBox:
         if (afc is None
             or not getattr(afc, "prep_done", False)):
             return
-        try:
-            chains = [obj for _name, obj
-                      in self.printer.lookup_objects(self._BASE_SECTION)
-                      if isinstance(obj, afcBridgeBox)]
-        except Exception:
-            chains = []
-        chains = chains or [self]
+        chains = self._all_chains()
         for chain in chains:
             chain._pack_checked = True
-        flagged = [chain for chain in chains
-                   if chain._state_get(f"{self._BASE_SECTION} {chain.name}",
-                                       self._PACK_KEY)]
-        if (not flagged
-            or any(pu.get("bound") for chain in chains
-                   for pu in getattr(chain, "_pool_units", None) or [])):
+        if any(pu.get("bound") for chain in chains
+               for pu in getattr(chain, "_pool_units", None) or []):
             return
-        recs = [rec for chain in chains
+        recs = {lname: rec for chain in chains
                 for entry in (getattr(chain, "_held", None) or {}).values()
-                for rec in (entry.get("lanes") or {}).values()
-                if isinstance(rec, dict)]
-        taken = {cmd for cmd, handler in _tcmd_handlers(afc).items()
-                 if not _tcmd_is_ours(afc, handler)}
-        for lane in (getattr(afc, "lanes", None) or {}).values():
-            taken.update(getattr(lane, "map", None) or [])
-            taken.update(getattr(lane, "_map", None) or [])
-        # Other hot swap types keep their unplugged units' T#s.
-        taken.update(held_tools(self.printer, skip=afcBridgeBox))
-        tools = {cmd for rec in recs for cmd in _parse_map(rec.get("map"))}
-        moves = _pack_tools(tools - taken, taken)
-        for rec in recs:
-            maps = _parse_map(rec.get("map"))
-            if not any(cmd in moves for cmd in maps):
+                for lname, rec in (entry.get("lanes") or {}).items()
+                if isinstance(rec, dict)}
+        lanes = {lname: _parse_map(rec.get("map")) for lname, rec in recs.items()}
+        taken = self._others_tools(afc, set(), False)
+        if (any(len(maps) != 1 for maps in lanes.values())
+            or not _needs_pack([maps[0] for maps in lanes.values()], taken)):
+            return
+        plan = _pack_plan(lanes, taken)
+        self._pack_records(recs, plan)
+        try:
+            afc.save_vars()
+        except Exception:
+            pass
+        self.logger.info(f"{self.name}: the T#s saved for the Bambu lanes pack down in lane "
+                         f"order: {', '.join(_pack_moves(lanes, plan))}")
+
+    def _pack_live(self, afc: Any) -> List[str]:
+        """
+        Pack the Bambu T#s of every chain down now: the claimed lanes' and the ones saved for
+        known units that are not claimed.
+
+        :param afc: the AFC object
+        :return list: what moved (see _pack_moves)
+        """
+        live: Dict[str, Any] = {}
+        recs: Dict[str, Dict[str, Any]] = {}
+        for chain in self._all_chains():
+            live.update(chain._claimed_lanes())
+            recs.update(chain._held_records())
+        lanes = {lname: list(lane.map) for lname, lane in live.items()}
+        lanes.update({lname: _parse_map(rec.get("map")) for lname, rec in recs.items()})
+        plan = _pack_plan(lanes, self._others_tools(afc, set(live), True))
+        moved = _pack_moves(lanes, plan)
+        self._pack_records(recs, {lname: maps for lname, maps in plan.items() if lname in recs})
+        self._pack_lanes(afc, live, {lname: maps for lname, maps in plan.items() if lname in live})
+        return moved
+
+    def _claimed_lanes(self) -> Dict[str, Any]:
+        """
+        The lanes of this chain's claimed units.
+
+        :return dict: lane name -> lane
+        """
+        out: Dict[str, Any] = {}
+        for pu in getattr(self, "_pool_units", None) or []:
+            if not pu.get("bound"):
                 continue
-            maps = [moves.get(cmd, cmd) for cmd in maps]
-            rec["map"] = (maps if isinstance(rec["map"], (list, tuple))
-                          else ", ".join(maps))
-            cur = moves.get(rec.get("current_map"), rec.get("current_map"))
-            rec["current_map"] = cur if cur in maps else maps[0]
-        if moves:
-            try:
-                afc.save_vars()
-            except Exception:
-                pass
-            self.logger.info(
-                f"{self.name}: a unit was forgotten, so the "
-                f"Bambu T#s pack down: "
-                + ", ".join(f"{old} -> {new}" for old, new in moves.items()))
-        for chain in flagged:
-            sec = f"{self._BASE_SECTION} {chain.name}"
-            cp = chain._read_state()
-            if (cp.has_section(sec)
-                and cp.remove_option(sec, self._PACK_KEY)):
-                chain._write_state(cp)
+            for lname in pu["lanes"]:
+                lane = self.printer.lookup_object(f"AFC_lane {lname}", None)
+                if (lane is not None
+                    and not getattr(lane, "unassigned", True)):
+                    out[lname] = lane
+        return out
+
+    def cmd_AFC_BRIDGEBOX_PACK(self, gcmd: Any) -> None:
+        """
+        Pack the T#s of every BridgeBox lane down into the lowest free ones, in lane order, with no
+        restart. The T#s saved for a unit that is unplugged pack down with them. A T# a macro or
+        another unit's lane has stays where it is. Not during a print.
+
+        Usage
+        -------
+        `AFC_BRIDGEBOX_PACK`
+
+        Example
+        -------
+        ```
+        AFC_BRIDGEBOX_PACK
+        ```
+        """
+        if self._is_printing():
+            error_str = "BridgeBox: the T#s cannot pack during a print. Run it once the print ends."
+            raise gcmd.error(error_str)
+        afc = self.printer.lookup_object("AFC")
+        moved = self._pack_live(afc)
+        if not moved:
+            gcmd.respond_info("BridgeBox: the T#s are packed already.")
+            return
+        afc.save_vars()
+        gcmd.respond_info(f"BridgeBox: the T#s packed down: {', '.join(moved)}")
 
     def _next_tool(self, afc: Any) -> Optional[str]:
         """
@@ -6697,8 +6877,26 @@ class afcBridgeBox:
                 and tc.name in getattr(ext, "lanes", {})):
                 continue
             ext.no_lanes = False
+            self._free_stand_in(tc)
             self.logger.debug(f"{self.name}: {ext.name} left standalone mode "
                               f"(claimed lanes attached)")
+
+    def _free_stand_in(self, lane: Optional[Any]) -> None:
+        """
+        Take away the T#s an extruder's stand-in lane still has once the extruder's own lanes
+        replaced it, so none stays behind as a command with no lane.
+
+        :param lane: the stand-in lane, None for an extruder that made none
+        """
+        afc = self.printer.lookup_object("AFC", None)
+        if (lane is None
+            or afc is None):
+            return
+        for cmd in list(getattr(lane, "map", None) or []):
+            if afc.tool_cmds.get(cmd) != lane.name:
+                continue
+            afc.tool_cmds.pop(cmd)
+            afc.gcode.register_command(cmd, None)
 
     #: An AMS 2 answers 0x3702 within ~1.5 s and an AMS 1 never does.
     _AMS1_ASK_FLOOR = 12
