@@ -25105,6 +25105,16 @@ class TestAfcBambuAMSAdvanceIntoExtruder:
             ("debug", "Bambu: tool_stn queued (38mm @ 7mm/s)")]
         assert unit.logger.messages == []
 
+    def test_a_gear_only_load_arms_the_assist_and_moves_no_extruder(
+            self, monkeypatch):
+        unit, lane, at_assist = self._rig(monkeypatch)
+        unit._advance_into_extruder(lane, lane.extruder_obj, load_to_gears=True)
+        assert unit.afc.e_moves == []
+        assert at_assist == [0]
+        assert unit._following_lane is lane
+        assert unit.afc.afcDeltaTime.messages == [self._settled("0.00", "0.00")]
+        assert unit.logger.messages == []
+
     def test_an_active_extruder_is_not_switched_again(self, monkeypatch):
         unit, lane, _ = self._rig(monkeypatch)
         unit._advance_into_extruder(lane, lane.extruder_obj)
@@ -25281,6 +25291,15 @@ class TestAfcBambuAMSUnitLoadLane:
         assert unit._load_in_progress is False
         assert lane.status == AFCLaneState.TOOL_LOADED
         assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS
+        assert unit.logger.messages == self.LOADED
+
+    def test_a_gear_only_load_is_passed_on(self, monkeypatch):
+        unit, lane, _ = self._rig(monkeypatch)
+        assert unit.unit_load_lane(lane, lane.extruder_obj, load_to_gears=True,
+                                   gcmd="callback") is True
+        assert unit.afc.e_moves == []
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert unit.afc.afcDeltaTime.messages == _P6_ARRIVAL_MARKS[:2]
         assert unit.logger.messages == self.LOADED
 
     def test_it_is_cleared_even_when_the_load_raises(self, monkeypatch):
@@ -26047,6 +26066,19 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
             ("debug", "Bambu: tool_stn queued (72mm @ 25mm/s)")]
         assert unit.logger.messages == [self.KICKED, self.ARRIVED]
 
+    def test_a_gear_only_load_ends_at_the_sensor(self, monkeypatch):
+        unit, lane = self._rig(monkeypatch, sensor=[False, False, True])
+        assert unit._unit_load_lane(lane, None, True, gcmd="callback") is True
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert unit.afc.e_moves == []
+        assert unit._bridge.sent == ([self.SELECT, self.PRIME, self.BULK]
+                                     + self.ARRIVAL)
+        assert unit.afc.error.calls == []
+        assert unit.afc.afcDeltaTime.messages == [
+            ("debug", "Bambu: fed to toolhead sensor"),
+            ("debug", "Bambu: unit settled (0.00s of 0.00s)")]
+        assert unit.logger.messages == [self.KICKED, self.ARRIVED]
+
     def test_a_failure_mid_print_marks_the_lane_for_reload(self, monkeypatch):
         unit, lane = self._rig(monkeypatch, print_state="printing",
                                sensor=[False, False, True, False])
@@ -26437,6 +26469,16 @@ class TestAfcBambuAMSPrivateUnitLoadLane:
                   "reached the extruder and that the spool turns freely. "
                   f"{_P6_RETRY}.")
 
+    def test_a_sensorless_gear_only_load_is_not_judged_on_a_pull(self,
+                                                              monkeypatch):
+        # Nothing pulled the filament, so a still odometer says nothing.
+        unit, lane, _ = self._lite_feeds(monkeypatch, to=1200)
+        assert unit._unit_load_lane(lane, None, True, gcmd="callback") is True
+        assert unit._bridge.sent[-1] == self.ASSIST
+        assert unit.afc.e_moves == []
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert unit.afc.error.calls == []
+
     def test_a_grip_failure_in_a_print_reloads_on_resume(self, monkeypatch):
         unit, lane, _ = self._lite_feeds(monkeypatch, to=1200, pulled=1210)
         monkeypatch.setattr(unit.afc.function, "in_print", lambda: True)
@@ -26732,6 +26774,15 @@ class TestAfcBambuAMSBoxedGrip:
         assert unit._unit_load_lane(lane, gcmd="callback") is True
         assert lane.status == AFCLaneState.TOOL_LOADED
         assert self.BACK not in bridge.sent
+        assert unit.afc.error.calls == []
+
+    def test_a_gear_only_load_is_not_judged_on_a_pull(self, monkeypatch):
+        # The buffer never drops, because the extruder pulled nothing.
+        unit, lane, bridge = self._unit(monkeypatch, pulls=[False])
+        assert unit._unit_load_lane(lane, None, True, gcmd="callback") is True
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert self.BACK not in bridge.sent
+        assert unit.afc.e_moves == []
         assert unit.afc.error.calls == []
 
     def test_a_load_the_extruder_did_not_take_is_fed_again(self, monkeypatch):

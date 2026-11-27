@@ -10407,15 +10407,19 @@ class afcBambuAMS(afcUnit):
                           f"AMS said: {said.strip() or 'nothing'}")
         return waited
 
-    def _advance_into_extruder(self, cur_lane: Any, cur_extruder: Any) -> None:
+    def _advance_into_extruder(self, cur_lane: Any, cur_extruder: Any,
+                               load_to_gears: bool = False) -> None:
         """
         Hand the filament to the extruder without fighting the AMS for it.
 
         :param cur_lane: the lane whose filament just reached the sensor
         :param cur_extruder: the extruder that will pull it in
+        :param load_to_gears: leave the filament where it arrived, with no extruder move
         """
         afc = self.afc
         tool_stn = getattr(cur_extruder, "tool_stn", 0) or 0
+        if load_to_gears:
+            tool_stn = 0
         speed = getattr(cur_extruder, "tool_load_speed", 0) or 0
         cur_lane.activate_toolhead_extruder()
         bite = min(self.tool_bite_mm, tool_stn) if tool_stn > 0 else 0.0
@@ -10438,13 +10442,14 @@ class afcBambuAMS(afcUnit):
             afc.move_e_pos(tool_stn - bite, speed, "tool stn")
             self._log_delta(f"Bambu: tool_stn queued ({tool_stn - bite:.0f}mm @ {speed:.0f}mm/s)")
 
-    def unit_load_lane(self, cur_lane: Any, cur_extruder: Any = None, *,
-                       gcmd: AFCGcmd) -> bool:
+    def unit_load_lane(self, cur_lane: Any, cur_extruder: Any = None,
+                       load_to_gears: bool = False, *, gcmd: AFCGcmd) -> bool:
         """
         Load a lane to the toolhead, with the follower tick held off throughout.
 
         :param cur_lane: Lane to load
         :param cur_extruder: Extruder the lane loads into (defaults to the lane's)
+        :param load_to_gears: Stop after loading filament to the extruder gears or sensor.
         :param gcmd: command context the load runs within
         :return bool: True on a verified load, False on failure
         """
@@ -10455,17 +10460,18 @@ class afcBambuAMS(afcUnit):
         if getattr(self, "_runout_drain", None) is not None:
             afcBambuAMS._end_runout_drain(self, f"{getattr(cur_lane, 'name', 'a lane')} is loading")
         try:
-            return self._unit_load_lane(cur_lane, cur_extruder, gcmd=gcmd)
+            return self._unit_load_lane(cur_lane, cur_extruder, load_to_gears, gcmd=gcmd)
         finally:
             self._load_in_progress = False
 
-    def _unit_load_lane(self, cur_lane: Any, cur_extruder: Any = None, *,
-                        gcmd: AFCGcmd) -> bool:
+    def _unit_load_lane(self, cur_lane: Any, cur_extruder: Any = None,
+                        load_to_gears: bool = False, *, gcmd: AFCGcmd) -> bool:
         """
         Full toolhead load for a stepperless Bambu AMS lane.
 
         :param cur_lane: Lane to load
         :param cur_extruder: Extruder the lane loads into (defaults to the lane's)
+        :param load_to_gears: Stop after loading filament to the extruder gears or sensor.
         :param gcmd: command context the load runs within
         :return bool: True on a verified load, False on failure
         """
@@ -10743,7 +10749,7 @@ class afcBambuAMS(afcUnit):
 
         # No re-select at arrival: a mode-09 select pulls the tray back and jams.
         try:
-            self._advance_into_extruder(cur_lane, cur_extruder)
+            self._advance_into_extruder(cur_lane, cur_extruder, load_to_gears)
         except Exception as e:
             self.logger.warning(f"{self.name}: tool_stn advance failed for "
                                 f"{cur_lane.name}: {e}")
@@ -10776,7 +10782,10 @@ class afcBambuAMS(afcUnit):
             afc.error.handle_lane_failure(cur_lane, cause, pause=afc.function.in_print(),
                                           gcmd=gcmd)
             return False
-        if lite:
+        if load_to_gears:
+            # The extruder pulled nothing, so there is no grip to check.
+            cause = None
+        elif lite:
             cause = self._lite_grip_check(cur_lane, cur_extruder, grip0)
         else:
             cause = self._boxed_grip_check(cur_lane, cur_extruder, mark)

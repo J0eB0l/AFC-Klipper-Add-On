@@ -3670,7 +3670,8 @@ class TestAfcACEPrepPostLoad:
         """
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, values={"dist_hub": 100}))
         lane = unit.lanes["lane0"]
-        lane.hub_obj = unit.printer.add_hub("real_hub", switch_pin="PA1")
+        lane.hub_obj = unit.printer.add_hub("real_hub", switch_pin="PA1",
+                                            hub_clear_move_dis=65.0)
         return unit, lane, AceHubSwitchPath(lane.hub_obj, switch_at, stuck=stuck)
 
     def test_real_hub_switch_parks_the_lane_short_of_it(self):
@@ -4272,6 +4273,7 @@ class TestAfcACESystemTest:
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True, tool_loaded=True),
                            current="other")
         lane = unit.lanes["lane0"]
+        lane.enable_buffer = Hook(lane.enable_buffer)
 
         gcmd = make_gcmd()
         ok = unit.system_Test(lane, 0.0, False, False, gcmd=gcmd)
@@ -4282,6 +4284,9 @@ class TestAfcACESystemTest:
         assert lane.current_led_state == "tool_loaded_idle"
         assert unit.afc.spool.set_active_spool.calls == []
         assert unit.printer.events == []
+        # An idle (not actively tooled) lane must not enable its buffer: only
+        # the lane actually active on the shuttle should run buffer correction.
+        assert lane.enable_buffer.calls == []
 
 
 class TestAfcACEFeedUntilSensor:
@@ -4636,7 +4641,7 @@ class TestAfcACECalibrateLane:
     def test_wraps_hub_inner(self):
         unit = ace_p1_unit("lane0")
         lane = unit.lanes["lane0"]
-        hub = unit.printer.add_hub("real_hub", switch_pin="PA1")
+        hub = unit.printer.add_hub("real_hub", switch_pin="PA1", hub_clear_move_dis=65.0)
         lane.hub_obj = hub
         seen: List[bool] = []
 
@@ -4655,7 +4660,8 @@ class TestAfcACECalibrateLane:
 
         result = unit.calibrate_lane(lane, 1.0, make_gcmd())
 
-        assert result == (True, "dist_hub calibration: 65.0mm (was 60mm)", 65.0)
+        assert result == (True, "dist_hub calibration: 65.0mm, hub sensor at 130.0mm less "
+                                "65.0mm hub_clear_move_dis (was 60mm)", 65.0)
         assert lane.dist_hub == 65.0
         # Three feeds, one step back off the switch and the clear move.
         assert seen == [True] * 5
@@ -4744,6 +4750,21 @@ class TestAfcACEUnitLoadLane:
             ("info", "ACE load: advancing tool_stn 72mm to nozzle for lane0")]
         assert unit.afc.afcDeltaTime.messages == [
             ("debug", "ACE load: tool_stn to nozzle"), ("debug", "ACE load transport complete")]
+
+
+    def test_load_to_gears_is_passed_through_and_skips_tool_stn(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        AceP1Wire(unit, on_move=lambda method, params: setattr(
+            lane.extruder_obj, "tool_start_state", True))
+
+        gcmd = make_gcmd()
+        assert unit.unit_load_lane(lane, lane.extruder_obj, load_to_gears=True, gcmd=gcmd) is True
+
+        assert lane.status == AFCLaneState.TOOL_LOADED
+        assert unit.afc.move_e_pos.calls == []
+        assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: feed on slot 0 stopped at the toolhead sensor")]
 
 
 class TestAfcACEUnitUnloadLane:
@@ -4880,6 +4901,19 @@ class TestAfcACEAceLoadSequence:
         assert unit.afc.afcDeltaTime.messages == [
             ("debug", "ACE load: tool_stn to nozzle"), ("debug", "ACE load transport complete")]
         assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_load_to_gears_is_passed_through_and_skips_tool_stn(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True))
+        lane = unit.lanes["lane0"]
+        AceP1Wire(unit, on_move=lambda method, params: setattr(
+            lane.extruder_obj, "tool_start_state", True))
+
+        gcmd = make_gcmd()
+        assert unit._ace_load_sequence(
+            lane, lane.extruder_obj, load_to_gears=True, gcmd=gcmd) is True
+
+        assert unit.afc.move_e_pos.calls == []
+        assert unit.afc.afcDeltaTime.messages == [("debug", "ACE load transport complete")]
 
     def test_a_failed_load_still_clears_flag(self):
         unit = ace_p1_unit(LaneSpec("lane0", prep=True, load=True), operation_active=True)
@@ -5083,6 +5117,22 @@ class TestAfcACEAceLoadInner:
         assert unit.afc.move_e_pos.calls == []
         assert unit.afc.afcDeltaTime.messages == [("debug", "ACE load transport complete")]
         # No tool_stn advance line.
+        assert unit.logger.messages == [
+            ("debug", "ACE Ace_1: feed on slot 0 stopped at the toolhead sensor")]
+        assert unit.afc.error.handle_lane_failure.calls == []
+
+    def test_load_to_gears_skips_tool_stn_even_when_positive(self):
+        unit = ace_p1_unit(LaneSpec("lane0", prep=True))
+        lane = unit.lanes["lane0"]
+        self._wire(unit, lane, sensor_on=1)
+
+        gcmd = make_gcmd()
+        assert unit._ace_load_inner(
+            lane, lane.extruder_obj, load_to_gears=True, gcmd=gcmd) is True
+
+        assert unit.afc.move_e_pos.calls == []
+        assert unit.afc.afcDeltaTime.messages == [("debug", "ACE load transport complete")]
+        # No tool_stn advance line, even though tool_stn is positive.
         assert unit.logger.messages == [
             ("debug", "ACE Ace_1: feed on slot 0 stopped at the toolhead sensor")]
         assert unit.afc.error.handle_lane_failure.calls == []
@@ -5521,7 +5571,8 @@ class TestAfcACEAceUnloadInner:
 
     def test_real_hub_switch_still_pressed_is_backed_off(self):
         unit, lane, wire = self._unit()
-        lane.hub_obj = unit.printer.add_hub("real_hub", switch_pin="PA1")
+        lane.hub_obj = unit.printer.add_hub("real_hub", switch_pin="PA1",
+                                            hub_clear_move_dis=65.0)
         path = AceHubSwitchPath(lane.hub_obj, switch_at=100.0, tip=1030.0)
         wire.on_move = path.move
 
@@ -5871,7 +5922,7 @@ class TestAfcACECmdAFCACECalibrateHub:
     def test_runs_hub_calibration(self):
         unit = ace_p1_unit("lane0")
         lane = unit.lanes["lane0"]
-        hub = unit.printer.add_hub("real_hub", switch_pin="PA1")
+        hub = unit.printer.add_hub("real_hub", switch_pin="PA1", hub_clear_move_dis=65.0)
         lane.hub_obj = hub
         # The hub switch sees the filament on the third 50mm step.
         AceP1Wire(unit, on_move=AceHubSwitchPath(hub, switch_at=140.0).move)
@@ -5879,7 +5930,8 @@ class TestAfcACECmdAFCACECalibrateHub:
 
         unit.cmd_AFC_ACE_CALIBRATE_HUB(gcmd)
 
-        assert gcmd.responses == ["dist_hub calibration: 65.0mm (was 60mm)"]
+        assert gcmd.responses == ["dist_hub calibration: 65.0mm, hub sensor at 130.0mm less "
+                                  "65.0mm hub_clear_move_dis (was 60mm)"]
         assert lane.dist_hub == 65.0
         assert unit.afc.function.ConfigRewrite.calls == [
             (("AFC_lane lane0", "dist_hub", 65.0, "\n dist_hub: New: 65.0 Old: 60"), {})]
@@ -8771,7 +8823,7 @@ class TestAfcACECalibrateHubInner:
             real switch pin
         """
         printer = make_ace_printer()
-        printer.add_hub("hub1", switch_pin="PA1")
+        printer.add_hub("hub1", switch_pin="PA1", hub_clear_move_dis=65.0)
         return ace_p2_unit(LaneSpec("lane1", prep=staged, load=staged,
                                     values={"hub": "hub1", "dist_hub": 10}),
                            printer=printer, **kwargs)
@@ -8832,7 +8884,8 @@ class TestAfcACECalibrateHubInner:
         result = unit._calibrate_hub_inner(lane)
 
         # Tripped 300 out, cleared 20 back, parked hub_clear_move_dis (65) short.
-        assert result == (True, "dist_hub calibration: 215.0mm (was 10.0mm)", 215.0)
+        assert result == (True, "dist_hub calibration: 215.0mm, hub sensor at 280.0mm less "
+                                "65.0mm hub_clear_move_dis (was 10.0mm)", 215.0)
         assert lane.dist_hub == 215.0
         assert path.tip == 215.0
         assert lane.hub_obj.state is False
@@ -8858,7 +8911,8 @@ class TestAfcACECalibrateHubInner:
         result = unit._calibrate_hub_inner(lane)
 
         # 300 fed from dist_hub (10) out, 40 back to clear the switch, then 65.
-        assert result == (True, "dist_hub calibration: 205.0mm (was 10.0mm)", 205.0)
+        assert result == (True, "dist_hub calibration: 205.0mm, hub sensor at 270.0mm less "
+                                "65.0mm hub_clear_move_dis (was 10.0mm)", 205.0)
         assert lane.dist_hub == 205.0
         assert path.tip == 205.0
         assert lane.loaded_to_hub is True
@@ -8884,7 +8938,8 @@ class TestAfcACECalibrateHubInner:
 
         # An insert is staged stage_initial_dist + dist_hub from the slot: the
         # tip parked 515 out is 330 + 185.
-        assert result == (True, "dist_hub calibration: 185.0mm (was 10.0mm)", 185.0)
+        assert result == (True, "dist_hub calibration: 185.0mm, hub sensor at 250.0mm less "
+                                "65.0mm hub_clear_move_dis (was 10.0mm)", 185.0)
         assert lane.dist_hub == 185.0
         assert path.tip == 515.0
         assert lane.loaded_to_hub is True
@@ -8896,7 +8951,7 @@ class TestAfcACECalibrateHubInner:
             ("info", "ACE hub calibrate: coarse trigger at 600.0mm"),
             ("info", "ACE hub calibrate: trigger at 600.0mm")]
 
-    def test_switch_nearer_than_the_clear_distance_saves_zero(self):
+    def test_switch_nearer_than_the_clear_distance_is_refused(self):
         unit = self._unit()
         lane = unit.lanes["lane1"]
         path = AceHubSwitchPath(lane.hub_obj, switch_at=40.0)
@@ -8904,8 +8959,12 @@ class TestAfcACECalibrateHubInner:
 
         result = unit._calibrate_hub_inner(lane)
 
-        assert result == (True, "dist_hub calibration: 0.0mm (was 10.0mm)", 0.0)
-        assert lane.dist_hub == 0.0
+        assert result == (False, "Hub sensor triggered at 30.0mm, which is not past the hub's "
+                                 "hub_clear_move_dis of 65.0mm. dist_hub was not changed.", 30.0)
+        assert lane.dist_hub == 10.0
+        assert lane.loaded_to_hub is False
+        assert unit.printer.afc.save_vars.call_count == 0
+        assert unit.printer.afc.function.ConfigRewrite.calls == []
         assert wire.moves() == [ace_hub_move("feed_filament", 50.0),
                                 ace_hub_move("unwind_filament", 20.0),
                                 ace_hub_move("unwind_filament", 65.0)]
@@ -8923,7 +8982,8 @@ class TestAfcACECalibrateHubInner:
         result = unit._calibrate_hub_inner(lane)
 
         # The trigger distance is the sum of both steps, not the last one.
-        assert result == (True, "dist_hub calibration: 35.0mm (was 10.0mm)", 35.0)
+        assert result == (True, "dist_hub calibration: 35.0mm, hub sensor at 100.0mm less "
+                                "65.0mm hub_clear_move_dis (was 10.0mm)", 35.0)
         assert lane.dist_hub == 35.0
         assert unit.printer.afc.function.ConfigRewrite.calls == [
             (("AFC_lane lane1", "dist_hub", 35.0, "\n dist_hub: New: 35.0 Old: 10.0"), {})]
@@ -9007,6 +9067,114 @@ class TestAfcACECalibrateHubInner:
         assert unit.printer.logger.messages == [
             ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 4000.0mm steps)"),
             ("error", "ACE hub calibrate: retract failed: unwind boom")]
+
+
+class TestAfcACECalibrateHubInnerClearMove:
+    @staticmethod
+    def _unit(margin: float, **kwargs: Any) -> afcACE:
+        """
+        :param margin: the hub's hub_clear_move_dis
+        :param kwargs: make_ace_unit keywords
+        :return afcACE: a unit whose lane1 (dist_hub 10) sits on a hub with a
+            real switch pin and that margin
+        """
+        printer = make_ace_printer()
+        printer.add_hub("hub1", switch_pin="PA1", hub_clear_move_dis=margin)
+        return ace_p2_unit(LaneSpec("lane1", values={"hub": "hub1", "dist_hub": 10}),
+                           printer=printer, **kwargs)
+
+    @staticmethod
+    def _trip_hub_on_move(unit: afcACE, moves: int) -> AceP2Wire:
+        """
+        :param unit: unit whose lane1 hub trips
+        :param moves: the 60mm feed that reaches the hub switch, which sits 10mm short of its end
+        :return AceP2Wire: the wire recording the moves
+        """
+        lane = unit.lanes["lane1"]
+        path = AceHubSwitchPath(lane.hub_obj, switch_at=moves * 60.0 - 10.0)
+        return AceP2Wire(unit, on_move=path.move)
+
+    def test_margin_is_taken_off_the_stored_dist_hub(self):
+        unit = self._unit(40.0, values={"calibration_step": 60.0})
+        lane = unit.lanes["lane1"]
+        self._trip_hub_on_move(unit, 2)
+
+        result = unit._calibrate_hub_inner(lane)
+
+        # Hub trips after 2 x 60mm = 120mm and clears 20mm back; 100 - 40 = 60 is stored.
+        assert result == (True, "dist_hub calibration: 60.0mm, hub sensor at 100.0mm less "
+                                "40.0mm hub_clear_move_dis (was 10.0mm)", 60.0)
+        assert lane.dist_hub == 60.0
+        assert unit.printer.afc.function.ConfigRewrite.calls == [
+            (("AFC_lane lane1", "dist_hub", 60.0, "\n dist_hub: New: 60.0 Old: 10.0"), {})]
+        assert unit.printer.logger.messages == [
+            ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 60.0mm steps)"),
+            ("info", "ACE hub calibrate: coarse trigger at 120.0mm"),
+            ("info", "ACE hub calibrate: trigger at 120.0mm")]
+
+    def test_margin_equal_to_the_measurement_is_refused(self):
+        unit = self._unit(100.0, values={"calibration_step": 60.0})
+        lane = unit.lanes["lane1"]
+        wire = self._trip_hub_on_move(unit, 2)
+
+        result = unit._calibrate_hub_inner(lane)
+
+        assert result == (False, "Hub sensor triggered at 100.0mm, which is not past the hub's "
+                                 "hub_clear_move_dis of 100.0mm. dist_hub was not changed.", 100.0)
+        assert lane.dist_hub == 10.0
+        assert unit.printer.afc.function.ConfigRewrite.calls == []
+        # The lane is still backed off the switch by the clear distance.
+        assert wire.moves()[-1] == ace_hub_move("unwind_filament", 100.0)
+        assert unit.printer.logger.messages == [
+            ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 60.0mm steps)"),
+            ("info", "ACE hub calibrate: coarse trigger at 120.0mm"),
+            ("info", "ACE hub calibrate: trigger at 120.0mm")]
+
+    def test_margin_just_under_the_measurement_is_stored(self):
+        unit = self._unit(99.5, values={"calibration_step": 60.0})
+        lane = unit.lanes["lane1"]
+        self._trip_hub_on_move(unit, 2)
+
+        result = unit._calibrate_hub_inner(lane)
+
+        assert result == (True, "dist_hub calibration: 0.5mm, hub sensor at 100.0mm less "
+                                "99.5mm hub_clear_move_dis (was 10.0mm)", 0.5)
+        assert lane.dist_hub == 0.5
+        assert unit.printer.afc.function.ConfigRewrite.calls == [
+            (("AFC_lane lane1", "dist_hub", 0.5, "\n dist_hub: New: 0.5 Old: 10.0"), {})]
+        assert unit.printer.logger.messages == [
+            ("raw", "Calibrating dist_hub for lane1 (max 4000mm in 60.0mm steps)"),
+            ("info", "ACE hub calibrate: coarse trigger at 120.0mm"),
+            ("info", "ACE hub calibrate: trigger at 120.0mm")]
+
+    def test_margin_that_rounds_to_zero_is_refused(self):
+        unit = self._unit(99.999, values={"calibration_step": 60.0})
+        lane = unit.lanes["lane1"]
+        self._trip_hub_on_move(unit, 2)
+
+        result = unit._calibrate_hub_inner(lane)
+
+        assert result == (False, "Hub sensor triggered at 100.0mm, which is not past the hub's "
+                                 "hub_clear_move_dis of 99.999mm. dist_hub was not changed.",
+                          100.0)
+        assert lane.dist_hub == 10.0
+        assert unit.printer.afc.function.ConfigRewrite.calls == []
+
+    def test_no_margin_stores_the_spot_the_switch_cleared(self):
+        unit = self._unit(0.0, values={"calibration_step": 60.0})
+        lane = unit.lanes["lane1"]
+        wire = self._trip_hub_on_move(unit, 2)
+
+        result = unit._calibrate_hub_inner(lane)
+
+        assert result == (True, "dist_hub calibration: 100.0mm (was 10.0mm)", 100.0)
+        assert lane.dist_hub == 100.0
+        # No clear move follows the step that cleared the switch.
+        assert wire.moves() == [ace_hub_move("feed_filament", 60.0),
+                                ace_hub_move("feed_filament", 60.0),
+                                ace_hub_move("unwind_filament", 20.0)]
+        assert unit.printer.afc.function.ConfigRewrite.calls == [
+            (("AFC_lane lane1", "dist_hub", 100.0, "\n dist_hub: New: 100.0 Old: 10.0"), {})]
 
 
 class TestAfcACESyncInventory:
