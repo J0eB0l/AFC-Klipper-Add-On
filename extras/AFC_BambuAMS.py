@@ -913,6 +913,10 @@ DEADLINE_REPORT_CHARS = 70
 #: Ceiling on the load-to-sensor window.
 LOAD_SENSOR_MAX_S = 180.0
 
+#: How long a buffer that stands in for a toolhead sensor gets to read empty once it was reset,
+#: before a feed that ends on it, in seconds.
+GATE_CLEAR_MAX_S = 3.0
+
 #: How far the dry countdown may fall between readings and still count as a tick, since the register
 #: catches up in one step after a deaf spell.
 DRYREM_TICK_SLACK_S = 120.0
@@ -11939,14 +11943,6 @@ class afcBambuAMS(afcUnit):
             return mm, "tube_len"
         return None, ""
 
-    def load_path_mm(self) -> Optional[float]:
-        """
-        The filament path this unit measured at its last load.
-
-        :return Optional[float]: mm from the bay to the toolhead, None when it measured none
-        """
-        return self._path_measurement()[0]
-
     def keep_path(self, load: float, unload: float) -> None:
         """
         Take a path length for loading and one for unloading, and save both as the learned
@@ -11961,14 +11957,6 @@ class afcBambuAMS(afcUnit):
         if master is not None:
             master.persist_learned(self.name, "afc_bowden_length", round(load, 1))
             master.persist_learned(self.name, "afc_unload_bowden_length", round(unload, 1))
-
-    def forget_path(self) -> None:
-        """
-        Go back to a path that was never measured, for this session: both lengths are the
-        ones a unit with nothing learned starts with, and the next load measures the path
-        again. Nothing is saved.
-        """
-        self.apply_learned({})
 
     def measured_path_mm(self) -> Optional[float]:
         """
@@ -12189,6 +12177,80 @@ class afcBambuAMS(afcUnit):
         self._wait_feed_stopped()
         self.eject_lane(lane, gcmd)
         return found
+
+    def measure_to(self, lane: Any, seen: Callable[[], bool], gcmd: AFCGcmd) -> Optional[float]:
+        """
+        Feed a lane out of its bay until a check sees its filament, or until its buffer finds
+        it at the extruder gears where the buffer stands in for the toolhead sensor, reel it
+        back to the bay, and say how far the unit's odometer counted it going.
+
+        :param lane: a lane with filament in its bay
+        :param seen: called while the lane feeds, True once its filament was seen
+        :param gcmd: command context the lane select and the reel-back run through
+        :return Optional[float]: mm from the bay to where the lane was seen, None when it was
+        not seen or the odometer gave no path
+        """
+        if self._is_lite():
+            self.logger.warning(f"{self.name}: an AMS Lite cannot reel {lane.name} back to its "
+                                f"spool, so it measures no path by feeding")
+            return None
+        ramming = afcBambuAMS._buffer_is_toolhead_sensor(lane)
+        if (ramming
+            and not self._gate_clear(lane)):
+            self.logger.warning(f"{self.name}: the buffer of {lane.name} reads filament at the "
+                                f"extruder gears before the lane was fed, so it measures no "
+                                f"path. Check that the toolhead is unloaded.")
+            return None
+        at: List[Optional[float]] = []
+
+        def arrived() -> bool:
+            """
+            Note the odometer where the lane was seen, or where its buffer found it.
+
+            :return bool: True once the lane is there
+            """
+            if not (seen()
+                    or (ramming
+                        and self._toolhead_sensor_triggered(lane))):
+                return False
+            at.append(self._feed_odom_mm(lane))
+            return True
+
+        found = self.feed_to(lane, arrived, gcmd)
+        if ramming:
+            # As an unload does: the load its buffer latched would end the next feed at once.
+            lane.disable_buffer()
+        if not found:
+            return None
+        mm = at[0]
+        if (mm is None
+            or mm < self.ODOM_PATH_MIN_MM
+            or mm > self.ODOM_PATH_MAX_MM):
+            self.logger.warning(f"{self.name}: the odometer gave no path for {lane.name}, it "
+                                f"read {mm} where the lane was seen")
+            return None
+        self.logger.info(f"{self.name}: {lane.name} went {mm:.0f} mm by the unit's odometer")
+        return mm
+
+    def _gate_clear(self, lane: Any) -> bool:
+        """
+        Reset the buffer that stands in for a lane's toolhead sensor, as an unload does, and
+        wait for it to read no filament at the extruder gears, for `GATE_CLEAR_MAX_S` at the
+        most.
+
+        :param lane: a lane on an extruder with `pin_tool_start: buffer`
+        :return bool: True once the buffer reads none
+        """
+        lane.disable_buffer()
+        reactor = self.afc.reactor
+        began = reactor.monotonic()
+        now = began
+        while self._toolhead_sensor_triggered(lane):
+            if now - began >= GATE_CLEAR_MAX_S:
+                return False
+            reactor.pause(now + 0.1)
+            now = reactor.monotonic()
+        return True
 
     def _wait_scan(self, slot: Optional[int]) -> float:
         """

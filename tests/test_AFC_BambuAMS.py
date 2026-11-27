@@ -29932,19 +29932,6 @@ class TestAfcBambuAMSMeasurePathFromOdom:
         assert unit.logger.messages == []
 
 
-class TestAfcBambuAMSLoadPathMm:
-    def test_the_path_the_last_load_measured(self, monkeypatch):
-        unit = _p6_unit(monkeypatch, lanes=())
-        unit._load_odom_start, unit._load_odom_at_sensor = 0.0, 3338.0
-        assert unit.load_path_mm() == 3338.0
-        assert unit.logger.messages == []
-
-    def test_a_load_that_measured_nothing_gives_none(self, monkeypatch):
-        unit = _p6_unit(monkeypatch, lanes=())
-        assert unit.load_path_mm() is None
-        assert unit.logger.messages == []
-
-
 class TestAfcBambuAMSKeepPath:
     class _Master:
         """Records what a unit asks its master to save."""
@@ -29971,39 +29958,6 @@ class TestAfcBambuAMSKeepPath:
         assert getattr(unit, "_master", None) is None
         unit.keep_path(2104.0, 2080.0)
         assert (unit.afc_bowden_length, unit.afc_unload_bowden_length) == (2104.0, 2080.0)
-        assert unit.logger.messages == []
-
-
-class TestAfcBambuAMSForgetPath:
-    def test_both_lengths_go_back_to_the_ones_of_a_path_never_measured(self, monkeypatch):
-        unit = _p6_unit(monkeypatch, lanes=())
-        unit.afc_bowden_length, unit.afc_unload_bowden_length = 2104.0, 2080.0
-        unit.forget_path()
-        assert (unit.afc_bowden_length, unit.afc_unload_bowden_length) == (3000.0, 3000.0)
-        assert unit.logger.messages == []
-
-    def test_what_the_last_load_measured_is_dropped(self, monkeypatch):
-        unit = _p6_unit(monkeypatch, lanes=())
-        unit._load_odom_start, unit._load_odom_at_sensor = 0.0, 3338.0
-        unit.forget_path()
-        assert (unit._load_odom_start, unit._load_odom_at_sensor) == (None, None)
-        assert unit.load_path_mm() is None
-        assert unit.logger.messages == []
-
-    def test_the_next_load_is_waited_for_and_its_path_adopted(self, monkeypatch):
-        unit = _p6_unit(monkeypatch, lanes=())
-        unit._path_adopted, unit._path_wait_load = True, False
-        unit.forget_path()
-        assert (unit._path_adopted, unit._path_wait_load) == (False, True)
-        assert unit.logger.messages == []
-
-    def test_nothing_is_saved(self, monkeypatch):
-        unit = _p6_unit(monkeypatch, lanes=())
-        master = TestAfcBambuAMSKeepPath._Master()
-        unit.set_master(master)
-        unit.afc_bowden_length, unit.afc_unload_bowden_length = 2104.0, 2080.0
-        unit.forget_path()
-        assert master.saved == []
         assert unit.logger.messages == []
 
 
@@ -31256,6 +31210,271 @@ class TestAfcBambuAMSReportSeqs:
         unit = _p6_unit(monkeypatch, offline=True)
         assert unit._bridge is None
         assert unit._report_seqs() == (None, 0)
+
+
+class TestAfcBambuAMSMeasureTo:
+    """
+    Feed a lane until a check sees its filament, or until its buffer finds it at the extruder
+    gears where the buffer stands in for the toolhead sensor, and take the odometer there.
+    """
+
+    class _Feed:
+        """
+        Stands in for feed_to: asks the check as the feed's loop does, with the odometer moved
+        on before each ask.
+        """
+
+        def __init__(self, unit: afcBambuAMS, odoms: Sequence[Optional[float]]) -> None:
+            """
+            :param unit: the unit that feeds
+            :param odoms: the odometer at each ask, None for a unit that reports none
+            """
+            self.unit = unit
+            self.odoms = list(odoms)
+            #: The lane, gcmd and timeout of each feed.
+            self.calls: List[tuple] = []
+            #: How often the check was asked.
+            self.asked = 0
+            #: Run before each ask with its number, counted from 0.
+            self.before: Optional[Callable[[int], None]] = None
+            #: The lanes whose buffer was reset and waited on to read empty.
+            self.gate: List[Any] = []
+
+        def __call__(self, lane: Any, seen: Callable[[], bool], gcmd: Any,
+                     timeout: Optional[float] = None) -> bool:
+            """:return bool: True once the check said yes, False when the odometers ran out"""
+            self.calls.append((lane, gcmd, timeout))
+            for index, odom in enumerate(self.odoms):
+                fields = {} if odom is None else {"odom": odom}
+                self.unit._bridge.status = _p6_frame(**fields)
+                if self.before is not None:
+                    self.before(index)
+                self.asked += 1
+                if seen():
+                    return True
+            return False
+
+    def _rig(self, monkeypatch: pytest.MonkeyPatch, odoms: Sequence[Optional[float]] = (),
+             ramming: bool = False, clear: bool = True, **kwargs: Any
+             ) -> Tuple[afcBambuAMS, Any, "TestAfcBambuAMSMeasureTo._Feed", FakeBuffer]:
+        """
+        lane1 behind a buffer, with feed_to and the wait for the buffer to read empty stood in
+        for.
+
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param odoms: the odometer at each ask of the check
+        :param ramming: whether lane1's extruder has the buffer in place of a toolhead sensor
+        :param clear: what the stand-in _gate_clear returns
+        :param kwargs: further _p6_unit arguments
+        :return tuple: (the unit, its lane1, the stand-in feed, the lane's buffer)
+        """
+        unit = _p6_unit(monkeypatch, bridge=FakeBridge(status=_p6_frame()), **kwargs)
+        lane = unit.lanes["lane1"]
+        buffer = FakeBuffer("TN")
+        lane.buffer_obj = buffer
+        if ramming:
+            lane.extruder_obj.tool_start = "buffer"
+            lane.extruder_obj.fila_tool_start = None
+        feed = self._Feed(unit, odoms)
+        unit.feed_to = feed
+
+        def gate_clear(cur_lane: Any) -> bool:
+            feed.gate.append(cur_lane)
+            return clear
+        unit._gate_clear = gate_clear
+        return unit, lane, feed, buffer
+
+    class _Check:
+        """The check a feed runs under: scripted answers, the last one from then on."""
+
+        def __init__(self, *answers: bool) -> None:
+            """:param answers: what successive asks answer"""
+            self.answers = list(answers)
+            #: How often it was asked.
+            self.asked = 0
+
+        def __call__(self) -> bool:
+            """:return bool: the next scripted answer"""
+            self.asked += 1
+            if len(self.answers) > 1:
+                return self.answers.pop(0)
+            return self.answers[0]
+
+    def test_the_odometer_where_the_lane_was_seen_is_the_path(self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [500.0, 1500.0, 2104.4, 2300.0])
+        gcmd = FakeGcmd()
+        check = self._Check(False, False, True)
+        assert unit.measure_to(lane, check, gcmd) == 2104.4
+        # The feed runs on the unit's own window, and stops asking once the lane was seen.
+        assert feed.calls == [(lane, gcmd, None)]
+        assert feed.asked == 3
+        assert check.asked == 3
+        # An extruder with a toolhead sensor leaves the buffer alone.
+        assert feed.gate == []
+        assert buffer.calls == []
+        assert unit.logger.messages == [
+            ("info", "Bambu_AMS_1: lane1 went 2104 mm by the unit's odometer")]
+
+    def test_the_length_it_logs_is_rounded_to_whole_mm(self, monkeypatch):
+        unit, lane, _feed, _buffer = self._rig(monkeypatch, [2250.6])
+        assert unit.measure_to(lane, self._Check(True), FakeGcmd()) == 2250.6
+        assert unit.logger.messages == [
+            ("info", "Bambu_AMS_1: lane1 went 2251 mm by the unit's odometer")]
+
+    def test_a_lane_that_was_never_seen_measures_nothing(self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [500.0, 1500.0])
+        assert unit.measure_to(lane, self._Check(False, False), FakeGcmd()) is None
+        assert feed.asked == 2
+        assert buffer.calls == []
+        assert unit.logger.messages == []
+
+    def test_a_toolhead_sensor_of_its_own_does_not_end_the_feed_for_the_check(
+            self, monkeypatch):
+        # Only a buffer that stands in for the toolhead sensor is read by the unit itself.
+        unit, lane, feed, _buffer = self._rig(monkeypatch, [500.0, 1500.0], sensor=[True])
+        assert unit._toolhead_sensor_triggered(lane) is True
+        assert unit.measure_to(lane, self._Check(False, False), FakeGcmd()) is None
+        assert feed.asked == 2
+        assert unit.logger.messages == []
+
+    def test_an_ams_lite_measures_nothing_and_feeds_nothing(self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [2104.0], model="lite")
+        check = self._Check(True)
+        assert unit.measure_to(lane, check, FakeGcmd()) is None
+        assert feed.calls == []
+        assert check.asked == 0
+        assert feed.gate == []
+        assert buffer.calls == []
+        assert unit.logger.messages == [
+            ("warning", "Bambu_AMS_1: an AMS Lite cannot reel lane1 back to its spool, so it "
+                        "measures no path by feeding")]
+
+    def test_with_buffer_ramming_the_buffer_ends_the_feed_at_the_gears(self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [800.0, 2240.0, 2251.0, 2251.0],
+                                             ramming=True)
+        feed.before = lambda index: setattr(buffer, "advance_state", index >= 2)
+        gcmd = FakeGcmd()
+        # No toolhead sensor reads the lane, so the check never does.
+        check = self._Check(False)
+        assert unit.measure_to(lane, check, gcmd) == 2251.0
+        assert feed.gate == [lane]
+        assert feed.calls == [(lane, gcmd, None)]
+        assert feed.asked == 3
+        # The load the buffer latched is reset once the lane is back, as an unload does.
+        assert buffer.calls == [("disable_buffer", ())]
+        assert unit.logger.messages == [
+            ("info", "Bambu_AMS_1: lane1 went 2251 mm by the unit's odometer")]
+
+    def test_with_buffer_ramming_a_check_that_sees_the_lane_ends_the_feed_too(
+            self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [800.0, 2104.0, 2251.0],
+                                             ramming=True)
+        assert unit.measure_to(lane, self._Check(False, True), FakeGcmd()) == 2104.0
+        assert buffer.advance_state is False
+        assert feed.asked == 2
+        assert buffer.calls == [("disable_buffer", ())]
+
+    def test_with_buffer_ramming_a_lane_the_buffer_never_finds_measures_nothing(
+            self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [800.0, 2240.0], ramming=True)
+        assert unit.measure_to(lane, self._Check(False), FakeGcmd()) is None
+        assert feed.asked == 2
+        # The buffer is reset all the same.
+        assert buffer.calls == [("disable_buffer", ())]
+        assert unit.logger.messages == []
+
+    def test_with_buffer_ramming_a_buffer_that_does_not_read_empty_is_not_fed(
+            self, monkeypatch):
+        unit, lane, feed, buffer = self._rig(monkeypatch, [2251.0], ramming=True, clear=False)
+        check = self._Check(True)
+        assert unit.measure_to(lane, check, FakeGcmd()) is None
+        assert feed.gate == [lane]
+        assert feed.calls == []
+        assert check.asked == 0
+        assert buffer.calls == []
+        assert unit.logger.messages == [
+            ("warning", "Bambu_AMS_1: the buffer of lane1 reads filament at the extruder gears "
+                        "before the lane was fed, so it measures no path. Check that the "
+                        "toolhead is unloaded.")]
+
+    @pytest.mark.parametrize("odom, read", [(None, "None"), (299.9, "299.9"),
+                                            (8000.1, "8000.1")],
+                             ids=["no-odometer", "short-of-a-path", "past-any-path"])
+    def test_an_odometer_that_gives_no_path_where_the_lane_was_seen_measures_nothing(
+            self, monkeypatch, odom, read):
+        unit, lane, _feed, _buffer = self._rig(monkeypatch, [odom])
+        assert unit.measure_to(lane, self._Check(True), FakeGcmd()) is None
+        assert unit.logger.messages == [
+            ("warning", f"Bambu_AMS_1: the odometer gave no path for lane1, it read {read} "
+                        "where the lane was seen")]
+
+    @pytest.mark.parametrize("odom, said", [(300.0, "300"), (8000.0, "8000")],
+                             ids=["the-shortest-path", "the-longest-path"])
+    def test_the_ends_of_what_counts_as_a_path_are_paths(self, monkeypatch, odom, said):
+        unit, lane, _feed, _buffer = self._rig(monkeypatch, [odom])
+        assert unit.measure_to(lane, self._Check(True), FakeGcmd()) == odom
+        assert unit.logger.messages == [
+            ("info", f"Bambu_AMS_1: lane1 went {said} mm by the unit's odometer")]
+
+
+class TestAfcBambuAMSGateClear:
+    """
+    Before a feed that ends on the buffer: reset the buffer as an unload does, and wait up to
+    three seconds for it to read no filament at the extruder gears.
+    """
+
+    @staticmethod
+    def _rig(monkeypatch: pytest.MonkeyPatch,
+             reads: bool) -> Tuple[afcBambuAMS, Any, FakeBuffer]:
+        """
+        :param monkeypatch: pytest's monkeypatch fixture
+        :param reads: whether the buffer reads filament at the gears to begin with
+        :return tuple: (the unit, its lane1 on an extruder with the buffer in place of a
+        toolhead sensor, the buffer)
+        """
+        unit = _p6_unit(monkeypatch)
+        lane = unit.lanes["lane1"]
+        lane.extruder_obj.tool_start = "buffer"
+        lane.extruder_obj.fila_tool_start = None
+        buffer = FakeBuffer("TN")
+        buffer.advance_state = reads
+        lane.buffer_obj = buffer
+        return unit, lane, buffer
+
+    def test_a_buffer_that_reads_empty_is_reset_and_not_waited_for(self, monkeypatch):
+        unit, lane, buffer = self._rig(monkeypatch, False)
+        assert unit._gate_clear(lane) is True
+        assert buffer.calls == [("disable_buffer", ())]
+        assert unit.reactor.pauses == []
+        assert unit.logger.messages == []
+
+    def test_the_buffer_is_reset_before_it_is_read(self, monkeypatch):
+        unit, lane, buffer = self._rig(monkeypatch, True)
+        # The reset drops the load the buffer had latched.
+        buffer.disable_buffer = lambda: setattr(buffer, "advance_state", False)
+        assert unit._gate_clear(lane) is True
+        assert unit.reactor.pauses == []
+
+    def test_a_buffer_that_still_reads_filament_is_waited_for_until_it_clears(
+            self, monkeypatch):
+        unit, lane, buffer = self._rig(monkeypatch, True)
+        _p6_at(unit, 100.35, lambda: setattr(buffer, "advance_state", False))
+        assert unit._gate_clear(lane) is True
+        # Looked at every tenth of a second, and no longer than it took.
+        assert unit.reactor.pauses == pytest.approx([100.1, 100.2, 100.3, 100.4])
+        assert buffer.calls == [("disable_buffer", ())]
+        assert unit.logger.messages == []
+
+    def test_a_buffer_that_never_clears_is_given_up_on_after_three_seconds(self, monkeypatch):
+        unit, lane, buffer = self._rig(monkeypatch, True)
+        assert unit._gate_clear(lane) is False
+        assert buffer.advance_state is True
+        # Three seconds of looks a tenth apart, give or take one for the clock's rounding.
+        assert len(unit.reactor.pauses) in (30, 31)
+        assert unit.reactor.pauses[0] == pytest.approx(100.1)
+        assert unit.reactor.pauses[29] == pytest.approx(103.0)
+        assert buffer.calls == [("disable_buffer", ())]
+        assert unit.logger.messages == []
 
 
 class TestAfcBambuAMSWaitScan:

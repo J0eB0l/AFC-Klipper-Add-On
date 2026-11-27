@@ -266,8 +266,6 @@ class afcBridgeBoxSwitch:
         self._setup_offered = False
         # The units whose own calibration gave no tube length.
         self._lengthless: List[str] = []
-        # The lane that is being measured by loading it: nothing is added to its tube.
-        self._measuring: Optional[AFCLane] = None
         self._moving = False
         self._told = ""
         # Reactor time the switch's section is printed by at the latest, None when none is due.
@@ -1092,16 +1090,6 @@ class afcBridgeBoxSwitch:
                 return holder
         return None
 
-    def _by_load(self, lane: AFCLane) -> bool:
-        """
-        Whether a lane's unit measures its own path when it loads, so the lane is measured by
-        loading it.
-
-        :param lane: a lane of this switch
-        :return bool: True for a unit that reports the path of its last load
-        """
-        return hasattr(lane.unit_obj, "load_path_mm")
-
     def _by_feed(self, lane: AFCLane) -> bool:
         """
         Whether a lane's unit counts the way a lane goes when it feeds it to a sensor, so the
@@ -1116,8 +1104,7 @@ class afcBridgeBoxSwitch:
         """
         Give a lane's tube the length for the outlet the lane goes through: its own, plus the
         difference between the two outlets' tubes when that is not the outlet its unit starts
-        on. A lane that is being measured by loading it gets no difference: its loads start
-        from no length at all.
+        on.
 
         :param lane: a lane that is loaded or about to be
         """
@@ -1131,8 +1118,7 @@ class afcBridgeBoxSwitch:
         start = self.start[inlet]
         offset = 0.0
         if (outlet != start
-            and self.calibrated()
-            and lane is not self._measuring):
+            and self.calibrated()):
             offset = self.lengths[outlet] - self.lengths[start]
         self._offset(tube, offset)
 
@@ -1643,10 +1629,9 @@ class afcBridgeBoxSwitch:
         and save both lengths.
 
         The lane's unit runs its own tube length calibration through each outlet, so the lane
-        has to be loaded in its unit and the toolheads empty. A unit that measures its own
-        path when it loads has the lane loaded into each toolhead and unloaded again instead,
-        and a unit that counts the way of its own feed has the lane fed to each toolhead and
-        pulled back.
+        has to be loaded in its unit and the toolheads empty. A unit that counts the way of
+        its own feed has the lane fed to each toolhead and pulled back instead, with nothing
+        loaded.
         Each run also checks the lane shows at the inlet its unit is configured on. Without
         LANE a prompt offers the units that can measure, and with UNIT the lanes of that unit.
         A switch with units whose inlet is found by loading first offers what to calibrate, the
@@ -1780,10 +1765,6 @@ class afcBridgeBoxSwitch:
         text = ("Measures the tube from each outlet to its toolhead with one lane, so a lane "
                 "loads the right distance through either outlet. Unload the toolheads, then "
                 "pick the unit to measure with.")
-        loads = [unit for unit, held in lanes.items() if self._by_load(held[0])]
-        if loads:
-            text += (f" A lane of {' or '.join(loads)} is loaded into each toolhead and "
-                     "unloaded again to measure.")
         if not buttons:
             text = ("No lane that can measure is loaded in its unit. Load one, or set "
                     f"{self._length_keys()} in [{self.section}] by hand.")
@@ -1830,8 +1811,6 @@ class afcBridgeBoxSwitch:
                    for index, lane in enumerate(lanes)]
         rows = [buttons[first:first + 2] for first in range(0, len(buttons), 2)]
         text = f"Select a loaded lane from {unit} to measure the tube from each outlet with."
-        if self._by_load(lanes[0]):
-            text += " It is loaded into each toolhead and unloaded again to measure."
         back = [("Back", f"{command} OUTLETS=1", "info")]
         AFCprompt(gcmd, self.logger).create_custom_p(f"{self.name} Outlets {unit}", text,
                                                      None, True, rows, back)
@@ -1855,13 +1834,12 @@ class afcBridgeBoxSwitch:
 
     def _measure(self, lane: AFCLane, gcmd: GCodeCommand) -> Dict[str, float]:
         """
-        Measure a lane's tube through each outlet with its unit's own calibration, for a unit
-        that measures its path when it loads by loading the lane, or for a unit that counts
-        the way of its own feed by feeding the lane to the toolhead, leaving the lane, its
-        unit's length and the switch as they were.
+        Measure a lane's tube through each outlet with its unit's own calibration, or for a
+        unit that counts the way of its own feed by feeding the lane to the toolhead, leaving
+        the lane, its unit's length and the switch as they were.
 
         :param lane: the lane to measure with
-        :param gcmd: the command the calibrations, loads or feeds run through
+        :param gcmd: the command the calibrations or feeds run through
         :return dict: outlet letter -> mm
         """
         inlet = self.inlet_of(lane.unit)
@@ -1887,7 +1865,6 @@ class afcBridgeBoxSwitch:
         self._offset(tube, 0.0)
         own = (tube.afc_bowden_length, tube.afc_unload_bowden_length)
         lengths: Dict[str, float] = {}
-        self._measuring = lane if self._by_load(lane) else None
         try:
             # The unit's own outlet goes first: a unit that measures no length stops there,
             # before anything of its own was calibrated through the other outlet.
@@ -1895,7 +1872,6 @@ class afcBridgeBoxSwitch:
             own = (tube.afc_bowden_length, tube.afc_unload_bowden_length)
             lengths[other(start)] = self._measure_outlet(lane, inlet, other(start), gcmd)
         finally:
-            self._measuring = None
             # The other outlet's run saved its length as the unit's own.
             self._restore_tube(tube, own)
             # The watch may have added the outlets' difference during that run.
@@ -1908,14 +1884,13 @@ class afcBridgeBoxSwitch:
     def _measure_outlet(self, lane: AFCLane, inlet: str, outlet: str,
                         gcmd: GCodeCommand) -> float:
         """
-        Measure a lane's tube through one outlet, with the unit's own tube length calibration,
-        by loading the lane or by feeding it to the toolhead, and check the lane showed at its
-        inlet on the way.
+        Measure a lane's tube through one outlet, with the unit's own tube length calibration
+        or by feeding it to the toolhead, and check the lane showed at its inlet on the way.
 
         :param lane: the lane to measure with
         :param inlet: the lane's inlet
         :param outlet: the outlet to measure through
-        :param gcmd: the command the calibration, the load or the feed runs through
+        :param gcmd: the command the calibration or the feed runs through
         :return float: mm from the lane's hub or unit to the outlet's toolhead
         """
         extruder = self.outlets[outlet]
@@ -1925,9 +1900,7 @@ class afcBridgeBoxSwitch:
         with self._own():
             self.set_inlet(inlet, outlet)
         self._seen = {letter: False for letter in LETTERS}
-        if self._by_load(lane):
-            done, why, length = self._load_to_measure(lane, inlet, gcmd)
-        elif self._by_feed(lane):
+        if self._by_feed(lane):
             done, why, length = self._feed_to_measure(lane, inlet, gcmd)
         else:
             done, why, length = lane.unit_obj.calibrate_bowden(lane, _MEASURE_STEP,
@@ -1975,36 +1948,14 @@ class afcBridgeBoxSwitch:
                             f"FAIL={lane.name} DISTANCE={abs(moved):.1f} RESET=1", gcmd=gcmd)
         return True
 
-    def _load_to_measure(self, lane: AFCLane, inlet: str,
-                         gcmd: GCodeCommand) -> Tuple[bool, str, float]:
-        """
-        Load a lane into its toolhead and back out, and take the path its unit measured on the
-        way in. The unit forgets the path it knew first, so the load is one to a toolhead at
-        an unknown distance and measures the whole way.
-
-        :param lane: the lane to measure with, on the extruder to measure to
-        :param inlet: the lane's inlet
-        :param gcmd: the command the load and the unload run through
-        :return tuple: whether it measured, why not, and the mm from the unit to the toolhead
-        """
-        lane.unit_obj.forget_path()
-        if not self.afc.TOOL_LOAD(lane, gcmd=gcmd):
-            return False, "It could not be loaded", 0.0
-        self._look()
-        length = lane.unit_obj.load_path_mm()
-        if not self._unload(lane, gcmd):
-            return False, "It could not be unloaded again", 0.0
-        self._wait_clear(inlet)
-        if length is None:
-            return False, f"{lane.unit} measured no path at that load", 0.0
-        return True, "", float(length)
-
     def _feed_to_measure(self, lane: AFCLane, inlet: str,
                          gcmd: GCodeCommand) -> Tuple[bool, str, float]:
         """
         Feed a lane to the toolhead it is on and back with its unit's own feed, and take the
         way the unit counted it going. The feed ends when the toolhead's sensor reads the
-        lane, or where the unit itself finds it at an extruder.
+        lane, or where the unit itself finds it at an extruder, as one that loads by buffer
+        ramming has no sensor to read. A toolhead whose sensor reads filament already is not
+        fed.
 
         :param lane: the lane to measure with, on the extruder to measure to
         :param inlet: the lane's inlet
@@ -2012,14 +1963,18 @@ class afcBridgeBoxSwitch:
         :return tuple: whether it measured, why not, and the mm from the unit to the toolhead
         """
         extruder = lane.extruder_obj
+        reads = self._sensor(extruder)
+        if reads:
+            return False, (f"The toolhead sensor of {extruder.name} reads filament, so nothing "
+                           "was fed. Unload that toolhead first"), 0.0
         self._watched = {}
-        if self._sensor(extruder) is False:
+        if reads is False:
             self._watched = {extruder.name: extruder}
         self._read = []
         length = lane.unit_obj.measure_to(lane, self._saw_toolhead, gcmd)
         self._wait_clear(inlet)
         if length is None:
-            return False, f"{lane.unit} did not get it to the toolhead, and pulled it back", 0.0
+            return False, f"{lane.unit} counted no length to the toolhead, and pulled it back", 0.0
         return True, "", float(length)
 
     def _restore_tube(self, tube: Any, lengths: Tuple[float, float]) -> None:
