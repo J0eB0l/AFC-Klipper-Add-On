@@ -1478,14 +1478,14 @@ class TestDeactivateToPool:
         # temperatures, runout lane or TD-1 data.
         printer, _unit, lane = self._live_lane(
             sub_type="Matte", extruder_temp=225.0, bed_temp=60.0,
-            multi_color=["FF0000", "00FF00"], spool_vendor="Bambu Lab",
+            multi_color=["FF0000", "00FF00"], color_mode="coaxial", spool_vendor="Bambu Lab",
             filament_name="Bambu PLA Matte", runout_lane="lane29",
             td1_data={"td": 1.2}, need_purge=True)
         deactivate_to_pool(lane)
         assert (lane.sub_type, lane.extruder_temp, lane.bed_temp) == (
             "", None, None)
-        assert (lane.multi_color, lane.spool_vendor, lane.filament_name) == (
-            [], "", "")
+        assert (lane.multi_color, lane.color_mode, lane.spool_vendor, lane.filament_name) == (
+            [], "", "", "")
         assert (lane.runout_lane, lane.td1_data, lane.need_purge) == (
             None, {}, False)
         assert (lane.color, lane.material) == ("", None)

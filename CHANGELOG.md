@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Installer now support EMU-C boards.
 
+### Updated
+- `AFC_ACE_FEED_ASSIST` macro now does not require `ENABLE` and instead return the status of if the assist is active or not.
+
+### Fixed
+- When `UNSET_LANE_LOADED` is ran, ACE assist is now properly turned off.
+
 ## [11-26-2026]
 ### Added
 - Added Creality CFS to the installer. Additional CFS units join the first box's chain: the installer
@@ -16,11 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placeholder, and asks for the first box's uid if it has none.
 
 ## [11-25-2026]
-## Fixed
+### Fixed
 - Buffers getting enabled when a lane is loaded and toolhead is docked during PREP
 
-## Added
+### Added
 - Resetting steppers rotation distance when performing calibration to make sure correct rotation distance is being used while calibrating.
+- Lanes keep a multi-color filament's colors and how they run. `SET_COLOR` takes
+  `COLORS=<color>,<color>,...` and `COLOR_MODE=gradient|coaxial`, and a Spoolman spool's
+  `multi_color_hexes` and `multi_color_direction` set them. `lane_data` gains `colors` (every
+  color as `#RRGGBB`) and `color_mode` (`solid`, `gradient` or `coaxial`), and the lane's
+  status gains `color_mode`. Both are saved across restarts. `SET_COLOR COLOR=` alone returns
+  the lane to one color.
 
 ## [11-24-2026]
 ### Added
@@ -43,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed ACE loads leaving the filament tip short of the extruder gears when the toolhead sensor
   sits above them: the unit now keeps feeding `load_gear_push` mm (default 20) past the sensor,
   at `tool_load_speed` alongside the extruder's `tool_stn` advance, and starts feed assist
-  after that push.
+  after that push..
+- Fixed ACE feed assist staying off after a `LANE_MOVE` on the loaded lane: the unit ends assist on
+  a slot it moves, so AFC now stops it before the move and restarts it after.
 
 ## [11-22-2026]
 ### Updated
