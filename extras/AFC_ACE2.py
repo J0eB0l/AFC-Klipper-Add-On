@@ -1439,6 +1439,24 @@ class afcACE2(afcACE):
             return buffer_obj
         return None
 
+    def _advance_tool_stn(self, cur_lane: AFCLane, cur_extruder: Any, slot: int,
+                          tool_stn: float) -> None:
+        """
+        Move the extruder tool_stn mm. A lane brought to the extruder on the unit's
+        buffer is already against the gears with feed assist holding the buffer full,
+        and a feed would end that assist, so the unit feeds nothing alongside.
+
+        :param cur_lane: Lane being loaded.
+        :param cur_extruder: Extruder the lane loads into.
+        :param slot: 0-based ACE slot index of the lane.
+        :param tool_stn: Distance in mm from the toolhead sensor to the nozzle.
+        """
+        if self._ram_buffer(cur_lane) is None:
+            super()._advance_tool_stn(cur_lane, cur_extruder, slot, tool_stn)
+            return
+        cur_lane.activate_toolhead_extruder()
+        self.afc.move_e_pos(tool_stn, cur_extruder.tool_load_speed, "tool stn")
+
     def _wait_for_feed_complete(self, slot_index: int, length_mm: float, speed_mm_s: float,
                                 lane: Optional[AFCLane] = None, poll_interval: float = 0.5) -> bool:
         """

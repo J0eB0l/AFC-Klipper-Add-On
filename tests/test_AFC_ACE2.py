@@ -3754,7 +3754,8 @@ class TestAfcACE2ClearTipSnag:
 
         feed = ("feed_filament", {"index": 3, "length": 3960.0, "speed": 80.0})
         back = ("unwind_filament", {"index": 3, "length": 5.0, "speed": 100.0, "mode": "normal"})
-        assert wire.moves() == [feed, back, feed]
+        push = ("feed_filament", {"index": 3, "length": 20.0, "speed": 25.0})
+        assert wire.moves() == [feed, back, feed, push]
 
 
 class RamStubBuffer:
@@ -3949,6 +3950,44 @@ class TestAfcACE2RamToBuffer:
 
         failures = unit.afc.error.handle_lane_failure.calls
         assert failures[-1][0][1] == "lane3 did not reach the extruder: jammed"
+
+
+class TestAfcACE2AdvanceToolStn:
+    @staticmethod
+    def _unit() -> Tuple[afcACE2, Any, List[Tuple[Any, ...]]]:
+        """
+        :return tuple: the unit, lane3 with the unit's buffer as its toolhead sensor, and
+            the extruder moves made
+        """
+        unit, lane, _buf = TestAfcACE2RamToBuffer()._unit()
+        moves: List[Tuple[Any, ...]] = []
+        unit.afc.move_e_pos = lambda *args: moves.append(args)
+        return unit, lane, moves
+
+    def test_a_lane_on_the_buffer_gets_the_extruder_move_and_no_feed(self):
+        unit, lane, moves = self._unit()
+        unit._feed_assist_active.add(3)
+
+        unit._advance_tool_stn(lane, lane.extruder_obj, 3, 72.0)
+
+        assert moves == [(72.0, 25.0, "tool stn")]
+        assert unit._ace.commands == []
+        assert unit._feed_assist_active == {3}
+        assert unit.logger.messages == []
+
+    def test_a_lane_with_its_own_toolhead_sensor_is_fed_alongside(self):
+        unit, lane, moves = self._unit()
+        lane.extruder_obj.tool_start = "tool_start_pin"
+
+        unit._advance_tool_stn(lane, lane.extruder_obj, 3, 72.0)
+
+        assert moves == [(72.0, 25.0, "tool stn")]
+        assert unit._ace.commands[:2] == [
+            ("get_status", {}),
+            ("feed_filament", {"index": 3, "length": 20.0, "speed": 25.0})]
+        assert unit.logger.messages == [
+            ("debug", "ACE wait: slot 3 short move (20mm) completed before motion was "
+                      "observed, treating as done")]
 
 
 class TestAfcACE2ConfirmEngaged:
