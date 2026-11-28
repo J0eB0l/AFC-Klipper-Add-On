@@ -171,7 +171,8 @@ class TestTd1Prep:
 
 
 class TestPrepRestoreFilamentInfo:
-    def _run_prep(self, lane_vars, spoolman=None, tmp_path=None, current_lane_obj=None):
+    def _run_prep(self, lane_vars, spoolman=None, tmp_path=None, current_lane_obj=None,
+                  filament_id=""):
         from tests.conftest import MockConfig, MockPrinter, MockAFC
 
         afc = MockAFC()
@@ -216,6 +217,7 @@ class TestPrepRestoreFilamentInfo:
         lane.spool_id = None
         lane.spool_vendor = ""
         lane.filament_name = ""
+        lane.filament_id = filament_id
         lane.runout_lane = None
         lane.map = None
         lane.unit_obj = unit
@@ -265,6 +267,23 @@ class TestPrepRestoreFilamentInfo:
         assert lane.spool_vendor == "Elegoo"
         assert lane.filament_name == "PLA"
 
+    def test_restores_filament_id_without_spoolman(self, tmp_path):
+        lane, _ = self._run_prep({"filament_id": "OFDSrzZ8"}, tmp_path=tmp_path)
+        assert lane.filament_id == "OFDSrzZ8"
+
+    def test_restores_filament_id_with_a_spoolman_spool(self, tmp_path):
+        """A saved filament_id is kept, since a Spoolman filament may carry none."""
+        lane, afc = self._run_prep({"spool_id": 5, "filament_id": "OFDSrzZ8"},
+                                   spoolman=MagicMock(), tmp_path=tmp_path)
+        afc.spool.set_spoolID.assert_called_once_with(lane, 5, save_vars=False,
+                                                      gcmd=afc._test_gcmd)
+        assert lane.filament_id == "OFDSrzZ8"
+
+    def test_missing_key_leaves_filament_id_unchanged(self, tmp_path):
+        lane, _ = self._run_prep({"filament_name": "PLA"}, tmp_path=tmp_path,
+                                 filament_id="OFDSrzZ8")
+        assert lane.filament_id == "OFDSrzZ8"
+
 
 class TestPREP:
     @staticmethod
@@ -292,18 +311,6 @@ class TestPREP:
         prep, lane = self._prep(tmp_path, {"filament_id": "OF5CgdDq"})
         prep.PREP(MagicMock())
         assert lane.filament_id == "OF5CgdDq"
-        assert prep.logger.messages == []
-
-    def test_a_lane_saved_without_one_has_none(self, tmp_path):
-        prep, lane = self._prep(tmp_path, {"material": "PLA"})
-        prep.PREP(MagicMock())
-        assert lane.filament_id == ""
-        assert prep.logger.messages == []
-
-    def test_a_saved_null_reads_as_none(self, tmp_path):
-        prep, lane = self._prep(tmp_path, {"filament_id": None})
-        prep.PREP(MagicMock())
-        assert lane.filament_id == ""
         assert prep.logger.messages == []
 
 

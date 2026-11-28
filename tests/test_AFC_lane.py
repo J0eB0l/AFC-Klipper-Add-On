@@ -234,6 +234,7 @@ def _make_afc_lane(fullname="AFC_stepper lane1"):
     lane.need_purge = False
     lane._afc_prep_done = False
     lane.custom_load_cmd = None
+    lane.filament_id = ""
     return lane
 
 
@@ -2134,6 +2135,7 @@ def _make_lane_for_get_status(map_value):
     lane.filament_name = ""
     lane.filament_id = ""
     lane.spool_vendor = ""
+    lane.filament_id = ""
     lane.multi_color = []
     lane.weight = 0
     lane.extruder_temp = None
@@ -2515,6 +2517,53 @@ class TestGetStatusSpoolVendor:
         assert response["filament_name"] == "Overture Gray ASA"
 
 
+def _make_real_lane_for_filament_id():
+    """A real AFCLane, mapped to T0, with moonraker and get_status's helpers mocked."""
+    lane = _make_real_afc_lane()
+    lane.connect_done = True
+    lane.map = ["T0"]
+    lane.afc.moonraker = MagicMock()
+    lane.afc.function = MagicMock()
+    lane.afc.function.get_filament_status.return_value = "a:b"
+    return lane
+
+
+class TestGetStatusFilamentId:
+    def test_filament_id_reported_live(self):
+        lane = _make_real_lane_for_filament_id()
+        lane.filament_id = "OFDSrzZ8"
+        response = lane.get_status()
+        assert response["filament_id"] == "OFDSrzZ8"
+
+    def test_filament_id_persisted_when_saving_to_file(self):
+        lane = _make_real_lane_for_filament_id()
+        lane.filament_id = "OFDSrzZ8"
+        response = lane.get_status(save_to_file=True)
+        assert response["filament_id"] == "OFDSrzZ8"
+
+
+class TestSendLaneDataFilamentId:
+    def test_filament_id_is_published(self):
+        lane = _make_real_lane_for_filament_id()
+        lane.filament_id = "OFDSrzZ8"
+        payload = _get_sent_payload(lane)
+        assert payload["value"]["filament_id"] == "OFDSrzZ8"
+
+    def test_filament_id_empty_when_unset(self):
+        """An unset id is published as an empty string rather than omitted."""
+        lane = _make_real_lane_for_filament_id()
+        payload = _get_sent_payload(lane)
+        assert payload["value"]["filament_id"] == ""
+
+
+class TestClearLaneDataFilamentId:
+    def test_filament_id_is_cleared(self):
+        lane = _make_real_lane_for_filament_id()
+        lane.filament_id = "OFDSrzZ8"
+        payload = _get_cleared_payload(lane)
+        assert payload["value"]["filament_id"] == ""
+
+
 class TestSendLaneDataExtruderIndex:
     @pytest.mark.parametrize("extruder_name,expected_index", [
         ("extruder",  0),
@@ -2572,18 +2621,6 @@ class TestSendLaneDataExtruderIndex:
         payload = _get_sent_payload(lane)
         assert payload["value"]["name"] == "Overture Gray ASA"
         assert "filament_name" not in payload["value"]
-
-    def test_filament_id_is_published(self):
-        """OrcaSlicer matches a lane's preset by lane_data's filament_id."""
-        lane = _make_lane_for_moonraker()
-        lane.filament_id = "OF5CgdDq"
-        payload = _get_sent_payload(lane)
-        assert payload["value"]["filament_id"] == "OF5CgdDq"
-
-    def test_filament_id_empty_without_one(self):
-        lane = _make_lane_for_moonraker()
-        payload = _get_sent_payload(lane)
-        assert payload["value"]["filament_id"] == ""
 
     def test_initial_weight_is_included(self):
         lane = _make_lane_for_moonraker()
