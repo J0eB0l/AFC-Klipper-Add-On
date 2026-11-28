@@ -2377,7 +2377,15 @@ class TestApplyFilamentDefaults:
         lane = rfid_lane()
         apply_filament_defaults(lane, {"multi_color": ["#aa0000", "", "00bb00"]})
         assert self._state(lane) == {**self._FRESH, "multi_color": ["aa0000", "00bb00"],
-                                     "color_mode": "coaxial", "weight": 1000}
+                                     "color_mode": "gradient", "weight": 1000}
+
+    def test_multi_color_silk_is_coaxial(self):
+        lane = rfid_lane()
+        apply_filament_defaults(lane, {"multi_color": ["aa0000", "00bb00"],
+                                       "sub_type": "PLA Silk+"})
+        assert self._state(lane) == {**self._FRESH, "multi_color": ["aa0000", "00bb00"],
+                                     "color_mode": "coaxial", "sub_type": "PLA Silk+",
+                                     "weight": 1000}
 
     def test_multi_color_not_applied_for_single(self):
         lane = rfid_lane()
@@ -2441,7 +2449,14 @@ class TestMissingFilamentFields:
             "material": "PLA"}
 
     def test_multi_color_two_hexes(self):
-        out = _missing_filament_fields({}, {"multi_color": ["#AA0000", "00bb00"]})
+        out = _missing_filament_fields({}, {"multi_color": ["#AA0000", "00bb00"],
+                                            "sub_type": "PLA Basic"})
+        assert out == {"multi_color_hexes": "aa0000,00bb00",
+                       "multi_color_direction": "longitudinal"}
+
+    def test_multi_color_silk_is_coaxial(self):
+        out = _missing_filament_fields({}, {"multi_color": ["aa0000", "00bb00"],
+                                            "sub_type": "Silk"})
         assert out == {"multi_color_hexes": "aa0000,00bb00",
                        "multi_color_direction": "coaxial"}
 
@@ -2981,6 +2996,15 @@ class TestSyncRfidToSpoolman:
                       '"settings_bed_temp": 60, "weight": 1000}'),
             ("warning", "TEST: Spoolman create_filament FAILED for 'Bambu PLA Basic', "
                         "check Spoolman/moonraker")]
+
+    def test_a_gradient_spool_creates_a_gradient_filament(self):
+        slot = {"uid": "AABB", "brand": "Bambu", "material": "PLA", "sub_type": "Basic",
+                "color_hex": "e7c1d5", "multi_color": ["e7c1d5", "8ec9e9"]}
+        routes = self._routes([], **{"GET /v1/vendor?name=Bambu": [{"id": 7, "name": "Bambu"}]})
+        afc, lane, logger = self._run(slot, routes, allow_create=True)
+        body = afc.moonraker.sent("POST", "/v1/filament")[0]
+        assert (body["multi_color_hexes"], body["multi_color_direction"]) == (
+            "e7c1d5,8ec9e9", "longitudinal")
 
     def test_created_filament_no_id_warns(self):
         routes = self._create_routes({"name": "X"})

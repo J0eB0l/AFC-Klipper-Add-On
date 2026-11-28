@@ -1213,6 +1213,20 @@ def build_filament_name(brand: str, material: str, sub_type: str) -> str:
     return " ".join(parts).strip()
 
 
+def multi_color_direction(slot_info: Optional[dict]) -> str:
+    """
+    Spoolman's multi_color_direction for a multi-color tag, which never says which kind it is.
+
+    Silk multi-color spools run their colors side by side; others, such as PLA Basic
+    Gradient, change color along the filament's length.
+
+    :param slot_info: The AFC slot_info dict
+    :return str: `coaxial` for silk, else `longitudinal`
+    """
+    name = " ".join(str((slot_info or {}).get(k) or "") for k in ("material", "sub_type"))
+    return "coaxial" if "silk" in name.lower() else "longitudinal"
+
+
 def map_tag_to_slot_info(tag: dict) -> dict:
     """
     Convert a host-side ``read_tag()`` result to the shared AFC slot_info.
@@ -1657,8 +1671,8 @@ def apply_filament_defaults(lane: AFCLane, slot_info: dict,
     if (len(multi) > 1
         and not getattr(lane, "multi_color", None)):
         lane.multi_color = multi
-        # Side by side, as the tag's Spoolman filament is written.
-        lane.color_mode = "coaxial"
+        # The same kind the tag's Spoolman filament is written with.
+        lane.color_mode = "coaxial" if multi_color_direction(slot_info) == "coaxial" else "gradient"
     rfid_density = slot_info.get("density") if slot_info else None
     if rfid_density:
         try:
@@ -1733,7 +1747,7 @@ def _missing_filament_fields(filament: dict, slot_info: dict) -> dict:
         and not has_color):
         if len(colors) > 1:
             updates["multi_color_hexes"] = ",".join(colors)
-            updates["multi_color_direction"] = "coaxial"
+            updates["multi_color_direction"] = multi_color_direction(slot_info)
         else:
             updates["color_hex"] = colors[0]
 
@@ -1991,6 +2005,7 @@ def _spoolman_resolve(afc: Any, prep: dict, slot_info: dict, logger: Any, prefix
                     diameter=diameter,
                     color_hex=color_hex if not is_multi else None,
                     multi_color_hexes=scanned_colors if is_multi else None,
+                    multi_color_direction=multi_color_direction(slot_info) if is_multi else None,
                     settings_extruder_temp=ext_temp,
                     settings_bed_temp=bed_temp,
                     weight=net_weight,
