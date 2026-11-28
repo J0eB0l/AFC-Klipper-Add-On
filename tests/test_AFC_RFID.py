@@ -2192,7 +2192,7 @@ class TestApplyFilamentDefaults:
     # A fresh AFCLane's filament fields, as its __init__ leaves them.
     _FRESH = {"material": None, "color": "", "extruder_temp": None, "bed_temp": None,
               "weight": 0.0, "sub_type": "", "spool_vendor": "", "multi_color": [],
-              "filament_density": 1.24}
+              "color_mode": "", "filament_density": 1.24}
 
     @staticmethod
     def _state(lane: AFCLane) -> Dict[str, Any]:
@@ -2204,7 +2204,7 @@ class TestApplyFilamentDefaults:
                 "extruder_temp": lane.extruder_temp, "bed_temp": lane.bed_temp,
                 "weight": lane.weight, "sub_type": lane.sub_type,
                 "spool_vendor": lane.spool_vendor, "multi_color": lane.multi_color,
-                "filament_density": lane.filament_density}
+                "color_mode": lane.color_mode, "filament_density": lane.filament_density}
 
     def test_material_unknown_cleared(self):
         lane = rfid_lane()
@@ -2377,7 +2377,7 @@ class TestApplyFilamentDefaults:
         lane = rfid_lane()
         apply_filament_defaults(lane, {"multi_color": ["#aa0000", "", "00bb00"]})
         assert self._state(lane) == {**self._FRESH, "multi_color": ["aa0000", "00bb00"],
-                                     "weight": 1000}
+                                     "color_mode": "coaxial", "weight": 1000}
 
     def test_multi_color_not_applied_for_single(self):
         lane = rfid_lane()

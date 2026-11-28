@@ -1657,6 +1657,8 @@ def apply_filament_defaults(lane: AFCLane, slot_info: dict,
     if (len(multi) > 1
         and not getattr(lane, "multi_color", None)):
         lane.multi_color = multi
+        # Side by side, as the tag's Spoolman filament is written.
+        lane.color_mode = "coaxial"
     rfid_density = slot_info.get("density") if slot_info else None
     if rfid_density:
         try:
